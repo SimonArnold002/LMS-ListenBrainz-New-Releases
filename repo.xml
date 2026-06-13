@@ -3,7 +3,7 @@
     <title lang="EN">ListenBrainz New releases</title>
   </details>
   <plugins>
-    <plugin name="EversoloScreenControl" version="1.0.1" minTarget="8.0.0" maxTarget="*">
+    <plugin name="EversoloScreenControl" version="0.2.1" minTarget="8.0.0" maxTarget="*">
       <title lang="EN">ListenBrainz New releases</title>
       <desc lang="EN">View what ListenBrainz Rrcommends to listen to</desc>
       <url>https://simonarnold002.github.io/LMS-ListenBrainz-New-Releases/ListenBrainzFreshReleases.zip</url>
