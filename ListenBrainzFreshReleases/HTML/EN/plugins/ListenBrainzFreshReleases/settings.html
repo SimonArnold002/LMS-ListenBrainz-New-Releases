@@ -1,5 +1,7 @@
 [% PROCESS settings/header.html %]
 
+<h2>[% 'PLUGIN_LBF_SECTION_GENERAL' | string %]</h2>
+
 [% WRAPPER setting title="PLUGIN_LBF_USERNAME" desc="PLUGIN_LBF_USERNAME_HINT" %]
 <input type="text" name="pref_username" value="[% prefs.username %]" size="40" autocomplete="off">
 [% END %]
@@ -21,12 +23,59 @@
 </select>
 [% END %]
 
-[% WRAPPER setting title="PLUGIN_LBF_FILTER_PAST" desc="PLUGIN_LBF_FILTER_PAST_DESC" %]
-<input type="checkbox" name="pref_past" value="1" [% IF prefs.past %]checked="checked"[% END %]>
+<h2>[% 'PLUGIN_LBF_SECTION_FORYOU' | string %]</h2>
+
+[% WRAPPER setting title="PLUGIN_LBF_FORYOU_ALBUMS" desc="PLUGIN_LBF_FORYOU_ALBUMS_DESC" %]
+<input type="checkbox" name="pref_foryou_albums" value="1" [% IF prefs.foryou_albums %]checked="checked"[% END %]>
 [% END %]
 
-[% WRAPPER setting title="PLUGIN_LBF_FILTER_FUTURE" desc="PLUGIN_LBF_FILTER_FUTURE_DESC" %]
-<input type="checkbox" name="pref_future" value="1" [% IF prefs.future %]checked="checked"[% END %]>
+[% WRAPPER setting title="PLUGIN_LBF_FORYOU_PAST" desc="PLUGIN_LBF_FORYOU_PAST_DESC" %]
+<input type="checkbox" name="pref_foryou_past" value="1" [% IF prefs.foryou_past %]checked="checked"[% END %]>
+[% END %]
+
+[% WRAPPER setting title="PLUGIN_LBF_FORYOU_FUTURE" desc="PLUGIN_LBF_FORYOU_FUTURE_DESC" %]
+<input type="checkbox" name="pref_foryou_future" value="1" [% IF prefs.foryou_future %]checked="checked"[% END %]>
+[% END %]
+
+[% WRAPPER setting title="PLUGIN_LBF_DISPLAY_ARTWORK" desc="PLUGIN_LBF_DISPLAY_ARTWORK_DESC" %]
+<input type="checkbox" name="pref_foryou_artwork_only" value="1" [% IF prefs.foryou_artwork_only %]checked="checked"[% END %]>
+[% END %]
+
+[% WRAPPER setting title="PLUGIN_LBF_DISPLAY_VARIOUS" desc="PLUGIN_LBF_DISPLAY_VARIOUS_DESC" %]
+<input type="checkbox" name="pref_foryou_various" value="1" [% IF prefs.foryou_various %]checked="checked"[% END %]>
+[% END %]
+
+<h2>[% 'PLUGIN_LBF_SECTION_ALL' | string %]</h2>
+
+[% WRAPPER setting title="PLUGIN_LBF_ALL_PAST" desc="PLUGIN_LBF_ALL_PAST_DESC" %]
+<input type="checkbox" name="pref_all_past" value="1" [% IF prefs.all_past %]checked="checked"[% END %]>
+[% END %]
+
+[% WRAPPER setting title="PLUGIN_LBF_ALL_FUTURE" desc="PLUGIN_LBF_ALL_FUTURE_DESC" %]
+<input type="checkbox" name="pref_all_future" value="1" [% IF prefs.all_future %]checked="checked"[% END %]>
+[% END %]
+
+[% WRAPPER setting title="PLUGIN_LBF_ALL_TYPES" desc="PLUGIN_LBF_ALL_TYPES_DESC" %]
+<div>
+  <label><input type="checkbox" name="pref_all_type_album" value="1" [% IF prefs.all_type_album %]checked="checked"[% END %]> Album</label><br>
+  <label><input type="checkbox" name="pref_all_type_single" value="1" [% IF prefs.all_type_single %]checked="checked"[% END %]> Single</label><br>
+  <label><input type="checkbox" name="pref_all_type_ep" value="1" [% IF prefs.all_type_ep %]checked="checked"[% END %]> EP</label><br>
+  <label><input type="checkbox" name="pref_all_type_broadcast" value="1" [% IF prefs.all_type_broadcast %]checked="checked"[% END %]> Broadcast</label><br>
+  <label><input type="checkbox" name="pref_all_type_other" value="1" [% IF prefs.all_type_other %]checked="checked"[% END %]> Other</label><br>
+  <label><input type="checkbox" name="pref_all_type_compilation" value="1" [% IF prefs.all_type_compilation %]checked="checked"[% END %]> Compilation</label><br>
+  <label><input type="checkbox" name="pref_all_type_soundtrack" value="1" [% IF prefs.all_type_soundtrack %]checked="checked"[% END %]> Soundtrack</label><br>
+  <label><input type="checkbox" name="pref_all_type_live" value="1" [% IF prefs.all_type_live %]checked="checked"[% END %]> Live</label><br>
+  <label><input type="checkbox" name="pref_all_type_remix" value="1" [% IF prefs.all_type_remix %]checked="checked"[% END %]> Remix</label><br>
+  <label><input type="checkbox" name="pref_all_type_demo" value="1" [% IF prefs.all_type_demo %]checked="checked"[% END %]> Demo</label>
+</div>
+[% END %]
+
+[% WRAPPER setting title="PLUGIN_LBF_DISPLAY_ARTWORK" desc="PLUGIN_LBF_DISPLAY_ARTWORK_DESC" %]
+<input type="checkbox" name="pref_all_artwork_only" value="1" [% IF prefs.all_artwork_only %]checked="checked"[% END %]>
+[% END %]
+
+[% WRAPPER setting title="PLUGIN_LBF_DISPLAY_VARIOUS" desc="PLUGIN_LBF_DISPLAY_VARIOUS_DESC" %]
+<input type="checkbox" name="pref_all_various" value="1" [% IF prefs.all_various %]checked="checked"[% END %]>
 [% END %]
 
 [% PROCESS settings/footer.html %]

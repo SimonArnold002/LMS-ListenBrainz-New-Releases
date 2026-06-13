@@ -16,12 +16,34 @@ my $log = Slim::Utils::Log->addLogCategory({
 my $prefs = preferences('plugin.listenbrainzfreshreleases');
 
 $prefs->init({
-    username => '',
-    token    => '',
-    days     => 14,
-    sort     => 'release_date',
-    past     => 1,
-    future   => 0,
+    # General
+    username             => '',
+    token                => '',
+    days                 => 14,
+    sort                 => 'release_date',
+
+    # For You section
+    foryou_albums        => 1,
+    foryou_past          => 1,
+    foryou_future        => 0,
+    foryou_artwork_only  => 1,
+    foryou_various       => 1,
+
+    # All Releases section
+    all_past             => 1,
+    all_future           => 0,
+    all_artwork_only     => 1,
+    all_various          => 1,
+    all_type_album       => 1,
+    all_type_single      => 0,
+    all_type_ep          => 0,
+    all_type_broadcast   => 0,
+    all_type_other       => 0,
+    all_type_compilation => 1,
+    all_type_soundtrack  => 1,
+    all_type_live        => 0,
+    all_type_remix       => 0,
+    all_type_demo        => 0,
 });
 
 sub initPlugin {
@@ -35,8 +57,6 @@ sub initPlugin {
     require Plugins::ListenBrainzFreshReleases::Browse;
     require Plugins::ListenBrainzFreshReleases::API;
 
-    # Register Cover Art Archive URLs with LMS image proxy cache
-    # LMS will fetch, cache and resize the image locally — no repeated external calls
     eval {
         require Slim::Web::ImageProxy;
         if ( UNIVERSAL::can('Slim::Web::ImageProxy', 'getRightSize') ) {
@@ -44,14 +64,12 @@ sub initPlugin {
                 match => qr/coverartarchive\.org/,
                 func  => sub {
                     my ($url, $spec) = @_;
-                    # Map requested size to CAA size suffixes
                     my $size = Slim::Web::ImageProxy->getRightSize($spec, {
                         50  => '250',
                         100 => '250',
                         250 => '250',
                         500 => '500',
                     }) || '250';
-                    # Replace the size suffix in the URL
                     $url =~ s|/front-\d+$|/front-$size|;
                     return $url;
                 },

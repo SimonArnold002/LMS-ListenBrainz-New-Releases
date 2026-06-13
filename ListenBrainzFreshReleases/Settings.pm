@@ -19,7 +19,13 @@ sub page {
 }
 
 sub prefs {
-    return ($prefs, qw(username token days sort past future));
+    return ($prefs, qw(
+        username token days sort
+        foryou_albums foryou_past foryou_future foryou_artwork_only foryou_various
+        all_past all_future all_artwork_only all_various
+        all_type_album all_type_single all_type_ep all_type_broadcast all_type_other
+        all_type_compilation all_type_soundtrack all_type_live all_type_remix all_type_demo
+    ));
 }
 
 sub handler {

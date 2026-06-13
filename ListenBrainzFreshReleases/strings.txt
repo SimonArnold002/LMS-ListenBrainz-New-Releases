@@ -4,8 +4,14 @@ PLUGIN_LISTENBRAINZ_FRESH_RELEASES
 PLUGIN_LISTENBRAINZ_FRESH_RELEASES_DESC
 	EN	Browse ListenBrainz Fresh Releases on your Squeezebox.
 
-PLUGIN_LBF_SETTINGS_DESC
-	EN	Connect to your ListenBrainz account to browse recently and soon-to-be-released music.
+PLUGIN_LBF_SECTION_GENERAL
+	EN	General Settings
+
+PLUGIN_LBF_SECTION_FORYOU
+	EN	For You Settings
+
+PLUGIN_LBF_SECTION_ALL
+	EN	All Releases Settings
 
 PLUGIN_LBF_USERNAME
 	EN	ListenBrainz Username
@@ -17,13 +23,7 @@ PLUGIN_LBF_TOKEN
 	EN	User Token
 
 PLUGIN_LBF_TOKEN_HINT
-	EN	Your personal API token, found at
-
-PLUGIN_LBF_TOKEN_VALID
-	EN	Token validated
-
-PLUGIN_LBF_TOKEN_INVALID
-	EN	Token invalid or could not be verified
+	EN	Your personal API token, found at listenbrainz.org/settings/
 
 PLUGIN_LBF_DAYS
 	EN	Days window
@@ -34,23 +34,53 @@ PLUGIN_LBF_DAYS_HINT
 PLUGIN_LBF_DEFAULT_SORT
 	EN	Default sort order
 
-PLUGIN_LBF_HELP
-	EN	Data provided by
+PLUGIN_LBF_FORYOU_ALBUMS
+	EN	Show Albums
 
-PLUGIN_LBF_FOR_YOU
-	EN	For You
+PLUGIN_LBF_FORYOU_ALBUMS_DESC
+	EN	Include album release type in the For You feed
 
-PLUGIN_LBF_ALL_RELEASES
-	EN	All Releases
+PLUGIN_LBF_FORYOU_PAST
+	EN	Include Past Releases
 
-PLUGIN_LBF_FRESH_RELEASES
-	EN	Fresh Releases
+PLUGIN_LBF_FORYOU_PAST_DESC
+	EN	Show releases that have already been released
 
-PLUGIN_LBF_SHOW_ALL
-	EN	Show All
+PLUGIN_LBF_FORYOU_FUTURE
+	EN	Include Upcoming Releases
 
-PLUGIN_LBF_SORT_BY
-	EN	Sort by...
+PLUGIN_LBF_FORYOU_FUTURE_DESC
+	EN	Show releases not yet released
+
+PLUGIN_LBF_ALL_PAST
+	EN	Include Past Releases
+
+PLUGIN_LBF_ALL_PAST_DESC
+	EN	Show releases that have already been released
+
+PLUGIN_LBF_ALL_FUTURE
+	EN	Include Upcoming Releases
+
+PLUGIN_LBF_ALL_FUTURE_DESC
+	EN	Show releases not yet released
+
+PLUGIN_LBF_ALL_TYPES
+	EN	Release Types
+
+PLUGIN_LBF_ALL_TYPES_DESC
+	EN	Select which release types to include
+
+PLUGIN_LBF_DISPLAY_ARTWORK
+	EN	Only Releases with Artwork
+
+PLUGIN_LBF_DISPLAY_ARTWORK_DESC
+	EN	Hide releases that have no cover art available
+
+PLUGIN_LBF_DISPLAY_VARIOUS
+	EN	Include Various Artists Releases
+
+PLUGIN_LBF_DISPLAY_VARIOUS_DESC
+	EN	Show compilations and other releases by Various Artists
 
 PLUGIN_LBF_SORT_DATE
 	EN	Release Date
@@ -64,29 +94,17 @@ PLUGIN_LBF_SORT_ALBUM
 PLUGIN_LBF_SORT_CONFIDENCE
 	EN	Confidence (For You)
 
-PLUGIN_LBF_FILTER
-	EN	Filter...
+PLUGIN_LBF_FOR_YOU
+	EN	For You
 
-PLUGIN_LBF_FILTER_PAST_FUTURE
-	EN	Past and Upcoming
-
-PLUGIN_LBF_FILTER_PAST
-	EN	Include Past Releases
-
-PLUGIN_LBF_FILTER_PAST_DESC
-	EN	Show releases that have already been released
-
-PLUGIN_LBF_FILTER_FUTURE
-	EN	Include Upcoming Releases
-
-PLUGIN_LBF_FILTER_FUTURE_DESC
-	EN	Show releases not yet released
+PLUGIN_LBF_ALL_RELEASES
+	EN	All Releases
 
 PLUGIN_LBF_SETUP_REQUIRED
 	EN	Configure username and token in Settings
 
 PLUGIN_LBF_NO_RESULTS
-	EN	No releases found for this query
+	EN	No releases found
 
 PLUGIN_LBF_ERROR
 	EN	Error fetching releases
@@ -103,17 +121,5 @@ PLUGIN_LBF_DATE
 PLUGIN_LBF_TYPE
 	EN	Type
 
-PLUGIN_LBF_RELEASE_TYPE
-	EN	Release Type
-
-PLUGIN_LBF_ALL_TYPES
-	EN	All Types
-
-PLUGIN_LBF_BROWSE_BY_TYPE
-	EN	Browse by Type
-
 PLUGIN_LBF_SEC_TYPES
 	EN	Secondary Types
-
-PLUGIN_LBF_SETTINGS
-	EN	Settings
