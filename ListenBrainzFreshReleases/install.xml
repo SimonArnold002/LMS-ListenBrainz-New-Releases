@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+
+<extension>
+
+<id>69a473da-c533-4f05-827d-926c48398e40</id>
+
+<name>ListenBrainzFreshReleases</name>
+
+<module>Plugins::ListenBrainzFreshReleases::Plugin</module>
+
+<version>0.2.1</version>
+
+<description>Browse ListenBrainz Fresh Releases on your Squeezebox. Shows personalised For You releases and a global feed with sort and filter options.</description>
+
+<creator>CrystalGipsy</creator>
+
+<icon>plugins/ListenBrainzFreshReleases/html/images/ListenBrainzFreshReleasesIcon_svg.png</icon>
+
+<defaultState>enabled</defaultState>
+
+<targetApplication>
+
+<id>SlimServer</id>
+
+<minVersion>9.0.0</minVersion>
+
+<maxVersion>*</maxVersion>
+
+</targetApplication>
+
+<optionsURL>plugins/ListenBrainzFreshReleases/settings.html</optionsURL>
+
+</extension>

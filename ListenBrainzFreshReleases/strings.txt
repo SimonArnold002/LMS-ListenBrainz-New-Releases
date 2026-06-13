@@ -1,0 +1,119 @@
+PLUGIN_LISTENBRAINZ_FRESH_RELEASES
+	EN	ListenBrainz Fresh Releases
+
+PLUGIN_LISTENBRAINZ_FRESH_RELEASES_DESC
+	EN	Browse ListenBrainz Fresh Releases on your Squeezebox.
+
+PLUGIN_LBF_SETTINGS_DESC
+	EN	Connect to your ListenBrainz account to browse recently and soon-to-be-released music.
+
+PLUGIN_LBF_USERNAME
+	EN	ListenBrainz Username
+
+PLUGIN_LBF_USERNAME_HINT
+	EN	Your MusicBrainz / ListenBrainz username
+
+PLUGIN_LBF_TOKEN
+	EN	User Token
+
+PLUGIN_LBF_TOKEN_HINT
+	EN	Your personal API token, found at
+
+PLUGIN_LBF_TOKEN_VALID
+	EN	Token validated
+
+PLUGIN_LBF_TOKEN_INVALID
+	EN	Token invalid or could not be verified
+
+PLUGIN_LBF_DAYS
+	EN	Days window
+
+PLUGIN_LBF_DAYS_HINT
+	EN	Number of days of releases to show (1-90, default 14)
+
+PLUGIN_LBF_DEFAULT_SORT
+	EN	Default sort order
+
+PLUGIN_LBF_HELP
+	EN	Data provided by
+
+PLUGIN_LBF_FOR_YOU
+	EN	For You
+
+PLUGIN_LBF_ALL_RELEASES
+	EN	All Releases
+
+PLUGIN_LBF_FRESH_RELEASES
+	EN	Fresh Releases
+
+PLUGIN_LBF_SHOW_ALL
+	EN	Show All
+
+PLUGIN_LBF_SORT_BY
+	EN	Sort by...
+
+PLUGIN_LBF_SORT_DATE
+	EN	Release Date
+
+PLUGIN_LBF_SORT_ARTIST
+	EN	Artist
+
+PLUGIN_LBF_SORT_ALBUM
+	EN	Album Name
+
+PLUGIN_LBF_SORT_CONFIDENCE
+	EN	Confidence (For You)
+
+PLUGIN_LBF_FILTER
+	EN	Filter...
+
+PLUGIN_LBF_FILTER_PAST_FUTURE
+	EN	Past and Upcoming
+
+PLUGIN_LBF_FILTER_PAST
+	EN	Include Past Releases
+
+PLUGIN_LBF_FILTER_PAST_DESC
+	EN	Show releases that have already been released
+
+PLUGIN_LBF_FILTER_FUTURE
+	EN	Include Upcoming Releases
+
+PLUGIN_LBF_FILTER_FUTURE_DESC
+	EN	Show releases not yet released
+
+PLUGIN_LBF_SETUP_REQUIRED
+	EN	Configure username and token in Settings
+
+PLUGIN_LBF_NO_RESULTS
+	EN	No releases found for this query
+
+PLUGIN_LBF_ERROR
+	EN	Error fetching releases
+
+PLUGIN_LBF_ARTIST
+	EN	Artist
+
+PLUGIN_LBF_ALBUM
+	EN	Album
+
+PLUGIN_LBF_DATE
+	EN	Release Date
+
+PLUGIN_LBF_TYPE
+	EN	Type
+
+PLUGIN_LBF_RELEASE_TYPE
+	EN	Release Type
+
+PLUGIN_LBF_ALL_TYPES
+	EN	All Types
+
+PLUGIN_LBF_BROWSE_BY_TYPE
+	EN	Browse by Type
+
+PLUGIN_LBF_SEC_TYPES
+	EN	Secondary Types
+
+PLUGIN_LBF_SETTINGS
+	EN	Settings
