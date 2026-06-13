@@ -1,15 +1,15 @@
 <extensions>
   <details>
-    <title lang="EN">ListenBrainz New releases</title>
+    <title lang="EN">ListenBrainz Fresh Releases</title>
   </details>
   <plugins>
-    <plugin name="EversoloScreenControl" version="0.2.1" minTarget="8.0.0" maxTarget="*">
-      <title lang="EN">ListenBrainz New releases</title>
-      <desc lang="EN">View what ListenBrainz Rrcommends to listen to</desc>
+    <plugin name="ListenBrainzFreshReleases" version="0.3.0" minTarget="9.0.0" maxTarget="*">
+      <title lang="EN">ListenBrainz Fresh Releases</title>
+      <desc lang="EN">Browse your ListenBrainz Fresh Releases feed in Lyrion Music Server</desc>
       <url>https://simonarnold002.github.io/LMS-ListenBrainz-New-Releases/ListenBrainzFreshReleases.zip</url>
       <creator>CrystalGipsy</creator>
       <email></email>
-      <sha>aba6bf34708db0b48e6ba64f7431ca5bef34786a</sha>
+      <sha></sha>
     </plugin>
   </plugins>
 </extensions>
