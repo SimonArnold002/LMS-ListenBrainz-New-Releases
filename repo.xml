@@ -1,0 +1,15 @@
+<extensions>
+  <details>
+    <title lang="EN">ListenBrainz New releases</title>
+  </details>
+  <plugins>
+    <plugin name="EversoloScreenControl" version="1.0.1" minTarget="8.0.0" maxTarget="*">
+      <title lang="EN">ListenBrainz New releases</title>
+      <desc lang="EN">View what ListenBrainz Rrcommends to listen to</desc>
+      <url>https://simonarnold002.github.io/LMS-ListenBrainz-New-Releases/ListenBrainzFreshReleases.zip</url>
+      <creator>CrystalGipsy</creator>
+      <email></email>
+      <sha>aba6bf34708db0b48e6ba64f7431ca5bef34786a</sha>
+    </plugin>
+  </plugins>
+</extensions>
