@@ -13,7 +13,6 @@ my $prefs = preferences('plugin.listenbrainzfreshreleases');
 
 use constant BASE_URL     => 'https://api.listenbrainz.org';
 use constant CAA_BASE_URL => 'https://coverartarchive.org/release/';
-use constant MAX_ITEMS    => 50;
 
 # ---------------------------------------------------------------------------
 # GET /1/user/<username>/fresh_releases  (personalised, auth required)
@@ -157,10 +156,6 @@ sub _handleResponse {
         $log->info("Found " . scalar(@$releases) . " releases in root array");
     } else {
         $log->error("Unexpected data type: " . ref($data));
-    }
-
-    if (scalar @$releases > MAX_ITEMS) {
-        $releases = [ @{$releases}[0 .. MAX_ITEMS - 1] ];
     }
 
     $onDone->($releases);
