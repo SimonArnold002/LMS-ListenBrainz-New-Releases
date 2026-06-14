@@ -144,3 +144,15 @@ PLUGIN_LBF_GROUP_ARTIST
 
 PLUGIN_LBF_GROUP_ARTIST_DESC
 	EN	Collapse artists with several new releases into a single entry you can tap to expand
+
+PLUGIN_LBF_PLAY_VIA
+	EN	Find on streaming services
+
+PLUGIN_LBF_NO_SERVICES
+	EN	No streaming services available
+
+PLUGIN_LBF_PLAY_VIA_SETTING
+	EN	Find on Streaming Services
+
+PLUGIN_LBF_PLAY_VIA_SETTING_DESC
+	EN	On the album detail page, offer to search and play the release on your installed streaming services (Qobuz, Bandcamp, etc.)

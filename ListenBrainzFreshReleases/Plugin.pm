@@ -22,6 +22,7 @@ $prefs->init({
     days                 => 14,
     sort                 => 'release_date',
     group_by_artist      => 1,
+    play_via             => 1,
 
     # For You section
     foryou_albums        => 1,

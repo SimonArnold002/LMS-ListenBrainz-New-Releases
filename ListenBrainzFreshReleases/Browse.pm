@@ -6,6 +6,7 @@ use warnings;
 use Slim::Utils::Log;
 use Slim::Utils::Prefs;
 use Slim::Utils::Strings qw(cstring string);
+use Slim::Menu::GlobalSearch;
 
 use Plugins::ListenBrainzFreshReleases::API;
 
@@ -494,7 +495,43 @@ sub _detailMeta {
     push @detail, { name => "MusicBrainz: https://musicbrainz.org/release/$mbid", type => 'text' }
         if $mbid;
 
+    # "Find on streaming services" — lazy: the search only runs when tapped,
+    # so it never slows the detail page. Fans out to whatever streaming plugins
+    # are installed via their registered GlobalSearch providers (Qobuz, Bandcamp, …).
+    if ($prefs->get('play_via')) {
+        my $query = join(' ', grep { defined && length } $artist, $album);
+        push @detail, {
+            name  => cstring($client, 'PLUGIN_LBF_PLAY_VIA'),
+            type  => 'link',
+            image => ICON,
+            url   => sub {
+                my ($client, $callback) = @_;
+                $callback->({ items => _streamingSearchItems($client, $query) });
+            },
+        } if length $query;
+    }
+
     return @detail;
+}
+
+# Run the installed streaming services' GlobalSearch providers for $query and
+# return their result nodes (each playable via that plugin's protocol handler).
+# Guarded: the exact GlobalSearch->menu contract is verified on the server, and
+# a vanilla server with no streaming plugins degrades to a "none" message.
+sub _streamingSearchItems {
+    my ($client, $query) = @_;
+
+    my $menu = eval { Slim::Menu::GlobalSearch->menu($client, { search => $query }) };
+    $log->warn("GlobalSearch lookup failed: $@") if $@;
+
+    my @items;
+    if (ref $menu eq 'HASH' && ref $menu->{items} eq 'ARRAY') {
+        @items = grep { ref $_ eq 'HASH' && $_->{name} } @{ $menu->{items} };
+    }
+
+    return @items
+        ? \@items
+        : [{ name => cstring($client, 'PLUGIN_LBF_NO_SERVICES'), type => 'text' }];
 }
 
 # Extract usable tag names from the payload's release_tags. Entries may be plain

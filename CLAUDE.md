@@ -41,7 +41,7 @@ ListenBrainzFreshReleases/
 ```
 
 ## Current Version
-0.4.0
+0.4.1
 
 ## Settings Structure (v0.3.2)
 
@@ -53,6 +53,7 @@ Three sections in the settings page:
 - `days` — days window (1-90, default 14)
 - `sort` — default sort (release_date / artist_credit_name / release_name / confidence)
 - `group_by_artist` — collapse multi-release artists into one tappable entry (default ON)
+- `play_via` — show a "Find on streaming services" link on the detail page (default ON)
 
 ### For You Settings
 - `foryou_albums` — albums-only filter (default ON)
@@ -177,3 +178,4 @@ Detected in `_isVariousArtists()`:
 - **0.3.2** — All Releases items now display the actual release title and release type from the ListenBrainz payload
 - **0.3.3** — Both feeds paginate in pages of 50 via a "Next page (n/total)" link; the filtered list is captured in-closure so paging never re-hits the API, and the LMS back button returns to the previous page
 - **0.4.0** — New Music Tracker–inspired presentation: release detail page now fetches genres + per-disc tracklist (durations) from MusicBrainz on demand (graceful fallback on failure); shows folksonomy tags carried in the fresh_releases payload (cleaned/deduped, no extra call); optional group-by-artist layout (default ON) collapsing multi-release artists; pagination generalised to window any item list. NB: a data probe found MusicBrainz/ListenBrainz genre coverage on fresh releases is ~8–9% (too sparse for genre *filtering* without Discogs), so only on-demand genre/tag *display* was added.
+- **0.4.1** — "Find on streaming services" link on the detail page (`play_via` pref, default ON): lazily fans the "artist album" query out to installed streaming plugins via their registered `Slim::Menu::GlobalSearch` providers, so results are playable through each plugin's own protocol handler. Confirmed on the target server that both Qobuz (v3.7.0) and Bandcamp (v1.12.0) register GlobalSearch providers, so no per-service code is needed. The `GlobalSearch->menu($client, {search=>...})` call is eval-guarded; exact contract to be confirmed by live test.
