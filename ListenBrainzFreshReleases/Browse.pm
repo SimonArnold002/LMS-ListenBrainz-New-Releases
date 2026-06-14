@@ -8,6 +8,7 @@ use Time::Local ();
 use Slim::Utils::Log;
 use Slim::Utils::Prefs;
 use Slim::Utils::Cache;
+use Slim::Utils::Timers;
 use Slim::Utils::Strings qw(cstring string);
 
 use Plugins::ListenBrainzFreshReleases::API;
@@ -22,6 +23,10 @@ my $cache = Slim::Utils::Cache->new();
 # a few days) → recheck daily.
 use constant STREAM_FOUND_TTL   => 7 * 86400;
 use constant STREAM_NOMATCH_TTL => 1 * 86400;
+
+# Safety net (seconds): if a streaming/MusicBrainz callback never fires (network
+# hang, partial failure), render the detail page anyway rather than hang.
+use constant DETAIL_TIMEOUT => 15;
 
 use constant ICON => 'plugins/ListenBrainzFreshReleases/html/images/ListenBrainzFreshReleasesIcon_svg.png';
 
@@ -532,6 +537,11 @@ sub _releaseDetail {
         return;
     }
 
+    # Watchdog: if a streaming/MusicBrainz callback never returns (network hang,
+    # partial failure), force a render with whatever arrived. $finish is
+    # idempotent ($done), so a normal completion makes this a no-op.
+    Slim::Utils::Timers::setTimer(undef, time() + DETAIL_TIMEOUT, sub { $finish->() });
+
     # Streaming services — search automatically and show matches inline
     if ($wantStream) {
         _findPlayable($client, sub {
@@ -615,12 +625,14 @@ sub _detailMeta {
     push @detail, { name => cstring($client, 'PLUGIN_LBF_TAGS') . ': ' . join(', ', @tags), type => 'text' }
         if @tags;
 
+    # Only build the link for a well-formed MBID (UUID) — the value comes from
+    # the API but lands in an href Material renders, so validate before trusting.
     push @detail, {
         name    => cstring($client, 'PLUGIN_LBF_VIEW_ON_MB'),
         type    => 'link',
         weblink => "https://musicbrainz.org/release/$mbid",
         image   => ICON,
-    } if $mbid;
+    } if $mbid =~ /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
     return @detail;
 }
@@ -687,9 +699,12 @@ sub _findPlayable {
 
         # Cache serializable copies (OPML item url is a coderef → strip it; it's
         # reattached per-service on read). _svc identifies which to reattach.
+        # Guarded: Storable dies on any unexpected nested coderef/blessed ref, and
+        # that must not stop us calling $callback below (would hang the page).
         my @store = map { my %x = %$_; delete $x{url}; \%x } @collected;
         my $ttl   = @collected ? STREAM_FOUND_TTL : STREAM_NOMATCH_TTL;
-        $cache->set($key, { items => \@store }, $ttl);
+        eval { $cache->set($key, { items => \@store }, $ttl); 1 }
+            or $log->warn("play-via cache set failed: $@");
 
         $log->info("play-via '$query': " . scalar(@collected) . " match(es), cached ${ttl}s");
         $callback->({ items => _streamResult($client, \@collected) });
