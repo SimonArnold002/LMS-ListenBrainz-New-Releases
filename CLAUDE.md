@@ -1,7 +1,7 @@
 # ListenBrainz Fresh Releases — LMS Plugin
 
 ## Project Overview
-A plugin for Lyrion Music Server (LMS) that browses ListenBrainz Fresh Releases. Provides a personalised "For You" feed and a global "All Releases" feed. All filtering is controlled via settings — the browse menu is simple and clean. Built for LMS v9.1.1, tested with Material Skin.
+A plugin for Lyrion Music Server (LMS) that browses ListenBrainz Fresh Releases. It provides a personalised "For You" feed and a global "All Releases" feed. Filtering is controlled via settings, and the browse menu stays intentionally simple. The current build targets LMS v9.x and has been tested with Material Skin.
 
 ## Server Details
 - **LMS Server**: 192.168.1.234:9000
@@ -30,7 +30,7 @@ ListenBrainzFreshReleases/
 ├── Browse.pm                          # Simple two-option feed (For You / All Releases), no in-menu filters
 ├── API.pm                             # Async ListenBrainz HTTP, payload.releases parsing
 ├── Settings.pm                        # CSRF-protected, three-section settings page
-├── install.xml                        # <extension> format, v0.3.0, icon_svg.png
+├── install.xml                        # <extension> format, v0.3.2, icon_svg.png
 ├── strings.txt                        # All localisation strings (EN)
 └── HTML/EN/plugins/ListenBrainzFreshReleases/
     ├── settings.html                  # Three-section settings page (General/For You/All Releases)
@@ -41,9 +41,9 @@ ListenBrainzFreshReleases/
 ```
 
 ## Current Version
-0.3.0
+0.3.2
 
-## Settings Structure (v0.3.0)
+## Settings Structure (v0.3.2)
 
 Three sections in the settings page:
 
@@ -68,7 +68,7 @@ Three sections in the settings page:
 - Type checkboxes — default ON: Album, Compilation, Soundtrack. Default OFF: Single, EP, Broadcast, Other, Live, Remix, Demo
 - All types stored as `all_type_<name>` prefs
 
-## Browse Menu (v0.3.0)
+## Browse Menu (v0.3.2)
 
 ```
 ListenBrainz Fresh Releases
@@ -119,7 +119,7 @@ No in-menu filter sub-menus. All filtering driven entirely by settings prefs.
 - Cover art: `https://coverartarchive.org/release/<mbid>/front-250`
   - Uses `caa_release_mbid` first, falls back to `release_mbid`
 - Token validation: `GET /1/validate-token?token=<t>`
-- Max 50 items enforced in `_handleResponse`
+- No hard cap is applied to the API payload; filtering runs on the full result set so artwork and type filters can behave correctly
 
 ### Release Type Filtering
 - The API does NOT support release type as a query parameter
@@ -129,6 +129,7 @@ No in-menu filter sub-menus. All filtering driven entirely by settings prefs.
 - MusicBrainz secondary types tracked: Compilation, Soundtrack, Spokenword, Interview, Audiobook, Audio drama, Live, Remix, Mixtape/Street, Demo
 - For You section uses `foryou_albums` (boolean, albums-only when ON)
 - All Releases section uses individual `all_type_<name>` checkboxes
+- Browse item rendering now uses the actual API title/type fields so All Releases shows the real release title and type rather than falling back to a generic album label
 
 ### Various Artists Detection
 Detected in `_isVariousArtists()`:
@@ -160,3 +161,5 @@ Detected in `_isVariousArtists()`:
 - 0.2.0 — future default to 0, filter out releases without artwork
 - 0.2.1 — install.xml icon reverted back to _svg.png
 - **0.3.0** — Full restructure: three settings sections, simplified browse menu (no in-menu filters), per-section prefs (For You vs All Releases), Various Artists toggle, comprehensive type checkboxes with Album/Compilation/Soundtrack defaults
+- **0.3.1** — Repository metadata and package version alignment; filtering now evaluates the full API response payload
+- **0.3.2** — All Releases items now display the actual release title and release type from the ListenBrainz payload
