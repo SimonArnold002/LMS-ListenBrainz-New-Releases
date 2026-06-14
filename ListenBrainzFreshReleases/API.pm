@@ -16,7 +16,7 @@ use constant CAA_BASE_URL => 'https://coverartarchive.org/release/';
 use constant MB_BASE_URL  => 'https://musicbrainz.org/ws/2/';
 
 # MusicBrainz requires a descriptive User-Agent identifying the application
-use constant USER_AGENT   => 'LMS-ListenBrainzFreshReleases/0.4.3 ( https://github.com/CrystalGipsy/LMS-ListenBrainz-New-Releases )';
+use constant USER_AGENT   => 'LMS-ListenBrainzFreshReleases/0.4.4 ( https://github.com/CrystalGipsy/LMS-ListenBrainz-New-Releases )';
 
 # ---------------------------------------------------------------------------
 # GET /1/user/<username>/fresh_releases  (personalised, auth required)
@@ -189,7 +189,11 @@ sub _parseReleaseDetails {
 # ---------------------------------------------------------------------------
 sub coverArtUrl {
     my ($class, $rel) = @_;
-    my $mbid = $rel->{caa_release_mbid} // $rel->{release_mbid};
+    # caa_release_mbid (with caa_id) is the authoritative "has cover art" signal
+    # in the fresh_releases payload. release_mbid is always present, so falling
+    # back to it returned a URL even when no art exists (404s + broke the
+    # artwork-only filter). Require caa_release_mbid so absence == no artwork.
+    my $mbid = $rel->{caa_release_mbid};
     return undef unless $mbid;
     return CAA_BASE_URL . $mbid . '/front-250';
 }

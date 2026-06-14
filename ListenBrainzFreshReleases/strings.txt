@@ -100,6 +100,15 @@ PLUGIN_LBF_FOR_YOU
 PLUGIN_LBF_ALL_RELEASES
 	EN	All Releases
 
+PLUGIN_LBF_SETTINGS
+	EN	Plugin Settings
+
+PLUGIN_LBF_WEEK_OF
+	EN	Week of
+
+PLUGIN_LBF_WEEK_UNKNOWN
+	EN	— Unknown release date —
+
 PLUGIN_LBF_SETUP_REQUIRED
 	EN	Configure username and token in Settings
 
@@ -144,6 +153,12 @@ PLUGIN_LBF_GROUP_ARTIST
 
 PLUGIN_LBF_GROUP_ARTIST_DESC
 	EN	Collapse artists with several new releases into a single entry you can tap to expand
+
+PLUGIN_LBF_WEEK_DIVIDERS
+	EN	Weekly Dividers
+
+PLUGIN_LBF_WEEK_DIVIDERS_DESC
+	EN	When sorted by release date, add a divider at the start of each week. Takes precedence over Group by Artist for the date sort.
 
 PLUGIN_LBF_PLAY_VIA
 	EN	Find on streaming services

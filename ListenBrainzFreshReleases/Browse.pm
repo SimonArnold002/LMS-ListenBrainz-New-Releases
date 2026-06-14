@@ -3,6 +3,8 @@ package Plugins::ListenBrainzFreshReleases::Browse;
 use strict;
 use warnings;
 
+use Time::Local ();
+
 use Slim::Utils::Log;
 use Slim::Utils::Prefs;
 use Slim::Utils::Strings qw(cstring string);
@@ -55,6 +57,13 @@ sub topLevel {
         image       => ICON,
     };
 
+    push @items, {
+        name    => cstring($client, 'PLUGIN_LBF_SETTINGS'),
+        type    => 'link',
+        weblink => '/plugins/ListenBrainzFreshReleases/settings.html',
+        image   => ICON,
+    };
+
     $callback->({ items => \@items });
 }
 
@@ -74,7 +83,7 @@ sub fetchForYou {
         future  => $future,
         days    => $prefs->get('days') // 14,
         onDone  => sub {
-            my $releases = _filterForYou(shift);
+            my $releases = _sortReleases(_filterForYou(shift));
             $callback->({ items => _buildItems($releases, $client) });
         },
         onError => sub {
@@ -100,7 +109,7 @@ sub fetchAll {
         future  => $future,
         days    => $prefs->get('days') // 14,
         onDone  => sub {
-            my $releases = _filterAll(shift);
+            my $releases = _sortReleases(_filterAll(shift));
             $callback->({ items => _buildItems($releases, $client) });
         },
         onError => sub {
@@ -203,6 +212,31 @@ sub _filterAll {
 }
 
 # ---------------------------------------------------------------------------
+# Sort releases by the configured order. Release date is newest-first and
+# confidence highest-first; artist/album are A–Z. (The API's own ordering is
+# unreliable — e.g. date comes back oldest-first — so we sort here.)
+# ---------------------------------------------------------------------------
+sub _sortReleases {
+    my ($releases) = @_;
+    return $releases unless ref $releases eq 'ARRAY';
+
+    my $sort = $prefs->get('sort') // 'release_date';
+
+    if ($sort eq 'artist_credit_name') {
+        return [ sort { lc($a->{artist_credit_name} // '') cmp lc($b->{artist_credit_name} // '') } @$releases ];
+    }
+    elsif ($sort eq 'release_name') {
+        return [ sort { lc($a->{release_name} // '') cmp lc($b->{release_name} // '') } @$releases ];
+    }
+    elsif ($sort eq 'confidence') {
+        return [ sort { ($b->{confidence} // 0) <=> ($a->{confidence} // 0) } @$releases ];
+    }
+
+    # default: release_date, newest first
+    return [ sort { ($b->{release_date} // '') cmp ($a->{release_date} // '') } @$releases ];
+}
+
+# ---------------------------------------------------------------------------
 # Helper to pick the first available value from a list of candidate keys
 # ---------------------------------------------------------------------------
 sub _pickValue {
@@ -275,11 +309,68 @@ sub _buildItems {
         return [{ name => cstring($client, 'PLUGIN_LBF_NO_RESULTS'), type => 'text' }];
     }
 
-    my $items = $prefs->get('group_by_artist')
-        ? _buildGrouped($releases, $client)
-        : [ map { _buildReleaseItem($_, $client) } @$releases ];
+    my $sort = $prefs->get('sort') // 'release_date';
+
+    my $items;
+    if ($prefs->get('week_dividers') && $sort eq 'release_date') {
+        # weekly view takes precedence for the date sort (it's the chronological read)
+        $items = _buildWeekly($releases, $client);
+    }
+    elsif ($prefs->get('group_by_artist')) {
+        $items = _buildGrouped($releases, $client);
+    }
+    else {
+        $items = [ map { _buildReleaseItem($_, $client) } @$releases ];
+    }
 
     return _paginate($items, $client, 0);
+}
+
+# ---------------------------------------------------------------------------
+# Flat date-sorted list with a divider row at the start of each week, so the
+# chronological feed is easier to scan. Assumes releases are already sorted
+# newest-first; weeks run Monday–Sunday.
+# ---------------------------------------------------------------------------
+sub _buildWeekly {
+    my ($releases, $client) = @_;
+
+    my @items;
+    my $curWeek = "\0";   # sentinel that no real week-start can equal
+
+    for my $rel (@$releases) {
+        my $ws = _weekStart($rel->{release_date} // '');
+        if ($ws ne $curWeek) {
+            $curWeek = $ws;
+            push @items, { name => _weekLabel($client, $ws), type => 'text' };
+        }
+        push @items, _buildReleaseItem($rel, $client);
+    }
+
+    return \@items;
+}
+
+# Monday (YYYY-MM-DD) of the week containing $date, or '' if unparseable.
+sub _weekStart {
+    my ($date) = @_;
+    return '' unless $date && $date =~ /^(\d{4})-(\d{2})-(\d{2})/;
+
+    my $epoch = eval { Time::Local::timegm(0, 0, 12, $3, $2 - 1, $1) };
+    return '' unless defined $epoch;
+
+    my $wday = (gmtime $epoch)[6];          # 0 = Sunday
+    my $mon  = $epoch - (($wday + 6) % 7) * 86400;
+    my @m    = gmtime $mon;
+    return sprintf('%04d-%02d-%02d', $m[5] + 1900, $m[4] + 1, $m[3]);
+}
+
+# Human-readable divider label for a week-start date.
+sub _weekLabel {
+    my ($client, $ws) = @_;
+    return cstring($client, 'PLUGIN_LBF_WEEK_UNKNOWN') unless $ws =~ /^(\d{4})-(\d{2})-(\d{2})$/;
+
+    my @months = qw(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec);
+    return sprintf('— %s %d %s %d —',
+        cstring($client, 'PLUGIN_LBF_WEEK_OF'), $3 + 0, $months[$2 - 1], $1);
 }
 
 # ---------------------------------------------------------------------------

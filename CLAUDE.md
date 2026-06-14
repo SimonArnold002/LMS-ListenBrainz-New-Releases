@@ -41,7 +41,7 @@ ListenBrainzFreshReleases/
 ```
 
 ## Current Version
-0.4.3
+0.4.4
 
 ## Settings Structure (v0.3.2)
 
@@ -53,7 +53,8 @@ Three sections in the settings page:
 - `days` — days window (1-90, default 14)
 - `sort` — default sort (release_date / artist_credit_name / release_name / confidence)
 - `group_by_artist` — collapse multi-release artists into one tappable entry (default ON)
-- `play_via` — show a "Find on streaming services" link on the detail page (default ON)
+- `week_dividers` — when sorted by release date, insert a divider per week; takes precedence over group_by_artist for the date sort (default ON)
+- `play_via` — show inline playable streaming matches on the detail page (default ON)
 
 ### For You Settings
 - `foryou_albums` — albums-only filter (default ON)
@@ -118,8 +119,8 @@ No in-menu filter sub-menus. All filtering driven entirely by settings prefs.
 - Personalised feed: `GET /1/user/<username>/fresh_releases` (requires token)
 - Global feed: `GET /1/explore/fresh-releases/`
 - Response structure: `payload.releases` (NOT `payload.fresh_releases`)
-- Cover art: `https://coverartarchive.org/release/<mbid>/front-250`
-  - Uses `caa_release_mbid` first, falls back to `release_mbid`
+- Cover art: `https://coverartarchive.org/release/<caa_release_mbid>/front-250`
+  - Requires `caa_release_mbid` (the authoritative "has art" signal); returns undef when absent. Do NOT fall back to `release_mbid` — it's always present, which 404s for art-less releases and defeats the artwork-only filter (fixed in 0.4.4)
 - Token validation: `GET /1/validate-token?token=<t>`
 - No hard cap is applied to the API payload; filtering runs on the full result set so artwork and type filters can behave correctly
 - Release detail enrichment: `GET https://musicbrainz.org/ws/2/release/<mbid>?inc=recordings+genres&fmt=json`
@@ -183,4 +184,5 @@ Detected in `_isVariousArtists()`:
   - **Qobuz**: `Plugins::Qobuz::Plugin::getAPIHandler($client)->search($cb, lc($query), 'albums')`; results in `$res->{albums}{items}`; each title-matched album is rendered with the plugin's own `Plugins::Qobuz::Plugin::_albumItem($client, $album)` (a `type=>'playlist'` node → playable).
   - **Bandcamp**: `Plugins::Bandcamp::Search::search($client, $cb, {search=>$query})`; keep result items whose `passthrough->[0]{album_id}` is set (already-playable album nodes from `album_list`).
   - Adapter availability is detected with `Plugins::<Svc>::Plugin->can(...)` (safe when absent); the detail link is hidden when no supported service is installed. Async fan-out with a pending-counter barrier; title matching via `_titleMatch`/`_norm` (lowercase, strip bracketed qualifiers + punctuation), so it can occasionally miss/mismatch. Adding a new service = one more adapter sub + `_streamingAdapters` entry.
+- **0.4.4** — Fixes + view options: (1) **sort** is now applied client-side in `_sortReleases` — release date is **newest-first** (the API returned oldest-first), confidence highest-first, artist/album A–Z; (2) **weekly dividers** (`week_dividers`, default ON) add a "— Week of D Mon YYYY —" divider per week in the date-sorted view (`_buildWeekly`/`_weekStart`, Monday-based, via `Time::Local`), taking precedence over group-by-artist for the date sort; (3) top-level menu now has a **Plugin Settings** entry (`weblink` to settings.html) → For You / All Releases / Plugin Settings; (4) **artwork-only filter fix** — `coverArtUrl` now requires `caa_release_mbid` (it used to fall back to the always-present `release_mbid`, so the filter never excluded art-less releases and thumbnails 404'd).
 - **0.4.3** — Streaming matches are now shown **inline on the detail page** (no "Find on streaming services" tap): `_releaseDetail` runs the streaming search and the MusicBrainz lookup in parallel and merges both into one callback (base meta → streaming matches → genres → tracklist). Each result uses the **service's own logo** as its thumbnail (`_pluginIcon` → `_pluginDataFor('icon')`) so the source is obvious; dropped the `"Svc:"` name prefix. Trade-off: the detail page now waits on the streaming search(es) before rendering, so it can be a touch slower (Bandcamp scraping is the slowest).

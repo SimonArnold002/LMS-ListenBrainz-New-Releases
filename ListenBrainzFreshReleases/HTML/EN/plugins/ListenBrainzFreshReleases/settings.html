@@ -27,6 +27,10 @@
 <input type="checkbox" name="pref_group_by_artist" value="1" [% IF prefs.group_by_artist %]checked="checked"[% END %]>
 [% END %]
 
+[% WRAPPER setting title="PLUGIN_LBF_WEEK_DIVIDERS" desc="PLUGIN_LBF_WEEK_DIVIDERS_DESC" %]
+<input type="checkbox" name="pref_week_dividers" value="1" [% IF prefs.week_dividers %]checked="checked"[% END %]>
+[% END %]
+
 [% WRAPPER setting title="PLUGIN_LBF_PLAY_VIA_SETTING" desc="PLUGIN_LBF_PLAY_VIA_SETTING_DESC" %]
 <input type="checkbox" name="pref_play_via" value="1" [% IF prefs.play_via %]checked="checked"[% END %]>
 [% END %]
