@@ -8,7 +8,7 @@
 
 <module>Plugins::ListenBrainzFreshReleases::Plugin</module>
 
-<version>0.3.2</version>
+<version>0.4.0</version>
 
 <description>Browse ListenBrainz Fresh Releases on your Squeezebox. Shows personalised For You releases and a global feed with sort and filter options.</description>
 

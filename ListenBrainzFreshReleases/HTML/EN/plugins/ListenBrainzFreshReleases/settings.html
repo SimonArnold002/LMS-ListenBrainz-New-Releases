@@ -23,6 +23,10 @@
 </select>
 [% END %]
 
+[% WRAPPER setting title="PLUGIN_LBF_GROUP_ARTIST" desc="PLUGIN_LBF_GROUP_ARTIST_DESC" %]
+<input type="checkbox" name="pref_group_by_artist" value="1" [% IF prefs.group_by_artist %]checked="checked"[% END %]>
+[% END %]
+
 <h2>[% 'PLUGIN_LBF_SECTION_FORYOU' | string %]</h2>
 
 [% WRAPPER setting title="PLUGIN_LBF_FORYOU_ALBUMS" desc="PLUGIN_LBF_FORYOU_ALBUMS_DESC" %]

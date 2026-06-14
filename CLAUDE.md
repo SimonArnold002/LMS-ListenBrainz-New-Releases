@@ -41,7 +41,7 @@ ListenBrainzFreshReleases/
 ```
 
 ## Current Version
-0.3.2
+0.4.0
 
 ## Settings Structure (v0.3.2)
 
@@ -52,6 +52,7 @@ Three sections in the settings page:
 - `token` — ListenBrainz API token
 - `days` — days window (1-90, default 14)
 - `sort` — default sort (release_date / artist_credit_name / release_name / confidence)
+- `group_by_artist` — collapse multi-release artists into one tappable entry (default ON)
 
 ### For You Settings
 - `foryou_albums` — albums-only filter (default ON)
@@ -120,6 +121,17 @@ No in-menu filter sub-menus. All filtering driven entirely by settings prefs.
   - Uses `caa_release_mbid` first, falls back to `release_mbid`
 - Token validation: `GET /1/validate-token?token=<t>`
 - No hard cap is applied to the API payload; filtering runs on the full result set so artwork and type filters can behave correctly
+- Release detail enrichment: `GET https://musicbrainz.org/ws/2/release/<mbid>?inc=recordings+genres&fmt=json`
+  - Fetched on-demand when a release is opened (one at a time, so the anonymous MusicBrainz 1 req/sec limit is fine)
+  - Requires a descriptive `User-Agent` (set in `API::USER_AGENT`) or MusicBrainz returns 403
+  - `API::getReleaseDetails` returns `{ genres => [names], media => [{ position, format, tracks => [{position,title,length}] }] }`
+  - Detail page degrades gracefully to base metadata if the lookup fails
+
+### Display / New Music Tracker–inspired presentation
+- Release detail page shows base metadata, then genres and a per-disc tracklist (m:ss durations) pulled from MusicBrainz
+- `group_by_artist` (default ON): artists with one new release stay inline; artists with several collapse into an `Artist  (N)` entry that expands to their releases
+- Pagination (`_paginate`, PAGE_SIZE 50) is generic — it windows whichever item list it's given (flat, grouped top-level, or an artist's expanded releases) with a `Next page (n/total)` link
+- Not ported from New Music Tracker (needs a web-app backend the OPML plugin doesn't have): OAuth login, artist following, wishlists, genre/style *filtering*, listener/popularity counts
 
 ### Release Type Filtering
 - The API does NOT support release type as a query parameter
@@ -163,3 +175,5 @@ Detected in `_isVariousArtists()`:
 - **0.3.0** — Full restructure: three settings sections, simplified browse menu (no in-menu filters), per-section prefs (For You vs All Releases), Various Artists toggle, comprehensive type checkboxes with Album/Compilation/Soundtrack defaults
 - **0.3.1** — Repository metadata and package version alignment; filtering now evaluates the full API response payload
 - **0.3.2** — All Releases items now display the actual release title and release type from the ListenBrainz payload
+- **0.3.3** — Both feeds paginate in pages of 50 via a "Next page (n/total)" link; the filtered list is captured in-closure so paging never re-hits the API, and the LMS back button returns to the previous page
+- **0.4.0** — New Music Tracker–inspired presentation: release detail page now fetches genres + per-disc tracklist (durations) from MusicBrainz on demand (graceful fallback on failure); shows folksonomy tags carried in the fresh_releases payload (cleaned/deduped, no extra call); optional group-by-artist layout (default ON) collapsing multi-release artists; pagination generalised to window any item list. NB: a data probe found MusicBrainz/ListenBrainz genre coverage on fresh releases is ~8–9% (too sparse for genre *filtering* without Discogs), so only on-demand genre/tag *display* was added.

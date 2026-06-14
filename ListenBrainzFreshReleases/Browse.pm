@@ -17,6 +17,9 @@ use constant ICON => 'plugins/ListenBrainzFreshReleases/html/images/ListenBrainz
 # Various Artists MBID — used to detect VA releases
 use constant VA_MBID => '89ad4ac3-39f7-470e-963a-56509c546377';
 
+# Maximum number of releases shown per page before a "Next page" link is added
+use constant PAGE_SIZE => 50;
+
 # ---------------------------------------------------------------------------
 # Top-level feed
 # ---------------------------------------------------------------------------
@@ -272,63 +275,257 @@ sub _buildItems {
         return [{ name => cstring($client, 'PLUGIN_LBF_NO_RESULTS'), type => 'text' }];
     }
 
-    my @items;
+    my $items = $prefs->get('group_by_artist')
+        ? _buildGrouped($releases, $client)
+        : [ map { _buildReleaseItem($_, $client) } @$releases ];
 
+    return _paginate($items, $client, 0);
+}
+
+# ---------------------------------------------------------------------------
+# Group releases under their artist (New Music Tracker style). Artists with a
+# single release stay inline; artists with several collapse into one tappable
+# entry that lists their releases. Artist order follows the chosen sort (first
+# appearance), so e.g. a date sort keeps the freshest artists at the top.
+# ---------------------------------------------------------------------------
+sub _buildGrouped {
+    my ($releases, $client) = @_;
+
+    my @order;
+    my %bucket;
     for my $rel (@$releases) {
-        my $artist     = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist') // 'Unknown Artist';
-        my $album      = _pickValue($rel, 'release_name', 'title', 'name') // 'Unknown Album';
-        my $date       = $rel->{release_date} // '';
-        my $type       = _displayType($rel);
-        my $sec_types  = $rel->{release_group_secondary_types} // $rel->{secondary_types} // [];
-        my $mbid       = $rel->{release_mbid} // '';
-        my $conf       = $rel->{confidence};
+        my $key = lc(_pickValue($rel, 'artist_credit_name', 'artist_name', 'artist'));
+        push @order, $key unless exists $bucket{$key};
+        push @{ $bucket{$key} }, $rel;
+    }
 
-        my $name = "$artist \x{2013} $album";
-        $name .= "  [$date]" if $date;
+    my @items;
+    for my $key (@order) {
+        my $rels = $bucket{$key};
 
-        my $line2 = $type;
-        if (ref $sec_types eq 'ARRAY' && scalar @$sec_types) {
-            $line2 .= ' / ' . join(', ', @$sec_types);
-        }
-        if (defined $conf) {
-            my $stars = $conf >= 3 ? "\x{2605}\x{2605}\x{2605}"
-                      : $conf == 2 ? "\x{2605}\x{2605}"
-                      :              "\x{2605}";
-            $line2 .= "  $stars";
+        if (scalar @$rels == 1) {
+            push @items, _buildReleaseItem($rels->[0], $client);
+            next;
         }
 
-        my $image = Plugins::ListenBrainzFreshReleases::API->coverArtUrl($rel) // ICON;
+        my $artist = _pickValue($rels->[0], 'artist_credit_name', 'artist_name', 'artist') // 'Unknown Artist';
+        my $image  = Plugins::ListenBrainzFreshReleases::API->coverArtUrl($rels->[0]) // ICON;
+        my $count  = scalar @$rels;
 
-        my $item = {
-            name  => $name,
-            line2 => $line2,
-            type  => 'text',
+        push @items, {
+            name  => "$artist  ($count)",
+            type  => 'link',
             image => $image,
-        };
-
-        if ($mbid) {
-            my $sec_str = (ref $sec_types eq 'ARRAY' && scalar @$sec_types)
-                        ? join(', ', @$sec_types) : '';
-            $item->{type} = 'link';
-            $item->{url}  = sub {
+            url   => sub {
                 my ($client, $callback) = @_;
-                my @detail = (
-                    { name => cstring($client, 'PLUGIN_LBF_ARTIST') . ": $artist", type => 'text' },
-                    { name => cstring($client, 'PLUGIN_LBF_ALBUM')  . ": $album",  type => 'text' },
-                    { name => cstring($client, 'PLUGIN_LBF_DATE')   . ": $date",   type => 'text' },
-                    { name => cstring($client, 'PLUGIN_LBF_TYPE')   . ": $type",   type => 'text' },
-                );
-                push @detail, { name => cstring($client, 'PLUGIN_LBF_SEC_TYPES') . ": $sec_str", type => 'text' }
-                    if $sec_str;
-                push @detail, { name => "MusicBrainz: https://musicbrainz.org/release/$mbid", type => 'text' };
-                $callback->({ items => \@detail });
-            };
-        }
-
-        push @items, $item;
+                my $sub = [ map { _buildReleaseItem($_, $client) } @$rels ];
+                $callback->({ items => _paginate($sub, $client, 0) });
+            },
+        };
     }
 
     return \@items;
+}
+
+# ---------------------------------------------------------------------------
+# Window an already-built item list into pages of PAGE_SIZE, appending a
+# "Next page (n/total)" link when more remain. The list is captured in the
+# closure so paging never re-hits the API; LMS's back button goes back a page.
+# ---------------------------------------------------------------------------
+sub _paginate {
+    my ($items, $client, $offset) = @_;
+    $offset //= 0;
+
+    my $total = scalar @$items;
+    return $items if $total <= PAGE_SIZE && $offset == 0;
+
+    my $last = $offset + PAGE_SIZE - 1;
+    $last = $total - 1 if $last > $total - 1;
+
+    my @page = @{$items}[$offset .. $last];
+
+    if ($last < $total - 1) {
+        my $next  = $offset + PAGE_SIZE;
+        my $page  = int($next / PAGE_SIZE) + 1;
+        my $pages = int(($total + PAGE_SIZE - 1) / PAGE_SIZE);
+        push @page, {
+            name  => cstring($client, 'PLUGIN_LBF_NEXT_PAGE') . " ($page/$pages)",
+            type  => 'link',
+            image => ICON,
+            url   => sub {
+                my ($client, $callback) = @_;
+                $callback->({ items => _paginate($items, $client, $next) });
+            },
+        };
+    }
+
+    return \@page;
+}
+
+# ---------------------------------------------------------------------------
+# Build a single OPML item from one release
+# ---------------------------------------------------------------------------
+sub _buildReleaseItem {
+    my ($rel, $client) = @_;
+
+    my $artist     = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist') // 'Unknown Artist';
+    my $album      = _pickValue($rel, 'release_name', 'title', 'name') // 'Unknown Album';
+    my $date       = $rel->{release_date} // '';
+    my $type       = _displayType($rel);
+    my $sec_types  = $rel->{release_group_secondary_types} // $rel->{secondary_types} // [];
+    my $mbid       = $rel->{release_mbid} // '';
+    my $conf       = $rel->{confidence};
+
+    my $name = "$artist \x{2013} $album";
+    $name .= "  [$date]" if $date;
+
+    my $line2 = $type;
+    if (ref $sec_types eq 'ARRAY' && scalar @$sec_types) {
+        $line2 .= ' / ' . join(', ', @$sec_types);
+    }
+    if (defined $conf) {
+        my $stars = $conf >= 3 ? "\x{2605}\x{2605}\x{2605}"
+                  : $conf == 2 ? "\x{2605}\x{2605}"
+                  :              "\x{2605}";
+        $line2 .= "  $stars";
+    }
+
+    my $image = Plugins::ListenBrainzFreshReleases::API->coverArtUrl($rel) // ICON;
+
+    my $item = {
+        name  => $name,
+        line2 => $line2,
+        type  => 'text',
+        image => $image,
+    };
+
+    if ($mbid) {
+        $item->{type} = 'link';
+        $item->{url}  = sub {
+            my ($client, $callback) = @_;
+            _releaseDetail($rel, $client, $callback);
+        };
+    }
+
+    return $item;
+}
+
+# ---------------------------------------------------------------------------
+# Release detail page — base metadata, then genres + tracklist fetched from
+# MusicBrainz on demand. Falls back to just the metadata if the lookup fails.
+# ---------------------------------------------------------------------------
+sub _releaseDetail {
+    my ($rel, $client, $callback) = @_;
+
+    my @base = _detailMeta($rel, $client);
+    my $mbid = $rel->{release_mbid} // '';
+
+    unless ($mbid) {
+        $callback->({ items => \@base });
+        return;
+    }
+
+    Plugins::ListenBrainzFreshReleases::API->getReleaseDetails(
+        $mbid,
+        sub {
+            my $info = shift;
+            my @items = @base;
+
+            my @genres = @{ $info->{genres} || [] };
+            push @items, {
+                name => cstring($client, 'PLUGIN_LBF_GENRES') . ': ' . join(', ', @genres),
+                type => 'text',
+            } if @genres;
+
+            my @media = grep { $_->{tracks} && scalar @{ $_->{tracks} } } @{ $info->{media} || [] };
+            if (@media) {
+                push @items, { name => cstring($client, 'PLUGIN_LBF_TRACKLIST'), type => 'text' };
+                my $multi = scalar @media > 1;
+                for my $m (@media) {
+                    if ($multi) {
+                        my $hdr = cstring($client, 'PLUGIN_LBF_DISC') . ' ' . ($m->{position} // '');
+                        $hdr .= " ($m->{format})" if $m->{format};
+                        push @items, { name => $hdr, type => 'text' };
+                    }
+                    for my $t (@{ $m->{tracks} }) {
+                        my $line = ($t->{position} ? "$t->{position}. " : '') . ($t->{title} // '');
+                        $line .= '  (' . _fmtDuration($t->{length}) . ')' if $t->{length};
+                        push @items, { name => $line, type => 'text' };
+                    }
+                }
+            }
+
+            $callback->({ items => \@items });
+        },
+        sub {
+            $log->info("Release detail lookup failed: " . (shift // ''));
+            $callback->({ items => \@base });
+        },
+    );
+}
+
+# Base metadata lines shown at the top of every release detail page
+sub _detailMeta {
+    my ($rel, $client) = @_;
+
+    my $artist  = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist') // 'Unknown Artist';
+    my $album   = _pickValue($rel, 'release_name', 'title', 'name') // 'Unknown Album';
+    my $date    = $rel->{release_date} // '';
+    my $type    = _displayType($rel);
+    my $sec     = $rel->{release_group_secondary_types} // $rel->{secondary_types} // [];
+    my $sec_str = (ref $sec eq 'ARRAY' && scalar @$sec) ? join(', ', @$sec) : '';
+    my $mbid    = $rel->{release_mbid} // '';
+
+    my @detail = (
+        { name => cstring($client, 'PLUGIN_LBF_ARTIST') . ": $artist", type => 'text' },
+        { name => cstring($client, 'PLUGIN_LBF_ALBUM')  . ": $album",  type => 'text' },
+        { name => cstring($client, 'PLUGIN_LBF_DATE')   . ": $date",   type => 'text' },
+        { name => cstring($client, 'PLUGIN_LBF_TYPE')   . ": $type",   type => 'text' },
+    );
+    push @detail, { name => cstring($client, 'PLUGIN_LBF_SEC_TYPES') . ": $sec_str", type => 'text' }
+        if $sec_str;
+
+    # Folksonomy tags ride along in the fresh_releases payload (no extra call).
+    # Coverage is low (~9%) and noisy, so only show when present after cleanup.
+    my @tags = _releaseTags($rel);
+    push @detail, { name => cstring($client, 'PLUGIN_LBF_TAGS') . ': ' . join(', ', @tags), type => 'text' }
+        if @tags;
+
+    push @detail, { name => "MusicBrainz: https://musicbrainz.org/release/$mbid", type => 'text' }
+        if $mbid;
+
+    return @detail;
+}
+
+# Extract usable tag names from the payload's release_tags. Entries may be plain
+# strings or { tag, count } hashes; drop blanks, dedupe case-insensitively, and
+# drop the over-long free-text junk ("adding tags for album ...") that isn't a genre.
+sub _releaseTags {
+    my ($rel) = @_;
+
+    my $tags = $rel->{release_tags};
+    return () unless ref $tags eq 'ARRAY';
+
+    my @out;
+    my %seen;
+    for my $t (@$tags) {
+        my $name = ref $t eq 'HASH' ? $t->{tag} : $t;
+        next unless defined $name;
+        $name =~ s/^\s+//; $name =~ s/\s+$//;
+        next if $name eq '' || length($name) > 30;
+        next if $seen{ lc $name }++;
+        push @out, $name;
+    }
+
+    return @out;
+}
+
+# Format a millisecond track length as m:ss
+sub _fmtDuration {
+    my ($ms) = @_;
+    return '' unless $ms;
+    my $secs = int($ms / 1000 + 0.5);
+    return sprintf('%d:%02d', int($secs / 60), $secs % 60);
 }
 
 1;

@@ -106,6 +106,9 @@ PLUGIN_LBF_SETUP_REQUIRED
 PLUGIN_LBF_NO_RESULTS
 	EN	No releases found
 
+PLUGIN_LBF_NEXT_PAGE
+	EN	Next page
+
 PLUGIN_LBF_ERROR
 	EN	Error fetching releases
 
@@ -123,3 +126,21 @@ PLUGIN_LBF_TYPE
 
 PLUGIN_LBF_SEC_TYPES
 	EN	Secondary Types
+
+PLUGIN_LBF_GENRES
+	EN	Genres
+
+PLUGIN_LBF_TAGS
+	EN	Tags
+
+PLUGIN_LBF_TRACKLIST
+	EN	Tracklist
+
+PLUGIN_LBF_DISC
+	EN	Disc
+
+PLUGIN_LBF_GROUP_ARTIST
+	EN	Group by Artist
+
+PLUGIN_LBF_GROUP_ARTIST_DESC
+	EN	Collapse artists with several new releases into a single entry you can tap to expand

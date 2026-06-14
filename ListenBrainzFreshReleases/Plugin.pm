@@ -21,6 +21,7 @@ $prefs->init({
     token                => '',
     days                 => 14,
     sort                 => 'release_date',
+    group_by_artist      => 1,
 
     # For You section
     foryou_albums        => 1,
