@@ -7,20 +7,26 @@ use Time::Local ();
 
 use Slim::Utils::Log;
 use Slim::Utils::Prefs;
+use Slim::Utils::Cache;
 use Slim::Utils::Strings qw(cstring string);
 
 use Plugins::ListenBrainzFreshReleases::API;
 
 my $log   = logger('plugin.listenbrainzfreshreleases');
 my $prefs = preferences('plugin.listenbrainzfreshreleases');
+my $cache = Slim::Utils::Cache->new();
+
+# How long to remember a streaming-match result before searching again.
+# A found match rarely changes (albums don't vanish) → keep a week. A "no match"
+# on a brand-new release is likely to change soon (it may land on the service in
+# a few days) → recheck daily.
+use constant STREAM_FOUND_TTL   => 7 * 86400;
+use constant STREAM_NOMATCH_TTL => 1 * 86400;
 
 use constant ICON => 'plugins/ListenBrainzFreshReleases/html/images/ListenBrainzFreshReleasesIcon_svg.png';
 
 # Various Artists MBID — used to detect VA releases
 use constant VA_MBID => '89ad4ac3-39f7-470e-963a-56509c546377';
-
-# Maximum number of releases shown per page before a "Next page" link is added
-use constant PAGE_SIZE => 50;
 
 # ---------------------------------------------------------------------------
 # Top-level feed
@@ -311,19 +317,18 @@ sub _buildItems {
 
     my $sort = $prefs->get('sort') // 'release_date';
 
-    my $items;
+    # Return the whole (already filtered + sorted) list as a single level and let
+    # LMS/Material window it natively — so Material's in-list filter spans every
+    # item, not just one page, and we get the native scroll/prev-next pager.
     if ($prefs->get('week_dividers') && $sort eq 'release_date') {
         # weekly view takes precedence for the date sort (it's the chronological read)
-        $items = _buildWeekly($releases, $client);
+        return _buildWeekly($releases, $client);
     }
     elsif ($prefs->get('group_by_artist')) {
-        $items = _buildGrouped($releases, $client);
-    }
-    else {
-        $items = [ map { _buildReleaseItem($_, $client) } @$releases ];
+        return _buildGrouped($releases, $client);
     }
 
-    return _paginate($items, $client, 0);
+    return [ map { _buildReleaseItem($_, $client) } @$releases ];
 }
 
 # ---------------------------------------------------------------------------
@@ -369,7 +374,7 @@ sub _weekLabel {
     return cstring($client, 'PLUGIN_LBF_WEEK_UNKNOWN') unless $ws =~ /^(\d{4})-(\d{2})-(\d{2})$/;
 
     my @months = qw(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec);
-    return sprintf('— %s %d %s %d —',
+    return sprintf('%s %d %s %d',
         cstring($client, 'PLUGIN_LBF_WEEK_OF'), $3 + 0, $months[$2 - 1], $1);
 }
 
@@ -409,48 +414,12 @@ sub _buildGrouped {
             image => $image,
             url   => sub {
                 my ($client, $callback) = @_;
-                my $sub = [ map { _buildReleaseItem($_, $client) } @$rels ];
-                $callback->({ items => _paginate($sub, $client, 0) });
+                $callback->({ items => [ map { _buildReleaseItem($_, $client) } @$rels ] });
             },
         };
     }
 
     return \@items;
-}
-
-# ---------------------------------------------------------------------------
-# Window an already-built item list into pages of PAGE_SIZE, appending a
-# "Next page (n/total)" link when more remain. The list is captured in the
-# closure so paging never re-hits the API; LMS's back button goes back a page.
-# ---------------------------------------------------------------------------
-sub _paginate {
-    my ($items, $client, $offset) = @_;
-    $offset //= 0;
-
-    my $total = scalar @$items;
-    return $items if $total <= PAGE_SIZE && $offset == 0;
-
-    my $last = $offset + PAGE_SIZE - 1;
-    $last = $total - 1 if $last > $total - 1;
-
-    my @page = @{$items}[$offset .. $last];
-
-    if ($last < $total - 1) {
-        my $next  = $offset + PAGE_SIZE;
-        my $page  = int($next / PAGE_SIZE) + 1;
-        my $pages = int(($total + PAGE_SIZE - 1) / PAGE_SIZE);
-        push @page, {
-            name  => cstring($client, 'PLUGIN_LBF_NEXT_PAGE') . " ($page/$pages)",
-            type  => 'link',
-            image => ICON,
-            url   => sub {
-                my ($client, $callback) = @_;
-                $callback->({ items => _paginate($items, $client, $next) });
-            },
-        };
-    }
-
-    return \@page;
 }
 
 # ---------------------------------------------------------------------------
@@ -467,8 +436,9 @@ sub _buildReleaseItem {
     my $mbid       = $rel->{release_mbid} // '';
     my $conf       = $rel->{confidence};
 
+    my $year = ($date =~ /^(\d{4})/) ? $1 : '';
     my $name = "$artist \x{2013} $album";
-    $name .= "  [$date]" if $date;
+    $name .= " ($year)" if $year;
 
     my $line2 = $type;
     if (ref $sec_types eq 'ARRAY' && scalar @$sec_types) {
@@ -516,7 +486,14 @@ sub _releaseDetail {
 
     my @streamItems;   # playable streaming matches (with a header)
     my @mbItems;       # genres + tracklist
-    my $pending = 0;
+
+    my $wantStream = ($prefs->get('play_via') && length $album && _streamingAdapters()) ? 1 : 0;
+    my $wantMB     = $mbid ? 1 : 0;
+
+    # Count all tasks up front: a cache hit completes its callback synchronously,
+    # so if we incremented per-task the barrier could fire after the first one
+    # finishes (before the second was even launched) and drop the other's data.
+    my $pending = $wantStream + $wantMB;
     my $done    = 0;
 
     my $finish = sub {
@@ -525,9 +502,13 @@ sub _releaseDetail {
         $callback->({ items => [ @base, @streamItems, @mbItems ] });
     };
 
+    unless ($pending) {
+        $callback->({ items => \@base });
+        return;
+    }
+
     # Streaming services — search automatically and show matches inline
-    if ($prefs->get('play_via') && length $album && _streamingAdapters()) {
-        $pending++;
+    if ($wantStream) {
         _findPlayable($client, sub {
             my $res   = shift;
             my @items = (ref $res eq 'HASH' && ref $res->{items} eq 'ARRAY') ? @{ $res->{items} } : ();
@@ -536,12 +517,11 @@ sub _releaseDetail {
                 if @items;
             $pending--;
             $finish->();
-        }, $artist, $album);
+        }, $artist, $album, $mbid);
     }
 
     # MusicBrainz genres + tracklist
-    if ($mbid) {
-        $pending++;
+    if ($wantMB) {
         Plugins::ListenBrainzFreshReleases::API->getReleaseDetails(
             $mbid,
             sub {
@@ -581,8 +561,6 @@ sub _releaseDetail {
             },
         );
     }
-
-    $finish->();   # nothing async (no mbid and no streaming services)
 }
 
 # Base metadata lines shown at the top of every release detail page
@@ -612,8 +590,12 @@ sub _detailMeta {
     push @detail, { name => cstring($client, 'PLUGIN_LBF_TAGS') . ': ' . join(', ', @tags), type => 'text' }
         if @tags;
 
-    push @detail, { name => "MusicBrainz: https://musicbrainz.org/release/$mbid", type => 'text' }
-        if $mbid;
+    push @detail, {
+        name    => cstring($client, 'PLUGIN_LBF_VIEW_ON_MB'),
+        type    => 'link',
+        weblink => "https://musicbrainz.org/release/$mbid",
+        image   => ICON,
+    } if $mbid;
 
     return @detail;
 }
@@ -646,14 +628,23 @@ sub _pluginIcon {
 # matching album as a directly-playable node (one tap to play / add), using
 # each plugin's own search API rather than a generic search drill-down.
 sub _findPlayable {
-    my ($client, $callback, $artist, $album) = @_;
+    my ($client, $callback, $artist, $album, $mbid) = @_;
 
-    my @adapters  = _streamingAdapters();
-    my $query     = join(' ', grep { defined && length } $artist, $album);
-    my $albumNorm = _norm($album);
+    my @adapters   = _streamingAdapters();
+    my $query      = join(' ', grep { defined && length } $artist, $album);
+    my $albumNorm  = _norm($album);
+    my $artistNorm = _norm($artist);
 
     unless (@adapters) {
         $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_NO_SERVICES'), type => 'text' }] });
+        return;
+    }
+
+    # Cache hit → rebuild the playable items from the stored data (no re-search).
+    my $key = 'lbf:stream:' . ($mbid || _norm($query));
+    if (my $c = $cache->get($key)) {
+        $log->info("play-via cache hit: $key (" . scalar(@{ $c->{items} || [] }) . " match(es))");
+        $callback->({ items => _streamResult($client, _rebuildStreamItems($c->{items})) });
         return;
     }
 
@@ -664,12 +655,15 @@ sub _findPlayable {
     my $finish = sub {
         return if $done || $pending > 0;
         $done = 1;
-        $log->info("play-via '$query': " . scalar(@collected) . " match(es)");
-        $callback->({
-            items => @collected
-                ? \@collected
-                : [{ name => cstring($client, 'PLUGIN_LBF_NO_MATCH'), type => 'text' }],
-        });
+
+        # Cache serializable copies (OPML item url is a coderef → strip it; it's
+        # reattached per-service on read). _svc identifies which to reattach.
+        my @store = map { my %x = %$_; delete $x{url}; \%x } @collected;
+        my $ttl   = @collected ? STREAM_FOUND_TTL : STREAM_NOMATCH_TTL;
+        $cache->set($key, { items => \@store }, $ttl);
+
+        $log->info("play-via '$query': " . scalar(@collected) . " match(es), cached ${ttl}s");
+        $callback->({ items => _streamResult($client, \@collected) });
     };
 
     for my $a (@adapters) {
@@ -678,15 +672,17 @@ sub _findPlayable {
         my $collect = sub {
             my $items = shift;
             if (ref $items eq 'ARRAY') {
-                # show the service's logo as the thumbnail so the source is clear
-                if ($icon) { $_->{image} = $icon for @$items; }
+                for my $it (@$items) {
+                    $it->{image} = $icon if $icon;   # service logo as thumbnail
+                    $it->{_svc}  = $svc;             # for cache rebuild
+                }
                 push @collected, @$items;
             }
             $pending--;
             $finish->();
         };
 
-        eval { $a->{run}->($client, $query, $albumNorm, $svc, $collect); 1 } or do {
+        eval { $a->{run}->($client, $query, $artistNorm, $albumNorm, $svc, $collect); 1 } or do {
             $log->warn("play-via $svc failed: $@");
             $pending--;
             $finish->();
@@ -694,10 +690,45 @@ sub _findPlayable {
     }
 }
 
+# Wrap matched items for display, or a "no match" placeholder when empty.
+sub _streamResult {
+    my ($client, $items) = @_;
+    return @$items
+        ? $items
+        : [{ name => cstring($client, 'PLUGIN_LBF_NO_MATCH'), type => 'text' }];
+}
+
+# Rebuild playable items from cached (url-stripped) data by reattaching each
+# service's native play coderef. Items whose service is no longer present are
+# dropped.
+sub _rebuildStreamItems {
+    my ($cached) = @_;
+
+    my @out;
+    for my $c (@{ $cached || [] }) {
+        my %item = %$c;
+        my $svc  = $item{_svc} // '';
+
+        if ($svc eq 'Qobuz' && Plugins::Qobuz::Plugin->can('QobuzGetTracks')) {
+            $item{url} = \&Plugins::Qobuz::Plugin::QobuzGetTracks;
+        }
+        elsif ($svc eq 'Bandcamp' && Plugins::Bandcamp::Plugin->can('get_album')) {
+            $item{url} = \&Plugins::Bandcamp::Plugin::get_album;
+        }
+        else {
+            next;
+        }
+
+        push @out, \%item;
+    }
+
+    return \@out;
+}
+
 # Qobuz: search albums via the plugin's own API, keep title matches, and reuse
 # the plugin's _albumItem so each result is a native, playable album node.
 sub _searchQobuz {
-    my ($client, $query, $albumNorm, $svc, $collect) = @_;
+    my ($client, $query, $artistNorm, $albumNorm, $svc, $collect) = @_;
 
     my $api = Plugins::Qobuz::Plugin::getAPIHandler($client);
     unless ($api) {
@@ -709,7 +740,8 @@ sub _searchQobuz {
         my $res = shift;
         my @out;
         for my $album (@{ ($res && $res->{albums} && $res->{albums}{items}) || [] }) {
-            next unless _titleMatch($albumNorm, $album->{title});
+            my $candArtist = ref $album->{artist} eq 'HASH' ? $album->{artist}{name} : '';
+            next unless _albumMatches($artistNorm, $albumNorm, $candArtist, $album->{title});
             push @out, Plugins::Qobuz::Plugin::_albumItem($client, $album);
         }
         $collect->(\@out);
@@ -719,7 +751,7 @@ sub _searchQobuz {
 # Bandcamp: run the plugin's combined search, keep the album results (identified
 # by an album_id in their passthrough — they're already playable album nodes).
 sub _searchBandcamp {
-    my ($client, $query, $albumNorm, $svc, $collect) = @_;
+    my ($client, $query, $artistNorm, $albumNorm, $svc, $collect) = @_;
 
     eval { require Plugins::Bandcamp::Search; 1 } or do {
         $collect->([]);
@@ -731,21 +763,32 @@ sub _searchBandcamp {
         my @out;
         for my $it (@{ ($res && $res->{items}) || [] }) {
             next unless ref $it eq 'HASH';
-            my $pt = $it->{passthrough};
-            next unless ref $pt eq 'ARRAY' && $pt->[0] && $pt->[0]{album_id};
-            next unless _titleMatch($albumNorm, $it->{name});
+            my $pt = ref $it->{passthrough} eq 'ARRAY' ? $it->{passthrough}[0] : undef;
+            next unless $pt && $pt->{album_id};
+            next unless _albumMatches($artistNorm, $albumNorm, $pt->{artist}, $pt->{title});
             push @out, $it;
         }
         $collect->(\@out);
     }, { search => $query });
 }
 
-# True if a service result title matches our album (normalised substring match).
-sub _titleMatch {
-    my ($albumNorm, $candidate) = @_;
+# True if a streaming result is the same release: the candidate title must
+# contain our album title (tolerates " (Deluxe)", " EP", etc. after _norm), AND
+# the candidate artist must match ours (the disambiguator — without it, similar
+# titles by unrelated artists slip through). Artist matches in either direction
+# to tolerate "feat."/credit variations. With no artist to compare, title alone.
+sub _albumMatches {
+    my ($artistNorm, $albumNorm, $candArtist, $candTitle) = @_;
+
     return 0 if length $albumNorm < 2;
-    my $c = _norm($candidate);
-    return ($c ne '' && index($c, $albumNorm) >= 0) ? 1 : 0;
+    my $t = _norm($candTitle);
+    return 0 if $t eq '' || index($t, $albumNorm) < 0;
+
+    return 1 if $artistNorm eq '';
+
+    my $a = _norm($candArtist);
+    return 0 if $a eq '';
+    return (index($a, $artistNorm) >= 0 || index($artistNorm, $a) >= 0) ? 1 : 0;
 }
 
 # Normalise a title for fuzzy matching: lowercase, drop bracketed qualifiers

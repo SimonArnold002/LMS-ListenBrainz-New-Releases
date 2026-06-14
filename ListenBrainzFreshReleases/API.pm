@@ -6,17 +6,24 @@ use warnings;
 use Slim::Networking::SimpleAsyncHTTP;
 use Slim::Utils::Log;
 use Slim::Utils::Prefs;
+use Slim::Utils::Cache;
 use JSON::XS::VersionOneAndTwo;
 
 my $log   = logger('plugin.listenbrainzfreshreleases');
 my $prefs = preferences('plugin.listenbrainzfreshreleases');
+my $cache = Slim::Utils::Cache->new();
+
+# A MusicBrainz tracklist never changes, so cache a found result for a long time;
+# genres can be sparse on fresh releases, so recheck an empty result daily.
+use constant MB_FOUND_TTL => 30 * 86400;
+use constant MB_EMPTY_TTL =>  1 * 86400;
 
 use constant BASE_URL     => 'https://api.listenbrainz.org';
 use constant CAA_BASE_URL => 'https://coverartarchive.org/release/';
 use constant MB_BASE_URL  => 'https://musicbrainz.org/ws/2/';
 
 # MusicBrainz requires a descriptive User-Agent identifying the application
-use constant USER_AGENT   => 'LMS-ListenBrainzFreshReleases/0.4.4 ( https://github.com/CrystalGipsy/LMS-ListenBrainz-New-Releases )';
+use constant USER_AGENT   => 'LMS-ListenBrainzFreshReleases/0.4.9 ( https://github.com/CrystalGipsy/LMS-ListenBrainz-New-Releases )';
 
 # ---------------------------------------------------------------------------
 # GET /1/user/<username>/fresh_releases  (personalised, auth required)
@@ -120,6 +127,14 @@ sub getReleaseDetails {
         return;
     }
 
+    # Cache hit → return the parsed tracklist/genres without re-fetching.
+    my $cacheKey = 'lbf:mb:' . $mbid;
+    if (my $cached = $cache->get($cacheKey)) {
+        $log->info("MusicBrainz release cache hit: $mbid");
+        $onDone->($cached);
+        return;
+    }
+
     (my $safe = $mbid) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
     my $url = MB_BASE_URL . 'release/' . $safe . '?inc=recordings+genres&fmt=json';
 
@@ -134,7 +149,11 @@ sub getReleaseDetails {
                 $onError->("JSON error: $@") if ref $onError eq 'CODE';
                 return;
             }
-            $onDone->(_parseReleaseDetails($data));
+            my $parsed = _parseReleaseDetails($data);
+            my $ttl    = (@{ $parsed->{media} } || @{ $parsed->{genres} })
+                       ? MB_FOUND_TTL : MB_EMPTY_TTL;
+            $cache->set($cacheKey, $parsed, $ttl);
+            $onDone->($parsed);
         },
         sub { _handleError(shift, $onError) },
         { timeout => 15 }

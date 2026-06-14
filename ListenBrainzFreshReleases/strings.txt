@@ -107,16 +107,13 @@ PLUGIN_LBF_WEEK_OF
 	EN	Week of
 
 PLUGIN_LBF_WEEK_UNKNOWN
-	EN	— Unknown release date —
+	EN	Unknown release date
 
 PLUGIN_LBF_SETUP_REQUIRED
 	EN	Configure username and token in Settings
 
 PLUGIN_LBF_NO_RESULTS
 	EN	No releases found
-
-PLUGIN_LBF_NEXT_PAGE
-	EN	Next page
 
 PLUGIN_LBF_ERROR
 	EN	Error fetching releases
@@ -135,6 +132,9 @@ PLUGIN_LBF_TYPE
 
 PLUGIN_LBF_SEC_TYPES
 	EN	Secondary Types
+
+PLUGIN_LBF_VIEW_ON_MB
+	EN	View on MusicBrainz
 
 PLUGIN_LBF_GENRES
 	EN	Genres
