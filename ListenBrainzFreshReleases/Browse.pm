@@ -200,6 +200,48 @@ sub _filterAll {
 }
 
 # ---------------------------------------------------------------------------
+# Helper to pick the first available value from a list of candidate keys
+# ---------------------------------------------------------------------------
+sub _pickValue {
+    my ($rel, @keys) = @_;
+
+    for my $key (@keys) {
+        my $value = $rel->{$key};
+        return $value if defined $value && $value ne '';
+    }
+
+    return '';
+}
+
+sub _displayType {
+    my ($rel) = @_;
+
+    my @parts;
+    my $primary = _pickValue($rel, 'release_group_primary_type', 'release_type', 'type');
+    $primary = _formatTypeName($primary) if $primary ne '';
+    push @parts, $primary if $primary ne '';
+
+    my $secondary = $rel->{release_group_secondary_types} // $rel->{secondary_types} // [];
+    if (ref $secondary eq 'ARRAY') {
+        for my $value (@$secondary) {
+            my $formatted = _formatTypeName($value);
+            push @parts, $formatted if $formatted ne '';
+        }
+    }
+
+    return join(' / ', @parts);
+}
+
+sub _formatTypeName {
+    my ($value) = @_;
+    return '' unless defined $value;
+    $value =~ s/^\s+//;
+    $value =~ s/\s+$//;
+    return '' if $value eq '';
+    return ucfirst(lc($value));
+}
+
+# ---------------------------------------------------------------------------
 # Detect Various Artists releases
 # ---------------------------------------------------------------------------
 sub _isVariousArtists {
@@ -233,12 +275,12 @@ sub _buildItems {
     my @items;
 
     for my $rel (@$releases) {
-        my $artist     = $rel->{artist_credit_name}             // 'Unknown Artist';
-        my $album      = $rel->{release_name}                   // 'Unknown Album';
-        my $date       = $rel->{release_date}                   // '';
-        my $type       = $rel->{release_group_primary_type}     // '';
-        my $sec_types  = $rel->{release_group_secondary_types}  // [];
-        my $mbid       = $rel->{release_mbid}                   // '';
+        my $artist     = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist') // 'Unknown Artist';
+        my $album      = _pickValue($rel, 'release_name', 'title', 'name') // 'Unknown Album';
+        my $date       = $rel->{release_date} // '';
+        my $type       = _displayType($rel);
+        my $sec_types  = $rel->{release_group_secondary_types} // $rel->{secondary_types} // [];
+        my $mbid       = $rel->{release_mbid} // '';
         my $conf       = $rel->{confidence};
 
         my $name = "$artist \x{2013} $album";
