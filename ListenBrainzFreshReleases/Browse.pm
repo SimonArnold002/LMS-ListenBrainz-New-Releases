@@ -656,9 +656,12 @@ sub _findPlayable {
     my ($client, $callback, $artist, $album, $mbid) = @_;
 
     my @adapters   = _streamingAdapters();
-    my $query      = join(' ', grep { defined && length } $artist, $album);
     my $albumNorm  = _norm($album);
     my $artistNorm = _norm($artist);
+    # Search with normalised terms (quotes, &, commas stripped). Raw multi-artist
+    # credits like 'Lee "Scratch" Perry & Mouse on Mars' otherwise make the
+    # service search miss the album.
+    my $query      = join(' ', grep { length } $artistNorm, $albumNorm);
 
     unless (@adapters) {
         $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_NO_SERVICES'), type => 'text' }] });
@@ -666,7 +669,8 @@ sub _findPlayable {
     }
 
     # Cache hit → rebuild the playable items from the stored data (no re-search).
-    my $key = 'lbf:stream:' . ($mbid || _norm($query));
+    # Key is versioned (:2:) so old entries from previous matching logic are ignored.
+    my $key = 'lbf:stream:2:' . ($mbid || _norm($query));
     if (my $c = $cache->get($key)) {
         $log->info("play-via cache hit: $key (" . scalar(@{ $c->{items} || [] }) . " match(es))");
         $callback->({ items => _streamResult($client, _rebuildStreamItems($c->{items})) });
@@ -810,10 +814,25 @@ sub _albumMatches {
     return 0 if $t eq '' || index($t, $albumNorm) < 0;
 
     return 1 if $artistNorm eq '';
+    return _artistMatch($artistNorm, _norm($candArtist));
+}
 
-    my $a = _norm($candArtist);
-    return 0 if $a eq '';
-    return (index($a, $artistNorm) >= 0 || index($artistNorm, $a) >= 0) ? 1 : 0;
+# Artist match tolerant of word order, connectors and partial credits: every
+# word of the shorter artist name must appear in the longer (token subset).
+# Handles 'lee scratch perry mouse on mars' vs 'lee scratch perry mouse on mars'
+# (& vs , normalise the same) and vs just one of the collaborators.
+sub _artistMatch {
+    my ($a, $b) = @_;
+    return 0 if $a eq '' || $b eq '';
+
+    my %at = map { ($_ => 1) } split ' ', $a;
+    my %bt = map { ($_ => 1) } split ' ', $b;
+    my ($small, $big) = (scalar keys %at <= scalar keys %bt) ? (\%at, \%bt) : (\%bt, \%at);
+
+    for my $tok (keys %$small) {
+        return 0 unless $big->{$tok};
+    }
+    return 1;
 }
 
 # Normalise a title for fuzzy matching: lowercase, drop bracketed qualifiers

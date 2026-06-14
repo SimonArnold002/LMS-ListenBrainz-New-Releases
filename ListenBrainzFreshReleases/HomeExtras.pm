@@ -17,7 +17,10 @@ sub initPlugin {
         tag   => 'LBFForYou',
         extra => {
             title       => 'PLUGIN_LBF_FOR_YOU',
-            icon        => Plugins::ListenBrainzFreshReleases::Plugin->_pluginDataFor('icon'),
+            # Material recolours the home-row icon, so use the _svg.png form (as
+            # the browse menu does) rather than the install.xml colour tile,
+            # which renders blank in the home row.
+            icon        => 'plugins/ListenBrainzFreshReleases/html/images/ListenBrainzFreshReleasesIcon_svg.png',
             needsPlayer => 0,
         },
     );
