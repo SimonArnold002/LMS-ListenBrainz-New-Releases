@@ -151,6 +151,9 @@ PLUGIN_LBF_PLAY_VIA
 PLUGIN_LBF_NO_SERVICES
 	EN	No streaming services available
 
+PLUGIN_LBF_NO_MATCH
+	EN	No match found on your streaming services
+
 PLUGIN_LBF_PLAY_VIA_SETTING
 	EN	Find on Streaming Services
 

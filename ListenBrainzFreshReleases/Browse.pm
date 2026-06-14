@@ -6,7 +6,6 @@ use warnings;
 use Slim::Utils::Log;
 use Slim::Utils::Prefs;
 use Slim::Utils::Strings qw(cstring string);
-use Slim::Menu::GlobalSearch;
 
 use Plugins::ListenBrainzFreshReleases::API;
 
@@ -412,57 +411,87 @@ sub _buildReleaseItem {
 }
 
 # ---------------------------------------------------------------------------
-# Release detail page — base metadata, then genres + tracklist fetched from
-# MusicBrainz on demand. Falls back to just the metadata if the lookup fails.
+# Release detail page — base metadata, then (in parallel) directly-playable
+# streaming matches and the MusicBrainz genres + tracklist, merged inline.
+# Either async source can fail/empty without breaking the page.
 # ---------------------------------------------------------------------------
 sub _releaseDetail {
     my ($rel, $client, $callback) = @_;
 
-    my @base = _detailMeta($rel, $client);
-    my $mbid = $rel->{release_mbid} // '';
+    my @base   = _detailMeta($rel, $client);
+    my $mbid   = $rel->{release_mbid} // '';
+    my $artist = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist') // '';
+    my $album  = _pickValue($rel, 'release_name', 'title', 'name') // '';
 
-    unless ($mbid) {
-        $callback->({ items => \@base });
-        return;
+    my @streamItems;   # playable streaming matches (with a header)
+    my @mbItems;       # genres + tracklist
+    my $pending = 0;
+    my $done    = 0;
+
+    my $finish = sub {
+        return if $done || $pending > 0;
+        $done = 1;
+        $callback->({ items => [ @base, @streamItems, @mbItems ] });
+    };
+
+    # Streaming services — search automatically and show matches inline
+    if ($prefs->get('play_via') && length $album && _streamingAdapters()) {
+        $pending++;
+        _findPlayable($client, sub {
+            my $res   = shift;
+            my @items = (ref $res eq 'HASH' && ref $res->{items} eq 'ARRAY') ? @{ $res->{items} } : ();
+            @items    = grep { ($_->{type} // '') ne 'text' } @items;   # drop "no match" placeholders
+            @streamItems = ({ name => cstring($client, 'PLUGIN_LBF_PLAY_VIA'), type => 'text' }, @items)
+                if @items;
+            $pending--;
+            $finish->();
+        }, $artist, $album);
     }
 
-    Plugins::ListenBrainzFreshReleases::API->getReleaseDetails(
-        $mbid,
-        sub {
-            my $info = shift;
-            my @items = @base;
+    # MusicBrainz genres + tracklist
+    if ($mbid) {
+        $pending++;
+        Plugins::ListenBrainzFreshReleases::API->getReleaseDetails(
+            $mbid,
+            sub {
+                my $info = shift;
 
-            my @genres = @{ $info->{genres} || [] };
-            push @items, {
-                name => cstring($client, 'PLUGIN_LBF_GENRES') . ': ' . join(', ', @genres),
-                type => 'text',
-            } if @genres;
+                my @genres = @{ $info->{genres} || [] };
+                push @mbItems, {
+                    name => cstring($client, 'PLUGIN_LBF_GENRES') . ': ' . join(', ', @genres),
+                    type => 'text',
+                } if @genres;
 
-            my @media = grep { $_->{tracks} && scalar @{ $_->{tracks} } } @{ $info->{media} || [] };
-            if (@media) {
-                push @items, { name => cstring($client, 'PLUGIN_LBF_TRACKLIST'), type => 'text' };
-                my $multi = scalar @media > 1;
-                for my $m (@media) {
-                    if ($multi) {
-                        my $hdr = cstring($client, 'PLUGIN_LBF_DISC') . ' ' . ($m->{position} // '');
-                        $hdr .= " ($m->{format})" if $m->{format};
-                        push @items, { name => $hdr, type => 'text' };
-                    }
-                    for my $t (@{ $m->{tracks} }) {
-                        my $line = ($t->{position} ? "$t->{position}. " : '') . ($t->{title} // '');
-                        $line .= '  (' . _fmtDuration($t->{length}) . ')' if $t->{length};
-                        push @items, { name => $line, type => 'text' };
+                my @media = grep { $_->{tracks} && scalar @{ $_->{tracks} } } @{ $info->{media} || [] };
+                if (@media) {
+                    push @mbItems, { name => cstring($client, 'PLUGIN_LBF_TRACKLIST'), type => 'text' };
+                    my $multi = scalar @media > 1;
+                    for my $m (@media) {
+                        if ($multi) {
+                            my $hdr = cstring($client, 'PLUGIN_LBF_DISC') . ' ' . ($m->{position} // '');
+                            $hdr .= " ($m->{format})" if $m->{format};
+                            push @mbItems, { name => $hdr, type => 'text' };
+                        }
+                        for my $t (@{ $m->{tracks} }) {
+                            my $line = ($t->{position} ? "$t->{position}. " : '') . ($t->{title} // '');
+                            $line .= '  (' . _fmtDuration($t->{length}) . ')' if $t->{length};
+                            push @mbItems, { name => $line, type => 'text' };
+                        }
                     }
                 }
-            }
 
-            $callback->({ items => \@items });
-        },
-        sub {
-            $log->info("Release detail lookup failed: " . (shift // ''));
-            $callback->({ items => \@base });
-        },
-    );
+                $pending--;
+                $finish->();
+            },
+            sub {
+                $log->info("Release detail lookup failed: " . (shift // ''));
+                $pending--;
+                $finish->();
+            },
+        );
+    }
+
+    $finish->();   # nothing async (no mbid and no streaming services)
 }
 
 # Base metadata lines shown at the top of every release detail page
@@ -495,43 +524,148 @@ sub _detailMeta {
     push @detail, { name => "MusicBrainz: https://musicbrainz.org/release/$mbid", type => 'text' }
         if $mbid;
 
-    # "Find on streaming services" — lazy: the search only runs when tapped,
-    # so it never slows the detail page. Fans out to whatever streaming plugins
-    # are installed via their registered GlobalSearch providers (Qobuz, Bandcamp, …).
-    if ($prefs->get('play_via')) {
-        my $query = join(' ', grep { defined && length } $artist, $album);
-        push @detail, {
-            name  => cstring($client, 'PLUGIN_LBF_PLAY_VIA'),
-            type  => 'link',
-            image => ICON,
-            url   => sub {
-                my ($client, $callback) = @_;
-                $callback->({ items => _streamingSearchItems($client, $query) });
-            },
-        } if length $query;
-    }
-
     return @detail;
 }
 
-# Run the installed streaming services' GlobalSearch providers for $query and
-# return their result nodes (each playable via that plugin's protocol handler).
-# Guarded: the exact GlobalSearch->menu contract is verified on the server, and
-# a vanilla server with no streaming plugins degrades to a "none" message.
-sub _streamingSearchItems {
-    my ($client, $query) = @_;
+# Which supported streaming-service adapters are available on this server.
+# Detection is via ->can on the plugin package: it's only loaded when the
+# plugin is installed+enabled, and ->can on an absent package is safe (no die).
+# In scalar/boolean context this returns the count (truthy if any present).
+sub _streamingAdapters {
+    my @adapters;
 
-    my $menu = eval { Slim::Menu::GlobalSearch->menu($client, { search => $query }) };
-    $log->warn("GlobalSearch lookup failed: $@") if $@;
+    push @adapters, { name => 'Qobuz', icon => _pluginIcon('Plugins::Qobuz::Plugin'), run => \&_searchQobuz }
+        if Plugins::Qobuz::Plugin->can('getAPIHandler')
+        && Plugins::Qobuz::Plugin->can('_albumItem');
 
-    my @items;
-    if (ref $menu eq 'HASH' && ref $menu->{items} eq 'ARRAY') {
-        @items = grep { ref $_ eq 'HASH' && $_->{name} } @{ $menu->{items} };
+    push @adapters, { name => 'Bandcamp', icon => _pluginIcon('Plugins::Bandcamp::Plugin'), run => \&_searchBandcamp }
+        if Plugins::Bandcamp::Plugin->can('album_list');
+
+    return @adapters;
+}
+
+# The service plugin's own icon (its Material logo), used as the thumbnail on
+# each result so it's clear which service it came from. Undef if unavailable.
+sub _pluginIcon {
+    my ($class) = @_;
+    return eval { $class->_pluginDataFor('icon') } || undef;
+}
+
+# Find the release on installed streaming services and present each service's
+# matching album as a directly-playable node (one tap to play / add), using
+# each plugin's own search API rather than a generic search drill-down.
+sub _findPlayable {
+    my ($client, $callback, $artist, $album) = @_;
+
+    my @adapters  = _streamingAdapters();
+    my $query     = join(' ', grep { defined && length } $artist, $album);
+    my $albumNorm = _norm($album);
+
+    unless (@adapters) {
+        $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_NO_SERVICES'), type => 'text' }] });
+        return;
     }
 
-    return @items
-        ? \@items
-        : [{ name => cstring($client, 'PLUGIN_LBF_NO_SERVICES'), type => 'text' }];
+    my @collected;
+    my $pending = scalar @adapters;
+    my $done    = 0;
+
+    my $finish = sub {
+        return if $done || $pending > 0;
+        $done = 1;
+        $log->info("play-via '$query': " . scalar(@collected) . " match(es)");
+        $callback->({
+            items => @collected
+                ? \@collected
+                : [{ name => cstring($client, 'PLUGIN_LBF_NO_MATCH'), type => 'text' }],
+        });
+    };
+
+    for my $a (@adapters) {
+        my $svc     = $a->{name};
+        my $icon    = $a->{icon};
+        my $collect = sub {
+            my $items = shift;
+            if (ref $items eq 'ARRAY') {
+                # show the service's logo as the thumbnail so the source is clear
+                if ($icon) { $_->{image} = $icon for @$items; }
+                push @collected, @$items;
+            }
+            $pending--;
+            $finish->();
+        };
+
+        eval { $a->{run}->($client, $query, $albumNorm, $svc, $collect); 1 } or do {
+            $log->warn("play-via $svc failed: $@");
+            $pending--;
+            $finish->();
+        };
+    }
+}
+
+# Qobuz: search albums via the plugin's own API, keep title matches, and reuse
+# the plugin's _albumItem so each result is a native, playable album node.
+sub _searchQobuz {
+    my ($client, $query, $albumNorm, $svc, $collect) = @_;
+
+    my $api = Plugins::Qobuz::Plugin::getAPIHandler($client);
+    unless ($api) {
+        $collect->([]);
+        return;
+    }
+
+    $api->search(sub {
+        my $res = shift;
+        my @out;
+        for my $album (@{ ($res && $res->{albums} && $res->{albums}{items}) || [] }) {
+            next unless _titleMatch($albumNorm, $album->{title});
+            push @out, Plugins::Qobuz::Plugin::_albumItem($client, $album);
+        }
+        $collect->(\@out);
+    }, lc($query), 'albums');
+}
+
+# Bandcamp: run the plugin's combined search, keep the album results (identified
+# by an album_id in their passthrough — they're already playable album nodes).
+sub _searchBandcamp {
+    my ($client, $query, $albumNorm, $svc, $collect) = @_;
+
+    eval { require Plugins::Bandcamp::Search; 1 } or do {
+        $collect->([]);
+        return;
+    };
+
+    Plugins::Bandcamp::Search::search($client, sub {
+        my $res = shift;
+        my @out;
+        for my $it (@{ ($res && $res->{items}) || [] }) {
+            next unless ref $it eq 'HASH';
+            my $pt = $it->{passthrough};
+            next unless ref $pt eq 'ARRAY' && $pt->[0] && $pt->[0]{album_id};
+            next unless _titleMatch($albumNorm, $it->{name});
+            push @out, $it;
+        }
+        $collect->(\@out);
+    }, { search => $query });
+}
+
+# True if a service result title matches our album (normalised substring match).
+sub _titleMatch {
+    my ($albumNorm, $candidate) = @_;
+    return 0 if length $albumNorm < 2;
+    my $c = _norm($candidate);
+    return ($c ne '' && index($c, $albumNorm) >= 0) ? 1 : 0;
+}
+
+# Normalise a title for fuzzy matching: lowercase, drop bracketed qualifiers
+# (deluxe/remaster/etc.) and punctuation, collapse whitespace.
+sub _norm {
+    my $s = lc(shift // '');
+    $s =~ s/[\(\[].*?[\)\]]//g;
+    $s =~ s/[^a-z0-9]+/ /g;
+    $s =~ s/^\s+|\s+$//g;
+    $s =~ s/\s+/ /g;
+    return $s;
 }
 
 # Extract usable tag names from the payload's release_tags. Entries may be plain
