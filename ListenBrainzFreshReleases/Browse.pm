@@ -100,6 +100,31 @@ sub fetchForYou {
 }
 
 # ---------------------------------------------------------------------------
+# Flat For You feed for the Material Skin home-page scrollable row. Same
+# filters/sort as the menu, but a flat, capped list of release cards (no weekly
+# dividers / artist grouping — those don't suit a carousel).
+# ---------------------------------------------------------------------------
+sub homeForYou {
+    my ($client, $cb) = @_;
+
+    Plugins::ListenBrainzFreshReleases::API->getFreshReleasesForUser(
+        sort    => $prefs->get('sort')          // 'release_date',
+        past    => $prefs->get('foryou_past')   // 1,
+        future  => $prefs->get('foryou_future') // 0,
+        days    => $prefs->get('days')          // 14,
+        onDone  => sub {
+            my $releases = _sortReleases(_filterForYou(shift));
+            $releases = [ @{$releases}[0 .. 49] ] if @$releases > 50;
+            $cb->({ items => [ map { _buildReleaseItem($_, $client) } @$releases ] });
+        },
+        onError => sub {
+            $log->error("Home For You fetch error: " . (shift // ''));
+            $cb->({ items => [] });
+        },
+    );
+}
+
+# ---------------------------------------------------------------------------
 # Fetch All Releases — applies All Releases prefs
 # ---------------------------------------------------------------------------
 sub fetchAll {

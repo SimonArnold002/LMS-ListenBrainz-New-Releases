@@ -5,6 +5,7 @@ use base qw(Slim::Plugin::OPMLBased);
 
 use Slim::Utils::Log;
 use Slim::Utils::Prefs;
+use Slim::Utils::PluginManager;
 use Slim::Utils::Strings qw(string cstring);
 
 my $log = Slim::Utils::Log->addLogCategory({
@@ -90,6 +91,23 @@ sub initPlugin {
     );
 
     return;
+}
+
+# Runs after all plugins have initialised, so Material Skin is available to
+# check. Registers a home-page scrollable row for the For You feed, mirroring
+# how Qobuz/Bandcamp do it.
+sub postinitPlugin {
+    my $class = shift;
+
+    if ( Slim::Utils::PluginManager->isEnabled('Plugins::MaterialSkin::Plugin')
+      && Plugins::MaterialSkin::Plugin->can('registerHomeExtra') ) {
+        eval {
+            require Plugins::ListenBrainzFreshReleases::HomeExtras;
+            Plugins::ListenBrainzFreshReleases::HomeExtras->initPlugin();
+            $log->info("Registered Material Skin home extra (For You)");
+            1;
+        } or $log->error("Failed to register Material home extra: $@");
+    }
 }
 
 sub getDisplayName { 'PLUGIN_LISTENBRAINZ_FRESH_RELEASES' }

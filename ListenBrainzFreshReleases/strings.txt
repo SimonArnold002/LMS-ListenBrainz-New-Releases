@@ -8,7 +8,7 @@ PLUGIN_LBF_SECTION_GENERAL
 	EN	General Settings
 
 PLUGIN_LBF_SECTION_FORYOU
-	EN	For You Settings
+	EN	New Releases for You Settings
 
 PLUGIN_LBF_SECTION_ALL
 	EN	All Releases Settings
@@ -95,7 +95,7 @@ PLUGIN_LBF_SORT_CONFIDENCE
 	EN	Confidence (For You)
 
 PLUGIN_LBF_FOR_YOU
-	EN	For You
+	EN	New Releases for You
 
 PLUGIN_LBF_ALL_RELEASES
 	EN	All Releases

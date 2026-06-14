@@ -29,19 +29,21 @@ ListenBrainzFreshReleases/
 ├── Plugin.pm                          # OPMLBased entry point, image proxy registration
 ├── Browse.pm                          # Simple two-option feed (For You / All Releases), no in-menu filters
 ├── API.pm                             # Async ListenBrainz HTTP, payload.releases parsing
+├── HomeExtras.pm                       # Material Skin home-page scrollable row (For You)
 ├── Settings.pm                        # CSRF-protected, three-section settings page
 ├── install.xml                        # <extension> format, v0.3.2, icon_svg.png
 ├── strings.txt                        # All localisation strings (EN)
 └── HTML/EN/plugins/ListenBrainzFreshReleases/
     ├── settings.html                  # Three-section settings page (General/For You/All Releases)
     └── html/images/
-        ├── ListenBrainzFreshReleasesIcon.png
-        ├── ListenBrainzFreshReleasesIcon.svg
-        └── ListenBrainzFreshReleasesIcon_svg.png
+        ├── ListenBrainzFreshReleasesIcon.png       # black silhouette (Material recolours)
+        ├── ListenBrainzFreshReleasesIcon.svg       # black SVG source for Material recolour
+        ├── ListenBrainzFreshReleasesIcon_svg.png   # _svg.png trigger for Material menu icon
+        └── ListenBrainzFreshReleasesIcon-tile.svg  # colour tile (install.xml <icon>; visible in Manage Plugins)
 ```
 
 ## Current Version
-0.4.9
+0.5.0
 
 ## Settings Structure (v0.3.2)
 
@@ -99,7 +101,8 @@ No in-menu filter sub-menus. All filtering driven entirely by settings prefs.
 - Uses `<extension>` (singular) root element — matches manually installed plugins like NowPlayingShare
 - `<extensions>` (plural) format is for repo-installed plugins — DO NOT use for manual plugins
 - `<optionsURL>` points to `plugins/ListenBrainzFreshReleases/settings.html`
-- `<icon>` points to `ListenBrainzFreshReleasesIcon_svg.png` (the `_svg.png` form, NOT plain `.svg`)
+- `<homepageURL>` points to the GitHub repo so a "more info" link shows in Manage Plugins (NOT `<link>` — that's ignored; Qobuz/Bandcamp use `homepageURL`)
+- `<icon>` points to `ListenBrainzFreshReleasesIcon-tile.svg` — a **self-contained colour tile** (orange bg + white art). The old `_svg.png`/black icons are silhouettes meant for Material's recolour step, so they render **blank** in core Manage Plugins; the tile renders visibly there (browser draws the SVG). The browse-menu/app icon still uses the black `_svg.png` via the `ICON` constant in Browse.pm (Material recolours it)
 
 ### Icon System (Material Skin)
 - Per Material Skin docs: `_svg.png` suffix tells Material to find and use the matching `.svg` file
@@ -184,6 +187,7 @@ Detected in `_isVariousArtists()`:
   - **Qobuz**: `Plugins::Qobuz::Plugin::getAPIHandler($client)->search($cb, lc($query), 'albums')`; results in `$res->{albums}{items}`; each title-matched album is rendered with the plugin's own `Plugins::Qobuz::Plugin::_albumItem($client, $album)` (a `type=>'playlist'` node → playable).
   - **Bandcamp**: `Plugins::Bandcamp::Search::search($client, $cb, {search=>$query})`; keep result items whose `passthrough->[0]{album_id}` is set (already-playable album nodes from `album_list`).
   - Adapter availability is detected with `Plugins::<Svc>::Plugin->can(...)` (safe when absent); the detail link is hidden when no supported service is installed. Async fan-out with a pending-counter barrier; title matching via `_titleMatch`/`_norm` (lowercase, strip bracketed qualifiers + punctuation), so it can occasionally miss/mismatch. Adding a new service = one more adapter sub + `_streamingAdapters` entry.
+- **0.5.0** — **Material Skin home-page scrollable row** for the For You feed. New `HomeExtras.pm` subclasses `Plugins::MaterialSkin::HomeExtraBase` and registers a home "extra" (`tag => 'LBFForYou'`, `title => PLUGIN_LBF_FOR_YOU`, plugin icon); its feed → `Browse::homeForYou` returns a flat, 50-capped list of release cards (For You filters/sort, no weekly dividers/grouping — unsuited to a carousel). Registered in `Plugin::postinitPlugin`, gated on `MaterialSkin->can('registerHomeExtra')` (mirrors Qobuz/Bandcamp). Also **renamed "For You" → "New Releases for You"** (the `PLUGIN_LBF_FOR_YOU` string drives the browse menu item and the home row; the settings section header `PLUGIN_LBF_SECTION_FORYOU` was renamed to match). Pattern reference: Bandcamp `HomeExtras.pm`. Also added: **README.md** (GitHub docs — features, requirements/ListenBrainz account, defaults, home shelf), an install.xml **`<homepageURL>`** to the repo (shows as the "more info" link in Manage Plugins), and a colour **tile SVG** icon for install.xml so the Manage Plugins icon isn't blank (the existing icons are black silhouettes for Material's recolour and render blank in core Manage Plugins).
 - **0.4.9** — The MusicBrainz line on the detail page is now a clickable `weblink` (**View on MusicBrainz**) that opens the release page in the browser, instead of plain text showing the URL. (Same `weblink` mechanism as the top-level Plugin Settings entry.)
 - **0.4.8** — **Caching** so revisits don't re-search (uses `Slim::Utils::Cache`, persistent across restarts). Streaming matches keyed by `lbf:stream:<release_mbid>` (TTL 7 days found / 1 day no-match); MusicBrainz tracklist+genres keyed by `lbf:mb:<mbid>` (30 days found / 1 day empty). OPML item `url` coderefs can't be Storable-serialised, so streaming items are cached with `url` stripped + a `_svc` tag and the play coderef is **reattached on read** (`_rebuildStreamItems`: Qobuz→`QobuzGetTracks`, Bandcamp→`get_album`; items whose service is gone are dropped). Note: Qobuz's own API also caches ~5 min internally; this is our durable layer on top. **Barrier fix:** `_releaseDetail` now counts both async tasks (streaming + MB) up front — a cache hit fires its callback *synchronously*, so the old per-task `$pending++` let the barrier complete after the first finished and drop the other's data (symptom: tracklist missing on cached revisits).
 - **0.4.7** — Replaced manual drill-in pagination with **native XMLBrowser windowing**: `_buildItems` (and the artist-group drill-in) now return the full filtered+sorted list as one level; LMS/Material window/scroll it. Removed `_paginate`, `PAGE_SIZE`, and the next/prev page strings. Reason: manual pages were separate menu nodes, so Material's in-list search/filter only saw the current page — a single level lets the filter span every item, and gives Material's native scroll + prev/next pager. (Settings filters — artwork/type/VA — were already global, applied in `_filter*` before building items.)

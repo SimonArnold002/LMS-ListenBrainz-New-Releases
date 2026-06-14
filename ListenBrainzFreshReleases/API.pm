@@ -23,7 +23,7 @@ use constant CAA_BASE_URL => 'https://coverartarchive.org/release/';
 use constant MB_BASE_URL  => 'https://musicbrainz.org/ws/2/';
 
 # MusicBrainz requires a descriptive User-Agent identifying the application
-use constant USER_AGENT   => 'LMS-ListenBrainzFreshReleases/0.4.9 ( https://github.com/CrystalGipsy/LMS-ListenBrainz-New-Releases )';
+use constant USER_AGENT   => 'LMS-ListenBrainzFreshReleases/0.5.0 ( https://github.com/SimonArnold002/LMS-ListenBrainz-New-Releases )';
 
 # ---------------------------------------------------------------------------
 # GET /1/user/<username>/fresh_releases  (personalised, auth required)
