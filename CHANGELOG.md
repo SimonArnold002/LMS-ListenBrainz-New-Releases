@@ -3,6 +3,12 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.6.10
+
+### Fixed
+- **Streaming links — wrong-album matches:** the album title now has to *be* the match or *start* with it, instead of just appearing somewhere in the candidate's title. Stops cases like "Apollo" by Gene wrongly matching "Friendship 7 To Apollo 11…".
+- **Streaming links — duplicates:** identical entries from the same service are collapsed (e.g. Bandcamp sometimes returns the same album twice). Genuinely different editions (Hi-Res vs standard) are still shown.
+
 ## 0.6.8
 
 A big update focused on genres, filtering, Material Skin polish, and reliability.

@@ -824,9 +824,28 @@ sub _findPlayable {
     }
 }
 
+# Collapse duplicate streaming entries — some services (seen with Bandcamp)
+# return the same album twice. Key on service + display name + subtitle so true
+# duplicates merge, but genuinely different editions (which differ in the name,
+# e.g. "(Hi-Res)" vs "(Album)") are both kept.
+sub _dedupeStreamItems {
+    my ($items) = @_;
+    my (%seen, @out);
+    for my $it (@{ $items || [] }) {
+        my $key = join('|',
+            lc($it->{_svc}  // ''),
+            lc($it->{name}  // ''),
+            lc($it->{line2} // ''));
+        next if $seen{$key}++;
+        push @out, $it;
+    }
+    return \@out;
+}
+
 # Wrap matched items for display, or a "no match" placeholder when empty.
 sub _streamResult {
     my ($client, $items) = @_;
+    $items = _dedupeStreamItems($items);
     return @$items
         ? $items
         : [{ name => cstring($client, 'PLUGIN_LBF_NO_MATCH'), type => 'text' }];
@@ -906,17 +925,22 @@ sub _searchBandcamp {
     }, { search => $query });
 }
 
-# True if a streaming result is the same release: the candidate title must
-# contain our album title (tolerates " (Deluxe)", " EP", etc. after _norm), AND
-# the candidate artist must match ours (the disambiguator — without it, similar
-# titles by unrelated artists slip through). Artist matches in either direction
-# to tolerate "feat."/credit variations. With no artist to compare, title alone.
+# True if a streaming result is the same release: the candidate title must BE our
+# album title, or START with it (tolerates " (Deluxe)", " EP", " (Hi-Res)" etc.
+# after _norm), AND the candidate artist must match ours (the disambiguator —
+# without it, similar titles by unrelated artists slip through). Artist matches in
+# either direction to tolerate "feat."/credit variations. With no artist, title
+# alone. NB: we require a leading-prefix (not a substring) match — the album name
+# appearing mid-title was a common false positive, e.g. our "Apollo" by "Gene"
+# wrongly matching "Friendship 7 to Apollo 11…". The trailing space is a word
+# boundary so "Apollo" doesn't match "Apollonia".
 sub _albumMatches {
     my ($artistNorm, $albumNorm, $candArtist, $candTitle) = @_;
 
     return 0 if length $albumNorm < 2;
     my $t = _norm($candTitle);
-    return 0 if $t eq '' || index($t, $albumNorm) < 0;
+    return 0 if $t eq '';
+    return 0 unless $t eq $albumNorm || index($t, "$albumNorm ") == 0;
 
     return 1 if $artistNorm eq '';
     return _artistMatch($artistNorm, _norm($candArtist));
