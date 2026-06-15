@@ -25,6 +25,12 @@ PLUGIN_LBF_TOKEN
 PLUGIN_LBF_TOKEN_HINT
 	EN	Your personal API token, found at listenbrainz.org/settings/
 
+PLUGIN_LBF_LASTFM_KEY
+	EN	Last.fm API Key (optional)
+
+PLUGIN_LBF_LASTFM_KEY_HINT
+	EN	Used to fill in genres on the release detail page when MusicBrainz has none (common for brand-new releases). Get a free key at last.fm/api/account/create. Leave blank to disable.
+
 PLUGIN_LBF_DAYS
 	EN	Days window
 

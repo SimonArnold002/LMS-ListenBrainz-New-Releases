@@ -20,6 +20,7 @@ $prefs->init({
     # General
     username             => '',
     token                => '',
+    lastfm_api_key       => '',
     days                 => 14,
     sort                 => 'release_date',
     group_by_artist      => 1,
@@ -27,11 +28,20 @@ $prefs->init({
     play_via             => 1,
 
     # For You section
-    foryou_albums        => 1,
-    foryou_past          => 1,
-    foryou_future        => 0,
-    foryou_artwork_only  => 1,
-    foryou_various       => 1,
+    foryou_past             => 1,
+    foryou_future           => 0,
+    foryou_artwork_only     => 1,
+    foryou_various          => 1,
+    foryou_type_album       => 1,
+    foryou_type_single      => 0,
+    foryou_type_ep          => 0,
+    foryou_type_broadcast   => 0,
+    foryou_type_other       => 0,
+    foryou_type_compilation => 1,
+    foryou_type_soundtrack  => 0,
+    foryou_type_live        => 0,
+    foryou_type_remix       => 0,
+    foryou_type_demo        => 0,
 
     # All Releases section
     all_past             => 1,
@@ -44,7 +54,7 @@ $prefs->init({
     all_type_broadcast   => 0,
     all_type_other       => 0,
     all_type_compilation => 1,
-    all_type_soundtrack  => 1,
+    all_type_soundtrack  => 0,
     all_type_live        => 0,
     all_type_remix       => 0,
     all_type_demo        => 0,
@@ -82,6 +92,13 @@ sub initPlugin {
         }
     } if preferences('server')->get('useLocalImageproxy');
 
+    # NB: OPMLBased ignores an icon => arg; the app/menu icon always comes from
+    # install.xml <icon> (OPMLBased.pm uses _pluginDataFor('icon')). We point it
+    # at ...Icon_svg.png: Material's "_svg.png" convention makes it load the
+    # sibling ...Icon.svg and recolour it per theme (white on dark, black on
+    # light). The SVG MUST use #000 (not #000000) — Material string-replaces
+    # "#000", so #000000 would corrupt to an invalid colour and render blank.
+    # Non-Material skins fall back to the real transparent PNG.
     $class->SUPER::initPlugin(
         tag    => 'listenbrainzfreshreleases',
         feed   => \&Plugins::ListenBrainzFreshReleases::Browse::topLevel,

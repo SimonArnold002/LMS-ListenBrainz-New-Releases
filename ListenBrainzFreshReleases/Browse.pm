@@ -42,6 +42,12 @@ sub topLevel {
     my $username = $prefs->get('username') // '';
     my $token    = $prefs->get('token')    // '';
 
+    # The requesting client's "features" string is only available here (the top
+    # feed gets the request params); XMLBrowser does NOT forward request params
+    # to drilled coderef sub-feeds. So capture it now and pass it down to
+    # fetchForYou/fetchAll via passthrough (which IS forwarded).
+    my $feat = _featuresOf($args);
+
     my @items;
 
     if ($username && $token) {
@@ -49,7 +55,7 @@ sub topLevel {
             name        => cstring($client, 'PLUGIN_LBF_FOR_YOU'),
             type        => 'link',
             url         => \&fetchForYou,
-            passthrough => [{}],
+            passthrough => [{ features => $feat }],
             image       => ICON,
         };
     } else {
@@ -64,7 +70,7 @@ sub topLevel {
         name        => cstring($client, 'PLUGIN_LBF_ALL_RELEASES'),
         type        => 'link',
         url         => \&fetchAll,
-        passthrough => [{}],
+        passthrough => [{ features => $feat }],
         image       => ICON,
     };
 
@@ -84,6 +90,7 @@ sub topLevel {
 sub fetchForYou {
     my ($client, $callback, $args, $passDict) = @_;
 
+    my $headers = _wantHeaders(ref $passDict eq 'HASH' ? $passDict->{features} : undef);
     my $sort   = $prefs->get('sort')          // 'release_date';
     my $past   = $prefs->get('foryou_past')   // 1;
     my $future = $prefs->get('foryou_future') // 0;
@@ -95,7 +102,7 @@ sub fetchForYou {
         days    => $prefs->get('days') // 14,
         onDone  => sub {
             my $releases = _sortReleases(_filterForYou(shift));
-            $callback->({ items => _buildItems($releases, $client) });
+            $callback->({ items => _buildItems($releases, $client, $headers) });
         },
         onError => sub {
             $log->error("For You fetch error: " . (shift // ''));
@@ -110,7 +117,16 @@ sub fetchForYou {
 # dividers / artist grouping — those don't suit a carousel).
 # ---------------------------------------------------------------------------
 sub homeForYou {
-    my ($client, $cb) = @_;
+    my ($client, $cb, $args) = @_;
+
+    # LBFForYou is invoked only by Material's home-extra mechanism. The carousel
+    # asks for NUM_HOME_ITEMS (10); the expanded "show all" click-in asks for a
+    # huge count (LMS_BATCH_SIZE, 25000). Use the requested quantity to tell them
+    # apart: the carousel stays a flat, capped strip of cards, but the click-in
+    # list gets the same week dividers / grouping as the For You menu. The client
+    # here is always Material, so headers are supported.
+    my $params   = (ref $args eq 'HASH' && ref $args->{params} eq 'HASH') ? $args->{params} : {};
+    my $expanded = ($params->{_quantity} // 0) > 50;
 
     Plugins::ListenBrainzFreshReleases::API->getFreshReleasesForUser(
         sort    => $prefs->get('sort')          // 'release_date',
@@ -119,8 +135,13 @@ sub homeForYou {
         days    => $prefs->get('days')          // 14,
         onDone  => sub {
             my $releases = _sortReleases(_filterForYou(shift));
-            $releases = [ @{$releases}[0 .. 49] ] if @$releases > 50;
-            $cb->({ items => [ map { _buildReleaseItem($_, $client) } @$releases ] });
+            if ($expanded) {
+                $cb->({ items => _buildItems($releases, $client, 1) });
+            }
+            else {
+                $releases = [ @{$releases}[0 .. 49] ] if @$releases > 50;
+                $cb->({ items => [ map { _buildReleaseItem($_, $client) } @$releases ] });
+            }
         },
         onError => sub {
             $log->error("Home For You fetch error: " . (shift // ''));
@@ -135,6 +156,7 @@ sub homeForYou {
 sub fetchAll {
     my ($client, $callback, $args, $passDict) = @_;
 
+    my $headers = _wantHeaders(ref $passDict eq 'HASH' ? $passDict->{features} : undef);
     my $sort   = $prefs->get('sort')       // 'release_date';
     my $past   = $prefs->get('all_past')   // 1;
     my $future = $prefs->get('all_future') // 0;
@@ -146,7 +168,7 @@ sub fetchAll {
         days    => $prefs->get('days') // 14,
         onDone  => sub {
             my $releases = _sortReleases(_filterAll(shift));
-            $callback->({ items => _buildItems($releases, $client) });
+            $callback->({ items => _buildItems($releases, $client, $headers) });
         },
         onError => sub {
             $log->error("All releases fetch error: " . (shift // ''));
@@ -158,103 +180,107 @@ sub fetchAll {
 # ---------------------------------------------------------------------------
 # Filter for For You section
 # ---------------------------------------------------------------------------
-sub _filterForYou {
-    my $releases = shift // [];
+# All release types offered as per-section filter checkboxes.
+my @RELEASE_TYPES = qw(album single ep broadcast other compilation soundtrack live remix demo);
 
-    my $albums       = $prefs->get('foryou_albums')       // 1;
-    my $artwork_only = $prefs->get('foryou_artwork_only') // 1;
-    my $various      = $prefs->get('foryou_various')      // 1;
-
-    my @out;
-    for my $rel (@$releases) {
-        my $type = $rel->{release_group_primary_type} // '';
-
-        # Albums-only filter: if Show Albums is checked, ONLY allow albums
-        if ($albums) {
-            next unless lc($type) eq 'album';
-        }
-
-        # Various artists filter
-        if (!$various) {
-            next if _isVariousArtists($rel);
-        }
-
-        # Artwork filter
-        if ($artwork_only) {
-            next unless Plugins::ListenBrainzFreshReleases::API->coverArtUrl($rel);
-        }
-
-        push @out, $rel;
-    }
-
-    return \@out;
-}
-
-# ---------------------------------------------------------------------------
-# Filter for All Releases section
-# ---------------------------------------------------------------------------
-sub _filterAll {
-    my $releases = shift // [];
-
-    my $artwork_only = $prefs->get('all_artwork_only') // 1;
-    my $various      = $prefs->get('all_various')      // 1;
-
-    # Build set of allowed types from prefs
+# Build the allowed-type set for a section from its <prefix>_type_* prefs.
+sub _allowedTypes {
+    my ($prefix) = @_;
     my %allowed;
-    $allowed{'album'}       = 1 if $prefs->get('all_type_album');
-    $allowed{'single'}      = 1 if $prefs->get('all_type_single');
-    $allowed{'ep'}          = 1 if $prefs->get('all_type_ep');
-    $allowed{'broadcast'}   = 1 if $prefs->get('all_type_broadcast');
-    $allowed{'other'}       = 1 if $prefs->get('all_type_other');
-    $allowed{'compilation'} = 1 if $prefs->get('all_type_compilation');
-    $allowed{'soundtrack'}  = 1 if $prefs->get('all_type_soundtrack');
-    $allowed{'live'}        = 1 if $prefs->get('all_type_live');
-    $allowed{'remix'}       = 1 if $prefs->get('all_type_remix');
-    $allowed{'demo'}        = 1 if $prefs->get('all_type_demo');
+    $allowed{$_} = 1 for grep { $prefs->get("${prefix}_type_$_") } @RELEASE_TYPES;
+    return \%allowed;
+}
 
-    # If nothing selected, allow everything
-    my $any_selected = scalar keys %allowed;
+# A release's secondary type, lower-cased ('' if none). ListenBrainz sends this
+# as a single scalar string (release_group_secondary_type) — NOT an array — but
+# accept the plural/array form defensively in case the API ever changes.
+sub _secondaryType {
+    my ($rel) = @_;
+    my $s = $rel->{release_group_secondary_type}
+         // $rel->{release_group_secondary_types}
+         // $rel->{secondary_types};
+    $s = $s->[0] if ref $s eq 'ARRAY';
+    return (defined $s && lc($s) ne 'none') ? lc($s) : '';
+}
+
+# Does a release pass the type filter? Allowlist semantics: the primary type
+# must be ticked AND any secondary type must also be ticked. This is what
+# excludes live/soundtrack/audiobook/etc. releases whose primary is "Album".
+# The secondary list in the API is larger than the offered checkboxes (DJ-mix,
+# Audiobook, Interview…), so an untickable secondary correctly fails the list.
+# An empty allowed-set means "nothing selected" → show everything (safety net).
+sub _typeMatches {
+    my ($rel, $allowed) = @_;
+    return 1 unless %$allowed;
+
+    return 0 unless $allowed->{ lc($rel->{release_group_primary_type} // '') };
+
+    my $sec = _secondaryType($rel);
+    return 0 if length $sec && !$allowed->{$sec};
+
+    return 1;
+}
+
+# Shared per-section filter: release type (by prefix), Various Artists, artwork.
+sub _filterSection {
+    my ($releases, $prefix) = @_;
+    $releases //= [];
+
+    my $artwork_only = $prefs->get("${prefix}_artwork_only") // 1;
+    my $various      = $prefs->get("${prefix}_various")      // 1;
+    my $allowed      = _allowedTypes($prefix);
 
     my @out;
     for my $rel (@$releases) {
-        my $primary = lc($rel->{release_group_primary_type} // '');
-        my $sec_types = $rel->{release_group_secondary_types} // [];
-
-        # Type filter — match either primary or any secondary type
-        if ($any_selected) {
-            my $match = $allowed{$primary} ? 1 : 0;
-            if (!$match && ref $sec_types eq 'ARRAY') {
-                for my $st (@$sec_types) {
-                    if ($allowed{ lc($st) }) { $match = 1; last; }
-                }
-            }
-            next unless $match;
-        }
-
-        # Various artists filter
-        if (!$various) {
-            next if _isVariousArtists($rel);
-        }
-
-        # Artwork filter
-        if ($artwork_only) {
-            next unless Plugins::ListenBrainzFreshReleases::API->coverArtUrl($rel);
-        }
-
+        next unless _typeMatches($rel, $allowed);
+        next if !$various && _isVariousArtists($rel);
+        next if $artwork_only && !Plugins::ListenBrainzFreshReleases::API->coverArtUrl($rel);
         push @out, $rel;
     }
-
     return \@out;
 }
+
+sub _filterForYou { _filterSection(shift, 'foryou') }
+sub _filterAll    { _filterSection(shift, 'all') }
 
 # ---------------------------------------------------------------------------
 # Sort releases by the configured order. Release date is newest-first and
 # confidence highest-first; artist/album are A–Z. (The API's own ordering is
 # unreliable — e.g. date comes back oldest-first — so we sort here.)
 # ---------------------------------------------------------------------------
+# Collapse duplicate editions of the same album. ListenBrainz/MusicBrainz often
+# list a fresh release twice — sometimes as two different release-groups — so key
+# on normalised artist + album + date rather than MBID. Keep the copy with cover
+# art where one of the pair has it.
+sub _dedupeReleases {
+    my ($releases) = @_;
+    return $releases unless ref $releases eq 'ARRAY';
+
+    my %idx;
+    my @out;
+    for my $rel (@$releases) {
+        my $key = join('|',
+            _norm(_pickValue($rel, 'artist_credit_name', 'artist_name', 'artist')),
+            _norm(_pickValue($rel, 'release_name', 'title', 'name')),
+            ($rel->{release_date} // ''));
+
+        if (defined(my $i = $idx{$key})) {
+            $out[$i] = $rel
+                if !Plugins::ListenBrainzFreshReleases::API->coverArtUrl($out[$i])
+                &&  Plugins::ListenBrainzFreshReleases::API->coverArtUrl($rel);
+            next;
+        }
+        $idx{$key} = scalar @out;
+        push @out, $rel;
+    }
+    return \@out;
+}
+
 sub _sortReleases {
     my ($releases) = @_;
     return $releases unless ref $releases eq 'ARRAY';
+
+    $releases = _dedupeReleases($releases);
 
     my $sort = $prefs->get('sort') // 'release_date';
 
@@ -294,12 +320,10 @@ sub _displayType {
     $primary = _formatTypeName($primary) if $primary ne '';
     push @parts, $primary if $primary ne '';
 
-    my $secondary = $rel->{release_group_secondary_types} // $rel->{secondary_types} // [];
-    if (ref $secondary eq 'ARRAY') {
-        for my $value (@$secondary) {
-            my $formatted = _formatTypeName($value);
-            push @parts, $formatted if $formatted ne '';
-        }
+    my $secondary = _secondaryType($rel);
+    if ($secondary ne '') {
+        my $formatted = _formatTypeName($secondary);
+        push @parts, $formatted if $formatted ne '';
     }
 
     return join(' / ', @parts);
@@ -338,8 +362,23 @@ sub _isVariousArtists {
 # ---------------------------------------------------------------------------
 # Build OPML items from release array
 # ---------------------------------------------------------------------------
+# The requesting client's "features" string, read from the top feed's request
+# params (e.g. Material sends "features:hi").
+sub _featuresOf {
+    my ($args) = @_;
+    return (ref $args->{params} eq 'HASH') ? ($args->{params}{features} // '') : '';
+}
+
+# True when the client advertises support for the "header" item type ('h' in
+# features). Material renders such items bold/accent-coloured (and can use a grid
+# view); other skins get plain text dividers instead.
+sub _wantHeaders {
+    my ($features) = @_;
+    return (defined $features && $features =~ /h/) ? 1 : 0;
+}
+
 sub _buildItems {
-    my ($releases, $client) = @_;
+    my ($releases, $client, $headers) = @_;
 
     unless ($releases && scalar @$releases) {
         return [{ name => cstring($client, 'PLUGIN_LBF_NO_RESULTS'), type => 'text' }];
@@ -352,7 +391,7 @@ sub _buildItems {
     # item, not just one page, and we get the native scroll/prev-next pager.
     if ($prefs->get('week_dividers') && $sort eq 'release_date') {
         # weekly view takes precedence for the date sort (it's the chronological read)
-        return _buildWeekly($releases, $client);
+        return _buildWeekly($releases, $client, $headers);
     }
     elsif ($prefs->get('group_by_artist')) {
         return _buildGrouped($releases, $client);
@@ -367,18 +406,39 @@ sub _buildItems {
 # newest-first; weeks run Monday–Sunday.
 # ---------------------------------------------------------------------------
 sub _buildWeekly {
-    my ($releases, $client) = @_;
+    my ($releases, $client, $headers) = @_;
 
-    my @items;
-    my $curWeek = "\0";   # sentinel that no real week-start can equal
+    # Real header item for Material (bold, accent colour); plain text elsewhere.
+    my $divType = $headers ? 'header' : 'text';
 
+    # Group into weeks (input is already date-sorted, so same-week rows are
+    # adjacent and week order is preserved).
+    my @order;
+    my %bucket;
     for my $rel (@$releases) {
         my $ws = _weekStart($rel->{release_date} // '');
-        if ($ws ne $curWeek) {
-            $curWeek = $ws;
-            push @items, { name => _weekLabel($client, $ws), type => 'text' };
+        push @order, $ws unless exists $bucket{$ws};
+        push @{ $bucket{$ws} }, $rel;
+    }
+
+    my @items;
+    for my $ws (@order) {
+        my $rels = $bucket{$ws};
+
+        my $hdr = { name => _weekLabel($client, $ws), type => $divType };
+        if ($headers) {
+            # Material renders header items with a drill action that XMLBrowser
+            # forces on (can't be suppressed); rather than lead nowhere, point it
+            # at this week's releases (same coderef pattern as _buildGrouped).
+            $hdr->{url} = sub {
+                my ($c, $cb) = @_;
+                $cb->({ items => [ map { _buildReleaseItem($_, $c) } @$rels ] });
+            };
+            $hdr->{passthrough} = [{}];
         }
-        push @items, _buildReleaseItem($rel, $client);
+
+        push @items, $hdr;
+        push @items, map { _buildReleaseItem($_, $client) } @$rels;
     }
 
     return \@items;
@@ -461,8 +521,7 @@ sub _buildReleaseItem {
     my $artist     = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist') // 'Unknown Artist';
     my $album      = _pickValue($rel, 'release_name', 'title', 'name') // 'Unknown Album';
     my $date       = $rel->{release_date} // '';
-    my $type       = _displayType($rel);
-    my $sec_types  = $rel->{release_group_secondary_types} // $rel->{secondary_types} // [];
+    my $type       = _displayType($rel);   # includes the secondary type, e.g. "Album / Live"
     my $mbid       = $rel->{release_mbid} // '';
     my $conf       = $rel->{confidence};
 
@@ -471,8 +530,13 @@ sub _buildReleaseItem {
     $name .= " ($year)" if $year;
 
     my $line2 = $type;
-    if (ref $sec_types eq 'ARRAY' && scalar @$sec_types) {
-        $line2 .= ' / ' . join(', ', @$sec_types);
+    # Genre/style tags ride along in the payload (release_tags) — show up to 3
+    # next to the title. Coverage is partial (~20%) and tag-only, so many rows
+    # legitimately have none; no extra API call is made.
+    my @tags = _releaseTags($rel);
+    if (@tags) {
+        my $max = $#tags < 2 ? $#tags : 2;
+        $line2 .= " \x{00B7} " . join(', ', @tags[0..$max]);
     }
     if (defined $conf) {
         my $stars = $conf >= 3 ? "\x{2605}\x{2605}\x{2605}"
@@ -510,26 +574,39 @@ sub _releaseDetail {
     my ($rel, $client, $callback) = @_;
 
     my @base   = _detailMeta($rel, $client);
-    my $mbid   = $rel->{release_mbid} // '';
+    my $mbid   = $rel->{release_mbid}       // '';
+    my $rgMbid = $rel->{release_group_mbid} // '';
     my $artist = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist') // '';
     my $album  = _pickValue($rel, 'release_name', 'title', 'name') // '';
 
     my @streamItems;   # playable streaming matches (with a header)
-    my @mbItems;       # genres + tracklist
+    my @trackItems;    # tracklist (from the release)
+    my $mbGenres;      # arrayref: genres from the MusicBrainz release-group
+    my $lfmGenres;     # arrayref: tags from Last.fm (fallback)
 
     my $wantStream = ($prefs->get('play_via') && length $album && _streamingAdapters()) ? 1 : 0;
-    my $wantMB     = $mbid ? 1 : 0;
+    my $wantGenres = $rgMbid ? 1 : 0;
+    my $wantLastfm = ($prefs->get('lastfm_api_key') && (length $artist || length $album)) ? 1 : 0;
+    my $wantTracks = $mbid   ? 1 : 0;
 
     # Count all tasks up front: a cache hit completes its callback synchronously,
-    # so if we incremented per-task the barrier could fire after the first one
-    # finishes (before the second was even launched) and drop the other's data.
-    my $pending = $wantStream + $wantMB;
+    # so per-task incrementing could let the barrier fire after the first one
+    # finishes (before the others launched) and drop their data.
+    my $pending = $wantStream + $wantGenres + $wantLastfm + $wantTracks;
     my $done    = 0;
 
     my $finish = sub {
         return if $done || $pending > 0;
         $done = 1;
-        $callback->({ items => [ @base, @streamItems, @mbItems ] });
+        # One "Genres" line: prefer curated MusicBrainz genres, fall back to
+        # Last.fm tags (MB is usually empty for fresh releases).
+        my $g = (ref $mbGenres  eq 'ARRAY' && @$mbGenres)  ? $mbGenres
+              : (ref $lfmGenres eq 'ARRAY' && @$lfmGenres) ? $lfmGenres
+              :                                              undef;
+        my @genreItems = $g
+            ? ({ name => cstring($client, 'PLUGIN_LBF_GENRES') . ': ' . join(', ', @$g), type => 'text' })
+            : ();
+        $callback->({ items => [ @base, @streamItems, @genreItems, @trackItems ] });
     };
 
     unless ($pending) {
@@ -537,9 +614,9 @@ sub _releaseDetail {
         return;
     }
 
-    # Watchdog: if a streaming/MusicBrainz callback never returns (network hang,
-    # partial failure), force a render with whatever arrived. $finish is
-    # idempotent ($done), so a normal completion makes this a no-op.
+    # Watchdog: if a callback never returns (network hang, partial failure),
+    # force a render with whatever arrived. $finish is idempotent ($done), so a
+    # normal completion makes this a no-op.
     Slim::Utils::Timers::setTimer(undef, time() + DETAIL_TIMEOUT, sub { $finish->() });
 
     # Streaming services — search automatically and show matches inline
@@ -555,33 +632,50 @@ sub _releaseDetail {
         }, $artist, $album, $mbid);
     }
 
-    # MusicBrainz genres + tracklist
-    if ($wantMB) {
+    # Genres — from the release-group (release-level genres are nearly always empty)
+    if ($wantGenres) {
+        Plugins::ListenBrainzFreshReleases::API->getReleaseGroupGenres(
+            $rgMbid,
+            sub { $mbGenres = shift; $pending--; $finish->(); },
+            sub {
+                $log->info("Release-group genres lookup failed: " . (shift // ''));
+                $pending--;
+                $finish->();
+            },
+        );
+    }
+
+    # Last.fm tags — fallback genre source (album tags, then artist tags). Only
+    # runs when an API key is configured; $finish prefers MB genres over these.
+    if ($wantLastfm) {
+        Plugins::ListenBrainzFreshReleases::API->getLastfmTags(
+            $artist, $album,
+            sub { $lfmGenres = shift; $pending--; $finish->(); },
+            sub { $pending--; $finish->(); },
+        );
+    }
+
+    # Tracklist — from the release
+    if ($wantTracks) {
         Plugins::ListenBrainzFreshReleases::API->getReleaseDetails(
             $mbid,
             sub {
                 my $info = shift;
 
-                my @genres = @{ $info->{genres} || [] };
-                push @mbItems, {
-                    name => cstring($client, 'PLUGIN_LBF_GENRES') . ': ' . join(', ', @genres),
-                    type => 'text',
-                } if @genres;
-
                 my @media = grep { $_->{tracks} && scalar @{ $_->{tracks} } } @{ $info->{media} || [] };
                 if (@media) {
-                    push @mbItems, { name => cstring($client, 'PLUGIN_LBF_TRACKLIST'), type => 'text' };
+                    push @trackItems, { name => cstring($client, 'PLUGIN_LBF_TRACKLIST'), type => 'text' };
                     my $multi = scalar @media > 1;
                     for my $m (@media) {
                         if ($multi) {
                             my $hdr = cstring($client, 'PLUGIN_LBF_DISC') . ' ' . ($m->{position} // '');
                             $hdr .= " ($m->{format})" if $m->{format};
-                            push @mbItems, { name => $hdr, type => 'text' };
+                            push @trackItems, { name => $hdr, type => 'text' };
                         }
                         for my $t (@{ $m->{tracks} }) {
                             my $line = ($t->{position} ? "$t->{position}. " : '') . ($t->{title} // '');
                             $line .= '  (' . _fmtDuration($t->{length}) . ')' if $t->{length};
-                            push @mbItems, { name => $line, type => 'text' };
+                            push @trackItems, { name => $line, type => 'text' };
                         }
                     }
                 }
@@ -605,9 +699,7 @@ sub _detailMeta {
     my $artist  = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist') // 'Unknown Artist';
     my $album   = _pickValue($rel, 'release_name', 'title', 'name') // 'Unknown Album';
     my $date    = $rel->{release_date} // '';
-    my $type    = _displayType($rel);
-    my $sec     = $rel->{release_group_secondary_types} // $rel->{secondary_types} // [];
-    my $sec_str = (ref $sec eq 'ARRAY' && scalar @$sec) ? join(', ', @$sec) : '';
+    my $type    = _displayType($rel);   # primary + secondary, e.g. "Album / Live"
     my $mbid    = $rel->{release_mbid} // '';
 
     my @detail = (
@@ -616,8 +708,6 @@ sub _detailMeta {
         { name => cstring($client, 'PLUGIN_LBF_DATE')   . ": $date",   type => 'text' },
         { name => cstring($client, 'PLUGIN_LBF_TYPE')   . ": $type",   type => 'text' },
     );
-    push @detail, { name => cstring($client, 'PLUGIN_LBF_SEC_TYPES') . ": $sec_str", type => 'text' }
-        if $sec_str;
 
     # Folksonomy tags ride along in the fresh_releases payload (no extra call).
     # Coverage is low (~9%) and noisy, so only show when present after cleanup.

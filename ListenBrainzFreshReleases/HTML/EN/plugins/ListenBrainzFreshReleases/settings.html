@@ -10,17 +10,21 @@
 <input type="password" name="pref_token" value="[% prefs.token %]" size="45" autocomplete="off">
 [% END %]
 
+[% WRAPPER setting title="PLUGIN_LBF_LASTFM_KEY" desc="PLUGIN_LBF_LASTFM_KEY_HINT" %]
+<input type="password" name="pref_lastfm_api_key" value="[% prefs.lastfm_api_key %]" size="45" autocomplete="off">
+[% END %]
+
 [% WRAPPER setting title="PLUGIN_LBF_DAYS" desc="PLUGIN_LBF_DAYS_HINT" %]
 <input type="number" name="pref_days" value="[% prefs.days %]" min="1" max="90" size="4">
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LBF_DEFAULT_SORT" %]
-<select name="pref_sort">
-  <option value="release_date" [% IF prefs.sort == 'release_date' %]selected="selected"[% END %]>[% 'PLUGIN_LBF_SORT_DATE' | string %]</option>
-  <option value="artist_credit_name" [% IF prefs.sort == 'artist_credit_name' %]selected="selected"[% END %]>[% 'PLUGIN_LBF_SORT_ARTIST' | string %]</option>
-  <option value="release_name" [% IF prefs.sort == 'release_name' %]selected="selected"[% END %]>[% 'PLUGIN_LBF_SORT_ALBUM' | string %]</option>
-  <option value="confidence" [% IF prefs.sort == 'confidence' %]selected="selected"[% END %]>[% 'PLUGIN_LBF_SORT_CONFIDENCE' | string %]</option>
-</select>
+<div>
+  <label><input type="radio" name="pref_sort" value="release_date" [% IF prefs.sort == 'release_date' %]checked="checked"[% END %]> [% 'PLUGIN_LBF_SORT_DATE' | string %]</label><br>
+  <label><input type="radio" name="pref_sort" value="artist_credit_name" [% IF prefs.sort == 'artist_credit_name' %]checked="checked"[% END %]> [% 'PLUGIN_LBF_SORT_ARTIST' | string %]</label><br>
+  <label><input type="radio" name="pref_sort" value="release_name" [% IF prefs.sort == 'release_name' %]checked="checked"[% END %]> [% 'PLUGIN_LBF_SORT_ALBUM' | string %]</label><br>
+  <label><input type="radio" name="pref_sort" value="confidence" [% IF prefs.sort == 'confidence' %]checked="checked"[% END %]> [% 'PLUGIN_LBF_SORT_CONFIDENCE' | string %]</label>
+</div>
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LBF_GROUP_ARTIST" desc="PLUGIN_LBF_GROUP_ARTIST_DESC" %]
@@ -37,8 +41,19 @@
 
 <h2>[% 'PLUGIN_LBF_SECTION_FORYOU' | string %]</h2>
 
-[% WRAPPER setting title="PLUGIN_LBF_FORYOU_ALBUMS" desc="PLUGIN_LBF_FORYOU_ALBUMS_DESC" %]
-<input type="checkbox" name="pref_foryou_albums" value="1" [% IF prefs.foryou_albums %]checked="checked"[% END %]>
+[% WRAPPER setting title="PLUGIN_LBF_ALL_TYPES" desc="PLUGIN_LBF_ALL_TYPES_DESC" %]
+<div>
+  <label><input type="checkbox" name="pref_foryou_type_album" value="1" [% IF prefs.foryou_type_album %]checked="checked"[% END %]> Album</label><br>
+  <label><input type="checkbox" name="pref_foryou_type_single" value="1" [% IF prefs.foryou_type_single %]checked="checked"[% END %]> Single</label><br>
+  <label><input type="checkbox" name="pref_foryou_type_ep" value="1" [% IF prefs.foryou_type_ep %]checked="checked"[% END %]> EP</label><br>
+  <label><input type="checkbox" name="pref_foryou_type_broadcast" value="1" [% IF prefs.foryou_type_broadcast %]checked="checked"[% END %]> Broadcast</label><br>
+  <label><input type="checkbox" name="pref_foryou_type_other" value="1" [% IF prefs.foryou_type_other %]checked="checked"[% END %]> Other</label><br>
+  <label><input type="checkbox" name="pref_foryou_type_compilation" value="1" [% IF prefs.foryou_type_compilation %]checked="checked"[% END %]> Compilation</label><br>
+  <label><input type="checkbox" name="pref_foryou_type_soundtrack" value="1" [% IF prefs.foryou_type_soundtrack %]checked="checked"[% END %]> Soundtrack</label><br>
+  <label><input type="checkbox" name="pref_foryou_type_live" value="1" [% IF prefs.foryou_type_live %]checked="checked"[% END %]> Live</label><br>
+  <label><input type="checkbox" name="pref_foryou_type_remix" value="1" [% IF prefs.foryou_type_remix %]checked="checked"[% END %]> Remix</label><br>
+  <label><input type="checkbox" name="pref_foryou_type_demo" value="1" [% IF prefs.foryou_type_demo %]checked="checked"[% END %]> Demo</label>
+</div>
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LBF_FORYOU_PAST" desc="PLUGIN_LBF_FORYOU_PAST_DESC" %]

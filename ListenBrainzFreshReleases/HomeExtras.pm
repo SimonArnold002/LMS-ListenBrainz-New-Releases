@@ -28,7 +28,9 @@ sub initPlugin {
 
 sub feed {
     my ($client, $cb, $args) = @_;
-    Plugins::ListenBrainzFreshReleases::Browse::homeForYou($client, $cb);
+    # Forward $args — homeForYou reads $args->{params}{_quantity} to tell the
+    # carousel (flat cards) from the "More" click-in (full list with week headers).
+    Plugins::ListenBrainzFreshReleases::Browse::homeForYou($client, $cb, $args);
 }
 
 1;
