@@ -3,6 +3,14 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.6.11
+
+### Fixed
+- **Streaming playback from the Material home shelf** — tapping play on a Qobuz/Bandcamp link now works. The home-page week-divider feature had made the feed's structure change with the request size, which broke the play command's item lookup.
+
+### Changed
+- The Material home shelf and its "show all" view are a flat card list again (no week dividers) — required to keep home-shelf playback working. Week dividers remain in the For You and All Releases menus.
+
 ## 0.6.10
 
 ### Fixed

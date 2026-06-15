@@ -119,15 +119,13 @@ sub fetchForYou {
 sub homeForYou {
     my ($client, $cb, $args) = @_;
 
-    # LBFForYou is invoked only by Material's home-extra mechanism. The carousel
-    # asks for NUM_HOME_ITEMS (10); the expanded "show all" click-in asks for a
-    # huge count (LMS_BATCH_SIZE, 25000). Use the requested quantity to tell them
-    # apart: the carousel stays a flat, capped strip of cards, but the click-in
-    # list gets the same week dividers / grouping as the For You menu. The client
-    # here is always Material, so headers are supported.
-    my $params   = (ref $args eq 'HASH' && ref $args->{params} eq 'HASH') ? $args->{params} : {};
-    my $expanded = ($params->{_quantity} // 0) > 50;
-
+    # Flat, capped list of release cards — used by BOTH the Material carousel and
+    # its "show all" click-in. This MUST NOT vary by request quantity. Play
+    # commands re-traverse the feed by item_id (often with a different quantity
+    # than the view used), so a quantity-dependent structure — e.g. injecting
+    # week-divider headers + per-week sub-feeds for large counts — shifts those
+    # item_id paths and breaks deep streaming playback from the home shelf. So:
+    # always flat. (Week dividers live in the main For You / All Releases menus.)
     Plugins::ListenBrainzFreshReleases::API->getFreshReleasesForUser(
         sort    => $prefs->get('sort')          // 'release_date',
         past    => $prefs->get('foryou_past')   // 1,
@@ -135,13 +133,8 @@ sub homeForYou {
         days    => $prefs->get('days')          // 14,
         onDone  => sub {
             my $releases = _sortReleases(_filterForYou(shift));
-            if ($expanded) {
-                $cb->({ items => _buildItems($releases, $client, 1) });
-            }
-            else {
-                $releases = [ @{$releases}[0 .. 49] ] if @$releases > 50;
-                $cb->({ items => [ map { _buildReleaseItem($_, $client) } @$releases ] });
-            }
+            $releases = [ @{$releases}[0 .. 49] ] if @$releases > 50;
+            $cb->({ items => [ map { _buildReleaseItem($_, $client) } @$releases ] });
         },
         onError => sub {
             $log->error("Home For You fetch error: " . (shift // ''));
