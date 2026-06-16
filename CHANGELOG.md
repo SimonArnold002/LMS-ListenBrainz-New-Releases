@@ -3,6 +3,11 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.6.12
+
+### Changed
+- **Grid view in Material** — the week-divider headers now carry the plugin icon, which keeps Material's grid/list view toggle available on the For You and All Releases lists (an icon-less header otherwise disabled it).
+
 ## 0.6.11
 
 ### Fixed

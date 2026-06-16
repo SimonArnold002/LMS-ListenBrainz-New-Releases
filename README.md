@@ -10,7 +10,7 @@ Tested on LMS 9.x with the **Material Skin**.
 
 - **New Releases for You** — a personalised feed of fresh releases from artists you listen to (requires a ListenBrainz account + token).
 - **All Releases** — the global ListenBrainz fresh-releases feed (no account needed).
-- **Weekly view** — when sorted by release date, releases are grouped under a divider per week (`Week of 9 Jun 2026`), newest first. In Material these render as proper section headers; tap a week to focus just that week.
+- **Weekly view** — when sorted by release date, releases are grouped under a divider per week (`Week of 9 Jun 2026`), newest first. In Material these render as proper section headers (tap a week to focus just that week), and the list supports Material's grid/list view toggle.
 - **Genre tags in the list** — where ListenBrainz supplies tags, up to three are shown next to each title (coverage is partial, so many rows won't have any).
 - **Rich detail pages** — tap a release to see its tracklist (with durations), genres, folksonomy tags, and a clickable **View on MusicBrainz** link. Genres come from MusicBrainz, with an optional **Last.fm** fallback (see below) that fills the gap for brand-new releases MusicBrainz hasn't tagged yet.
 - **One-tap streaming playback** — if you have the **Qobuz** and/or **Bandcamp** plugins installed, each release detail page shows the matching album on those services (with their logos), playable directly. Matching is by artist + title.
@@ -108,7 +108,7 @@ To enable it: in Material, edit the home screen / **Customize home menu** and tu
 
 > **Tip:** Material caches the list of available home rows in your browser. If a newly added row doesn't appear, do a hard refresh (**Ctrl/Cmd-Shift-R**) and look again.
 
-The row shows your latest personalised releases as cards; tapping a card opens the full detail page (tracklist, genres, streaming playback). Clicking into the row itself opens the full list with the same weekly dividers as the *New Releases for You* menu.
+The row shows your latest personalised releases as cards; tapping a card opens the full detail page (tracklist, genres, streaming playback). Clicking into the row opens the full list of cards. (The weekly dividers live in the main *New Releases for You* / *All Releases* menus — the home shelf is kept as a flat list so streaming playback works from it.)
 
 ---
 

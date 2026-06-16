@@ -418,7 +418,12 @@ sub _buildWeekly {
     for my $ws (@order) {
         my $rels = $bucket{$ws};
 
-        my $hdr = { name => _weekLabel($client, $ws), type => $divType };
+        # Give the header an image. Material's grid detection counts headers too
+        # (older versions: image-less item → haveWithoutIcons → grid/list toggle
+        # disabled for the whole page). With every item carrying an image the grid
+        # view stays available, and the header still renders as a divider. (Same
+        # approach as the Listen to Later plugin.)
+        my $hdr = { name => _weekLabel($client, $ws), type => $divType, image => ICON };
         if ($headers) {
             # Material renders header items with a drill action that XMLBrowser
             # forces on (can't be suppressed); rather than lead nowhere, point it
