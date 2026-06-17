@@ -39,6 +39,21 @@
 <input type="checkbox" name="pref_play_via" value="1" [% IF prefs.play_via %]checked="checked"[% END %]>
 [% END %]
 
+<h2>[% 'PLUGIN_LBF_SECTION_SERVICES' | string %]</h2>
+
+[% WRAPPER setting title="PLUGIN_LBF_SVC_PRIORITY" desc="PLUGIN_LBF_SVC_PRIORITY_DESC" %]
+<div>
+[% FOREACH s IN lbf_services %]
+  <div style="margin:4px 0;">
+    <input type="number" name="pref_svc_priority_[% s.key %]" value="[% s.priority %]" min="0" max="9" style="width:3em;">
+    <strong>[% s.name %]</strong>
+    &mdash;
+    [% IF s.installed %]<span style="color:#4caf50">[% 'PLUGIN_LBF_SVC_DETECTED' | string %]</span>[% ELSE %]<span style="opacity:0.6">[% 'PLUGIN_LBF_SVC_NOT_DETECTED' | string %]</span>[% END %]
+  </div>
+[% END %]
+</div>
+[% END %]
+
 <h2>[% 'PLUGIN_LBF_SECTION_FORYOU' | string %]</h2>
 
 [% WRAPPER setting title="PLUGIN_LBF_ALL_TYPES" desc="PLUGIN_LBF_ALL_TYPES_DESC" %]

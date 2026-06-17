@@ -27,6 +27,12 @@ $prefs->init({
     week_dividers        => 1,
     play_via             => 1,
 
+    # Streaming-service search priority. Services are searched in ascending order
+    # and the search stops at the first one with a match; 0 = never search it.
+    svc_priority_qobuz    => 1,
+    svc_priority_bandcamp => 2,
+    svc_priority_tidal    => 3,
+
     # For You section
     foryou_past             => 1,
     foryou_future           => 0,

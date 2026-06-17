@@ -180,3 +180,21 @@ PLUGIN_LBF_PLAY_VIA_SETTING
 
 PLUGIN_LBF_PLAY_VIA_SETTING_DESC
 	EN	On the album detail page, offer to search and play the release on your installed streaming services (Qobuz, Bandcamp, etc.)
+
+PLUGIN_LBF_REFRESH
+	EN	Refresh streaming matches
+
+PLUGIN_LBF_SECTION_SERVICES
+	EN	Streaming Services
+
+PLUGIN_LBF_SVC_PRIORITY
+	EN	Search Priority
+
+PLUGIN_LBF_SVC_PRIORITY_DESC
+	EN	Services are searched in order of priority (lower number first), and the search stops at the first service that has a match. Set a service to 0 to never search it.
+
+PLUGIN_LBF_SVC_DETECTED
+	EN	detected
+
+PLUGIN_LBF_SVC_NOT_DETECTED
+	EN	not installed

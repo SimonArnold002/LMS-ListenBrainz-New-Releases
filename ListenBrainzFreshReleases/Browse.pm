@@ -582,7 +582,7 @@ sub _releaseDetail {
     my $mbGenres;      # arrayref: genres from the MusicBrainz release-group
     my $lfmGenres;     # arrayref: tags from Last.fm (fallback)
 
-    my $wantStream = ($prefs->get('play_via') && length $album && _streamingAdapters()) ? 1 : 0;
+    my $wantStream = ($prefs->get('play_via') && length $album && _orderedAdapters()) ? 1 : 0;
     my $wantGenres = $rgMbid ? 1 : 0;
     my $wantLastfm = ($prefs->get('lastfm_api_key') && (length $artist || length $album)) ? 1 : 0;
     my $wantTracks = $mbid   ? 1 : 0;
@@ -617,14 +617,21 @@ sub _releaseDetail {
     # normal completion makes this a no-op.
     Slim::Utils::Timers::setTimer(undef, time() + DETAIL_TIMEOUT, sub { $finish->() });
 
-    # Streaming services — search automatically and show matches inline
+    # Streaming services — search automatically and show matches inline, with a
+    # manual "refresh" that re-searches (bypasses the cache) for this album.
     if ($wantStream) {
         _findPlayable($client, sub {
             my $res   = shift;
             my @items = (ref $res eq 'HASH' && ref $res->{items} eq 'ARRAY') ? @{ $res->{items} } : ();
             @items    = grep { ($_->{type} // '') ne 'text' } @items;   # drop "no match" placeholders
-            @streamItems = ({ name => cstring($client, 'PLUGIN_LBF_PLAY_VIA'), type => 'text' }, @items)
-                if @items;
+            @streamItems = ({ name => cstring($client, 'PLUGIN_LBF_PLAY_VIA'), type => 'text' }, @items);
+            push @streamItems, {
+                name        => cstring($client, 'PLUGIN_LBF_REFRESH'),
+                type        => 'link',
+                image       => ICON,
+                url         => sub { _findPlayable($_[0], $_[1], $artist, $album, $mbid, 1) },
+                passthrough => [{}],
+            };
             $pending--;
             $finish->();
         }, $artist, $album, $mbid);
@@ -747,6 +754,38 @@ sub _streamingAdapters {
     return @adapters;
 }
 
+# Installed adapters in search order: ascending svc_priority_<name>, dropping any
+# set to 0 (disabled). Used by _findPlayable to search one service at a time.
+sub _orderedAdapters {
+    my @out;
+    for my $a (_streamingAdapters()) {
+        my $prio = $prefs->get('svc_priority_' . lc $a->{name});
+        $prio = 1 unless defined $prio;   # unknown service → still searchable
+        next unless $prio > 0;
+        push @out, { %$a, priority => $prio };
+    }
+    my @ordered = sort { $a->{priority} <=> $b->{priority} } @out;
+    return @ordered;   # named array → safe count in scalar/boolean context
+}
+
+# Detection + priority for every service we know how to integrate (installed or
+# not), in display order — drives the settings page's "Streaming Services" list.
+sub serviceStatus {
+    my @known = (
+        [ 'qobuz',    'Qobuz'    ],
+        [ 'bandcamp', 'Bandcamp' ],
+        [ 'tidal',    'Tidal'    ],
+    );
+    my %installed = map { lc($_->{name}) => 1 } _streamingAdapters();
+    return [ map {
+        {   key       => $_->[0],
+            name      => $_->[1],
+            installed => $installed{ $_->[0] } ? 1 : 0,
+            priority  => $prefs->get('svc_priority_' . $_->[0]) // 0,
+        }
+    } @known ];
+}
+
 # The service plugin's own icon (its Material logo), used as the thumbnail on
 # each result so it's clear which service it came from. Undef if unavailable.
 sub _pluginIcon {
@@ -758,9 +797,9 @@ sub _pluginIcon {
 # matching album as a directly-playable node (one tap to play / add), using
 # each plugin's own search API rather than a generic search drill-down.
 sub _findPlayable {
-    my ($client, $callback, $artist, $album, $mbid) = @_;
+    my ($client, $callback, $artist, $album, $mbid, $force) = @_;
 
-    my @adapters   = _streamingAdapters();
+    my @adapters   = _orderedAdapters();
     my $albumNorm  = _norm($album);
     my $artistNorm = _norm($artist);
     # Search with normalised terms (quotes, &, commas stripped). Raw multi-artist
@@ -774,57 +813,82 @@ sub _findPlayable {
     }
 
     # Cache hit → rebuild the playable items from the stored data (no re-search).
-    # Key is versioned (:2:) so old entries from previous matching logic are ignored.
-    my $key = 'lbf:stream:2:' . ($mbid || _norm($query));
-    if (my $c = $cache->get($key)) {
+    # Key is versioned so a change to the set of searched services / matching
+    # logic invalidates stale entries (:2: matching rework, :3: added Tidal).
+    # $force (manual refresh) skips the read so the services are searched again.
+    my $key = 'lbf:stream:3:' . ($mbid || _norm($query));
+    if (!$force && (my $c = $cache->get($key))) {
         $log->info("play-via cache hit: $key (" . scalar(@{ $c->{items} || [] }) . " match(es))");
         $callback->({ items => _streamResult($client, _rebuildStreamItems($c->{items})) });
         return;
     }
 
-    my @collected;
-    my $pending = scalar @adapters;
-    my $done    = 0;
+    # Search one service at a time in priority order; stop at the first that has a
+    # match (see _tryNextAdapter). The chosen service's matches are cached (or an
+    # empty result if none matched anywhere), so a revisit is instant.
+    _tryNextAdapter({
+        client     => $client,
+        callback   => $callback,
+        query      => $query,
+        artistNorm => $artistNorm,
+        albumNorm  => $albumNorm,
+        key        => $key,
+        adapters   => \@adapters,
+        idx        => 0,
+    });
+}
 
-    my $finish = sub {
-        return if $done || $pending > 0;
-        $done = 1;
+# Cache the matched items for a play-via key (url coderef stripped — it's
+# reattached per service on read by _rebuildStreamItems). Guarded: Storable dies
+# on unexpected nested coderefs/blessed refs and that must not stop the page.
+sub _cacheStream {
+    my ($key, $items, $ttl) = @_;
+    my @store = map { my %x = %$_; delete $x{url}; \%x } @$items;
+    eval { $cache->set($key, { items => \@store }, $ttl); 1 }
+        or $log->warn("play-via cache set failed: $@");
+}
 
-        # Cache serializable copies (OPML item url is a coderef → strip it; it's
-        # reattached per-service on read). _svc identifies which to reattach.
-        # Guarded: Storable dies on any unexpected nested coderef/blessed ref, and
-        # that must not stop us calling $callback below (would hang the page).
-        my @store = map { my %x = %$_; delete $x{url}; \%x } @collected;
-        my $ttl   = @collected ? STREAM_FOUND_TTL : STREAM_NOMATCH_TTL;
-        eval { $cache->set($key, { items => \@store }, $ttl); 1 }
-            or $log->warn("play-via cache set failed: $@");
+# Try the service at $ctx->{idx}, advancing one at a time; stop at the first with
+# a match. A named sub with an explicit $ctx (rather than a self-referencing
+# closure) so there's no reference cycle / leak across the async hops.
+sub _tryNextAdapter {
+    my ($ctx) = @_;
+    my $adapters = $ctx->{adapters};
 
-        $log->info("play-via '$query': " . scalar(@collected) . " match(es), cached ${ttl}s");
-        $callback->({ items => _streamResult($client, \@collected) });
+    if ($ctx->{idx} >= @$adapters) {
+        _cacheStream($ctx->{key}, [], STREAM_NOMATCH_TTL);
+        $log->info("play-via '$ctx->{query}': no match on any service");
+        $ctx->{callback}->({ items => _streamResult($ctx->{client}, []) });
+        return;
+    }
+
+    my $a    = $adapters->[ $ctx->{idx}++ ];
+    my $svc  = $a->{name};
+    my $icon = $a->{icon};
+
+    my $collect = sub {
+        my $items   = shift;
+        my @matched = (ref $items eq 'ARRAY') ? @$items : ();
+
+        unless (@matched) {
+            _tryNextAdapter($ctx);   # nothing here — fall through to the next service
+            return;
+        }
+
+        for my $it (@matched) {
+            $it->{image} = $icon if $icon;   # service logo as thumbnail
+            $it->{_svc}  = $svc;             # for cache rebuild
+        }
+        _cacheStream($ctx->{key}, \@matched, STREAM_FOUND_TTL);
+        $log->info("play-via '$ctx->{query}': matched on $svc (" . scalar(@matched) . ")");
+        $ctx->{callback}->({ items => _streamResult($ctx->{client}, \@matched) });
     };
 
-    for my $a (@adapters) {
-        my $svc     = $a->{name};
-        my $icon    = $a->{icon};
-        my $collect = sub {
-            my $items = shift;
-            if (ref $items eq 'ARRAY') {
-                for my $it (@$items) {
-                    $it->{image} = $icon if $icon;   # service logo as thumbnail
-                    $it->{_svc}  = $svc;             # for cache rebuild
-                }
-                push @collected, @$items;
-            }
-            $pending--;
-            $finish->();
-        };
-
-        eval { $a->{run}->($client, $query, $artistNorm, $albumNorm, $svc, $collect); 1 } or do {
+    eval { $a->{run}->($ctx->{client}, $ctx->{query}, $ctx->{artistNorm}, $ctx->{albumNorm}, $svc, $collect); 1 }
+        or do {
             $log->warn("play-via $svc failed: $@");
-            $pending--;
-            $finish->();
+            _tryNextAdapter($ctx);
         };
-    }
 }
 
 # Collapse duplicate streaming entries — some services (seen with Bandcamp)
