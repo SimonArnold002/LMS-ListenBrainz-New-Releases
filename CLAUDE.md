@@ -42,7 +42,7 @@ ListenBrainzFreshReleases/
 ```
 
 ## Current Version
-0.6.15
+0.7.0
 
 ## Settings Structure (v0.3.2)
 

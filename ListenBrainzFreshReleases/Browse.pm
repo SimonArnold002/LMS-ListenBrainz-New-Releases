@@ -739,6 +739,11 @@ sub _streamingAdapters {
     push @adapters, { name => 'Bandcamp', icon => _pluginIcon('Plugins::Bandcamp::Plugin'), run => \&_searchBandcamp }
         if Plugins::Bandcamp::Plugin->can('album_list');
 
+    push @adapters, { name => 'Tidal', icon => _pluginIcon('Plugins::TIDAL::Plugin'), run => \&_searchTidal }
+        if Plugins::TIDAL::Plugin->can('getAPIHandler')
+        && Plugins::TIDAL::Plugin->can('getAlbum')
+        && Plugins::TIDAL::Plugin->can('_renderAlbum');
+
     return @adapters;
 }
 
@@ -866,6 +871,9 @@ sub _rebuildStreamItems {
         elsif ($svc eq 'Bandcamp' && Plugins::Bandcamp::Plugin->can('get_album')) {
             $item{url} = \&Plugins::Bandcamp::Plugin::get_album;
         }
+        elsif ($svc eq 'Tidal' && Plugins::TIDAL::Plugin->can('getAlbum')) {
+            $item{url} = \&Plugins::TIDAL::Plugin::getAlbum;
+        }
         else {
             next;
         }
@@ -921,6 +929,32 @@ sub _searchBandcamp {
         }
         $collect->(\@out);
     }, { search => $query });
+}
+
+# Tidal: search albums via the plugin's API handler, keep title+artist matches,
+# and reuse the plugin's _renderAlbum so each result is a native, playable album
+# node (url => getAlbum, plus play/add/insert itemActions keyed by album id).
+sub _searchTidal {
+    my ($client, $query, $artistNorm, $albumNorm, $svc, $collect) = @_;
+
+    my $api = Plugins::TIDAL::Plugin::getAPIHandler($client);
+    unless ($api) {
+        $collect->([]);
+        return;
+    }
+
+    $api->search(sub {
+        my $albums = shift;   # raw album hashes (type => albums search)
+        my @out;
+        for my $album (@{ $albums || [] }) {
+            next unless ref $album eq 'HASH';
+            my $artistRef  = $album->{artist} || ($album->{artists} && $album->{artists}[0]) || {};
+            my $candArtist = ref $artistRef eq 'HASH' ? $artistRef->{name} : '';
+            next unless _albumMatches($artistNorm, $albumNorm, $candArtist, $album->{title});
+            push @out, Plugins::TIDAL::Plugin::_renderAlbum($album);
+        }
+        $collect->(\@out);
+    }, { type => 'albums', search => $query, limit => 20 });
 }
 
 # True if a streaming result is the same release: the candidate title must BE our
