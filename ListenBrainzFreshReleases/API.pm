@@ -37,7 +37,7 @@ use constant MB_BASE_URL     => 'https://musicbrainz.org/ws/2/';
 use constant LASTFM_BASE_URL => 'https://ws.audioscrobbler.com/2.0/';
 
 # MusicBrainz requires a descriptive User-Agent identifying the application
-use constant USER_AGENT   => 'LMS-ListenBrainzFreshReleases/0.6.12 ( https://github.com/SimonArnold002/LMS-ListenBrainz-New-Releases )';
+use constant USER_AGENT   => 'LMS-ListenBrainzFreshReleases/0.6.15 ( https://github.com/SimonArnold002/LMS-ListenBrainz-New-Releases )';
 
 # ---------------------------------------------------------------------------
 # GET /1/user/<username>/fresh_releases  (personalised, auth required)
@@ -282,6 +282,15 @@ sub getLastfmTags {
         $onDone->([]);
         return;
     }
+
+    # Work in UTF-8 octets. Titles from the JSON API are wide strings (utf8 flag
+    # set); a CJK/emoji title crashes Digest::MD5 — used to build the cache key
+    # below — with "Wide character in subroutine entry", which aborts the whole
+    # detail request. Downgrading to octets fixes that (and the URL encoding in
+    # _lastfmCall, which percent-encodes per byte). Only encode flagged strings
+    # so we never double-encode plain Latin-1 octets.
+    utf8::encode($artist)               if utf8::is_utf8($artist);
+    utf8::encode($album) if defined $album && utf8::is_utf8($album);
 
     my $cacheKey = 'lbf:lfm:' . lc("$artist|" . ($album // ''));
     if (my $cached = $cache->get($cacheKey)) {

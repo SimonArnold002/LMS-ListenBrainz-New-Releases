@@ -3,6 +3,11 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.6.15
+
+### Fixed
+- **Detail page blank for non-Latin titles** — opening a release whose title contains Japanese/Korean/Chinese characters, emoji, etc. showed no data when a Last.fm API key was configured. Those characters crashed the Last.fm cache lookup (and aborted the whole request); the lookup now handles them correctly.
+
 ## 0.6.12
 
 ### Changed

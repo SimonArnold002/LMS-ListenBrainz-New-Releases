@@ -112,20 +112,21 @@ sub fetchForYou {
 }
 
 # ---------------------------------------------------------------------------
-# Flat For You feed for the Material Skin home-page scrollable row. Same
-# filters/sort as the menu, but a flat, capped list of release cards (no weekly
-# dividers / artist grouping — those don't suit a carousel).
+# For You feed for the Material Skin home-page row (carousel + "show all"
+# click-in). Same structure as the main For You menu (week dividers / grouping).
 # ---------------------------------------------------------------------------
 sub homeForYou {
     my ($client, $cb, $args) = @_;
 
-    # Flat, capped list of release cards — used by BOTH the Material carousel and
-    # its "show all" click-in. This MUST NOT vary by request quantity. Play
-    # commands re-traverse the feed by item_id (often with a different quantity
-    # than the view used), so a quantity-dependent structure — e.g. injecting
-    # week-divider headers + per-week sub-feeds for large counts — shifts those
-    # item_id paths and breaks deep streaming playback from the home shelf. So:
-    # always flat. (Week dividers live in the main For You / All Releases menus.)
+    # Flat list of release cards — NO week-divider headers. The Material carousel
+    # and its "show all" click-in are the SAME feed (Material exposes no way to
+    # give the click-in a different command), so they must share one structure.
+    # A header item sits at index 0 and shifts every card's item_id; play commands
+    # re-traverse the feed by item_id at quantity 1, so that shift makes deep
+    # streaming playback resolve the wrong item and fail (verified via JSON-RPC:
+    # headered item_id:1 = a card, flat item_id:1 = a different card). It must
+    # also not vary by request quantity for the same reason. So: always flat, for
+    # every quantity. Week dividers live in the main For You / All Releases menus.
     Plugins::ListenBrainzFreshReleases::API->getFreshReleasesForUser(
         sort    => $prefs->get('sort')          // 'release_date',
         past    => $prefs->get('foryou_past')   // 1,
@@ -133,7 +134,6 @@ sub homeForYou {
         days    => $prefs->get('days')          // 14,
         onDone  => sub {
             my $releases = _sortReleases(_filterForYou(shift));
-            $releases = [ @{$releases}[0 .. 49] ] if @$releases > 50;
             $cb->({ items => [ map { _buildReleaseItem($_, $client) } @$releases ] });
         },
         onError => sub {
