@@ -77,15 +77,6 @@ sub initPlugin {
     require Plugins::ListenBrainzFreshReleases::Browse;
     require Plugins::ListenBrainzFreshReleases::API;
 
-    # CLI command behind the detail page's "Refresh streaming matches" action:
-    # clears the play-via cache for an album so the detail re-render re-searches.
-    # Invoked as a non-browse 'do' action with nextWindow:refresh, so Material
-    # refreshes the current page in place rather than navigating.
-    Slim::Control::Request::addDispatch(
-        [ 'listenbrainzfreshreleases', 'refreshstream' ],
-        [ 0, 0, 1, \&Plugins::ListenBrainzFreshReleases::Browse::cliRefreshStream ],
-    );
-
     eval {
         require Slim::Web::ImageProxy;
         if ( UNIVERSAL::can('Slim::Web::ImageProxy', 'getRightSize') ) {

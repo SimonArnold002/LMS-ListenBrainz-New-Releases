@@ -625,22 +625,21 @@ sub _releaseDetail {
             my @items = (ref $res eq 'HASH' && ref $res->{items} eq 'ARRAY') ? @{ $res->{items} } : ();
             @items    = grep { ($_->{type} // '') ne 'text' } @items;   # drop "no match" placeholders
             @streamItems = ({ name => cstring($client, 'PLUGIN_LBF_PLAY_VIA'), type => 'text' }, @items);
-            # "Refresh" is a non-browse 'do' action (via the jive override) +
-            # nextWindow:refresh, so Material runs the command and re-renders THIS
-            # page in place (rather than drilling into a new one). The command
-            # clears the cache; the re-render then re-searches the services.
+            # "Refresh" re-renders THIS detail page in place (no navigation). It's
+            # a normal link whose coderef clears the play-via cache and returns an
+            # EMPTY list: Material treats an empty browse response + nextWindow
+            # 'refresh' as "pop back and refresh the page" (browse-functions.js),
+            # so it re-fetches the detail — which now cache-misses and re-searches.
             push @streamItems, {
-                name  => cstring($client, 'PLUGIN_LBF_REFRESH'),
-                type  => 'text',
-                image => ICON,
-                jive  => {
-                    actions => {
-                        do => {
-                            cmd    => [ 'listenbrainzfreshreleases', 'refreshstream' ],
-                            params => { mbid => $mbid },
-                        },
-                    },
-                    nextWindow => 'refresh',
+                name        => cstring($client, 'PLUGIN_LBF_REFRESH'),
+                type        => 'link',
+                image       => ICON,
+                nextWindow  => 'refresh',
+                passthrough => [{}],
+                url         => sub {
+                    my ($c, $cb) = @_;
+                    $cache->remove('lbf:stream:3:' . $mbid);
+                    $cb->({ items => [] });
                 },
             } if $mbid;
             $pending--;
@@ -802,18 +801,6 @@ sub serviceStatus {
 sub _pluginIcon {
     my ($class) = @_;
     return eval { $class->_pluginDataFor('icon') } || undef;
-}
-
-# CLI command behind the detail page's "Refresh streaming matches" action: clear
-# the play-via cache for an album so the page re-render re-searches the services.
-sub cliRefreshStream {
-    my $request = shift;
-    my $mbid = $request->getParam('mbid') // '';
-    if ($mbid) {
-        $cache->remove('lbf:stream:3:' . $mbid);
-        $log->info("play-via cache cleared for $mbid (manual refresh)");
-    }
-    $request->setStatusDone();
 }
 
 # Find the release on installed streaming services and present each service's
