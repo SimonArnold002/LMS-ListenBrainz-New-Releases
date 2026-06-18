@@ -3,6 +3,11 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.7.2 (dev)
+
+### Added
+- **All Releases → by-week landing page** — tapping **All Releases** now opens a menu instead of dropping straight into the full list. The first entry, **All releases**, shows the complete list as before; below it is one entry per week-commencing (newest first, e.g. *Week of 16 Jun 2026  (42)*) that drills into just that week's releases. Lets you narrow the feed to a single week without scrolling the whole thing.
+
 ## 0.7.1 (dev)
 
 ### Fixed

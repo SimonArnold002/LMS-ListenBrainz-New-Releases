@@ -42,7 +42,7 @@ ListenBrainzFreshReleases/
 ```
 
 ## Current Version
-0.7.1 (dev)
+0.7.2 (dev)
 
 ## Settings Structure (v0.3.2)
 
@@ -78,10 +78,17 @@ Three sections in the settings page:
 ```
 ListenBrainz Fresh Releases
 ├── For You (requires username + token)  ← filtered by For You prefs
-└── All Releases                          ← filtered by All Releases prefs
+└── All Releases                          ← by-week landing menu (0.7.2)
+    ├── All releases                       ← complete list (weekly/grouped view)
+    ├── Week of <date>  (N)                ← that week's releases only
+    └── …                                  ← one entry per week-commencing
 ```
 
-No in-menu filter sub-menus. All filtering driven entirely by settings prefs.
+All section filtering (artwork/type/VA) still driven entirely by settings prefs.
+The only in-menu navigation is the All Releases by-week split (`_buildAllLanding`),
+which groups the already-filtered+sorted list by `_weekStart` and offers a
+per-week drill-in plus an "All releases" entry. For You still drops straight into
+its list.
 
 ## Key Technical Decisions
 
@@ -163,6 +170,7 @@ Detected in `_isVariousArtists()`:
 - Material Skin's grouped artist release page layout is NOT achievable from OPML feeds — only via native library `albums_loop` responses. Solved in earlier versions by using Browse by Type sub-menus, removed in v0.3.0 in favour of settings-driven filtering.
 
 ## Version History
+- **0.7.2 (dev)** — **All Releases by-week landing menu.** Tapping All Releases no longer drops straight into the full list; `fetchAll` now returns `_buildAllLanding` (the For You path is unchanged). The landing menu's first item, "All releases" (`PLUGIN_LBF_VIEW_ALL`), is a coderef that returns the previous full view via `_buildItems` (so the weekly-divider/group-by-artist behaviour is preserved under it); below it is one drill-in per week-commencing, labelled with `_weekLabel` + a `(count)`, each coderef returning just that week's `_buildReleaseItem`s. Weeks are grouped with the same `_weekStart`/newest-first logic as `_buildWeekly` (input is already `_sortReleases(_filterAll(...))`). All coderefs are live feed nodes (not cached/serialised), matching `_buildWeekly`/`_buildGrouped`. NB: this is a browse-only navigation split — no new prefs, and the week grouping always runs regardless of the `week_dividers`/sort prefs (those still govern what "All releases" shows).
 - **0.7.1 (dev)** — **Non-Latin artist match fix (real root cause of the "Prism" 48→still-many hits).** The 0.7.0 `_norm` made the regex Unicode-aware (`\p{Alnum}`), but that only works on a utf8-*flagged* string. Artist/album names actually reach `_findPlayable` as raw **UTF-8 octets** (no flag) — via the Storable stream cache and the play passthrough. On the server's Perl (no `unicode_strings` in scope), `\p{Alnum}` on those bytes stripped the whole non-Latin name → `artistNorm eq ''` → `_albumMatches` fell to its "exact-title-only, no artist" branch → every album literally titled "Prism" matched (was 48; capped to 12 by `STREAM_MAX_RESULTS`, which is the "lots" the user still saw). Verified locally: byte-string `_norm("踊って…")` empties/garbles on the no-`unicode_strings` path, decoded `_norm` yields `踊ってばかりの国`. Fix: `_norm` now `utf8::decode`s octet input (guarded — only adopts the result if it's valid UTF-8, and only when the string has a high byte) before lowercasing, so the name survives as real codepoints and the artist again acts as the disambiguator (simulated: Katy Perry/Prism + Roxette/Prism → reject, real band → match). Also: the search query sent to the streaming services is now an explicit octet copy (`$queryEnc`, `utf8::encode`) so a wide-char query can't warn/break in the URI layer, while `artistNorm`/`albumNorm` stay characters for matching. Stream cache key bumped `:3:`→`:4:` (and the manual-refresh `$cache->remove` follows) so the stale wrong matches from 0.7.0 invalidate automatically — no manual refresh needed.
 - 0.0.x — Initial development, plugin loading fixes, API parsing fix
 - 0.1.0 — PNG icon

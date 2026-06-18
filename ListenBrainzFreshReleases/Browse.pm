@@ -168,7 +168,7 @@ sub fetchAll {
         days    => $prefs->get('days') // 14,
         onDone  => sub {
             my $releases = _sortReleases(_filterAll(shift));
-            $callback->({ items => _buildItems($releases, $client, $headers) });
+            $callback->({ items => _buildAllLanding($releases, $client, $headers) });
         },
         onError => sub {
             $log->error("All releases fetch error: " . (shift // ''));
@@ -398,6 +398,60 @@ sub _buildItems {
     }
 
     return [ map { _buildReleaseItem($_, $client) } @$releases ];
+}
+
+# ---------------------------------------------------------------------------
+# All Releases landing menu: instead of dropping straight into the full list,
+# offer "All releases" (the complete weekly/grouped view) plus one entry per
+# week-commencing, so the feed can be narrowed to a single week. Each week entry
+# drills into just that week's releases. Weeks run newest-first (the input is
+# already date-sorted) and carry a release count.
+# ---------------------------------------------------------------------------
+sub _buildAllLanding {
+    my ($releases, $client, $headers) = @_;
+
+    unless ($releases && scalar @$releases) {
+        return [{ name => cstring($client, 'PLUGIN_LBF_NO_RESULTS'), type => 'text' }];
+    }
+
+    # "All releases" → the full list with the user's usual weekly/grouped view.
+    my @items = ({
+        name        => cstring($client, 'PLUGIN_LBF_VIEW_ALL'),
+        type        => 'link',
+        image       => ICON,
+        passthrough => [{}],
+        url         => sub {
+            my ($c, $cb) = @_;
+            $cb->({ items => _buildItems($releases, $c, $headers) });
+        },
+    });
+
+    # Group into weeks (input already date-sorted → same-week rows are adjacent
+    # and week order is preserved).
+    my @order;
+    my %bucket;
+    for my $rel (@$releases) {
+        my $ws = _weekStart($rel->{release_date} // '');
+        push @order, $ws unless exists $bucket{$ws};
+        push @{ $bucket{$ws} }, $rel;
+    }
+
+    for my $ws (@order) {
+        my $rels  = $bucket{$ws};
+        my $count = scalar @$rels;
+        push @items, {
+            name        => _weekLabel($client, $ws) . "  ($count)",
+            type        => 'link',
+            image       => ICON,
+            passthrough => [{}],
+            url         => sub {
+                my ($c, $cb) = @_;
+                $cb->({ items => [ map { _buildReleaseItem($_, $c) } @$rels ] });
+            },
+        };
+    }
+
+    return \@items;
 }
 
 # ---------------------------------------------------------------------------

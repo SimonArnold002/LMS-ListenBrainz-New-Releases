@@ -110,7 +110,7 @@ PLUGIN_LBF_SETTINGS
 	EN	Plugin Settings
 
 PLUGIN_LBF_VIEW_ALL
-	EN	All releases
+	EN	Show all
 
 PLUGIN_LBF_WEEK_OF
 	EN	Week of
