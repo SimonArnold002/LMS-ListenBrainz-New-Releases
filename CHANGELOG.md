@@ -3,6 +3,11 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.7.1 (dev)
+
+### Fixed
+- **Non-Latin artist names → wrong streaming matches** — albums by artists with Japanese/Korean/Chinese (etc.) names (e.g. *踊ってばかりの国 – PRISM*) were matching lots of unrelated streaming albums that merely shared the title ("Prism"). The artist name was being stripped to nothing before matching, so there was no artist left to tell the right album from the wrong ones. Those names are now preserved, so the artist is used to reject unrelated results. (Stale wrong matches clear automatically — no manual refresh needed.)
+
 ## 0.6.15
 
 ### Fixed

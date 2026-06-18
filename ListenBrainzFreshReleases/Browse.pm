@@ -648,7 +648,7 @@ sub _releaseDetail {
                 passthrough => [{}],
                 url         => sub {
                     my ($c, $cb) = @_;
-                    $cache->remove('lbf:stream:3:' . $mbid);
+                    $cache->remove('lbf:stream:4:' . $mbid);
                     $cb->({ items => [] });
                 },
             } if $mbid;
@@ -826,6 +826,10 @@ sub _findPlayable {
     # credits like 'Lee "Scratch" Perry & Mouse on Mars' otherwise make the
     # service search miss the album.
     my $query      = join(' ', grep { length } $artistNorm, $albumNorm);
+    # Octet copy for the service HTTP search (a wide-char query warns/breaks in the
+    # URI layer). artistNorm/albumNorm stay as characters for _albumMatches.
+    my $queryEnc   = $query;
+    utf8::encode($queryEnc) if utf8::is_utf8($queryEnc);
 
     unless (@adapters) {
         $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_NO_SERVICES'), type => 'text' }] });
@@ -834,9 +838,10 @@ sub _findPlayable {
 
     # Cache hit → rebuild the playable items from the stored data (no re-search).
     # Key is versioned so a change to the set of searched services / matching
-    # logic invalidates stale entries (:2: matching rework, :3: added Tidal).
+    # logic invalidates stale entries (:2: matching rework, :3: added Tidal,
+    # :4: decode non-Latin names so the artist disambiguator works).
     # $force (manual refresh) skips the read so the services are searched again.
-    my $key = 'lbf:stream:3:' . ($mbid || _norm($query));
+    my $key = 'lbf:stream:4:' . ($mbid || _norm($query));
     utf8::encode($key) if utf8::is_utf8($key);   # octet key — non-Latin fallback can't crash md5
     if (!$force && (my $c = $cache->get($key))) {
         $log->info("play-via cache hit: $key (" . scalar(@{ $c->{items} || [] }) . " match(es))");
@@ -893,7 +898,7 @@ sub _findPlayable {
             $settle->([]);
         });
 
-        eval { $a->{run}->($client, $query, $artistNorm, $albumNorm, $svc, $settle); 1 } or do {
+        eval { $a->{run}->($client, $queryEnc, $artistNorm, $albumNorm, $svc, $settle); 1 } or do {
             $log->warn("play-via $svc failed: $@");
             $settle->([]);
         };
@@ -1088,7 +1093,17 @@ sub _artistMatch {
 # artist/album names (e.g. Japanese "踊ってばかりの国") survive — otherwise they
 # normalised to "" and matching fell back to title-only (one search returned 48).
 sub _norm {
-    my $s = lc(shift // '');
+    my $s = shift // '';
+    # Names often arrive as UTF-8 *octets* (no utf8 flag) via the Storable cache or
+    # the play passthrough. On the server's Perl, \p{Alnum} then strips every byte
+    # of a non-Latin name, so the artist normalised to '' and matching fell back to
+    # title-only (a generic "Prism" matched dozens of unrelated albums). Decode to
+    # real characters first so \p{Alnum} sees codepoints and the name survives.
+    if (!utf8::is_utf8($s) && $s =~ /[^\x00-\x7f]/) {
+        my $d = $s;
+        $s = $d if utf8::decode($d);   # only adopt it if it's valid UTF-8
+    }
+    $s = lc($s);
     $s =~ s/[\(\[].*?[\)\]]//g;
     $s =~ s/[^\p{Alnum}]+/ /g;
     $s =~ s/^\s+|\s+$//g;
