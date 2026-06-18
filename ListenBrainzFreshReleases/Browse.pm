@@ -26,10 +26,14 @@ use constant STREAM_NOMATCH_TTL => 1 * 86400;
 # Per-service streaming-search timeout: a slow/hung service is treated as "no
 # match" after this so it can't hold up the (parallel) lookup.
 use constant STREAM_SVC_TIMEOUT => 8;
+# Cap on streaming matches shown — a generic single-word album ("Prism") can
+# prefix-match dozens of unrelated albums on a service (one search returned 48);
+# bound the detail page so it stays fast and sane.
+use constant STREAM_MAX_RESULTS => 12;
 
 # Safety net (seconds): if a streaming/MusicBrainz callback never fires (network
 # hang, partial failure), render the detail page anyway rather than hang.
-use constant DETAIL_TIMEOUT => 15;
+use constant DETAIL_TIMEOUT => 10;
 
 use constant ICON => 'plugins/ListenBrainzFreshReleases/html/images/ListenBrainzFreshReleasesIcon_svg.png';
 
@@ -597,7 +601,9 @@ sub _releaseDetail {
     my $done    = 0;
 
     my $finish = sub {
-        return if $done || $pending > 0;
+        my ($force) = @_;
+        return if $done;
+        return if !$force && $pending > 0;   # $force (watchdog) renders regardless
         $done = 1;
         # One "Genres" line: prefer curated MusicBrainz genres, fall back to
         # Last.fm tags (MB is usually empty for fresh releases).
@@ -615,10 +621,11 @@ sub _releaseDetail {
         return;
     }
 
-    # Watchdog: if a callback never returns (network hang, partial failure),
-    # force a render with whatever arrived. $finish is idempotent ($done), so a
+    # Watchdog: if a task never returns (network hang, partial failure), FORCE a
+    # render with whatever arrived ($finish->(1) bypasses the pending check) so
+    # the page can never hang the client. $finish is idempotent ($done), so a
     # normal completion makes this a no-op.
-    Slim::Utils::Timers::setTimer(undef, time() + DETAIL_TIMEOUT, sub { $finish->() });
+    Slim::Utils::Timers::setTimer(undef, time() + DETAIL_TIMEOUT, sub { $finish->(1) });
 
     # Streaming services — search automatically and show matches inline, with a
     # manual "refresh" that re-searches (bypasses the cache) for this album.
@@ -830,6 +837,7 @@ sub _findPlayable {
     # logic invalidates stale entries (:2: matching rework, :3: added Tidal).
     # $force (manual refresh) skips the read so the services are searched again.
     my $key = 'lbf:stream:3:' . ($mbid || _norm($query));
+    utf8::encode($key) if utf8::is_utf8($key);   # octet key — non-Latin fallback can't crash md5
     if (!$force && (my $c = $cache->get($key))) {
         $log->info("play-via cache hit: $key (" . scalar(@{ $c->{items} || [] }) . " match(es))");
         $callback->({ items => _streamResult($client, _rebuildStreamItems($c->{items})) });
@@ -924,6 +932,7 @@ sub _dedupeStreamItems {
 sub _streamResult {
     my ($client, $items) = @_;
     $items = _dedupeStreamItems($items);
+    $items = [ @{$items}[0 .. STREAM_MAX_RESULTS - 1] ] if @$items > STREAM_MAX_RESULTS;
     return @$items
         ? $items
         : [{ name => cstring($client, 'PLUGIN_LBF_NO_MATCH'), type => 'text' }];
@@ -1049,7 +1058,9 @@ sub _albumMatches {
     return 0 if $t eq '';
     return 0 unless $t eq $albumNorm || index($t, "$albumNorm ") == 0;
 
-    return 1 if $artistNorm eq '';
+    # No artist to disambiguate with → only an EXACT title match counts; otherwise
+    # a generic one-word title ("Prism") prefix-matches dozens of unrelated albums.
+    return $t eq $albumNorm ? 1 : 0 if $artistNorm eq '';
     return _artistMatch($artistNorm, _norm($candArtist));
 }
 
@@ -1071,12 +1082,15 @@ sub _artistMatch {
     return 1;
 }
 
-# Normalise a title for fuzzy matching: lowercase, drop bracketed qualifiers
-# (deluxe/remaster/etc.) and punctuation, collapse whitespace.
+# Normalise a title/artist for fuzzy matching: lowercase, drop bracketed
+# qualifiers (deluxe/remaster/etc.) and punctuation, collapse whitespace.
+# Keeps alphanumerics from ANY script (\p{Alnum}, not just a-z0-9) so non-Latin
+# artist/album names (e.g. Japanese "踊ってばかりの国") survive — otherwise they
+# normalised to "" and matching fell back to title-only (one search returned 48).
 sub _norm {
     my $s = lc(shift // '');
     $s =~ s/[\(\[].*?[\)\]]//g;
-    $s =~ s/[^a-z0-9]+/ /g;
+    $s =~ s/[^\p{Alnum}]+/ /g;
     $s =~ s/^\s+|\s+$//g;
     $s =~ s/\s+/ /g;
     return $s;
