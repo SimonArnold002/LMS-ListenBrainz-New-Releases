@@ -31,6 +31,14 @@ use constant LFM_EMPTY_TTL =>  7 * 86400;
 # midnight anyway via the date in its cache key.
 use constant FEED_TTL => 6 * 3600;   # 6 hours
 
+# Network timeout for the feed fetches — kept short so a slow/unreachable
+# ListenBrainz fails fast instead of leaving the menu/home spinning.
+use constant FEED_TIMEOUT => 10;
+
+# A separate, long-lived copy of the last successful feed. If a later fetch fails
+# (ListenBrainz down/slow) we serve this so the menu/home still shows something.
+use constant FEED_FALLBACK_TTL => 30 * 86400;
+
 use constant BASE_URL        => 'https://api.listenbrainz.org';
 use constant CAA_BASE_URL    => 'https://coverartarchive.org/release/';
 use constant MB_BASE_URL     => 'https://musicbrainz.org/ws/2/';
@@ -58,7 +66,8 @@ sub getFreshReleasesForUser {
     my $past   = $args{past}   ? 'true' : 'false';
     my $future = $args{future} ? 'true' : 'false';
 
-    my $cacheKey = 'lbf:feed:user:' . join('|', $username, $sort, $past, $future, $days);
+    my $cacheKey = 'lbf:feed:user:'   . join('|', $username, $sort, $past, $future, $days);
+    my $fbKey    = 'lbf:feed:userfb:' . join('|', $username, $sort, $past, $future, $days);
     if (my $cached = $cache->get($cacheKey)) {
         $log->info("For-you releases cache hit ($cacheKey)");
         $args{onDone}->($cached);
@@ -76,13 +85,12 @@ sub getFreshReleasesForUser {
         sub {
             _handleResponse(shift, sub {
                 my $releases = shift;
-                eval { $cache->set($cacheKey, $releases, FEED_TTL); 1 }
-                    or $log->warn("For-you feed cache set failed: $@");
+                _cacheFeed($cacheKey, $fbKey, $releases);
                 $args{onDone}->($releases);
             });
         },
-        sub { _handleError(shift, $args{onError}) },
-        { timeout => 15 }
+        sub { _feedError(shift, $fbKey, $args{onDone}, $args{onError}) },
+        { timeout => FEED_TIMEOUT }
     );
 
     $http->get($url,
@@ -105,7 +113,8 @@ sub getFreshReleasesAll {
     my @t = localtime(time);
     my $today = sprintf('%04d-%02d-%02d', $t[5]+1900, $t[4]+1, $t[3]);
 
-    my $cacheKey = 'lbf:feed:all:' . join('|', $sort, $past, $future, $days, $today);
+    my $cacheKey = 'lbf:feed:all:'   . join('|', $sort, $past, $future, $days, $today);
+    my $fbKey    = 'lbf:feed:allfb:' . join('|', $sort, $past, $future, $days);
     if (my $cached = $cache->get($cacheKey)) {
         $log->info("All releases cache hit ($cacheKey)");
         $args{onDone}->($cached);
@@ -121,16 +130,38 @@ sub getFreshReleasesAll {
         sub {
             _handleResponse(shift, sub {
                 my $releases = shift;
-                eval { $cache->set($cacheKey, $releases, FEED_TTL); 1 }
-                    or $log->warn("All-releases feed cache set failed: $@");
+                _cacheFeed($cacheKey, $fbKey, $releases);
                 $args{onDone}->($releases);
             });
         },
-        sub { _handleError(shift, $args{onError}) },
-        { timeout => 15 }
+        sub { _feedError(shift, $fbKey, $args{onDone}, $args{onError}) },
+        { timeout => FEED_TIMEOUT }
     );
 
     $http->get($url, 'Accept' => 'application/json');
+}
+
+# Store a fetched feed under both the short-TTL working key and the long-TTL
+# fallback key (used when a later fetch fails). Guarded so a Storable hiccup
+# can't break the response.
+sub _cacheFeed {
+    my ($cacheKey, $fbKey, $releases) = @_;
+    eval { $cache->set($cacheKey, $releases, FEED_TTL);          1 } or $log->warn("feed cache set failed: $@");
+    eval { $cache->set($fbKey,    $releases, FEED_FALLBACK_TTL); 1 } or $log->warn("feed fallback cache set failed: $@");
+}
+
+# On a feed fetch failure, serve the last successfully cached copy if we have one
+# (a ListenBrainz outage then degrades to slightly-stale data instead of an empty
+# / error menu). Only when there's nothing cached do we surface the error.
+sub _feedError {
+    my ($resp, $fbKey, $onDone, $onError) = @_;
+    if (my $stale = $cache->get($fbKey)) {
+        my $msg = (ref $resp && $resp->can('error')) ? ($resp->error // '?') : 'error';
+        $log->warn("ListenBrainz feed fetch failed ($msg) — serving last cached copy");
+        $onDone->($stale);
+        return;
+    }
+    _handleError($resp, $onError);
 }
 
 # ---------------------------------------------------------------------------

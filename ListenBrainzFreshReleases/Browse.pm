@@ -23,6 +23,9 @@ my $cache = Slim::Utils::Cache->new();
 # a few days) → recheck daily.
 use constant STREAM_FOUND_TTL   => 7 * 86400;
 use constant STREAM_NOMATCH_TTL => 1 * 86400;
+# Per-service streaming-search timeout: a slow/hung service is treated as "no
+# match" after this so it can't hold up the (parallel) lookup.
+use constant STREAM_SVC_TIMEOUT => 8;
 
 # Safety net (seconds): if a streaming/MusicBrainz callback never fires (network
 # hang, partial failure), render the detail page anyway rather than hang.
@@ -833,19 +836,60 @@ sub _findPlayable {
         return;
     }
 
-    # Search one service at a time in priority order; stop at the first that has a
-    # match (see _tryNextAdapter). The chosen service's matches are cached (or an
-    # empty result if none matched anywhere), so a revisit is instant.
-    _tryNextAdapter({
-        client     => $client,
-        callback   => $callback,
-        query      => $query,
-        artistNorm => $artistNorm,
-        albumNorm  => $albumNorm,
-        key        => $key,
-        adapters   => \@adapters,
-        idx        => 0,
-    });
+    # Search every service in PARALLEL, but resolve to the highest-priority service
+    # that matched, as soon as that's decided — i.e. once every higher-priority
+    # service has come back (matched or not). Each service has its own timeout so a
+    # slow/hung one is treated as "no match" and can't stall the result. The chosen
+    # service's matches (or an empty result if nothing matched) are cached.
+    my @result   = map { undef } @adapters;   # undef = pending, [] = miss, [..] = match
+    my $resolved = 0;
+
+    my $resolve = sub {
+        return if $resolved;
+        my $win;
+        for my $i (0 .. $#adapters) {
+            return if !defined $result[$i];     # a higher-priority service is still pending
+            if (@{ $result[$i] }) { $win = $i; last; }
+        }
+        $resolved = 1;
+        my $items = defined $win ? $result[$win] : [];
+        _cacheStream($key, $items, @$items ? STREAM_FOUND_TTL : STREAM_NOMATCH_TTL);
+        $log->info("play-via '$query': "
+            . (defined $win ? "matched on $adapters[$win]{name} (" . scalar(@$items) . ")"
+                            : "no match on any service"));
+        $callback->({ items => _streamResult($client, $items) });
+    };
+
+    for my $i (0 .. $#adapters) {
+        my $a    = $adapters[$i];
+        my $svc  = $a->{name};
+        my $icon = $a->{icon};
+
+        my $settled = 0;
+        my $settle  = sub {
+            return if $settled || $resolved;
+            $settled = 1;
+            my @matched = (ref $_[0] eq 'ARRAY') ? @{ $_[0] } : ();
+            for my $it (@matched) {
+                $it->{image} = $icon if $icon;   # service logo as thumbnail
+                $it->{_svc}  = $svc;             # for cache rebuild
+            }
+            $result[$i] = \@matched;
+            $resolve->();
+        };
+
+        # Per-service timeout → treat as "no match" so it can't hold up the others.
+        Slim::Utils::Timers::setTimer(undef, time() + STREAM_SVC_TIMEOUT, sub {
+            return if $settled || $resolved;
+            $log->warn("play-via $svc timed out");
+            $settle->([]);
+        });
+
+        eval { $a->{run}->($client, $query, $artistNorm, $albumNorm, $svc, $settle); 1 } or do {
+            $log->warn("play-via $svc failed: $@");
+            $settle->([]);
+        };
+    }
 }
 
 # Cache the matched items for a play-via key (url coderef stripped — it's
@@ -856,49 +900,6 @@ sub _cacheStream {
     my @store = map { my %x = %$_; delete $x{url}; \%x } @$items;
     eval { $cache->set($key, { items => \@store }, $ttl); 1 }
         or $log->warn("play-via cache set failed: $@");
-}
-
-# Try the service at $ctx->{idx}, advancing one at a time; stop at the first with
-# a match. A named sub with an explicit $ctx (rather than a self-referencing
-# closure) so there's no reference cycle / leak across the async hops.
-sub _tryNextAdapter {
-    my ($ctx) = @_;
-    my $adapters = $ctx->{adapters};
-
-    if ($ctx->{idx} >= @$adapters) {
-        _cacheStream($ctx->{key}, [], STREAM_NOMATCH_TTL);
-        $log->info("play-via '$ctx->{query}': no match on any service");
-        $ctx->{callback}->({ items => _streamResult($ctx->{client}, []) });
-        return;
-    }
-
-    my $a    = $adapters->[ $ctx->{idx}++ ];
-    my $svc  = $a->{name};
-    my $icon = $a->{icon};
-
-    my $collect = sub {
-        my $items   = shift;
-        my @matched = (ref $items eq 'ARRAY') ? @$items : ();
-
-        unless (@matched) {
-            _tryNextAdapter($ctx);   # nothing here — fall through to the next service
-            return;
-        }
-
-        for my $it (@matched) {
-            $it->{image} = $icon if $icon;   # service logo as thumbnail
-            $it->{_svc}  = $svc;             # for cache rebuild
-        }
-        _cacheStream($ctx->{key}, \@matched, STREAM_FOUND_TTL);
-        $log->info("play-via '$ctx->{query}': matched on $svc (" . scalar(@matched) . ")");
-        $ctx->{callback}->({ items => _streamResult($ctx->{client}, \@matched) });
-    };
-
-    eval { $a->{run}->($ctx->{client}, $ctx->{query}, $ctx->{artistNorm}, $ctx->{albumNorm}, $svc, $collect); 1 }
-        or do {
-            $log->warn("play-via $svc failed: $@");
-            _tryNextAdapter($ctx);
-        };
 }
 
 # Collapse duplicate streaming entries — some services (seen with Bandcamp)
