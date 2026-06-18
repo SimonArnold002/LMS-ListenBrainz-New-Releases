@@ -6,7 +6,7 @@
     <plugin name="ListenBrainzFreshReleases" version="0.7.2" minTarget="9.0.0" maxTarget="*">
       <title lang="EN">ListenBrainz Fresh Releases</title>
       <desc lang="EN">Browse your ListenBrainz Fresh Releases feed in Lyrion Music Server</desc>
-      <url>https://raw.githubusercontent.com/SimonArnold002/LMS-ListenBrainz-New-Releases/dev/ListenBrainzFreshReleases.zip</url>
+      <url>https://raw.githubusercontent.com/SimonArnold002/LMS-ListenBrainz-New-Releases/ListenBrainzFreshReleases.zip</url>
       <creator>CrystalGipsy</creator>
       <email></email>
       <sha>08819417df7827062d4336862ec7c95017972577</sha>
