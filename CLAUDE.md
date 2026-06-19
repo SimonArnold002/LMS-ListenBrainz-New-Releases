@@ -28,7 +28,7 @@ grep -i "listenbrainz" /var/log/squeezeboxserver/server.log | grep -v "Artwork\|
 ListenBrainzFreshReleases/
 ├── Plugin.pm                          # OPMLBased entry point, image proxy registration
 ├── Browse.pm                          # Simple two-option feed (For You / All Releases), no in-menu filters
-├── API.pm                             # Async ListenBrainz HTTP, payload.releases parsing
+├── API.pm                             # Async ListenBrainz HTTP, payload.releases parsing + createdfor/playlist endpoints
 ├── HomeExtras.pm                       # Material Skin home-page scrollable row (For You)
 ├── Settings.pm                        # CSRF-protected, three-section settings page
 ├── install.xml                        # <extension> format, v0.3.2, icon_svg.png
@@ -42,7 +42,74 @@ ListenBrainzFreshReleases/
 ```
 
 ## Current Version
-0.7.2 (dev)
+0.8.7 (dev)
+
+## Created-for-You Playlists (0.8.0)
+
+New **Playlists** browse section (`Browse::fetchPlaylists` → `resolvePlaylist`), gated on
+`username` being set. Surfaces the ListenBrainz algorithmic playlists and turns each into a
+fully-streaming, Play-all-able playlist.
+
+- **API** (`API.pm`): `getCreatedForPlaylists` → `GET /1/user/<user>/playlists/createdfor`
+  (no token needed to read; sent if present), parsed by `_parsePlaylistList` into
+  `{ mbid, title, annotation, source_patch, last_modified }` (mbid from the `…/playlist/<mbid>`
+  identifier). `getPlaylistTracks($mbid,$lastMod,…)` → `GET /1/playlist/<mbid>`, parsed by
+  `_parsePlaylistTracks` into `{ title, artist(=creator), album, duration_ms, recording_mbid,
+  caa_id, caa_release_mbid }`. The createdfor *listing* has empty `track` arrays and no track
+  count — count is only known after fetching the playlist. Playlist-list cache mirrors the
+  feed's dual short/fallback TTL; track cache is immutable-per-`last_modified` (30d/1d).
+  `coverArtUrl` now accepts a bare `caa_release_mbid` string too (playlist tracks carry it).
+- **Track matching** (`Browse.pm`): `_findPlayableTrack` is the track-level analogue of
+  `_findPlayable` — same ordered-adapter / per-service-timeout / first-priority-wins /
+  versioned-cache shape, but returns ONE item and **only accepts a match with a plain string
+  protocol url** (e.g. `qobuz://<id>.flac`). That rule keeps the resolved playlist fully
+  Storable AND quantity-stable (the 0.6.11 home-shelf lesson — a coderef url would be stripped
+  on cache and the item would vanish on revisit, shifting item_ids and breaking deep play).
+  `_trackMatches` mirrors `_albumMatches` (title equals/prefix + `_artistMatch`). Adapters gained
+  a `runTrack` coderef: `_searchQobuzTrack` (search type `tracks` → `tracks.items`, builds the
+  `qobuz://<id>.flac` audio item — **the one fully-working service today**), `_searchTidalTrack`
+  (search `type=>tracks`, adopts a `_renderTrack` result only if it has a string url — confirm on
+  server), `_searchBandcampTrack` (no-op for now; album-oriented). Same `svc_priority_*` prefs
+  drive album and track search.
+- **resolvePlaylist**: fetch tracks → `_resolveTracks` (bounded `PLAYLIST_CONCURRENCY`=6, ordered
+  by index so playlist order is preserved, unmatched dropped, `PLAYLIST_TIMEOUT`=45s watchdog) →
+  `_playlistView` prepends a stable `PLUGIN_LBF_PL_MATCHED` header. Whole result cached under
+  `lbf:pl:resolved:1:<mbid>|<last_modified>|<svc-order>`, so revisits and play-by-item_id are
+  instant and stable.
+- **Caching tuned to the weekly cadence (0.8.0):** the Created-for-You playlists only regenerate
+  weekly (Mon, user TZ; ListenBrainz keeps current + previous week). The JSPF content is IMMUTABLE
+  for a given `mbid|last_modified`, and a new week brings a new mbid (fresh key) that re-resolves
+  once — so resolved playlists AND per-track results are cached **30d for both full and partial**
+  matches (was 7d/1d). 30d matters: a Weekly Jams playlist lives ~2 weeks, so the cache must
+  survive into its SECOND week or the "previous week" entry would re-resolve all 50 tracks
+  needlessly. No-match tracks keep 7d (recur across weeks). The createdfor LISTING uses
+  `PLAYLIST_LIST_TTL` = 24h (was the 6h feed TTL). Trade-off: a track that only later lands on a
+  service isn't picked up until next week's playlist — intentional, to avoid the slow re-resolve. Items are string-url `type=>audio` nodes (no coderef
+  rebuild needed, unlike the album play-via cache).
+- **Cover art — per-category bundled images (0.8.4):** a real 2×2 track-art grid needs
+  server-side compositing (GD/Imager/ImageMagick). The target DietPi box has **none** of those and
+  LMS bundles only `Image::Scale` (resize, can't composite), and per [[no-extra-server-installs]] we
+  won't require an install. So the agreed fallback is used: each playlist tile shows a **bundled,
+  per-category cover** keyed by `source_patch` (`Browse::_categoryCover` → static
+  `html/images/playlist-{weekly-jams,weekly-exploration,daily-jams,default}.png`, generated with
+  Pillow in ListenBrainz brand colours). Cross-platform (LMS static-served), instant, and stable —
+  no compositing, no redirect, so no flicker on return. (The earlier dynamic `Grid.pm` raw-route
+  compositor was removed in 0.8.4 once it was clear no image lib would be available; history below.)
+  Playlist tiles are `type => 'playlist'` (playable containers: Play/Add the whole resolved
+  playlist, plus tap-to-open).
+- **Prefer local library (0.8.7):** `_findPlayableTrack` first tries the user's own LMS library
+  (`prefer_library` pref, default on) before any streaming adapter — `_findLocalTrack`: tier 1 =
+  exact `tracks.musicbrainz_id` via `Slim::Schema->search('Track', …)`, tier 2 = LMS `titles`
+  search (`Slim::Control::Request::executeRequest(undef, ['titles', …, "search:$artist $title"])`)
+  gated by `_trackMatches`. A hit returns a string `url` (the file URL) → playable + cacheable like
+  a streaming item, tagged `_svc => 'Library'`. Because a file URL can go stale on a rescan, library
+  hits (and any resolved playlist containing one, via `_playlistTtl`) cache only `LIBRARY_TTL` (1d).
+  All DB access is eval-guarded → falls through to streaming on any hiccup.
+- **Background warm (0.8.3):** `Plugin::postinitPlugin` schedules `Browse::warmCache` ~60s after
+  startup, re-armed daily (`Slim::Utils::Timers`). It pre-fetches the playlist list and pre-resolves
+  every playlist's track matches into `lbf:pl:resolved:*` (using the first connected player for the
+  streaming-service API context), so the Playlists view and each playlist open instantly. Cheap
+  daily: keyed by `last_modified`, real work only when a new week's playlist appears.
 
 ## Settings Structure (v0.3.2)
 

@@ -35,7 +35,43 @@ use constant STREAM_MAX_RESULTS => 12;
 # hang, partial failure), render the detail page anyway rather than hang.
 use constant DETAIL_TIMEOUT => 10;
 
+# A local-library match points at a file URL that could disappear on a rescan, so
+# cache library hits (and any resolved playlist that contains one) for only a day.
+use constant LIBRARY_TTL => 1 * 86400;
+# Per-track streaming-match cache TTLs. A found track persists; a no-match is also
+# kept a good while (a week) — these algorithmic playlists only change weekly and
+# the same track recurs across weeks/playlists, so re-searching a known miss daily
+# is wasted API calls for no real benefit.
+use constant TRACK_FOUND_TTL   => 30 * 86400;
+use constant TRACK_NOMATCH_TTL =>  7 * 86400;
+# Resolved whole-playlist cache. The JSPF content is IMMUTABLE for a given
+# mbid|last_modified, so there's no correctness reason to expire early — a new
+# week brings a new mbid (a fresh key) which re-resolves once. We keep BOTH full
+# and partial results long: the Weekly Jams/Exploration playlists live ~2 weeks
+# (current + previous week), so the cache must survive into the playlist's SECOND
+# week or the "previous week" entry would re-resolve all 50 tracks needlessly.
+# (Trade-off: a track that only later appears on a service isn't picked up until
+# next week's playlist — an intentional choice to avoid the slow re-resolve.)
+use constant PLAYLIST_FOUND_TTL   => 30 * 86400;
+use constant PLAYLIST_PARTIAL_TTL => 30 * 86400;
+# Max tracks resolved in parallel — bounds the burst of service searches a 50-track
+# playlist would otherwise fire all at once (rate-limit friendliness).
+use constant PLAYLIST_CONCURRENCY => 6;
+# Overall watchdog for resolving a playlist, so a hung service search can't leave
+# the playlist page spinning forever.
+use constant PLAYLIST_TIMEOUT => 45;
+
 use constant ICON => 'plugins/ListenBrainzFreshReleases/html/images/ListenBrainzFreshReleasesIcon_svg.png';
+
+# Branded cover-style images for the top-level menu rows (same look as the
+# playlist covers). The settings cog uses Material's "_MTL_icon_<name>" filename
+# convention so Material renders its own themed cog font-icon; the file itself is
+# a flat gear PNG fallback for non-Material skins.
+use constant IMG_BASE      => 'plugins/ListenBrainzFreshReleases/html/images/';
+use constant MENU_NEW      => IMG_BASE . 'menu-new-releases.png';
+use constant MENU_PLAYLISTS=> IMG_BASE . 'menu-playlists.png';
+use constant MENU_ALL      => IMG_BASE . 'menu-all-releases.png';
+use constant MENU_COG      => IMG_BASE . 'lbf-cog_MTL_icon_settings.png';
 
 # Various Artists MBID — used to detect VA releases
 use constant VA_MBID => '89ad4ac3-39f7-470e-963a-56509c546377';
@@ -55,40 +91,57 @@ sub topLevel {
     # fetchForYou/fetchAll via passthrough (which IS forwarded).
     my $feat = _featuresOf($args);
 
+    my $useH = _wantHeaders($feat);
+
+    # --- section child items ---------------------------------------------
+    my $newReleases = ($username && $token)
+        ? { name => cstring($client, 'PLUGIN_LBF_FOR_YOU'), type => 'link',
+            url => \&fetchForYou, passthrough => [{ features => $feat }], image => MENU_NEW }
+        : { name => cstring($client, 'PLUGIN_LBF_SETUP_REQUIRED'), type => 'text', image => ICON };
+
+    my @createdFor = ($newReleases);
+    push @createdFor, {
+        name => cstring($client, 'PLUGIN_LBF_PLAYLISTS'), type => 'link',
+        url => \&fetchPlaylists, passthrough => [{ features => $feat }], image => MENU_PLAYLISTS,
+    } if $username;
+
+    my @allReleases = ({
+        name => cstring($client, 'PLUGIN_LBF_ALL_RELEASES'), type => 'link',
+        url => \&fetchAll, passthrough => [{ features => $feat }], image => MENU_ALL,
+    });
+
+    my @settings = ({
+        name => cstring($client, 'PLUGIN_LBF_SETTINGS'), type => 'link',
+        weblink => '/plugins/ListenBrainzFreshReleases/settings.html', image => MENU_COG,
+    });
+
+    # --- assemble with Material section headers --------------------------
     my @items;
-
-    if ($username && $token) {
-        push @items, {
-            name        => cstring($client, 'PLUGIN_LBF_FOR_YOU'),
-            type        => 'link',
-            url         => \&fetchForYou,
-            passthrough => [{ features => $feat }],
-            image       => ICON,
-        };
-    } else {
-        push @items, {
-            name  => cstring($client, 'PLUGIN_LBF_SETUP_REQUIRED'),
-            type  => 'text',
-            image => ICON,
-        };
-    }
-
-    push @items, {
-        name        => cstring($client, 'PLUGIN_LBF_ALL_RELEASES'),
-        type        => 'link',
-        url         => \&fetchAll,
-        passthrough => [{ features => $feat }],
-        image       => ICON,
-    };
-
-    push @items, {
-        name    => cstring($client, 'PLUGIN_LBF_SETTINGS'),
-        type    => 'link',
-        weblink => '/plugins/ListenBrainzFreshReleases/settings.html',
-        image   => ICON,
-    };
+    push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_CREATED_FOR_YOU', $useH, \@createdFor), @createdFor;
+    push @items, _sectionHeader($client, 'PLUGIN_LBF_ALL_RELEASES',           $useH, \@allReleases), @allReleases;
+    push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_SETTINGS',       $useH, \@settings),    @settings;
 
     $callback->({ items => \@items });
+}
+
+# A Material section-divider header. Material renders type=>'header' bold/accented
+# but forces a drill action onto it (can't be suppressed), so — as with the week
+# dividers — give it a url returning its own child items, so tapping the header
+# (or its "More") shows that section rather than an empty page. Non-Material skins
+# get a plain text divider.
+sub _sectionHeader {
+    my ($client, $stringToken, $useH, $children) = @_;
+    my $hdr = {
+        name  => cstring($client, $stringToken),
+        type  => $useH ? 'header' : 'text',
+        image => ICON,
+    };
+    if ($useH) {
+        my @kids = @$children;
+        $hdr->{url}         = sub { $_[1]->({ items => \@kids }) };
+        $hdr->{passthrough} = [{}];
+    }
+    return $hdr;
 }
 
 # ---------------------------------------------------------------------------
@@ -174,6 +227,273 @@ sub fetchAll {
             $log->error("All releases fetch error: " . (shift // ''));
             $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_ERROR'), type => 'text' }] });
         },
+    );
+}
+
+# ===========================================================================
+# Created-for-You Playlists section. Lists the ListenBrainz algorithmic
+# playlists (Weekly Jams, Weekly Exploration, Daily Jams, …); opening one
+# resolves every track to a streaming track (preferred-service order), drops the
+# unmatched, and presents a fully-streaming, Play-all-able playlist with a 2x2
+# grid cover tile.
+# ===========================================================================
+sub fetchPlaylists {
+    my ($client, $callback, $args, $pass) = @_;
+
+    Plugins::ListenBrainzFreshReleases::API->getCreatedForPlaylists(
+        onDone => sub {
+            my $playlists = shift // [];
+            unless (@$playlists) {
+                $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_NO_PLAYLISTS'), type => 'text' }] });
+                return;
+            }
+            # Mark each playlist current/previous within its category (list is
+            # already newest-first), so the weekly tiles get the right week cover.
+            my %n;
+            for my $pl (@$playlists) {
+                $pl->{_variant} = $n{ lc($pl->{source_patch} // '') }++ ? 'previous' : 'current';
+            }
+            $callback->({ items => [ map { _playlistTile($_, $client) } @$playlists ] });
+        },
+        onError => sub {
+            $log->error("Playlists fetch error: " . (shift // ''));
+            $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_ERROR'), type => 'text' }] });
+        },
+    );
+}
+
+# One browse tile for a playlist: title, a trimmed annotation as line2, and the
+# 2x2 grid cover (a real server-served PNG, so every skin shows it).
+sub _playlistTile {
+    my ($pl, $client) = @_;
+
+    my $line2 = $pl->{annotation} // '';
+    $line2 = substr($line2, 0, 120) . "\x{2026}" if length($line2) > 123;
+
+    return {
+        name  => $pl->{title} // 'Playlist',
+        ($line2 ne '' ? (line2 => $line2) : ()),
+        # 'playlist' (not 'link') makes the row a playable container: tapping still
+        # drills in (go), but it now also carries Play/Add actions that resolve the
+        # feed and queue all its streaming tracks — like a native playlist row.
+        type        => 'playlist',
+        # Per-category cover (bundled static image, keyed by source_patch). A real
+        # 2x2 track-art grid needs server-side compositing (GD/Imager/ImageMagick),
+        # none of which are present and which we won't require — so we use a fixed,
+        # cross-platform branded cover per playlist type (no flicker, instant).
+        image       => _categoryCover($pl->{source_patch}, $pl->{_variant}),
+        url         => \&resolvePlaylist,
+        passthrough => [{
+            mbid          => $pl->{mbid},
+            title         => $pl->{title},
+            last_modified => $pl->{last_modified},
+        }],
+    };
+}
+
+# Per-category bundled cover image, keyed by the playlist's source_patch. These
+# are static plugin images (cross-platform, no server-side compositing needed).
+# The weekly playlists exist as current + previous week; ListenBrainz keeps both,
+# so they'd otherwise share one cover. We pick a "This Week"/"Last Week" variant
+# ($variant eq 'previous' → the -prev image) so the two are distinguishable. The
+# exact week date is in the row title — drawing it onto the image would need a
+# server-side image lib we deliberately don't require (see no-extra-server-installs).
+my %PL_COVER = (
+    'weekly-jams'        => 'playlist-weekly-jams.png',
+    'weekly-exploration' => 'playlist-weekly-exploration.png',
+    'daily-jams'         => 'playlist-daily-jams.png',
+);
+sub _categoryCover {
+    my ($patch, $variant) = @_;
+    $patch = lc($patch // '');
+    my $file = $PL_COVER{$patch} // 'playlist-default.png';
+    $file =~ s/\.png$/-prev.png/ if ($variant // '') eq 'previous' && $patch =~ /^weekly-/;
+    return 'plugins/ListenBrainzFreshReleases/html/images/' . $file;
+}
+
+# Open a playlist → resolved, fully-streaming track list (cached as a unit so
+# revisits and play-by-item_id re-traversals are instant and quantity-stable).
+sub resolvePlaylist {
+    my ($client, $callback, $args, $pass) = @_;
+
+    my $mbid    = ref $pass eq 'HASH' ? $pass->{mbid}          : undef;
+    my $lastMod = ref $pass eq 'HASH' ? $pass->{last_modified} : '';
+    unless ($mbid) {
+        $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_ERROR'), type => 'text' }] });
+        return;
+    }
+
+    # Key includes the service order so changing priorities re-resolves.
+    my $svcOrder = join(',', map { lc $_->{name} } _orderedAdapters());
+    my $rkey = 'lbf:pl:resolved:1:' . join('|', $mbid, ($lastMod // ''), $svcOrder);
+
+    my $title = ref $pass eq 'HASH' ? $pass->{title} : undef;
+
+    if (my $c = $cache->get($rkey)) {
+        $log->info("resolved playlist cache hit: $mbid ($c->{matched}/$c->{total})");
+        $callback->(_playlistResult($client, $c, $title));
+        return;
+    }
+
+    Plugins::ListenBrainzFreshReleases::API->getPlaylistTracks(
+        $mbid, $lastMod,
+        sub {
+            my $tracks = shift // [];
+
+            unless (@$tracks) {
+                $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_NO_RESULTS'), type => 'text' }] });
+                return;
+            }
+
+            _resolveTracks($client, $tracks, sub {
+                my $items   = shift // [];
+                my $payload = { items => $items, matched => scalar(@$items), total => scalar(@$tracks) };
+                my $ttl     = _playlistTtl($items, scalar @$tracks);
+                eval { $cache->set($rkey, $payload, $ttl); 1 }
+                    or $log->warn("resolved playlist cache set failed: $@");
+                $log->info("resolved playlist $mbid: $payload->{matched}/$payload->{total} matched");
+                $callback->(_playlistResult($client, $payload, $title));
+            });
+        },
+        sub {
+            $log->error("Playlist resolve error: " . (shift // ''));
+            $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_ERROR'), type => 'text' }] });
+        },
+    );
+}
+
+# Build the resolved-playlist feed result: a PURE list of playable track items
+# (unmatched tracks are dropped — no unplayable rows), so the level is a proper
+# track list with a Play/Play-all option. The matched count goes in the page
+# TITLE rather than as a list row. A stable structure at every request quantity
+# keeps deep play-by-item_id correct (the 0.6.11 rule).
+sub _playlistResult {
+    my ($client, $payload, $title) = @_;
+
+    my @items   = @{ $payload->{items} || [] };
+    my $matched = $payload->{matched} // scalar(@items);
+    my $total   = $payload->{total}   // scalar(@items);
+
+    # Page title carries the match count, e.g. "Weekly Exploration … (47/50)".
+    my $heading = defined $title && length $title ? $title : cstring($client, 'PLUGIN_LBF_PLAYLISTS');
+    $heading .= " ($matched/$total)";
+
+    return {
+        title => $heading,
+        items => @items ? \@items : [{ name => cstring($client, 'PLUGIN_LBF_NO_MATCH'), type => 'text' }],
+    };
+}
+
+# Cache TTL for a resolved playlist. A playlist containing any local-library track
+# is kept only a day (the file URL can go stale on a rescan/delete); otherwise it
+# follows the long full/partial streaming TTLs.
+sub _playlistTtl {
+    my ($items, $total) = @_;
+    return LIBRARY_TTL if grep { ($_->{_svc} // '') eq 'Library' } @$items;
+    return (scalar(@$items) == $total) ? PLAYLIST_FOUND_TTL : PLAYLIST_PARTIAL_TTL;
+}
+
+# Resolve every track to a streaming track with bounded concurrency, preserving
+# playlist order. Matched items only are returned (unmatched are dropped). A
+# watchdog guarantees the page renders even if a service search hangs.
+sub _resolveTracks {
+    my ($client, $tracks, $done) = @_;
+
+    my $total     = scalar @$tracks;
+    my @slots     = (undef) x $total;   # per-index: hashref (match) / 0 (miss) / undef (pending)
+    my $next      = 0;
+    my $active    = 0;
+    my $completed = 0;
+    my $finished  = 0;
+
+    my $finish = sub {
+        return if $finished;
+        $finished = 1;
+        $done->([ grep { ref $_ } @slots ]);   # matched items, in order
+    };
+
+    Slim::Utils::Timers::setTimer(undef, time() + PLAYLIST_TIMEOUT, sub { $finish->() });
+
+    my $pump;
+    $pump = sub {
+        return if $finished;
+        while ($active < PLAYLIST_CONCURRENCY && $next < $total) {
+            my $i  = $next++;
+            my $tr = $tracks->[$i];
+            $active++;
+            _findPlayableTrack($client, sub {
+                my $item = shift;
+                $slots[$i] = (ref $item eq 'HASH') ? $item : 0;
+                $active--;
+                $completed++;
+                ($completed >= $total) ? $finish->() : $pump->();
+            }, $tr->{artist}, $tr->{title}, $tr->{album}, $tr->{recording_mbid});
+        }
+    };
+
+    $total ? $pump->() : $finish->();
+}
+
+# ---------------------------------------------------------------------------
+# Background warm: pre-fetch the playlist list, pre-resolve every playlist's
+# track matches, and pre-build the grid covers — so opening the Playlists view
+# and any playlist is INSTANT, and the tile art is already cached (no flicker on
+# return). Runs on startup and daily (Plugin::postinitPlugin schedules it). The
+# per-playlist tracks/resolved/grid caches are keyed by mbid|last_modified, so a
+# daily run is cheap: it only does real work when a new week's playlist appears.
+# Playlists are processed one at a time to stay gentle on the streaming APIs.
+# ---------------------------------------------------------------------------
+sub warmCache {
+    my ($client) = @_;
+
+    return unless ($prefs->get('username') // '') ne '';
+
+    # Need a player for the streaming-service API context (Qobuz/Tidal handlers
+    # are fetched per-client). Use any connected player; if none, we still warm
+    # the list + grid covers, and track resolution happens on first open.
+    $client ||= (Slim::Player::Client::clients())[0];
+
+    Plugins::ListenBrainzFreshReleases::API->getCreatedForPlaylists(
+        onDone => sub {
+            my @queue = @{ shift // [] };
+            $log->info("warm: " . scalar(@queue) . " playlist(s)");
+
+            my $svcOrder = join(',', map { lc $_->{name} } _orderedAdapters());
+
+            my $next;
+            $next = sub {
+                my $pl = shift @queue or do { $log->info("warm: done"); return; };
+
+                Plugins::ListenBrainzFreshReleases::API->getPlaylistTracks(
+                    $pl->{mbid}, $pl->{last_modified},
+                    sub {
+                        my $tracks = shift // [];
+
+                        my $rkey = 'lbf:pl:resolved:1:'
+                            . join('|', $pl->{mbid}, ($pl->{last_modified} // ''), $svcOrder);
+
+                        # Already resolved (same week) or no client → move on.
+                        if ($cache->get($rkey) || !$client || !@$tracks) {
+                            $next->();
+                            return;
+                        }
+
+                        _resolveTracks($client, $tracks, sub {
+                            my $items = shift // [];
+                            my $payload = { items => $items, matched => scalar(@$items), total => scalar(@$tracks) };
+                            my $ttl = _playlistTtl($items, scalar @$tracks);
+                            eval { $cache->set($rkey, $payload, $ttl); 1 }
+                                or $log->warn("warm resolved cache set failed: $@");
+                            $log->info("warm: resolved $pl->{mbid} $payload->{matched}/$payload->{total}");
+                            $next->();
+                        });
+                    },
+                    sub { $next->() },
+                );
+            };
+            $next->();
+        },
+        onError => sub { $log->info("warm: playlist list fetch failed: " . (shift // '')) },
     );
 }
 
@@ -813,17 +1133,23 @@ sub _detailMeta {
 sub _streamingAdapters {
     my @adapters;
 
-    push @adapters, { name => 'Qobuz', icon => _pluginIcon('Plugins::Qobuz::Plugin'), run => \&_searchQobuz }
-        if Plugins::Qobuz::Plugin->can('getAPIHandler')
-        && Plugins::Qobuz::Plugin->can('_albumItem');
+    push @adapters, {
+        name => 'Qobuz', icon => _pluginIcon('Plugins::Qobuz::Plugin'),
+        run => \&_searchQobuz, runTrack => \&_searchQobuzTrack,
+    } if Plugins::Qobuz::Plugin->can('getAPIHandler')
+      && Plugins::Qobuz::Plugin->can('_albumItem');
 
-    push @adapters, { name => 'Bandcamp', icon => _pluginIcon('Plugins::Bandcamp::Plugin'), run => \&_searchBandcamp }
-        if Plugins::Bandcamp::Plugin->can('album_list');
+    push @adapters, {
+        name => 'Bandcamp', icon => _pluginIcon('Plugins::Bandcamp::Plugin'),
+        run => \&_searchBandcamp, runTrack => \&_searchBandcampTrack,
+    } if Plugins::Bandcamp::Plugin->can('album_list');
 
-    push @adapters, { name => 'Tidal', icon => _pluginIcon('Plugins::TIDAL::Plugin'), run => \&_searchTidal }
-        if Plugins::TIDAL::Plugin->can('getAPIHandler')
-        && Plugins::TIDAL::Plugin->can('getAlbum')
-        && Plugins::TIDAL::Plugin->can('_renderAlbum');
+    push @adapters, {
+        name => 'Tidal', icon => _pluginIcon('Plugins::TIDAL::Plugin'),
+        run => \&_searchTidal, runTrack => \&_searchTidalTrack,
+    } if Plugins::TIDAL::Plugin->can('getAPIHandler')
+      && Plugins::TIDAL::Plugin->can('getAlbum')
+      && Plugins::TIDAL::Plugin->can('_renderAlbum');
 
     return @adapters;
 }
@@ -1098,6 +1424,280 @@ sub _searchTidal {
         }
         $collect->(\@out);
     }, { type => 'albums', search => $query, limit => 20 });
+}
+
+# ===========================================================================
+# Track-level matching (for the Created-for-You playlists). The album path above
+# resolves to a playable ALBUM node; here each playlist track resolves to a single
+# directly-playable TRACK. To keep the resolved playlist fully cacheable AND
+# quantity-stable (see the 0.6.11 home-shelf lesson), we accept ONLY matches that
+# carry a plain string protocol url (e.g. qobuz://<id>.flac) — no coderef url that
+# Storable can't serialise and that would drop out of a cached list on revisit.
+# ===========================================================================
+
+# Resolve one playlist track to a single playable streaming-track item (or undef).
+# Same ordered-adapter / per-service-timeout / first-priority-wins / versioned-cache
+# shape as _findPlayable, but returns one item and enforces a string url.
+sub _findPlayableTrack {
+    my ($client, $callback, $artist, $title, $album, $recMbid, $force) = @_;
+
+    my @adapters   = grep { $_->{runTrack} } _orderedAdapters();
+    my $titleNorm  = _norm($title);
+    my $artistNorm = _norm($artist);
+    my $query      = join(' ', grep { length } $artistNorm, $titleNorm);
+    my $queryEnc   = $query;
+    utf8::encode($queryEnc) if utf8::is_utf8($queryEnc);
+
+    unless (@adapters && length $titleNorm) {
+        $callback->(undef);
+        return;
+    }
+
+    # Cache the per-track decision (item or "no match") keyed by recording MBID
+    # where available, else the normalised "artist title". Versioned (:1:).
+    my $key = 'lbf:track:1:' . ($recMbid || _norm($query));
+    utf8::encode($key) if utf8::is_utf8($key);
+    if (!$force && (my $c = $cache->get($key))) {
+        $callback->($c->{item});
+        return;
+    }
+
+    # Highest priority: a copy in the user's own LMS library (instant, free, often
+    # higher quality). MBID-exact first, then normalised artist+title. A hit short-
+    # circuits the streaming search entirely. Cached briefly (the file URL could go
+    # stale on a rescan/delete).
+    if ($prefs->get('prefer_library') // 1) {
+        my $local = _findLocalTrack($artist, $title, $recMbid);
+        if ($local) {
+            eval { $cache->set($key, { item => $local }, LIBRARY_TTL); 1 }
+                or $log->warn("track cache set failed: $@");
+            $callback->($local);
+            return;
+        }
+    }
+
+    my @result   = map { undef } @adapters;   # undef pending, [] miss, [item] hit
+    my $resolved = 0;
+
+    my $resolve = sub {
+        return if $resolved;
+        my $win;
+        for my $i (0 .. $#adapters) {
+            return if !defined $result[$i];          # higher-priority svc still pending
+            if (@{ $result[$i] }) { $win = $i; last; }
+        }
+        $resolved = 1;
+        my $item = defined $win ? $result[$win][0] : undef;
+        eval { $cache->set($key, { item => $item }, $item ? TRACK_FOUND_TTL : TRACK_NOMATCH_TTL); 1 }
+            or $log->warn("track cache set failed: $@");
+        $callback->($item);
+    };
+
+    for my $i (0 .. $#adapters) {
+        my $a   = $adapters[$i];
+        my $svc = $a->{name};
+
+        my $settled = 0;
+        my $settle  = sub {
+            return if $settled || $resolved;
+            $settled = 1;
+            my @matched = (ref $_[0] eq 'ARRAY') ? @{ $_[0] } : ();
+            # String-url, directly-playable items only (see header note); keep the first.
+            @matched = grep { defined $_->{url} && !ref $_->{url} } @matched;
+            my $first = $matched[0];
+            $first->{_svc} = $svc if $first;
+            $result[$i] = $first ? [$first] : [];
+            $resolve->();
+        };
+
+        Slim::Utils::Timers::setTimer(undef, time() + STREAM_SVC_TIMEOUT, sub {
+            return if $settled || $resolved;
+            $log->warn("track-match $svc timed out");
+            $settle->([]);
+        });
+
+        eval { $a->{runTrack}->($client, $queryEnc, $artistNorm, $titleNorm, $album, $settle); 1 } or do {
+            $log->warn("track-match $svc failed: $@");
+            $settle->([]);
+        };
+    }
+}
+
+# Find a copy of this track in the local LMS library → a playable item (file URL),
+# or undef. Tier 1: exact MusicBrainz recording MBID (tracks.musicbrainz_id), the
+# most robust signal where files are MB-tagged. Tier 2: LMS's own title search,
+# verified against our normalised artist+title matcher. All DB access is guarded
+# so a schema/availability hiccup just falls through to streaming.
+sub _findLocalTrack {
+    my ($artist, $title, $recMbid) = @_;
+
+    my $titleNorm = _norm($title);
+    return undef if length $titleNorm < 2;
+    my $artistNorm = _norm($artist);
+
+    # Tier 1 — MBID exact.
+    if ($recMbid) {
+        my $item = eval { _localByMbid($recMbid) };
+        $log->warn("local MBID lookup failed: $@") if $@;
+        return $item if $item;
+    }
+
+    # Tier 2 — text search via LMS's titles query, gated by _trackMatches.
+    my $item = eval { _localByText($artist, $title, $artistNorm, $titleNorm) };
+    $log->warn("local text lookup failed: $@") if $@;
+    return $item;
+}
+
+sub _localByMbid {
+    my ($mbid) = @_;
+    return undef unless $mbid && Slim::Schema->can('search');
+    for my $m ($mbid, lc $mbid, uc $mbid) {
+        my $tr = Slim::Schema->search('Track', { musicbrainz_id => $m })->first;
+        return _localItem($tr) if $tr;
+    }
+    return undef;
+}
+
+sub _localByText {
+    my ($artist, $title, $artistNorm, $titleNorm) = @_;
+
+    # Let LMS tokenise/normalise the search; we re-verify candidates ourselves.
+    my $term = join(' ', grep { length } $artist, $title);
+    return undef unless length $term;
+
+    my $req = Slim::Control::Request::executeRequest(undef,
+        ['titles', 0, 20, "search:$term", 'tags:ula']);
+    return undef unless $req;
+
+    for my $e (@{ $req->getResult('titles_loop') || [] }) {
+        next unless _trackMatches($artistNorm, $titleNorm, $e->{artist}, $e->{title});
+        my $item = _localItemFromLoop($e);
+        return $item if $item;
+    }
+    return undef;
+}
+
+# Build a playable library item from a Slim::Schema::Track row.
+sub _localItem {
+    my ($tr) = @_;
+    return undef unless $tr;
+    my $url = eval { $tr->url } or return undef;
+    my $artist = eval { $tr->artistName } || eval { $tr->artist && $tr->artist->name } || '';
+    my $album  = eval { $tr->album && $tr->album->title } || '';
+    my $id     = eval { $tr->id };
+    return _localItemHash($url, eval { $tr->title } // '', $artist, $album, $id);
+}
+
+# Build a playable library item from a 'titles' query loop entry.
+sub _localItemFromLoop {
+    my ($e) = @_;
+    my $url = $e->{url} or return undef;
+    return _localItemHash($url, $e->{title} // '', $e->{artist} // '', $e->{album} // '', $e->{id});
+}
+
+sub _localItemHash {
+    my ($url, $title, $artist, $album, $id) = @_;
+    my $line2 = join(" \x{2013} ", grep { defined && length } $artist, $album);
+    return {
+        name  => $title,
+        ($line2 ne '' ? (line2 => $line2) : ()),
+        type  => 'audio',
+        url   => $url,
+        play  => $url,
+        (defined $id ? (image => "/music/$id/cover.jpg") : ()),
+        _svc  => 'Library',
+    };
+}
+
+# True if a candidate streaming track is the same song: title equals or
+# prefix-matches ours (word boundary — tolerates " (Remastered)" etc. after
+# _norm) AND the artist matches. Mirrors _albumMatches but for track titles.
+sub _trackMatches {
+    my ($artistNorm, $titleNorm, $candArtist, $candTitle) = @_;
+
+    return 0 if length $titleNorm < 2;
+    my $t = _norm($candTitle);
+    return 0 if $t eq '';
+    return 0 unless $t eq $titleNorm || index($t, "$titleNorm ") == 0;
+
+    return $t eq $titleNorm ? 1 : 0 if $artistNorm eq '';
+    return _artistMatch($artistNorm, _norm($candArtist));
+}
+
+# Qobuz: search the track index, keep title+artist matches, build a directly
+# playable audio item using the Qobuz protocol url (qobuz://<id>.flac). A string
+# url => the item is Storable and survives the resolved-playlist cache intact.
+sub _searchQobuzTrack {
+    my ($client, $query, $artistNorm, $titleNorm, $album, $collect) = @_;
+
+    my $api = Plugins::Qobuz::Plugin::getAPIHandler($client);
+    unless ($api) { $collect->([]); return; }
+
+    $api->search(sub {
+        my $res = shift;
+        my @out;
+        for my $tr (@{ ($res && $res->{tracks} && $res->{tracks}{items}) || [] }) {
+            next unless ref $tr eq 'HASH';
+            my $performer = ref $tr->{performer} eq 'HASH' ? $tr->{performer}{name}
+                          : ref $tr->{artist}    eq 'HASH' ? $tr->{artist}{name}
+                          : '';
+            $performer ||= (ref $tr->{album} eq 'HASH' && ref $tr->{album}{artist} eq 'HASH')
+                         ? $tr->{album}{artist}{name} : '';
+            next unless _trackMatches($artistNorm, $titleNorm, $performer, $tr->{title});
+            my $id = $tr->{id} or next;
+
+            my $albumName = ref $tr->{album} eq 'HASH' ? $tr->{album}{title} : '';
+            my $cover;
+            if (ref $tr->{album} eq 'HASH' && ref $tr->{album}{image} eq 'HASH') {
+                $cover = $tr->{album}{image}{large} || $tr->{album}{image}{small};
+            }
+            my $url = "qobuz://$id.flac";
+            push @out, {
+                name  => $tr->{title},
+                line2 => join(" \x{2013} ", grep { length } $performer, $albumName),
+                type  => 'audio',
+                url   => $url,
+                play  => $url,
+                image => $cover,
+            };
+        }
+        $collect->(\@out);
+    }, lc($query), 'tracks');
+}
+
+# Tidal: search the track index, keep title+artist matches. We only adopt a match
+# if the plugin's track renderer yields a plain string play url (kept for cache
+# stability); otherwise treat as no match. (Renderer/protocol confirmed on server.)
+sub _searchTidalTrack {
+    my ($client, $query, $artistNorm, $titleNorm, $album, $collect) = @_;
+
+    my $api = Plugins::TIDAL::Plugin::getAPIHandler($client);
+    unless ($api) { $collect->([]); return; }
+
+    $api->search(sub {
+        my $tracks = shift;
+        my @out;
+        for my $tr (@{ $tracks || [] }) {
+            next unless ref $tr eq 'HASH';
+            my $artistRef  = $tr->{artist} || ($tr->{artists} && $tr->{artists}[0]) || {};
+            my $candArtist = ref $artistRef eq 'HASH' ? $artistRef->{name} : '';
+            next unless _trackMatches($artistNorm, $titleNorm, $candArtist, $tr->{title});
+
+            my $item = Plugins::TIDAL::Plugin->can('_renderTrack')
+                ? eval { Plugins::TIDAL::Plugin::_renderTrack($tr) } : undef;
+            next unless ref $item eq 'HASH' && defined $item->{url} && !ref $item->{url};
+            push @out, $item;
+        }
+        $collect->(\@out);
+    }, { type => 'tracks', search => $query, limit => 20 });
+}
+
+# Bandcamp: its search is album/track-mixed and individual-track streaming isn't a
+# stable string-url path, so track matching is a no-op for now (album matching is
+# unaffected). Left as a clearly-marked hook to fill in once confirmed on server.
+sub _searchBandcampTrack {
+    my ($client, $query, $artistNorm, $titleNorm, $album, $collect) = @_;
+    $collect->([]);
 }
 
 # True if a streaming result is the same release: the candidate title must BE our

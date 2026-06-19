@@ -20,7 +20,7 @@ sub page {
 
 sub prefs {
     return ($prefs, qw(
-        username token lastfm_api_key days sort group_by_artist week_dividers play_via
+        username token lastfm_api_key days sort group_by_artist week_dividers play_via prefer_library
         svc_priority_qobuz svc_priority_bandcamp svc_priority_tidal
         foryou_past foryou_future foryou_artwork_only foryou_various
         foryou_type_album foryou_type_single foryou_type_ep foryou_type_broadcast foryou_type_other

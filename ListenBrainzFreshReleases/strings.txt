@@ -106,6 +106,27 @@ PLUGIN_LBF_FOR_YOU
 PLUGIN_LBF_ALL_RELEASES
 	EN	All Releases
 
+PLUGIN_LBF_SECTION_CREATED_FOR_YOU
+	EN	Created for You
+
+PLUGIN_LBF_SECTION_SETTINGS
+	EN	Settings
+
+PLUGIN_LBF_PLAYLISTS
+	EN	Playlists
+
+PLUGIN_LBF_PLAYLISTS_DESC
+	EN	Created for You
+
+PLUGIN_LBF_NO_PLAYLISTS
+	EN	No playlists found
+
+PLUGIN_LBF_PL_MATCHED
+	EN	%s of %s tracks matched
+
+PLUGIN_LBF_PL_TRACKS
+	EN	%s tracks
+
 PLUGIN_LBF_SETTINGS
 	EN	Plugin Settings
 
@@ -186,6 +207,12 @@ PLUGIN_LBF_PLAY_VIA_SETTING_DESC
 
 PLUGIN_LBF_REFRESH
 	EN	Refresh streaming matches
+
+PLUGIN_LBF_PREFER_LIBRARY
+	EN	Prefer Tracks from My Library
+
+PLUGIN_LBF_PREFER_LIBRARY_DESC
+	EN	When building a playlist, use a track from your own music library if you have it (matched by MusicBrainz ID, then artist + title), before searching streaming services.
 
 PLUGIN_LBF_SECTION_SERVICES
 	EN	Streaming Services

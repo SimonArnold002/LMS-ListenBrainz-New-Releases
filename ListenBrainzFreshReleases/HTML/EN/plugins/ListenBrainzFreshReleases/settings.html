@@ -39,6 +39,10 @@
 <input type="checkbox" name="pref_play_via" value="1" [% IF prefs.play_via %]checked="checked"[% END %]>
 [% END %]
 
+[% WRAPPER setting title="PLUGIN_LBF_PREFER_LIBRARY" desc="PLUGIN_LBF_PREFER_LIBRARY_DESC" %]
+<input type="checkbox" name="pref_prefer_library" value="1" [% IF prefs.prefer_library %]checked="checked"[% END %]>
+[% END %]
+
 <h2>[% 'PLUGIN_LBF_SECTION_SERVICES' | string %]</h2>
 
 [% WRAPPER setting title="PLUGIN_LBF_SVC_PRIORITY" desc="PLUGIN_LBF_SVC_PRIORITY_DESC" %]
