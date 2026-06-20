@@ -60,6 +60,19 @@ sub handler {
             }
         }
 
+        # Unblock any artists whose "remove" box was ticked. blocked_artists is
+        # not in the prefs() list (it's a structured arrayref, not a scalar pref),
+        # so we mutate it here directly; SUPER::handler leaves it untouched. The
+        # checkbox name carries the entry's list index (lbf_unblock_<i>).
+        my $blocked = $prefs->get('blocked_artists');
+        if (ref $blocked eq 'ARRAY' && @$blocked) {
+            my @kept;
+            for my $i (0 .. $#$blocked) {
+                push @kept, $blocked->[$i] unless $params->{"lbf_unblock_$i"};
+            }
+            $prefs->set('blocked_artists', \@kept) if @kept != @$blocked;
+        }
+
         $log->info('ListenBrainz Fresh Releases settings saved');
 
         # Validate the token against ListenBrainz and report the result on the
@@ -97,6 +110,15 @@ sub _render {
     my ($class, $client, $params) = @_;
     require Plugins::ListenBrainzFreshReleases::Browse;
     $params->{lbf_services} = Plugins::ListenBrainzFreshReleases::Browse::serviceStatus();
+
+    # The blocked-artists list (with each entry's index, for the unblock checkbox).
+    my $blocked = $prefs->get('blocked_artists');
+    $blocked = [] unless ref $blocked eq 'ARRAY';
+    $params->{lbf_blocked} = [
+        map {{ idx => $_, name => ($blocked->[$_]{name} // ''), mbid => ($blocked->[$_]{mbid} // '') }}
+        grep { ref $blocked->[$_] eq 'HASH' } 0 .. $#$blocked
+    ];
+
     return $class->SUPER::handler($client, $params);
 }
 

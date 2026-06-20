@@ -3,6 +3,11 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.6 (dev)
+
+### Added
+- **Block an artist from your feeds.** A release's detail page now has a **"Block this artist"** action. Blocked artists are hidden from every feed — New Releases for You, All Releases, and the Material home shelves. There is no ListenBrainz API for this (the `fresh_releases` endpoint only takes date/sort params, and the feedback API is per-recording, not per-artist, and isn't consumed by the feed), so it's a purely local filter applied at render time in `Browse::_filterSection` — it takes effect immediately, no feed-cache clear needed. Matching hides a release if any of its `artist_mbids` is blocked **or** its normalised artist credit name matches a blocked name (the name catch covers feed rows with a different/missing MBID; the MBID catch covers credit-name variants). The blocklist is stored in the `blocked_artists` pref as `[{ mbid, name }, …]`. Various Artists is never offered for blocking (it would hide unrelated compilations). A new **Blocked Artists** settings section lists every blocked artist with an "Unblock" checkbox (tick + save to remove); the detail page shows "This artist is blocked" instead of the action when already blocked.
+
 ## 0.9.5 (dev)
 
 ### Changed

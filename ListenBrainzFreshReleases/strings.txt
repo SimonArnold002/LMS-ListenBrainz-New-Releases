@@ -267,3 +267,27 @@ PLUGIN_LBF_SVC_DETECTED
 
 PLUGIN_LBF_SVC_NOT_DETECTED
 	EN	not installed
+
+PLUGIN_LBF_SECTION_BLOCKED
+	EN	Blocked Artists
+
+PLUGIN_LBF_BLOCKED_ARTISTS
+	EN	Blocked Artists
+
+PLUGIN_LBF_BLOCKED_ARTISTS_DESC
+	EN	Releases by these artists are hidden from every feed. Tick an artist and save to unblock them. Block an artist from a release's detail page ("Block this artist").
+
+PLUGIN_LBF_NO_BLOCKED
+	EN	No artists blocked yet.
+
+PLUGIN_LBF_UNBLOCK
+	EN	Unblock
+
+PLUGIN_LBF_BLOCK_ARTIST
+	EN	Block this artist (hide from feeds)
+
+PLUGIN_LBF_ARTIST_BLOCKED
+	EN	This artist is blocked (unblock in Settings)
+
+PLUGIN_LBF_BLOCKED_DONE
+	EN	Blocked %s — hidden from your feeds. Unblock in Settings.

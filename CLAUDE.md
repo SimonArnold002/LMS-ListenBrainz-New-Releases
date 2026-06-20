@@ -46,7 +46,7 @@ tools/
 ```
 
 ## Current Version
-0.9.5 (dev)
+0.9.6 (dev)
 
 ## Created-for-You Playlists (0.8.0)
 
@@ -238,7 +238,7 @@ convention documented under "Icon System".
 
 ## Settings Structure
 
-Four sections in the settings page (General / Streaming Services / For You / All Releases). Each is a
+Five sections in the settings page (General / Blocked Artists / Streaming Services / For You / All Releases). Each is a
 proper Material settings section (0.8.24): the header is `<div class="prefHead collapsableSection"
 id="lbf_<section>_Header">` and the section's settings are wrapped in a matching `<div
 id="lbf_<section>">` panel. Material's `addExpanders` (iframe-dialog.js) finds `.collapsableSection`
@@ -259,6 +259,9 @@ divider, and it gives no accent bar). The panels also collapse/expand like nativ
 - `week_dividers` — when sorted by release date, insert a divider per week; takes precedence over group_by_artist for the date sort (default ON)
 - `play_via` — show inline playable streaming matches on the detail page (default ON)
 - `prefer_library` — when building a Created-for-You playlist, use a track from the user's own LMS library (matched by MusicBrainz ID, then artist + title) before searching streaming services (default ON; see "Prefer local library")
+
+### Blocked Artists Settings
+- `blocked_artists` — arrayref of `{ mbid, name }`. Releases by these artists are hidden from EVERY feed (For You / All Releases / home shelves) by `Browse::_filterSection` → `_isBlocked` (matches any blocked `artist_mbids` OR normalised credit name). No ListenBrainz API exists for this — the `fresh_releases` endpoint takes only date/sort params and the feedback API is per-recording (love/hate, `score 1/-1`) and isn't consumed by the feed — so it's a purely local, render-time filter (takes effect on next browse; no feed-cache clear). Added from a release detail page's **"Block this artist"** link (`Browse::_blockArtist`); VA is never offered (would hide unrelated compilations). The settings section lists each blocked artist with an Unblock checkbox (`lbf_unblock_<i>`); `Settings::handler` removes ticked entries on save (the pref is NOT in the `prefs()` list, so it's mutated directly).
 
 ### Streaming Services Settings
 - `svc_priority_<qobuz|bandcamp|tidal>` — search priority per service (number 0–9; lower = searched first, **0 = never search it**). Search stops at the first service that matches. Drives BOTH album play-via and playlist track matching. The page lists each known service as detected/not installed via `Browse::serviceStatus`.

@@ -13,6 +13,7 @@ Tested on LMS 9.x with the **Material Skin**.
 - **Weekly view** — when sorted by release date, releases are grouped under a divider per week (`Week of 9 Jun 2026`), newest first. In Material these render as proper section headers (tap a week to focus just that week), and the list supports Material's grid/list view toggle.
 - **Genre tags in the list** — where ListenBrainz supplies tags, up to three are shown next to each title (coverage is partial, so many rows won't have any).
 - **Rich detail pages** — tap a release to see its tracklist (with durations), genres, folksonomy tags, and a clickable **View on MusicBrainz** link. Genres come from MusicBrainz, with an optional **Last.fm** fallback (see below) that fills the gap for brand-new releases MusicBrainz hasn't tagged yet.
+- **Block artists you don't want** — a **Block this artist** action on any release detail page hides every release by that artist from all feeds (New Releases for You, All Releases, and the home shelf). Manage and unblock them in the **Blocked Artists** settings section.
 - **One-tap streaming playback** — if you have the **Qobuz** and/or **Bandcamp** plugins installed, each release detail page shows the matching album on those services (with their logos), playable directly. Matching is by artist + title.
 - **Material home shelf** — adds an optional **New Releases for You** scrollable row to the Material Skin home screen (see below).
 - **Caching** — streaming matches and MusicBrainz lookups are cached so revisiting an album is instant.
@@ -77,6 +78,10 @@ Download `ListenBrainzFreshReleases.zip` from the [latest release](https://githu
 | Find on Streaming Services | **On** | Show playable Qobuz/Bandcamp matches on detail pages |
 
 Both sections share the same set of filters and the same defaults; you can tune each independently.
+
+### Blocked Artists
+
+Artists you've blocked (via **Block this artist** on a release detail page) are listed here, and their releases are hidden from every feed. There is no ListenBrainz API for this — it's a purely local filter, so it takes effect immediately the next time you open a feed. Tick an artist's **Unblock** box and save to start seeing their releases again. Various Artists can't be blocked (it would hide unrelated compilations).
 
 ### New Releases for You
 

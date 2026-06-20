@@ -731,11 +731,13 @@ sub _filterSection {
     my $artwork_only = $prefs->get("${prefix}_artwork_only") // 1;
     my $various      = $prefs->get("${prefix}_various")      // 1;
     my $allowed      = _allowedTypes($prefix);
+    my $blocked      = _blockedSet();
 
     my @out;
     for my $rel (@$releases) {
         next unless _typeMatches($rel, $allowed);
         next if !$various && _isVariousArtists($rel);
+        next if _isBlocked($rel, $blocked);
         next if $artwork_only && !Plugins::ListenBrainzFreshReleases::API->coverArtUrl($rel);
         push @out, $rel;
     }
@@ -859,6 +861,80 @@ sub _isVariousArtists {
     }
 
     return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Blocked artists — a purely local filter (no ListenBrainz API exists for it).
+# The pref is an arrayref of { mbid => '<artist MBID or ''>', name => '<display>' }.
+# A release is hidden if ANY of its artist_mbids is blocked OR its normalised
+# artist credit name matches a blocked name (the name catch covers feed rows
+# that carry a different/no MBID; the MBID catch covers credit-name variants).
+# ---------------------------------------------------------------------------
+
+# Read the pref once and split into fast lookup sets of blocked MBIDs and names.
+sub _blockedSet {
+    my $list = $prefs->get('blocked_artists');
+    $list = [] unless ref $list eq 'ARRAY';
+
+    my (%mbids, %names);
+    for my $e (@$list) {
+        next unless ref $e eq 'HASH';
+        $mbids{ lc $e->{mbid} } = 1 if $e->{mbid};
+        $names{ _norm($e->{name}) } = 1 if defined $e->{name} && length $e->{name};
+    }
+    return { mbids => \%mbids, names => \%names };
+}
+
+# Is this release by a blocked artist? $set is a _blockedSet() result.
+sub _isBlocked {
+    my ($rel, $set) = @_;
+    return 0 unless $set && (%{ $set->{mbids} } || %{ $set->{names} });
+
+    my $mbids = $rel->{artist_mbids};
+    if (ref $mbids eq 'ARRAY') {
+        for my $m (@$mbids) {
+            return 1 if $m && $set->{mbids}{ lc $m };
+        }
+    }
+
+    my $name = _norm(_pickValue($rel, 'artist_credit_name', 'artist_name', 'artist'));
+    return 1 if length $name && $set->{names}{$name};
+
+    return 0;
+}
+
+# Add the release's artist to the blocklist (idempotent). Records the first
+# non-Various-Artists MBID (when present) plus the display name. Returns the
+# display name for the confirmation message.
+sub _blockArtist {
+    my ($rel) = @_;
+
+    my $name = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist');
+    my $mbid = '';
+    my $mbids = $rel->{artist_mbids};
+    if (ref $mbids eq 'ARRAY') {
+        for my $m (@$mbids) {
+            next if !$m || lc($m) eq VA_MBID;
+            $mbid = $m;
+            last;
+        }
+    }
+
+    my $list = $prefs->get('blocked_artists');
+    $list = [] unless ref $list eq 'ARRAY';
+
+    my $norm = _norm($name);
+    for my $e (@$list) {
+        next unless ref $e eq 'HASH';
+        return $name if $mbid && $e->{mbid} && lc($e->{mbid}) eq lc($mbid);
+        return $name if !$mbid && length $norm && _norm($e->{name}) eq $norm;
+    }
+
+    push @$list, { mbid => $mbid, name => $name };
+    $prefs->set('blocked_artists', $list);
+    $log->info("blocked artist: $name" . ($mbid ? " ($mbid)" : ''));
+
+    return $name;
 }
 
 # ---------------------------------------------------------------------------
@@ -1390,6 +1466,34 @@ sub _detailMeta {
         weblink => "https://musicbrainz.org/release/$mbid",
         image   => ICON,
     } if $mbid =~ /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+    # "Block this artist" — hides every release by this artist from all feeds
+    # (managed/unblocked on the settings page). If already blocked, show a static
+    # note instead of the action. Skip entirely for Various Artists (blocking the
+    # VA umbrella would hide unrelated compilations).
+    unless (_isVariousArtists($rel)) {
+        if (_isBlocked($rel, _blockedSet())) {
+            push @detail, {
+                name => cstring($client, 'PLUGIN_LBF_ARTIST_BLOCKED'),
+                type => 'text',
+            };
+        }
+        else {
+            push @detail, {
+                name  => cstring($client, 'PLUGIN_LBF_BLOCK_ARTIST'),
+                type  => 'link',
+                image => ICON,
+                url   => sub {
+                    my ($c, $cb) = @_;
+                    my $name = _blockArtist($rel);
+                    $cb->({ items => [{
+                        name => sprintf(cstring($c, 'PLUGIN_LBF_BLOCKED_DONE'), $name),
+                        type => 'text',
+                    }] });
+                },
+            };
+        }
+    }
 
     return @detail;
 }

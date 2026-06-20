@@ -39,6 +39,14 @@ $prefs->init({
     play_via             => 1,
     prefer_library       => 1,
 
+    # Artists the user has blocked: an arrayref of { mbid => <artist MBID or ''>,
+    # name => <display name> }. Releases by any of these are hidden from every
+    # feed (For You / All Releases + the home shelves) by Browse::_filterSection.
+    # Built from the release detail page's "Block this artist" action; managed
+    # (unblocked) on the settings page. There is no ListenBrainz API for this —
+    # it is a purely local filter applied at render time.
+    blocked_artists      => [],
+
     # Streaming-service search priority. Services are searched in ascending order
     # and the search stops at the first one with a match; 0 = never search it.
     svc_priority_qobuz    => 1,
