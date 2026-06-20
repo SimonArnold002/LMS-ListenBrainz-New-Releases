@@ -25,6 +25,48 @@ PLUGIN_LBF_TOKEN
 PLUGIN_LBF_TOKEN_HINT
 	EN	Your personal API token, found at listenbrainz.org/settings/
 
+PLUGIN_LBF_TOKEN_VALID
+	EN	ListenBrainz token validated successfully.
+
+PLUGIN_LBF_TOKEN_VALID_USER
+	EN	ListenBrainz token validated successfully (user: %s).
+
+PLUGIN_LBF_TOKEN_INVALID
+	EN	ListenBrainz rejected this token. Check it at listenbrainz.org/settings/ and re-save.
+
+PLUGIN_LBF_TOKEN_CHECK_FAILED
+	EN	Could not reach ListenBrainz to validate the token. The settings were saved; the token was not checked.
+
+PLUGIN_LBF_TOKEN_CHECK
+	EN	Check token
+
+PLUGIN_LBF_TOKEN_CHECKING
+	EN	Checking token...
+
+PLUGIN_LBF_TOKEN_EMPTY
+	EN	Enter a token, then click Check token.
+
+PLUGIN_LBF_TOKEN_NET_ERROR
+	EN	Could not reach ListenBrainz to check the token.
+
+PLUGIN_LBF_LASTFM_CHECK
+	EN	Check key
+
+PLUGIN_LBF_LASTFM_VALID
+	EN	Last.fm API key is valid.
+
+PLUGIN_LBF_LASTFM_INVALID
+	EN	Last.fm rejected this API key.
+
+PLUGIN_LBF_LASTFM_CHECKING
+	EN	Checking key...
+
+PLUGIN_LBF_LASTFM_EMPTY
+	EN	No Last.fm key entered (it is optional).
+
+PLUGIN_LBF_LASTFM_NET_ERROR
+	EN	Could not reach Last.fm to check the key.
+
 PLUGIN_LBF_LASTFM_KEY
 	EN	Last.fm API Key (optional)
 
@@ -39,12 +81,6 @@ PLUGIN_LBF_DAYS_HINT
 
 PLUGIN_LBF_DEFAULT_SORT
 	EN	Default sort order
-
-PLUGIN_LBF_FORYOU_ALBUMS
-	EN	Show Albums
-
-PLUGIN_LBF_FORYOU_ALBUMS_DESC
-	EN	Include album release type in the For You feed
 
 PLUGIN_LBF_FORYOU_PAST
 	EN	Include Past Releases
@@ -106,14 +142,32 @@ PLUGIN_LBF_FOR_YOU
 PLUGIN_LBF_ALL_RELEASES
 	EN	All Releases
 
+PLUGIN_LBF_SECTION_CREATED_FOR_YOU
+	EN	Created for You
+
+PLUGIN_LBF_SECTION_SETTINGS
+	EN	Settings
+
+PLUGIN_LBF_PLAYLISTS
+	EN	Playlists
+
+PLUGIN_LBF_NO_PLAYLISTS
+	EN	No playlists found
+
+PLUGIN_LBF_PL_MATCHED
+	EN	%s of %s tracks matched
+
 PLUGIN_LBF_SETTINGS
 	EN	Plugin Settings
 
 PLUGIN_LBF_VIEW_ALL
 	EN	Show all
 
-PLUGIN_LBF_WEEK_OF
-	EN	Week of
+PLUGIN_LBF_WEEK_COMMENCING
+	EN	W/C
+
+PLUGIN_LBF_N_RELEASES
+	EN	%s releases
 
 PLUGIN_LBF_WEEK_UNKNOWN
 	EN	Unknown release date
@@ -138,9 +192,6 @@ PLUGIN_LBF_DATE
 
 PLUGIN_LBF_TYPE
 	EN	Type
-
-PLUGIN_LBF_SEC_TYPES
-	EN	Secondary Types
 
 PLUGIN_LBF_VIEW_ON_MB
 	EN	View on MusicBrainz
@@ -186,6 +237,15 @@ PLUGIN_LBF_PLAY_VIA_SETTING_DESC
 
 PLUGIN_LBF_REFRESH
 	EN	Refresh streaming matches
+
+PLUGIN_LBF_REFRESH_FEED
+	EN	Refresh (force update now)
+
+PLUGIN_LBF_PREFER_LIBRARY
+	EN	Prefer Tracks from My Library
+
+PLUGIN_LBF_PREFER_LIBRARY_DESC
+	EN	When building a playlist, use a track from your own music library if you have it (matched by MusicBrainz ID, then artist + title), before searching streaming services.
 
 PLUGIN_LBF_SECTION_SERVICES
 	EN	Streaming Services

@@ -1,17 +1,22 @@
 [% PROCESS settings/header.html %]
 
-<h2>[% 'PLUGIN_LBF_SECTION_GENERAL' | string %]</h2>
+<div class="prefHead collapsableSection" id="lbf_general_Header">[% 'PLUGIN_LBF_SECTION_GENERAL' | string %]</div>
+<div id="lbf_general">
 
 [% WRAPPER setting title="PLUGIN_LBF_USERNAME" desc="PLUGIN_LBF_USERNAME_HINT" %]
 <input type="text" name="pref_username" value="[% prefs.username %]" size="40" autocomplete="off">
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LBF_TOKEN" desc="PLUGIN_LBF_TOKEN_HINT" %]
-<input type="password" name="pref_token" value="[% prefs.token %]" size="45" autocomplete="off">
+<input type="password" name="pref_token" id="lbf_token" value="[% prefs.token %]" size="45" autocomplete="off">
+<button type="button" id="lbf_token_check" style="margin-left:6px;">[% 'PLUGIN_LBF_TOKEN_CHECK' | string %]</button>
+<div id="lbf_token_status" style="margin-top:6px;font-weight:bold;"></div>
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LBF_LASTFM_KEY" desc="PLUGIN_LBF_LASTFM_KEY_HINT" %]
-<input type="password" name="pref_lastfm_api_key" value="[% prefs.lastfm_api_key %]" size="45" autocomplete="off">
+<input type="password" name="pref_lastfm_api_key" id="lbf_lastfm" value="[% prefs.lastfm_api_key %]" size="45" autocomplete="off">
+<button type="button" id="lbf_lastfm_check" style="margin-left:6px;">[% 'PLUGIN_LBF_LASTFM_CHECK' | string %]</button>
+<div id="lbf_lastfm_status" style="margin-top:6px;font-weight:bold;"></div>
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LBF_DAYS" desc="PLUGIN_LBF_DAYS_HINT" %]
@@ -39,7 +44,14 @@
 <input type="checkbox" name="pref_play_via" value="1" [% IF prefs.play_via %]checked="checked"[% END %]>
 [% END %]
 
-<h2>[% 'PLUGIN_LBF_SECTION_SERVICES' | string %]</h2>
+[% WRAPPER setting title="PLUGIN_LBF_PREFER_LIBRARY" desc="PLUGIN_LBF_PREFER_LIBRARY_DESC" %]
+<input type="checkbox" name="pref_prefer_library" value="1" [% IF prefs.prefer_library %]checked="checked"[% END %]>
+[% END %]
+
+</div>
+
+<div class="prefHead collapsableSection" id="lbf_services_Header">[% 'PLUGIN_LBF_SECTION_SERVICES' | string %]</div>
+<div id="lbf_services">
 
 [% WRAPPER setting title="PLUGIN_LBF_SVC_PRIORITY" desc="PLUGIN_LBF_SVC_PRIORITY_DESC" %]
 <div>
@@ -54,7 +66,10 @@
 </div>
 [% END %]
 
-<h2>[% 'PLUGIN_LBF_SECTION_FORYOU' | string %]</h2>
+</div>
+
+<div class="prefHead collapsableSection" id="lbf_foryou_Header">[% 'PLUGIN_LBF_SECTION_FORYOU' | string %]</div>
+<div id="lbf_foryou">
 
 [% WRAPPER setting title="PLUGIN_LBF_ALL_TYPES" desc="PLUGIN_LBF_ALL_TYPES_DESC" %]
 <div>
@@ -87,7 +102,10 @@
 <input type="checkbox" name="pref_foryou_various" value="1" [% IF prefs.foryou_various %]checked="checked"[% END %]>
 [% END %]
 
-<h2>[% 'PLUGIN_LBF_SECTION_ALL' | string %]</h2>
+</div>
+
+<div class="prefHead collapsableSection" id="lbf_all_Header">[% 'PLUGIN_LBF_SECTION_ALL' | string %]</div>
+<div id="lbf_all">
 
 [% WRAPPER setting title="PLUGIN_LBF_ALL_PAST" desc="PLUGIN_LBF_ALL_PAST_DESC" %]
 <input type="checkbox" name="pref_all_past" value="1" [% IF prefs.all_past %]checked="checked"[% END %]>
@@ -119,5 +137,92 @@
 [% WRAPPER setting title="PLUGIN_LBF_DISPLAY_VARIOUS" desc="PLUGIN_LBF_DISPLAY_VARIOUS_DESC" %]
 <input type="checkbox" name="pref_all_various" value="1" [% IF prefs.all_various %]checked="checked"[% END %]>
 [% END %]
+
+</div>
+
+[%# Inline credential checks. Material loads plugin settings in an iframe and does %]
+[%# NOT surface the server-side "warning" message, so validate the ListenBrainz token %]
+[%# AND the Last.fm key directly from the browser (both APIs send Allow-Origin: *) and %]
+[%# show the result inline. Each runs on page load (if populated), on field blur, and %]
+[%# on its Check button. The server-side validateToken on save still runs for the %]
+[%# classic skin; this is what makes the result visible in Material. %]
+<script type="text/javascript">
+(function() {
+    var LB = {
+        VALID:      "[% 'PLUGIN_LBF_TOKEN_VALID'      | string %]",
+        VALID_USER: "[% 'PLUGIN_LBF_TOKEN_VALID_USER' | string %]",
+        INVALID:    "[% 'PLUGIN_LBF_TOKEN_INVALID'    | string %]",
+        CHECKING:   "[% 'PLUGIN_LBF_TOKEN_CHECKING'   | string %]",
+        EMPTY:      "[% 'PLUGIN_LBF_TOKEN_EMPTY'      | string %]",
+        NETERR:     "[% 'PLUGIN_LBF_TOKEN_NET_ERROR'  | string %]"
+    };
+    var LF = {
+        VALID:    "[% 'PLUGIN_LBF_LASTFM_VALID'     | string %]",
+        INVALID:  "[% 'PLUGIN_LBF_LASTFM_INVALID'   | string %]",
+        CHECKING: "[% 'PLUGIN_LBF_LASTFM_CHECKING'  | string %]",
+        EMPTY:    "[% 'PLUGIN_LBF_LASTFM_EMPTY'     | string %]",
+        NETERR:   "[% 'PLUGIN_LBF_LASTFM_NET_ERROR' | string %]"
+    };
+
+    function el(id) { return document.getElementById(id); }
+    function val(id) { var f = el(id); return f ? (f.value || '').replace(/^\s+|\s+$/g, '') : ''; }
+    function setStatus(id, text, color) {
+        var s = el(id);
+        if (s) { s.textContent = text; s.style.color = color; }
+    }
+
+    function checkToken() {
+        var tok = val('lbf_token');
+        if (!tok) { setStatus('lbf_token_status', LB.EMPTY, '#b00'); return; }
+        setStatus('lbf_token_status', LB.CHECKING, '#888');
+        fetch('https://api.listenbrainz.org/1/validate-token?token=' + encodeURIComponent(tok),
+              { headers: { 'Accept': 'application/json' } })
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                if (d && d.valid) {
+                    setStatus('lbf_token_status', d.user_name ? LB.VALID_USER.replace('%s', d.user_name) : LB.VALID, '#2e7d32');
+                } else {
+                    setStatus('lbf_token_status', LB.INVALID, '#b00');
+                }
+            })
+            .catch(function() { setStatus('lbf_token_status', LB.NETERR, '#e65100'); });
+    }
+
+    function checkLastfm() {
+        var key = val('lbf_lastfm');
+        if (!key) { setStatus('lbf_lastfm_status', LF.EMPTY, '#888'); return; }   // optional, so not an error
+        setStatus('lbf_lastfm_status', LF.CHECKING, '#888');
+        fetch('https://ws.audioscrobbler.com/2.0/?method=auth.gettoken&format=json&api_key=' + encodeURIComponent(key))
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                if (d && !d.error && d.token) {
+                    setStatus('lbf_lastfm_status', LF.VALID, '#2e7d32');
+                } else {
+                    setStatus('lbf_lastfm_status', LF.INVALID, '#b00');
+                }
+            })
+            .catch(function() { setStatus('lbf_lastfm_status', LF.NETERR, '#e65100'); });
+    }
+
+    function wire(fieldId, btnId, fn) {
+        var b = el(btnId);
+        if (b) b.addEventListener('click', fn);
+        var f = el(fieldId);
+        if (f) {
+            f.addEventListener('blur', function() { if ((f.value || '').trim()) fn(); });
+            if ((f.value || '').trim()) fn();   // show current status on open
+        }
+    }
+    function init() {
+        wire('lbf_token',  'lbf_token_check',  checkToken);
+        wire('lbf_lastfm', 'lbf_lastfm_check', checkLastfm);
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+})();
+</script>
 
 [% PROCESS settings/footer.html %]

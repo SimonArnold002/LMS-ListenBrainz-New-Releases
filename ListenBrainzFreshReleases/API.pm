@@ -26,10 +26,11 @@ use constant LFM_EMPTY_TTL =>  7 * 86400;
 # The fresh-releases feed only changes ~daily, but the Material home row reloads
 # it constantly. Without caching, every home/menu view fired a fresh, slow (2-15s)
 # ListenBrainz call — which flooded and rate-limited the API and hung the home
-# page. Cache the parsed feed so repeat views are instant. 6h balances freshness
-# (the data is ~daily) against fetch count; All Releases also rolls over at local
-# midnight anyway via the date in its cache key.
-use constant FEED_TTL => 6 * 3600;   # 6 hours
+# page. Cache the parsed feed so repeat views are instant. The data is ~daily, so
+# refresh once a day; a "Refresh" row in each list lets the user force one sooner
+# (it removes the key below via clearFeedCache). All Releases also rolls over at
+# local midnight via the date in its cache key.
+use constant FEED_TTL => 24 * 3600;   # 1 day
 
 # Network timeout for the feed fetches — kept short so a slow/unreachable
 # ListenBrainz fails fast instead of leaving the menu/home spinning.
@@ -39,13 +40,21 @@ use constant FEED_TIMEOUT => 10;
 # (ListenBrainz down/slow) we serve this so the menu/home still shows something.
 use constant FEED_FALLBACK_TTL => 30 * 86400;
 
+# The Created-for-You playlist LISTING only changes weekly (new Weekly Jams /
+# Exploration generated each Monday in the user's timezone; ListenBrainz keeps the
+# current + previous week). A 6h feed TTL would refetch it pointlessly all week, so
+# cache it a day — fresh enough to pick up Monday's rollover within 24h, but a
+# fraction of the API calls. The per-playlist tracks/resolved caches (keyed by
+# last_modified) are what's expensive, and they're immutable per key.
+use constant PLAYLIST_LIST_TTL => 24 * 3600;   # 1 day
+
 use constant BASE_URL        => 'https://api.listenbrainz.org';
 use constant CAA_BASE_URL    => 'https://coverartarchive.org/release/';
 use constant MB_BASE_URL     => 'https://musicbrainz.org/ws/2/';
 use constant LASTFM_BASE_URL => 'https://ws.audioscrobbler.com/2.0/';
 
 # MusicBrainz requires a descriptive User-Agent identifying the application
-use constant USER_AGENT   => 'LMS-ListenBrainzFreshReleases/0.7.0 ( https://github.com/SimonArnold002/LMS-ListenBrainz-New-Releases )';
+use constant USER_AGENT   => 'LMS-ListenBrainzFreshReleases/0.8.22 ( https://github.com/SimonArnold002/LMS-ListenBrainz-New-Releases )';
 
 # ---------------------------------------------------------------------------
 # GET /1/user/<username>/fresh_releases  (personalised, auth required)
@@ -83,11 +92,19 @@ sub getFreshReleasesForUser {
 
     my $http = Slim::Networking::SimpleAsyncHTTP->new(
         sub {
-            _handleResponse(shift, sub {
-                my $releases = shift;
-                _cacheFeed($cacheKey, $fbKey, $releases);
-                $args{onDone}->($releases);
-            });
+            my $resp = shift;
+            _handleResponse($resp,
+                sub {
+                    my $releases = shift;
+                    _cacheFeed($cacheKey, $fbKey, $releases);
+                    $args{onDone}->($releases);
+                },
+                # A 200 with an unparseable / unexpected body must NOT be cached as
+                # an empty feed (it would blank the menu for FEED_TTL). Route it
+                # through the same fallback path as a transport error so the last
+                # good copy is served instead.
+                sub { _feedError($resp, $fbKey, $args{onDone}, $args{onError}) },
+            );
         },
         sub { _feedError(shift, $fbKey, $args{onDone}, $args{onError}) },
         { timeout => FEED_TIMEOUT }
@@ -128,11 +145,17 @@ sub getFreshReleasesAll {
 
     my $http = Slim::Networking::SimpleAsyncHTTP->new(
         sub {
-            _handleResponse(shift, sub {
-                my $releases = shift;
-                _cacheFeed($cacheKey, $fbKey, $releases);
-                $args{onDone}->($releases);
-            });
+            my $resp = shift;
+            _handleResponse($resp,
+                sub {
+                    my $releases = shift;
+                    _cacheFeed($cacheKey, $fbKey, $releases);
+                    $args{onDone}->($releases);
+                },
+                # See getFreshReleasesForUser: don't cache an unparseable 200 —
+                # fall back to the last good copy instead.
+                sub { _feedError($resp, $fbKey, $args{onDone}, $args{onError}) },
+            );
         },
         sub { _feedError(shift, $fbKey, $args{onDone}, $args{onError}) },
         { timeout => FEED_TIMEOUT }
@@ -150,6 +173,31 @@ sub _cacheFeed {
     eval { $cache->set($fbKey,    $releases, FEED_FALLBACK_TTL); 1 } or $log->warn("feed fallback cache set failed: $@");
 }
 
+# Drop the working cache key for a feed so the next view re-fetches (used by the
+# "Refresh" row). $which is 'user' or 'all'. The key here MUST match the one built
+# in getFreshReleasesForUser / getFreshReleasesAll (same prefs, same format). The
+# long-lived fallback copy is left intact — it's only consulted on a fetch error.
+sub clearFeedCache {
+    my ($class, $which) = @_;
+    my $sort = $prefs->get('sort') // 'release_date';
+    my $days = $prefs->get('days') // 14;
+
+    if ($which eq 'all') {
+        my $past   = ($prefs->get('all_past')   // 1) ? 'true' : 'false';
+        my $future = ($prefs->get('all_future') // 0) ? 'true' : 'false';
+        my @t = localtime(time);
+        my $today = sprintf('%04d-%02d-%02d', $t[5]+1900, $t[4]+1, $t[3]);
+        $cache->remove('lbf:feed:all:' . join('|', $sort, $past, $future, $days, $today));
+    }
+    else {
+        my $username = $prefs->get('username') // '';
+        my $past   = ($prefs->get('foryou_past')   // 1) ? 'true' : 'false';
+        my $future = ($prefs->get('foryou_future') // 0) ? 'true' : 'false';
+        $cache->remove('lbf:feed:user:' . join('|', $username, $sort, $past, $future, $days));
+    }
+    $log->info("cleared $which feed cache (forced refresh)");
+}
+
 # On a feed fetch failure, serve the last successfully cached copy if we have one
 # (a ListenBrainz outage then degrades to slightly-stale data instead of an empty
 # / error menu). Only when there's nothing cached do we surface the error.
@@ -162,6 +210,193 @@ sub _feedError {
         return;
     }
     _handleError($resp, $onError);
+}
+
+# ---------------------------------------------------------------------------
+# GET /1/user/<username>/playlists/createdfor  — the algorithmic "Created for
+# You" playlists (Weekly Jams, Weekly Exploration, Daily Jams, …). Readable
+# without a token; we send the token too if present. The listing's per-playlist
+# track array is always empty — the tracks come from getPlaylistTracks.
+# ---------------------------------------------------------------------------
+sub getCreatedForPlaylists {
+    my ($class, %args) = @_;
+
+    my $username = $prefs->get('username') // '';
+    my $token    = $prefs->get('token')    // '';
+
+    unless ($username) {
+        $args{onError}->("No ListenBrainz username configured");
+        return;
+    }
+
+    my $cacheKey = 'lbf:pl:list:'   . $username;
+    my $fbKey    = 'lbf:pl:listfb:' . $username;
+    if (my $cached = $cache->get($cacheKey)) {
+        $log->info("Created-for playlists cache hit ($cacheKey)");
+        $args{onDone}->($cached);
+        return;
+    }
+
+    (my $safe_user = $username) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
+    my $url = sprintf('%s/1/user/%s/playlists/createdfor?count=25', BASE_URL, $safe_user);
+
+    $log->info("Fetching created-for playlists: $url");
+
+    my @headers = ('Accept' => 'application/json');
+    push @headers, ('Authorization' => "Token $token") if $token;
+
+    my $http = Slim::Networking::SimpleAsyncHTTP->new(
+        sub {
+            my $resp = shift;
+            my $data = eval { from_json($resp->content) };
+            if ($@) {
+                $log->error("Created-for JSON parse error: $@");
+                _feedError($resp, $fbKey, $args{onDone}, $args{onError});
+                return;
+            }
+            my $playlists = _parsePlaylistList($data);
+            # Use the feed-style dual cache so a later outage degrades to the
+            # last good copy rather than an empty section.
+            eval { $cache->set($cacheKey, $playlists, PLAYLIST_LIST_TTL);  1 } or $log->warn("pl list cache set failed: $@");
+            eval { $cache->set($fbKey,    $playlists, FEED_FALLBACK_TTL); 1 } or $log->warn("pl list fallback set failed: $@");
+            $args{onDone}->($playlists);
+        },
+        sub { _feedError(shift, $fbKey, $args{onDone}, $args{onError}) },
+        { timeout => FEED_TIMEOUT }
+    );
+
+    $http->get($url, @headers);
+}
+
+# Normalise the createdfor response into a newest-first arrayref of
+# { mbid, title, annotation, source_patch, track_count, last_modified }.
+sub _parsePlaylistList {
+    my ($data) = @_;
+    return [] unless ref $data eq 'HASH' && ref $data->{playlists} eq 'ARRAY';
+
+    my @out;
+    for my $wrap (@{ $data->{playlists} }) {
+        my $p = ref $wrap eq 'HASH' ? $wrap->{playlist} : undef;
+        next unless ref $p eq 'HASH';
+
+        my $ext = $p->{extension}
+            && $p->{extension}{'https://musicbrainz.org/doc/jspf#playlist'};
+        $ext = {} unless ref $ext eq 'HASH';
+        my $meta = ref $ext->{additional_metadata} eq 'HASH' ? $ext->{additional_metadata} : {};
+        my $algo = ref $meta->{algorithm_metadata} eq 'HASH' ? $meta->{algorithm_metadata} : {};
+
+        my $mbid = '';
+        if (defined $p->{identifier}) {
+            my $id = ref $p->{identifier} eq 'ARRAY' ? $p->{identifier}[0] : $p->{identifier};
+            ($mbid) = ($id // '') =~ m{/playlist/([0-9a-f-]{36})}i;
+        }
+        next unless $mbid;
+
+        push @out, {
+            mbid          => lc $mbid,
+            title         => $p->{title} // 'Playlist',
+            annotation    => _stripHtml($p->{annotation} // ''),
+            source_patch  => $algo->{source_patch} // '',
+            track_count   => $meta->{playlist_length} // 0,
+            last_modified => $ext->{last_modified_at} // $p->{date} // '',
+        };
+    }
+
+    # Newest-first by last_modified (ISO-8601 sorts lexically).
+    @out = sort { ($b->{last_modified} // '') cmp ($a->{last_modified} // '') } @out;
+    return \@out;
+}
+
+# ---------------------------------------------------------------------------
+# GET /1/playlist/<mbid>  — the full JSPF playlist with its tracks. A playlist's
+# contents are immutable for a given last_modified, so cache long once found.
+# ---------------------------------------------------------------------------
+sub getPlaylistTracks {
+    my ($class, $mbid, $lastModified, $onDone, $onError) = @_;
+
+    unless ($mbid) {
+        $onError->('No playlist MBID') if ref $onError eq 'CODE';
+        return;
+    }
+
+    my $cacheKey = 'lbf:pl:tracks:' . join('|', $mbid, ($lastModified // ''));
+    if (my $cached = $cache->get($cacheKey)) {
+        $log->info("Playlist tracks cache hit: $mbid");
+        $onDone->($cached);
+        return;
+    }
+
+    (my $safe = $mbid) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
+    my $url = BASE_URL . '/1/playlist/' . $safe;
+
+    $log->info("Fetching playlist tracks: $url");
+
+    my $http = Slim::Networking::SimpleAsyncHTTP->new(
+        sub {
+            my $resp = shift;
+            my $data = eval { from_json($resp->content) };
+            if ($@) {
+                $log->error("Playlist JSON parse error: $@");
+                $onError->("JSON error: $@") if ref $onError eq 'CODE';
+                return;
+            }
+            my $tracks = _parsePlaylistTracks($data);
+            my $ttl    = @$tracks ? MB_FOUND_TTL : MB_EMPTY_TTL;
+            eval { $cache->set($cacheKey, $tracks, $ttl); 1 }
+                or $log->warn("playlist tracks cache set failed: $@");
+            $onDone->($tracks);
+        },
+        sub { _handleError(shift, $onError) },
+        { timeout => 15 }
+    );
+
+    $http->get($url, 'Accept' => 'application/json', 'User-Agent' => USER_AGENT);
+}
+
+# Normalise playlist.track[] into an arrayref of
+# { title, artist, album, duration_ms, recording_mbid, caa_id, caa_release_mbid }.
+sub _parsePlaylistTracks {
+    my ($data) = @_;
+    my $p = (ref $data eq 'HASH') ? $data->{playlist} : undef;
+    return [] unless ref $p eq 'HASH' && ref $p->{track} eq 'ARRAY';
+
+    my @out;
+    for my $t (@{ $p->{track} }) {
+        next unless ref $t eq 'HASH';
+
+        my $ext = $t->{extension}
+            && $t->{extension}{'https://musicbrainz.org/doc/jspf#track'};
+        $ext = {} unless ref $ext eq 'HASH';
+        my $meta = ref $ext->{additional_metadata} eq 'HASH' ? $ext->{additional_metadata} : {};
+
+        my $recMbid = '';
+        if (defined $t->{identifier}) {
+            my $id = ref $t->{identifier} eq 'ARRAY' ? $t->{identifier}[0] : $t->{identifier};
+            ($recMbid) = ($id // '') =~ m{/recording/([0-9a-f-]{36})}i;
+        }
+
+        push @out, {
+            title            => $t->{title}   // '',
+            artist           => $t->{creator} // '',
+            album            => $t->{album}   // '',
+            duration_ms      => $t->{duration},
+            recording_mbid   => lc($recMbid // ''),
+            caa_id           => $meta->{caa_id},
+            caa_release_mbid => $meta->{caa_release_mbid},
+        };
+    }
+    return \@out;
+}
+
+# Strip HTML tags / collapse whitespace from a playlist annotation for line2 use.
+sub _stripHtml {
+    my ($s) = @_;
+    return '' unless defined $s;
+    $s =~ s/<[^>]+>/ /g;
+    $s =~ s/&[a-z]+;/ /gi;
+    $s =~ s/\s+/ /g;
+    $s =~ s/^\s+|\s+$//g;
+    return $s;
 }
 
 # ---------------------------------------------------------------------------
@@ -225,9 +460,12 @@ sub getReleaseDetails {
                 return;
             }
             my $parsed = _parseReleaseDetails($data);
-            my $ttl    = (@{ $parsed->{media} } || @{ $parsed->{genres} })
-                       ? MB_FOUND_TTL : MB_EMPTY_TTL;
-            $cache->set($cacheKey, $parsed, $ttl);
+            # This request only asks for recordings (the tracklist); genres come
+            # from the release-GROUP (getReleaseGroupGenres), so the TTL is driven
+            # purely by whether we got a tracklist.
+            my $ttl    = @{ $parsed->{media} } ? MB_FOUND_TTL : MB_EMPTY_TTL;
+            eval { $cache->set($cacheKey, $parsed, $ttl); 1 }
+                or $log->warn("release detail cache set failed: $@");
             $onDone->($parsed);
         },
         sub { _handleError(shift, $onError) },
@@ -413,11 +651,13 @@ sub _parseLastfmTags {
     return \@out;
 }
 
-# Normalise a MusicBrainz release lookup into { genres => [names], media => [...] }
+# Normalise a MusicBrainz release lookup into { media => [...] }. Genres are NOT
+# read here — they live on the release-group (getReleaseGroupGenres); the release
+# request only includes recordings.
 sub _parseReleaseDetails {
     my ($data) = @_;
 
-    my %out = (genres => _parseGenres($data), media => []);
+    my %out = (media => []);
 
     # Tracks are grouped by medium (disc); preserve that grouping
     if (ref $data->{media} eq 'ARRAY') {
@@ -453,7 +693,9 @@ sub coverArtUrl {
     # in the fresh_releases payload. release_mbid is always present, so falling
     # back to it returned a URL even when no art exists (404s + broke the
     # artwork-only filter). Require caa_release_mbid so absence == no artwork.
-    my $mbid = $rel->{caa_release_mbid};
+    # Accept either a release hashref or a bare caa_release_mbid string so
+    # playlist tracks (which carry the mbid directly) can reuse this.
+    my $mbid = (ref $rel eq 'HASH') ? $rel->{caa_release_mbid} : $rel;
     return undef unless $mbid;
     return CAA_BASE_URL . $mbid . '/front-250';
 }
@@ -461,8 +703,15 @@ sub coverArtUrl {
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+# Parse a fresh-releases response. On success calls $onDone with the releases
+# arrayref (which may legitimately be empty). On an unparseable body or an
+# unrecognised structure calls $onError instead, so the caller can fall back to
+# the last good cached copy rather than caching the failure as an empty feed.
+# $onError defaults to the old behaviour (an empty list) for any caller that
+# doesn't pass one.
 sub _handleResponse {
-    my ($resp, $onDone) = @_;
+    my ($resp, $onDone, $onError) = @_;
+    $onError ||= sub { $onDone->([]) };
 
     $log->info("ListenBrainz API response code: " . $resp->code);
     $log->info("ListenBrainz API response length: " . length($resp->content));
@@ -470,40 +719,36 @@ sub _handleResponse {
     my $data = eval { from_json($resp->content) };
     if ($@) {
         $log->error("JSON parse error: $@");
-        $onDone->([]);
+        $onError->("JSON parse error: $@");
         return;
     }
-
-    my $releases = [];
 
     if (ref $data eq 'HASH') {
         my $payload = $data->{payload};
         if (ref $payload eq 'HASH' && ref $payload->{fresh_releases} eq 'ARRAY') {
-            $releases = $payload->{fresh_releases};
-            $log->info("Found " . scalar(@$releases) . " releases in payload.fresh_releases");
+            $log->info("Found " . scalar(@{ $payload->{fresh_releases} }) . " releases in payload.fresh_releases");
+            $onDone->($payload->{fresh_releases});
         } elsif (ref $payload eq 'HASH' && ref $payload->{releases} eq 'ARRAY') {
-            $releases = $payload->{releases};
-            $log->info("Found " . scalar(@$releases) . " releases in payload.releases");
+            $log->info("Found " . scalar(@{ $payload->{releases} }) . " releases in payload.releases");
+            $onDone->($payload->{releases});
         } elsif (ref $payload eq 'ARRAY') {
-            $releases = $payload;
-            $log->info("Found " . scalar(@$releases) . " releases in payload array");
+            $log->info("Found " . scalar(@$payload) . " releases in payload array");
+            $onDone->($payload);
         } elsif (ref $data->{fresh_releases} eq 'ARRAY') {
-            $releases = $data->{fresh_releases};
-            $log->info("Found " . scalar(@$releases) . " releases in fresh_releases");
+            $log->info("Found " . scalar(@{ $data->{fresh_releases} }) . " releases in fresh_releases");
+            $onDone->($data->{fresh_releases});
         } else {
-            $log->info("Unexpected response structure, keys: " . join(', ', keys %$data));
-            if (ref $payload eq 'HASH') {
-                $log->info("Payload keys: " . join(', ', keys %$payload));
-            }
+            $log->warn("Unexpected response structure, keys: " . join(', ', keys %$data));
+            $log->warn("Payload keys: " . join(', ', keys %$payload)) if ref $payload eq 'HASH';
+            $onError->("unexpected response structure");
         }
     } elsif (ref $data eq 'ARRAY') {
-        $releases = $data;
-        $log->info("Found " . scalar(@$releases) . " releases in root array");
+        $log->info("Found " . scalar(@$data) . " releases in root array");
+        $onDone->($data);
     } else {
         $log->error("Unexpected data type: " . ref($data));
+        $onError->("unexpected data type");
     }
-
-    $onDone->($releases);
 }
 
 sub _handleError {

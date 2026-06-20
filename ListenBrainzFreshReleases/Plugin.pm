@@ -7,10 +7,21 @@ use Slim::Utils::Log;
 use Slim::Utils::Prefs;
 use Slim::Utils::PluginManager;
 use Slim::Utils::Strings qw(string cstring);
+use Slim::Utils::Timers;
+
+# Background cache-warm timing: first run shortly after startup (so it doesn't
+# compete with boot), then once a day. Daily is cheap because the playlist
+# caches are keyed by last_modified — real work happens only when a new week's
+# playlist appears.
+use constant WARM_DELAY    => 60;          # seconds after startup
+use constant WARM_INTERVAL => 24 * 3600;   # daily
 
 my $log = Slim::Utils::Log->addLogCategory({
     'category'     => 'plugin.listenbrainzfreshreleases',
-    'defaultLevel' => 'INFO',
+    # WARN in production keeps server.log quiet (the INFO lines log every API
+    # response code/length/URL and cache hit). Raise to INFO via Settings →
+    # Logging when diagnosing.
+    'defaultLevel' => 'WARN',
     'description'  => 'PLUGIN_LISTENBRAINZ_FRESH_RELEASES',
 });
 
@@ -26,6 +37,7 @@ $prefs->init({
     group_by_artist      => 1,
     week_dividers        => 1,
     play_via             => 1,
+    prefer_library       => 1,
 
     # Streaming-service search priority. Services are searched in ascending order
     # and the search stops at the first one with a match; 0 = never search it.
@@ -131,6 +143,24 @@ sub postinitPlugin {
             1;
         } or $log->error("Failed to register Material home extra: $@");
     }
+
+    # Warm the Created-for-You caches (playlist list, per-track matches, grid
+    # covers) shortly after startup, then daily — so the Playlists view and each
+    # playlist open instantly and the tile artwork is pre-rendered. A daily tick
+    # is cheap (caches keyed by last_modified; real work only when a new week's
+    # playlist lands). First run is delayed so it doesn't compete with boot.
+    Slim::Utils::Timers::setTimer(undef, time() + WARM_DELAY, \&_warmTick);
+}
+
+# Run the warm, then re-arm for the next day.
+sub _warmTick {
+    eval {
+        require Plugins::ListenBrainzFreshReleases::Browse;
+        Plugins::ListenBrainzFreshReleases::Browse::warmCache();
+        1;
+    } or $log->error("Playlist warm failed: $@");
+
+    Slim::Utils::Timers::setTimer(undef, time() + WARM_INTERVAL, \&_warmTick);
 }
 
 sub getDisplayName { 'PLUGIN_LISTENBRAINZ_FRESH_RELEASES' }
