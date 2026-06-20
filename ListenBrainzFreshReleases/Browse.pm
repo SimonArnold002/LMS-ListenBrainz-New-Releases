@@ -199,10 +199,10 @@ sub _stashPlaylistSummary {
     return unless ref $playlists eq 'ARRAY' && @$playlists;
     my @starts;
     for my $pl (@$playlists) {
-        my $lm    = $pl->{last_modified} // '';
+        my $lm    = _isoToLocalDate($pl->{last_modified} // '');   # UTC instant → local date
         my $start = (lc($pl->{source_patch} // '') =~ /^weekly-/)
             ? _weekStart($lm)
-            : ($lm =~ /^(\d{4}-\d{2}-\d{2})/ ? $1 : '');
+            : $lm;
         push @starts, $start if $start;
     }
     return unless @starts;
@@ -428,14 +428,17 @@ sub _playlistTile {
     # the resolve here; omitted until that cache is populated.
     my $patch = lc($pl->{source_patch} // '');
     my $lastMod = $pl->{last_modified} // '';
+    # The displayed period uses the LOCAL calendar date of the (UTC) last_modified
+    # instant; $lastMod itself stays raw below for the cache key / passthrough.
+    my $lastModLocal = _isoToLocalDate($lastMod);
 
     my $period;
     if ($patch =~ /^weekly-/) {
-        my $ws = _weekStart($lastMod);
+        my $ws = _weekStart($lastModLocal);
         $period = $ws ? cstring($client, 'PLUGIN_LBF_WEEK_COMMENCING') . ' ' . _fmtDate($ws) : '';
     }
     else {
-        $period = ($lastMod =~ /^(\d{4}-\d{2}-\d{2})/) ? _fmtDate($1) : '';
+        $period = $lastModLocal ? _fmtDate($lastModLocal) : '';
     }
 
     my $matched = '';
@@ -1001,17 +1004,21 @@ sub _buildWeekly {
     return \@items;
 }
 
-# Monday (YYYY-MM-DD) of the week containing $date, or '' if unparseable.
+# Monday (YYYY-MM-DD) of the week containing $date, or '' if unparseable. Works
+# on a local calendar date (use noon so a whole-day subtraction can't cross a date
+# boundary even across a DST change). The result is the same regardless of zone for
+# a date-only input — the weekday of a calendar date is timezone-independent — but
+# computing it in local time keeps the whole date path consistent with "today".
 sub _weekStart {
     my ($date) = @_;
     return '' unless $date && $date =~ /^(\d{4})-(\d{2})-(\d{2})/;
 
-    my $epoch = eval { Time::Local::timegm(0, 0, 12, $3, $2 - 1, $1) };
+    my $epoch = eval { Time::Local::timelocal(0, 0, 12, $3, $2 - 1, $1) };
     return '' unless defined $epoch;
 
-    my $wday = (gmtime $epoch)[6];          # 0 = Sunday
+    my $wday = (localtime $epoch)[6];       # 0 = Sunday
     my $mon  = $epoch - (($wday + 6) % 7) * 86400;
-    my @m    = gmtime $mon;
+    my @m    = localtime $mon;
     return sprintf('%04d-%02d-%02d', $m[5] + 1900, $m[4] + 1, $m[3]);
 }
 
@@ -1021,13 +1028,13 @@ sub _weekStart {
 sub _weekBadgeImage {
     my ($ws) = @_;
     return MENU_ALL unless $ws =~ /^(\d{4})-(\d{2})-(\d{2})$/;
-    my $wsEpoch = eval { Time::Local::timegm(0, 0, 12, $3, $2 - 1, $1) };
+    my $wsEpoch = eval { Time::Local::timelocal(0, 0, 12, $3, $2 - 1, $1) };
     return MENU_ALL unless defined $wsEpoch;
 
     my @n = localtime(time);
     my $curWs = _weekStart(sprintf('%04d-%02d-%02d', $n[5] + 1900, $n[4] + 1, $n[3]));
     return MENU_ALL unless $curWs =~ /^(\d{4})-(\d{2})-(\d{2})$/;
-    my $curEpoch = Time::Local::timegm(0, 0, 12, $3, $2 - 1, $1);
+    my $curEpoch = Time::Local::timelocal(0, 0, 12, $3, $2 - 1, $1);
 
     my $weeks = int(($curEpoch - $wsEpoch) / (7 * 86400) + 0.5);
     return $weeks <= 0 ? AR_THIS : $weeks == 1 ? AR_LAST : AR_EARLIER;
@@ -1088,6 +1095,24 @@ sub _windowSpan {
 sub _ymd {
     my @t = localtime(shift);
     return sprintf('%04d-%02d-%02d', $t[5] + 1900, $t[4] + 1, $t[3]);
+}
+
+# Convert an ISO-8601 last_modified value to the server's LOCAL calendar date
+# (YYYY-MM-DD). ListenBrainz sends this as a UTC instant (e.g. "2026-06-15T23:30:00+00:00"),
+# so a date-with-time is interpreted as UTC and converted to local — otherwise the
+# W/C / Daily-Jams label could show the UTC day, which is a day (or week) off from
+# the user's local day near midnight (notably UK during BST). A date-only value has
+# no instant to convert, so it's returned as-is. '' when unparseable.
+sub _isoToLocalDate {
+    my ($iso) = @_;
+    return '' unless defined $iso && length $iso;
+
+    if (my ($y, $mo, $d, $h, $mi, $s) =
+            $iso =~ /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})/) {
+        my $epoch = eval { Time::Local::timegm($s, $mi, $h, $d, $mo - 1, $y) };
+        return _ymd($epoch) if defined $epoch;
+    }
+    return ($iso =~ /^(\d{4}-\d{2}-\d{2})/) ? $1 : '';
 }
 
 # ---------------------------------------------------------------------------

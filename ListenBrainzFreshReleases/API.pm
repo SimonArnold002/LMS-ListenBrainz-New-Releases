@@ -54,7 +54,7 @@ use constant MB_BASE_URL     => 'https://musicbrainz.org/ws/2/';
 use constant LASTFM_BASE_URL => 'https://ws.audioscrobbler.com/2.0/';
 
 # MusicBrainz requires a descriptive User-Agent identifying the application
-use constant USER_AGENT   => 'LMS-ListenBrainzFreshReleases/0.8.15 ( https://github.com/SimonArnold002/LMS-ListenBrainz-New-Releases )';
+use constant USER_AGENT   => 'LMS-ListenBrainzFreshReleases/0.8.22 ( https://github.com/SimonArnold002/LMS-ListenBrainz-New-Releases )';
 
 # ---------------------------------------------------------------------------
 # GET /1/user/<username>/fresh_releases  (personalised, auth required)
@@ -92,11 +92,19 @@ sub getFreshReleasesForUser {
 
     my $http = Slim::Networking::SimpleAsyncHTTP->new(
         sub {
-            _handleResponse(shift, sub {
-                my $releases = shift;
-                _cacheFeed($cacheKey, $fbKey, $releases);
-                $args{onDone}->($releases);
-            });
+            my $resp = shift;
+            _handleResponse($resp,
+                sub {
+                    my $releases = shift;
+                    _cacheFeed($cacheKey, $fbKey, $releases);
+                    $args{onDone}->($releases);
+                },
+                # A 200 with an unparseable / unexpected body must NOT be cached as
+                # an empty feed (it would blank the menu for FEED_TTL). Route it
+                # through the same fallback path as a transport error so the last
+                # good copy is served instead.
+                sub { _feedError($resp, $fbKey, $args{onDone}, $args{onError}) },
+            );
         },
         sub { _feedError(shift, $fbKey, $args{onDone}, $args{onError}) },
         { timeout => FEED_TIMEOUT }
@@ -137,11 +145,17 @@ sub getFreshReleasesAll {
 
     my $http = Slim::Networking::SimpleAsyncHTTP->new(
         sub {
-            _handleResponse(shift, sub {
-                my $releases = shift;
-                _cacheFeed($cacheKey, $fbKey, $releases);
-                $args{onDone}->($releases);
-            });
+            my $resp = shift;
+            _handleResponse($resp,
+                sub {
+                    my $releases = shift;
+                    _cacheFeed($cacheKey, $fbKey, $releases);
+                    $args{onDone}->($releases);
+                },
+                # See getFreshReleasesForUser: don't cache an unparseable 200 —
+                # fall back to the last good copy instead.
+                sub { _feedError($resp, $fbKey, $args{onDone}, $args{onError}) },
+            );
         },
         sub { _feedError(shift, $fbKey, $args{onDone}, $args{onError}) },
         { timeout => FEED_TIMEOUT }
@@ -446,9 +460,12 @@ sub getReleaseDetails {
                 return;
             }
             my $parsed = _parseReleaseDetails($data);
-            my $ttl    = (@{ $parsed->{media} } || @{ $parsed->{genres} })
-                       ? MB_FOUND_TTL : MB_EMPTY_TTL;
-            $cache->set($cacheKey, $parsed, $ttl);
+            # This request only asks for recordings (the tracklist); genres come
+            # from the release-GROUP (getReleaseGroupGenres), so the TTL is driven
+            # purely by whether we got a tracklist.
+            my $ttl    = @{ $parsed->{media} } ? MB_FOUND_TTL : MB_EMPTY_TTL;
+            eval { $cache->set($cacheKey, $parsed, $ttl); 1 }
+                or $log->warn("release detail cache set failed: $@");
             $onDone->($parsed);
         },
         sub { _handleError(shift, $onError) },
@@ -634,11 +651,13 @@ sub _parseLastfmTags {
     return \@out;
 }
 
-# Normalise a MusicBrainz release lookup into { genres => [names], media => [...] }
+# Normalise a MusicBrainz release lookup into { media => [...] }. Genres are NOT
+# read here — they live on the release-group (getReleaseGroupGenres); the release
+# request only includes recordings.
 sub _parseReleaseDetails {
     my ($data) = @_;
 
-    my %out = (genres => _parseGenres($data), media => []);
+    my %out = (media => []);
 
     # Tracks are grouped by medium (disc); preserve that grouping
     if (ref $data->{media} eq 'ARRAY') {
@@ -684,8 +703,15 @@ sub coverArtUrl {
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+# Parse a fresh-releases response. On success calls $onDone with the releases
+# arrayref (which may legitimately be empty). On an unparseable body or an
+# unrecognised structure calls $onError instead, so the caller can fall back to
+# the last good cached copy rather than caching the failure as an empty feed.
+# $onError defaults to the old behaviour (an empty list) for any caller that
+# doesn't pass one.
 sub _handleResponse {
-    my ($resp, $onDone) = @_;
+    my ($resp, $onDone, $onError) = @_;
+    $onError ||= sub { $onDone->([]) };
 
     $log->info("ListenBrainz API response code: " . $resp->code);
     $log->info("ListenBrainz API response length: " . length($resp->content));
@@ -693,40 +719,36 @@ sub _handleResponse {
     my $data = eval { from_json($resp->content) };
     if ($@) {
         $log->error("JSON parse error: $@");
-        $onDone->([]);
+        $onError->("JSON parse error: $@");
         return;
     }
-
-    my $releases = [];
 
     if (ref $data eq 'HASH') {
         my $payload = $data->{payload};
         if (ref $payload eq 'HASH' && ref $payload->{fresh_releases} eq 'ARRAY') {
-            $releases = $payload->{fresh_releases};
-            $log->info("Found " . scalar(@$releases) . " releases in payload.fresh_releases");
+            $log->info("Found " . scalar(@{ $payload->{fresh_releases} }) . " releases in payload.fresh_releases");
+            $onDone->($payload->{fresh_releases});
         } elsif (ref $payload eq 'HASH' && ref $payload->{releases} eq 'ARRAY') {
-            $releases = $payload->{releases};
-            $log->info("Found " . scalar(@$releases) . " releases in payload.releases");
+            $log->info("Found " . scalar(@{ $payload->{releases} }) . " releases in payload.releases");
+            $onDone->($payload->{releases});
         } elsif (ref $payload eq 'ARRAY') {
-            $releases = $payload;
-            $log->info("Found " . scalar(@$releases) . " releases in payload array");
+            $log->info("Found " . scalar(@$payload) . " releases in payload array");
+            $onDone->($payload);
         } elsif (ref $data->{fresh_releases} eq 'ARRAY') {
-            $releases = $data->{fresh_releases};
-            $log->info("Found " . scalar(@$releases) . " releases in fresh_releases");
+            $log->info("Found " . scalar(@{ $data->{fresh_releases} }) . " releases in fresh_releases");
+            $onDone->($data->{fresh_releases});
         } else {
-            $log->info("Unexpected response structure, keys: " . join(', ', keys %$data));
-            if (ref $payload eq 'HASH') {
-                $log->info("Payload keys: " . join(', ', keys %$payload));
-            }
+            $log->warn("Unexpected response structure, keys: " . join(', ', keys %$data));
+            $log->warn("Payload keys: " . join(', ', keys %$payload)) if ref $payload eq 'HASH';
+            $onError->("unexpected response structure");
         }
     } elsif (ref $data eq 'ARRAY') {
-        $releases = $data;
-        $log->info("Found " . scalar(@$releases) . " releases in root array");
+        $log->info("Found " . scalar(@$data) . " releases in root array");
+        $onDone->($data);
     } else {
         $log->error("Unexpected data type: " . ref($data));
+        $onError->("unexpected data type");
     }
-
-    $onDone->($releases);
 }
 
 sub _handleError {

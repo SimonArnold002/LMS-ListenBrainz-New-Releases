@@ -18,7 +18,10 @@ use constant WARM_INTERVAL => 24 * 3600;   # daily
 
 my $log = Slim::Utils::Log->addLogCategory({
     'category'     => 'plugin.listenbrainzfreshreleases',
-    'defaultLevel' => 'INFO',
+    # WARN in production keeps server.log quiet (the INFO lines log every API
+    # response code/length/URL and cache hit). Raise to INFO via Settings →
+    # Logging when diagnosing.
+    'defaultLevel' => 'WARN',
     'description'  => 'PLUGIN_LISTENBRAINZ_FRESH_RELEASES',
 });
 

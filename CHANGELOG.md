@@ -3,6 +3,46 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.8.22 (dev)
+
+### Internal
+- Removed 6 unused localisation strings left over from earlier features (`PLUGIN_LBF_FORYOU_ALBUMS`/`_DESC`, `PLUGIN_LBF_PLAYLISTS_DESC`, `PLUGIN_LBF_PL_TRACKS`, `PLUGIN_LBF_SEC_TYPES`, `PLUGIN_LBF_WEEK_OF`). No user-visible change.
+
+## 0.8.21 (dev)
+
+### Fixed
+- **Playlist dates now use local time, not UTC.** ListenBrainz sends a playlist's `last_modified` as a UTC instant; the "W/C …" and Daily-Jams date labels derived from it now convert that to the server's local calendar date, so they match the user's day instead of being a day (or week) off near midnight — notably in the UK during BST. The week helpers were also moved from `timegm`/`gmtime` to `timelocal`/`localtime` so the whole date path is consistently local (behaviour-preserving for the date-only release feed; `timegm` is now used only where the input is explicitly UTC).
+
+## 0.8.20 (dev)
+
+### Added
+- **Inline check for the Last.fm API key**, matching the ListenBrainz token check. The settings page validates the key client-side against Last.fm's `auth.getToken` (Last.fm allows CORS) and shows the result inline next to the field — on page open (if a key is set), on field blur, and via a "Check key" button. Green = valid, red = rejected, amber = couldn't reach Last.fm; an empty key shows a neutral "optional" note.
+
+## 0.8.19 (dev)
+
+### Fixed
+- **A partial settings save can no longer disable a streaming service.** The service-priority handler used to force any missing `svc_priority_*` field to 0 (= never search). On a normal full-form save every field is present so this was harmless, but an incomplete/non-form POST would silently zero the priorities. It now keeps the current saved value when a field is absent, so priorities are only changed when actually submitted.
+
+## 0.8.18 (dev)
+
+### Fixed
+- **Token validation result is now actually visible in Material Skin.** 0.8.17 validated the token on save and returned the result via LMS's `warning` field, but Material loads plugin settings in an iframe and never surfaces that field, so the message was invisible (it worked only in the classic web UI). The settings page now also checks the token **client-side** — directly from the browser against `/1/validate-token` (ListenBrainz allows CORS) — and shows the result inline next to the token field: on page open (if a token is set), when the field loses focus, and via a "Check token" button. Green = valid (with your username), red = rejected, amber = couldn't reach ListenBrainz. The server-side on-save validation from 0.8.17 is kept for the classic skin.
+
+## 0.8.17 (dev)
+
+### Added
+- **The ListenBrainz token is now validated on save.** Saving the settings with a token set checks it against `/1/validate-token` and shows the result on the page — success (with your username), a rejection message if the token is wrong, or a "couldn't reach ListenBrainz" note if the check itself failed (the settings are still saved). Previously a wrong token failed silently with no feedback. (Wires up the existing, previously-unused `API::validateToken`.)
+
+## 0.8.16 (dev)
+
+### Fixed
+- **Settings validation is no longer bypassed.** The Days window (1–90) and the streaming-service priorities (0–9) are now clamped into the submitted form values *before* the base settings handler stores them. Previously the handler set the clamped pref and then the base class immediately re-set it from the raw posted value, so an out-of-range or non-numeric `days` / priority could be persisted from a crafted or non-browser POST.
+- **A bad HTTP 200 from ListenBrainz no longer blanks the feed for a day.** If a feed response parsed as JSON but had an unexpected shape (or didn't parse at all), the empty result was cached under both the working (24h) and fallback (30d) keys, blanking the menu/home rows until it expired. Such responses are now treated like a transport error: the last good cached copy is served and nothing is overwritten.
+
+### Internal
+- Default log level lowered to WARN (was INFO) so production `server.log` isn't filled with per-request response/cache lines; raise it via Settings → Logging when diagnosing.
+- The release-detail cache write is now `eval`-guarded like every other cache write, and the unused genre parse on the recordings-only release lookup was removed (genres come from the release-group path).
+
 ## 0.8.15 (dev)
 
 ### Fixed

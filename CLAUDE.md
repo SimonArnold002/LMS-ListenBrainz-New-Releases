@@ -45,7 +45,7 @@ tools/
 ```
 
 ## Current Version
-0.8.15 (dev)
+0.8.22 (dev)
 
 ## Created-for-You Playlists (0.8.0)
 
@@ -314,7 +314,7 @@ Detected in `_isVariousArtists()`:
 `plugin.listenbrainzfreshreleases` — used consistently across all modules
 
 ## Known Issues / Notes
-- Log level set to INFO in Plugin.pm and API.pm for debugging — can be changed to WARN for production
+- Log category default level is WARN (0.8.16; was INFO). The INFO lines (per-request response code/length/URL, cache hits) are still there — raise the level via Settings → Logging when diagnosing
 - `<extensions>` vs `<extension>` in install.xml matters — manually installed plugins must use `<extension>` singular
 - File ownership must be `squeezeboxserver:nogroup` on DietPi — NOT `squeezeboxserver:squeezeboxserver`
 - The zip must extract directly as `ListenBrainzFreshReleases/` with no extra `Plugins/` wrapper for manual installs
