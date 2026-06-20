@@ -4,6 +4,12 @@ PLUGIN_LISTENBRAINZ_FRESH_RELEASES
 PLUGIN_LISTENBRAINZ_FRESH_RELEASES_DESC
 	EN	Browse ListenBrainz Fresh Releases on your Squeezebox.
 
+PLUGIN_LBF_DSTM_RADIO
+	EN	ListenBrainz Radio (similar to what's playing)
+
+PLUGIN_LBF_DSTM_RECOMMENDED
+	EN	ListenBrainz Recommended for You
+
 PLUGIN_LBF_SECTION_GENERAL
 	EN	General Settings
 

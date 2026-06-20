@@ -3,6 +3,37 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.4 (dev)
+
+### Changed
+- **Deeper track variety per artist.** The radio took each artist's top 8 most-popular recordings — i.e. their greatest hits every refresh. It now samples 8 at random from the artist's top `PER_ARTIST_POOL`=40, so album cuts surface and the same famous songs don't recur. Pairs with the 0.9.3 per-artist cap/cooldown.
+
+## 0.9.3 (dev)
+
+### Changed
+- **Far fewer repeat artists in the radio.** The per-player memory only tracked played *recordings*, not *artists*, and the fan-out was narrow (6 artists × up to 15 tracks each), so the same artist clustered within a top-up and recurred across them. Now: fan-out widened to 12 artists × 8 tracks, a **cap of 2 tracks per artist per top-up** (`MAX_PER_ARTIST`), candidates **round-robin interleaved by artist** so the order alternates rather than clusters, and a per-player **artist cooldown FIFO** (`ARTIST_COOLDOWN`=16) that won't reuse an artist until others have played. Applies to both mixers (the Recommended pool keys diversity on artist name, since it has no artist MBID). New helpers `DSTM::_selectCandidates`/`_artistKey`.
+
+## 0.9.2 (dev)
+
+### Fixed
+- **Radio now follows streaming tracks (Qobuz/Tidal/…), not just MusicBrainz-tagged ones.** The seed was taken only from a track's MusicBrainz artist ID, which streaming tracks don't carry — so after a Qobuz track the radio found no seed and silently fell back to the generic recommendation pool (why it looked identical to the old propagator). Now `_seedArtist` returns the artist *name* too, and when there's no MBID the new `API::getArtistMbidByName` resolves it via MusicBrainz (strong-match only, cached) before running the similar-artists engine. Verified end-to-end: Bonobo → Boards of Canada / Massive Attack / Tycho / Air / Röyksopp.
+
+## 0.9.1 (dev)
+
+### Fixed
+- **No streaming services? The library is now used.** `_findPlayableTrack` previously bailed before the library lookup when no streaming adapters were installed, so with no streaming plugins the DSTM mixers (and the Created-for-You playlists) matched nothing — even tracks you owned. The empty-`@adapters` short-circuit was moved after the library tier: a no-streaming user now gets a **local-library** radio/recommendations (and playlists match owned tracks). No change when streaming services are present.
+
+## 0.9.0 (dev)
+
+### Added
+- **Don't Stop The Music propagators (ListenBrainz).** The plugin now registers **two** mixers with Lyrion's built-in *Don't Stop The Music* (DSTM), so when the play queue runs low it tops up from ListenBrainz. Pick one in Material → player settings → *Don't Stop The Music*. New module `DSTM.pm` (loaded by `Plugin::postinitPlugin`, mirrors `HomeExtras.pm` — **not** a separate plugin).
+  - **ListenBrainz Radio (similar to what's playing)** — seeds from the artist of the track you were last playing and **evolves** as it goes, so the music flows. Reads the seed artist via DSTM's `getMixablePropertiesFromTrack`, fetches similar artists (`API::getSimilarArtists`, labs `similar-artists` dataset), fans out across a weighted-random pick of them plus their top recordings (`API::getTopRecordingsForArtist`, `/1/popularity/top-recordings-for-artist/<m>`), and reseeds each top-up toward where the music has drifted. Cold start (nothing MusicBrainz-tagged to seed from) falls back to the Recommended pool.
+  - **ListenBrainz Recommended for You** — your personalised collaborative-filtering recommendations (`API::getRecommendations` → `/1/cf/recommendation/.../recording`, names filled via `API::getRecordingMetadata` → `/1/metadata/recording/`), shuffled. Cached a day; a `204` (no recs generated) degrades quietly.
+- **Streaming-first resolution for the mixers** so the queue fills with *new* music instead of copies you already own. `Browse::_findPlayableTrack`/`_resolveTracks` gained a library mode — **first** (library→streaming, the playlist default), **fallback** (streaming first, library only if no service has it — what the mixers use), **never** (streaming only). Non-default modes use a separate cache-key suffix so they don't collide with the playlist feature's library-preferring cache. A per-player served-set keeps successive top-ups varied.
+- New prefs `dstm_count` (Recommended pool size, default 100) and `dstm_batch` (tracks added per top-up, default 10); reuses `svc_priority_*`.
+
+  Note: ListenBrainz's cf-recommendation `artist_type` (similar/raw/top) is currently **ignored by the live API** (all three return the same list), which is why there's one Recommended mixer rather than three.
+
 ## 0.8.24 (dev)
 
 ### Changed

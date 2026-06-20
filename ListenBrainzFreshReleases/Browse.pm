@@ -578,7 +578,7 @@ sub _playlistTtl {
 # playlist order. Matched items only are returned (unmatched are dropped). A
 # watchdog guarantees the page renders even if a service search hangs.
 sub _resolveTracks {
-    my ($client, $tracks, $done) = @_;
+    my ($client, $tracks, $done, $libMode) = @_;
 
     my $total     = scalar @$tracks;
     my @slots     = (undef) x $total;   # per-index: hashref (match) / 0 (miss) / undef (pending)
@@ -608,7 +608,7 @@ sub _resolveTracks {
                 $active--;
                 $completed++;
                 ($completed >= $total) ? $finish->() : $pump->();
-            }, $tr->{artist}, $tr->{title}, $tr->{album}, $tr->{recording_mbid});
+            }, $tr->{artist}, $tr->{title}, $tr->{album}, $tr->{recording_mbid}, undef, $libMode);
         }
     };
 
@@ -1707,7 +1707,16 @@ sub _searchTidal {
 # Same ordered-adapter / per-service-timeout / first-priority-wins / versioned-cache
 # shape as _findPlayable, but returns one item and enforces a string url.
 sub _findPlayableTrack {
-    my ($client, $callback, $artist, $title, $album, $recMbid, $force) = @_;
+    my ($client, $callback, $artist, $title, $album, $recMbid, $force, $libMode) = @_;
+
+    # Library-resolution mode:
+    #   'first'    — try the local library before streaming (the playlist default,
+    #                derived from the prefer_library pref). A library hit wins.
+    #   'fallback' — streaming first; only try the library if no service matched
+    #                (the DSTM radio/recommended default — favours discovery but
+    #                still plays an owned-only track rather than dropping it).
+    #   'never'    — streaming only; never consult the library.
+    $libMode //= ($prefs->get('prefer_library') // 1) ? 'first' : 'never';
 
     my @adapters   = grep { $_->{runTrack} } _orderedAdapters();
     my $titleNorm  = _norm($title);
@@ -1716,32 +1725,61 @@ sub _findPlayableTrack {
     my $queryEnc   = $query;
     utf8::encode($queryEnc) if utf8::is_utf8($queryEnc);
 
-    unless (@adapters && length $titleNorm) {
+    # A title is the one thing we always need; missing streaming adapters is NOT
+    # fatal — the library may still satisfy the track (handled below), so don't
+    # bail on an empty @adapters here.
+    unless (length $titleNorm) {
         $callback->(undef);
         return;
     }
 
     # Cache the per-track decision (item or "no match") keyed by recording MBID
-    # where available, else the normalised "artist title". Versioned (:1:).
+    # where available, else the normalised "artist title". Versioned (:2:). The
+    # non-default library modes get their own key suffix so a streaming-first
+    # result can't collide with the playlist feature's library-preferring cache.
     my $key = 'lbf:track:2:' . ($recMbid || _norm($query));
+    $key .= ":$libMode" unless $libMode eq 'first';
     utf8::encode($key) if utf8::is_utf8($key);
     if (!$force && (my $c = $cache->get($key))) {
         $callback->($c->{item});
         return;
     }
 
-    # Highest priority: a copy in the user's own LMS library (instant, free, often
-    # higher quality). MBID-exact first, then normalised artist+title. A hit short-
-    # circuits the streaming search entirely. Cached briefly (the file URL could go
-    # stale on a rescan/delete).
-    if ($prefs->get('prefer_library') // 1) {
+    # Cache TTL for a resolved item: library hits can go stale on a rescan/delete,
+    # so they get the short LIBRARY_TTL; a streaming match is durable.
+    my $cacheItem = sub {
+        my $item = shift;
+        my $ttl = !$item ? TRACK_NOMATCH_TTL
+                : (($item->{_svc} // '') eq 'Library') ? LIBRARY_TTL
+                : TRACK_FOUND_TTL;
+        eval { $cache->set($key, { item => $item }, $ttl); 1 }
+            or $log->warn("track cache set failed: $@");
+    };
+
+    # 'first': a copy in the user's own LMS library short-circuits streaming
+    # (instant, free, often higher quality). MBID-exact first, then artist+title.
+    if ($libMode eq 'first') {
         my $local = _findLocalTrack($artist, $title, $recMbid);
         if ($local) {
-            eval { $cache->set($key, { item => $local }, LIBRARY_TTL); 1 }
-                or $log->warn("track cache set failed: $@");
+            $cacheItem->($local);
             $callback->($local);
             return;
         }
+    }
+
+    # No streaming services installed (or all deprioritised) → the local library
+    # is the only possible source. 'first' already tried it above and missed;
+    # 'fallback' tries it now (so a no-streaming user still gets a library radio);
+    # 'never' is streaming-only, so there's nothing left to do.
+    unless (@adapters) {
+        my $item;
+        if ($libMode eq 'fallback') {
+            my $local = eval { _findLocalTrack($artist, $title, $recMbid) };
+            $item = $local if $local;
+        }
+        $cacheItem->($item);
+        $callback->($item);
+        return;
     }
 
     my @result   = map { undef } @adapters;   # undef pending, [] miss, [item] hit
@@ -1756,8 +1794,12 @@ sub _findPlayableTrack {
         }
         $resolved = 1;
         my $item = defined $win ? $result[$win][0] : undef;
-        eval { $cache->set($key, { item => $item }, $item ? TRACK_FOUND_TTL : TRACK_NOMATCH_TTL); 1 }
-            or $log->warn("track cache set failed: $@");
+        # 'fallback': no streaming match → try the library as a last resort.
+        if (!$item && $libMode eq 'fallback') {
+            my $local = eval { _findLocalTrack($artist, $title, $recMbid) };
+            $item = $local if $local;
+        }
+        $cacheItem->($item);
         $callback->($item);
     };
 

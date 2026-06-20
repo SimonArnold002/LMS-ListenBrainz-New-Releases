@@ -49,6 +49,7 @@ use constant FEED_FALLBACK_TTL => 30 * 86400;
 use constant PLAYLIST_LIST_TTL => 24 * 3600;   # 1 day
 
 use constant BASE_URL        => 'https://api.listenbrainz.org';
+use constant LABS_URL        => 'https://labs.api.listenbrainz.org';
 use constant CAA_BASE_URL    => 'https://coverartarchive.org/release/';
 use constant MB_BASE_URL     => 'https://musicbrainz.org/ws/2/';
 use constant LASTFM_BASE_URL => 'https://ws.audioscrobbler.com/2.0/';
@@ -397,6 +398,316 @@ sub _stripHtml {
     $s =~ s/\s+/ /g;
     $s =~ s/^\s+|\s+$//g;
     return $s;
+}
+
+# ---------------------------------------------------------------------------
+# GET /1/cf/recommendation/user/<user>/recording — collaborative-filtering
+# recommended recordings, used by the Don't Stop The Music propagators. The
+# flavour (artist_type) selects: 'similar' = artists similar to the user's taste
+# that they don't already listen to (new-music discovery), 'raw' = unfiltered CF
+# output, 'top' = the user's own top artists. Returns an ordered (highest-score
+# first) arrayref of recording MBID strings. A 204 (recs not yet generated for
+# this account) or any non-list payload yields an empty list, not an error.
+# ---------------------------------------------------------------------------
+sub getRecommendations {
+    my ($class, %args) = @_;
+
+    my $username = $prefs->get('username') // '';
+    my $token    = $prefs->get('token')    // '';
+    my $flavour  = $args{flavour} || 'similar';
+    my $count    = $args{count}   || 100;
+    my $onDone   = $args{onDone}  || sub {};
+    my $onError  = $args{onError} || sub { $onDone->([]) };
+
+    unless ($username) {
+        $onError->("No ListenBrainz username configured");
+        return;
+    }
+
+    (my $safe_user = $username) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
+    my $url = sprintf('%s/1/cf/recommendation/user/%s/recording?artist_type=%s&count=%d',
+        BASE_URL, $safe_user, $flavour, $count);
+
+    $log->info("Fetching recommendations ($flavour): $url");
+
+    my @headers = ('Accept' => 'application/json', 'User-Agent' => USER_AGENT);
+    push @headers, ('Authorization' => "Token $token") if $token;
+
+    my $http = Slim::Networking::SimpleAsyncHTTP->new(
+        sub {
+            my $resp = shift;
+            # 204 No Content (recs not generated yet) → empty content; treat as no recs.
+            my $body = $resp->content;
+            unless (defined $body && length $body) {
+                $log->info("Recommendations: no content (code " . $resp->code . ")");
+                $onDone->([]);
+                return;
+            }
+            my $data = eval { from_json($body) };
+            if ($@) {
+                $log->error("Recommendations JSON parse error: $@");
+                $onError->("JSON error: $@");
+                return;
+            }
+            my $payload = (ref $data eq 'HASH') ? $data->{payload} : undef;
+            my $mbids   = (ref $payload eq 'HASH' && ref $payload->{mbids} eq 'ARRAY')
+                ? $payload->{mbids} : [];
+            my @ids = grep { $_ } map { lc($_->{recording_mbid} // '') } @$mbids;
+            $log->info("Recommendations ($flavour): " . scalar(@ids) . " recording MBIDs");
+            $onDone->(\@ids);
+        },
+        sub { _handleError(shift, $onError) },
+        { timeout => 15 }
+    );
+
+    $http->get($url, @headers);
+}
+
+# ---------------------------------------------------------------------------
+# GET /1/metadata/recording/?recording_mbids=<csv>&inc=artist — bulk-resolve a
+# list of recording MBIDs to { artist, title } in one (or a few) call(s),
+# avoiding MusicBrainz's 1 req/sec throttle. Calls $onDone with a hashref keyed
+# by lower-case recording MBID: { mbid => { artist, title } }. Chunks to
+# METADATA_CHUNK MBIDs per request and merges.
+# ---------------------------------------------------------------------------
+use constant METADATA_CHUNK => 50;
+
+sub getRecordingMetadata {
+    my ($class, $mbids, $onDone, $onError) = @_;
+    $onDone  ||= sub {};
+    $onError ||= sub { $onDone->({}) };
+
+    my @all = grep { $_ } @{ $mbids || [] };
+    unless (@all) { $onDone->({}); return; }
+
+    my %meta;
+    my @chunks;
+    push @chunks, [ splice(@all, 0, METADATA_CHUNK) ] while @all;
+
+    my $next;
+    $next = sub {
+        my $chunk = shift @chunks;
+        unless ($chunk) { $onDone->(\%meta); return; }
+
+        my $csv = join(',', @$chunk);
+        (my $safe = $csv) =~ s/([^A-Za-z0-9\-_.~,])/sprintf("%%%02X",ord($1))/ge;
+        my $url = BASE_URL . '/1/metadata/recording/?inc=artist&recording_mbids=' . $safe;
+
+        my $http = Slim::Networking::SimpleAsyncHTTP->new(
+            sub {
+                my $resp = shift;
+                my $data = eval { from_json($resp->content) };
+                if ($@) {
+                    $log->error("Recording metadata JSON parse error: $@");
+                } else {
+                    _mergeRecordingMetadata(\%meta, $data);
+                }
+                $next->();
+            },
+            # A failed chunk shouldn't sink the rest — log and continue with what we have.
+            sub {
+                my $resp = shift;
+                $log->warn("Recording metadata chunk failed: " . ($resp->error // '?'));
+                $next->();
+            },
+            { timeout => 15 }
+        );
+
+        $http->get($url, 'Accept' => 'application/json', 'User-Agent' => USER_AGENT);
+    };
+    $next->();
+}
+
+# Merge a /metadata/recording response (object keyed by recording MBID) into
+# %$meta as { mbid => { artist, title } }. Tolerates the two artist shapes:
+# a flat artist.name credit string, or an artist.artists[] credit array.
+sub _mergeRecordingMetadata {
+    my ($meta, $data) = @_;
+    return unless ref $data eq 'HASH';
+
+    while (my ($mbid, $entry) = each %$data) {
+        next unless ref $entry eq 'HASH';
+        my $rec    = ref $entry->{recording} eq 'HASH' ? $entry->{recording} : {};
+        my $artObj = ref $entry->{artist}    eq 'HASH' ? $entry->{artist}    : {};
+
+        my $title = $rec->{name} // '';
+        my $artist = $artObj->{name} // '';
+        if (!length $artist && ref $artObj->{artists} eq 'ARRAY') {
+            $artist = join('', map {
+                ($_->{artist_credit_name} // $_->{name} // '') . ($_->{join_phrase} // '')
+            } @{ $artObj->{artists} });
+        }
+
+        $meta->{ lc $mbid } = { artist => $artist, title => $title }
+            if length $title;
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Resolve an artist NAME to a MusicBrainz artist MBID. Needed for the radio when
+# the seed track came from a streaming service (Qobuz/Tidal/etc.) and carries no
+# MusicBrainz ID — without this the radio can't fetch similar artists and falls
+# back to generic recommendations. One cached lookup per artist; requires a
+# strong (score>=90) match to avoid seeding off the wrong artist. Calls $onDone
+# with a lower-case MBID or undef.
+# ---------------------------------------------------------------------------
+sub getArtistMbidByName {
+    my ($class, $name, $onDone, $onError) = @_;
+    $onDone  ||= sub {};
+    $onError ||= sub { $onDone->(undef) };
+
+    $name = defined $name ? $name : '';
+    $name =~ s/^\s+|\s+$//g;
+    unless (length $name) { $onDone->(undef); return; }
+
+    my $cacheKey = 'lbf:artistmbid:' . lc $name;
+    utf8::encode($cacheKey) if utf8::is_utf8($cacheKey);
+    if (defined(my $c = $cache->get($cacheKey))) {
+        $onDone->($c || undef);   # '' is the cached "not found" sentinel
+        return;
+    }
+
+    my $q = 'artist:"' . $name . '"';
+    utf8::encode($q) if utf8::is_utf8($q);
+    (my $safe = $q) =~ s/([^A-Za-z0-9])/sprintf("%%%02X",ord($1))/ge;
+    my $url = MB_BASE_URL . 'artist?query=' . $safe . '&fmt=json&limit=1';
+
+    $log->info("Resolving artist name to MBID: $name");
+
+    my $http = Slim::Networking::SimpleAsyncHTTP->new(
+        sub {
+            my $resp = shift;
+            my $data = eval { from_json($resp->content) };
+            my $mbid = '';
+            if (!$@ && ref $data eq 'HASH' && ref $data->{artists} eq 'ARRAY' && @{ $data->{artists} }) {
+                my $a = $data->{artists}[0];
+                $mbid = lc $a->{id} if $a->{id} && ($a->{score} // 0) >= 90;
+            }
+            eval { $cache->set($cacheKey, $mbid, $mbid ? MB_FOUND_TTL : MB_EMPTY_TTL); 1 }
+                or $log->warn("artist-mbid cache set failed: $@");
+            $log->info("Artist '$name' => " . ($mbid || 'no match'));
+            $onDone->($mbid || undef);
+        },
+        sub { _handleError(shift, $onError) },
+        { timeout => 12 }
+    );
+
+    $http->get($url, 'Accept' => 'application/json', 'User-Agent' => USER_AGENT);
+}
+
+# ---------------------------------------------------------------------------
+# Similar artists (labs dataset) — GET labs/similar-artists/json?artist_mbids=<m>
+# Powers the "ListenBrainz Radio" propagator: given the last-played artist, find
+# artists similar listeners gravitate to. Returns an arrayref of
+# { artist_mbid, name, score }, score-desc. Cached SIMILAR_TTL (the dataset is
+# stable). Empty/odd response → empty list, never an error.
+# ---------------------------------------------------------------------------
+use constant SIMILAR_TTL    => 7 * 86400;
+use constant SIMILAR_ALGO   => 'session_based_days_7500_session_300_contribution_5_threshold_10_limit_100_filter_True_skip_30';
+
+sub getSimilarArtists {
+    my ($class, $artistMbid, $onDone, $onError) = @_;
+    $onDone  ||= sub {};
+    $onError ||= sub { $onDone->([]) };
+
+    unless ($artistMbid) { $onDone->([]); return; }
+
+    my $cacheKey = 'lbf:similar:artist:' . lc $artistMbid;
+    if (my $cached = $cache->get($cacheKey)) {
+        $log->info("Similar-artists cache hit: $artistMbid");
+        $onDone->($cached);
+        return;
+    }
+
+    (my $safe = $artistMbid) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
+    my $url = LABS_URL . '/similar-artists/json?artist_mbids=' . $safe
+        . '&algorithm=' . SIMILAR_ALGO;
+
+    $log->info("Fetching similar artists: $url");
+
+    my $http = Slim::Networking::SimpleAsyncHTTP->new(
+        sub {
+            my $resp = shift;
+            my $data = eval { from_json($resp->content) };
+            if ($@) {
+                $log->error("Similar-artists JSON parse error: $@");
+                $onError->("JSON error: $@");
+                return;
+            }
+            # Response is a top-level array (or { data => [...] } on some deploys).
+            my $rows = (ref $data eq 'ARRAY') ? $data
+                     : (ref $data eq 'HASH' && ref $data->{data} eq 'ARRAY') ? $data->{data} : [];
+            my @out;
+            for my $r (@$rows) {
+                next unless ref $r eq 'HASH' && $r->{artist_mbid};
+                push @out, {
+                    artist_mbid => lc $r->{artist_mbid},
+                    name        => $r->{name} // $r->{artist_name} // '',
+                    score       => $r->{score} // 0,
+                };
+            }
+            eval { $cache->set($cacheKey, \@out, SIMILAR_TTL); 1 }
+                or $log->warn("similar-artists cache set failed: $@");
+            $log->info("Similar artists for $artistMbid: " . scalar(@out));
+            $onDone->(\@out);
+        },
+        sub { _handleError(shift, $onError) },
+        { timeout => 15 }
+    );
+
+    $http->get($url, 'Accept' => 'application/json', 'User-Agent' => USER_AGENT);
+}
+
+# ---------------------------------------------------------------------------
+# Top recordings for an artist — GET /1/popularity/top-recordings-for-artist/<m>
+# Turns a (similar) artist into concrete, resolvable tracks. Returns an arrayref
+# of { recording_mbid, title, artist }, most-popular first. Cached SIMILAR_TTL.
+# ---------------------------------------------------------------------------
+sub getTopRecordingsForArtist {
+    my ($class, $artistMbid, $onDone, $onError) = @_;
+    $onDone  ||= sub {};
+    $onError ||= sub { $onDone->([]) };
+
+    unless ($artistMbid) { $onDone->([]); return; }
+
+    my $cacheKey = 'lbf:toprec:artist:' . lc $artistMbid;
+    if (my $cached = $cache->get($cacheKey)) {
+        $onDone->($cached);
+        return;
+    }
+
+    (my $safe = $artistMbid) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
+    my $url = BASE_URL . '/1/popularity/top-recordings-for-artist/' . $safe;
+
+    my $http = Slim::Networking::SimpleAsyncHTTP->new(
+        sub {
+            my $resp = shift;
+            my $data = eval { from_json($resp->content) };
+            if ($@) {
+                $log->error("Top-recordings JSON parse error: $@");
+                $onError->("JSON error: $@");
+                return;
+            }
+            my $rows = (ref $data eq 'ARRAY') ? $data
+                     : (ref $data eq 'HASH' && ref $data->{data} eq 'ARRAY') ? $data->{data} : [];
+            my @out;
+            for my $r (@$rows) {
+                next unless ref $r eq 'HASH' && $r->{recording_mbid};
+                push @out, {
+                    recording_mbid => lc $r->{recording_mbid},
+                    title          => $r->{recording_name} // '',
+                    artist         => $r->{artist_name}    // '',
+                };
+            }
+            eval { $cache->set($cacheKey, \@out, SIMILAR_TTL); 1 }
+                or $log->warn("top-recordings cache set failed: $@");
+            $onDone->(\@out);
+        },
+        sub { _handleError(shift, $onError) },
+        { timeout => 15 }
+    );
+
+    $http->get($url, 'Accept' => 'application/json', 'User-Agent' => USER_AGENT);
 }
 
 # ---------------------------------------------------------------------------

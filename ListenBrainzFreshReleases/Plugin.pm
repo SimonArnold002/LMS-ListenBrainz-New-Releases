@@ -45,6 +45,13 @@ $prefs->init({
     svc_priority_bandcamp => 2,
     svc_priority_tidal    => 3,
 
+    # Don't Stop The Music propagators (Similar / Raw / Top). dstm_count = how many
+    # recommended recordings to pull from ListenBrainz into the pool; dstm_batch =
+    # how many resolved tracks to append per queue top-up. Track resolution reuses
+    # prefer_library + svc_priority_* (library first, then streaming).
+    dstm_count => 100,
+    dstm_batch => 10,
+
     # For You section
     foryou_past             => 1,
     foryou_future           => 0,
@@ -143,6 +150,15 @@ sub postinitPlugin {
             1;
         } or $log->error("Failed to register Material home extra: $@");
     }
+
+    # Register the Don't Stop The Music propagators (Similar / Raw / Top). DSTM is
+    # a core plugin (normally enabled); DSTM->register guards on registerHandler so
+    # a disabled DSTM is a quiet no-op.
+    eval {
+        require Plugins::ListenBrainzFreshReleases::DSTM;
+        Plugins::ListenBrainzFreshReleases::DSTM->register();
+        1;
+    } or $log->error("Failed to register DSTM propagators: $@");
 
     # Warm the Created-for-You caches (playlist list, per-track matches, grid
     # covers) shortly after startup, then daily — so the Playlists view and each

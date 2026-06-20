@@ -30,6 +30,7 @@ ListenBrainzFreshReleases/
 ├── Browse.pm                          # ALL browse feeds: top-level sections, For You / All Releases (+ by-week landing), Created-for-You Playlists (streaming + local-library track matching), the Material home-shelf feeds, branded tiles
 ├── API.pm                             # Async ListenBrainz HTTP: fresh_releases + createdfor/playlist endpoints, feed caching, MusicBrainz/Last.fm enrichment
 ├── HomeExtras.pm                      # Material home-page shelves — three HomeExtraBase subclasses (New Releases for You / Playlists / All Releases)
+├── DSTM.pm                            # Don't Stop The Music propagators — 2 mixers: Radio (seeds from last-played artist → similar-artists → top-recordings, evolves) + Recommended (CF pool); streaming-first resolution via Browse::_resolveTracks
 ├── Settings.pm                        # CSRF-protected settings page (General / Streaming Services / For You / All Releases)
 ├── install.xml                        # <extension> format, icon_svg.png (version in <version>)
 ├── strings.txt                        # All localisation strings (EN)
@@ -45,7 +46,7 @@ tools/
 ```
 
 ## Current Version
-0.8.24 (dev)
+0.9.4 (dev)
 
 ## Created-for-You Playlists (0.8.0)
 
@@ -115,6 +116,59 @@ fully-streaming, Play-all-able playlist.
   every playlist's track matches into `lbf:pl:resolved:*` (using the first connected player for the
   streaming-service API context), so the Playlists view and each playlist open instantly. Cheap
   daily: keyed by `last_modified`, real work only when a new week's playlist appears.
+
+## Don't Stop The Music propagators (0.9.0)
+
+**Two** DSTM mixers backed by ListenBrainz — when the play queue runs low, DSTM tops it up.
+Registered in `DSTM.pm` (a module of this plugin, loaded by `Plugin::postinitPlugin` — **not** a
+separate LMS plugin; mirrors `HomeExtras.pm`). Gated on `username`. Each mixer's handler is
+`($client, $cb)` and MUST call `$cb->($client, \@urls)` — plain track URLs (streaming protocol urls
+**or** library file urls); `[]` if nothing.
+
+- **ListenBrainz Radio** (`PLUGIN_LBF_DSTM_RADIO` → `DSTM::radio`) — **seeds from what you were
+  playing and evolves**. Reads the artist MBID of the current/last queue track via DSTM's own
+  `getMixablePropertiesFromTrack` (`_seedArtist`, scans back ≤3 tracks for the most-recent track
+  with artist info). **Streaming seed tracks (Qobuz/Tidal/…) carry no MusicBrainz ID**, so when
+  there's no artist MBID the artist *name* is resolved to one via `API::getArtistMbidByName`
+  (MusicBrainz search, strong-match≥90 only, cached) — without this the radio fell back to generic
+  recommendations after every streaming track (the 0.9.2 fix). Then: `API::getSimilarArtists`
+  (labs `similar-artists` dataset) → a
+  weighted-random pick of similar artists (`_pickSimilar`: score-biased top-slice, then shuffled,
+  so it varies) → `API::getTopRecordingsForArtist` (`/1/popularity/top-recordings-for-artist/<m>`)
+  fanned out across `ARTIST_FANOUT`=12 artists, `PER_ARTIST_TRACKS`=8 each → a candidate pool. It
+  **evolves** because each top-up stashes a random served artist MBID as `$state{cid}{next_seed}`,
+  used when the live queue offers no fresh MB-tagged seed (e.g. our own streaming adds aren't
+  tagged). Cold start / no seed at all → falls back to the Recommended pool so it still plays.
+- **Artist diversity (`_selectCandidates`/`_artistKey`, 0.9.3).** To stop the same artist clustering
+  or recurring: candidates are grouped by artist, capped at `MAX_PER_ARTIST`=2 per top-up, artists
+  not on a per-player cooldown FIFO (`ARTIST_COOLDOWN`=16) are preferred, and the short-list is
+  **round-robin interleaved by artist** so the returned order alternates. `$state{cid}` holds
+  `served` (recording_mbids), `recent` (the artist FIFO) and `next_seed`. Both mixers use this — the
+  Recommended pool keys on artist *name* (`n:<name>`) since CF recs carry no artist MBID.
+- **ListenBrainz Recommended for You** (`PLUGIN_LBF_DSTM_RECOMMENDED` → `DSTM::recommended`) — your
+  personalised collaborative-filtering pool, shuffled. `API::getRecommendations` →
+  `GET /1/cf/recommendation/user/<user>/recording` (the `artist_type` param is **ignored by the
+  live API** — similar/raw/top all return the same list, which is why there's one mixer, not three)
+  → `API::getRecordingMetadata` (`/1/metadata/recording/?inc=artist`, chunked ≤50) to fill
+  artist/title. Pool cached `lbf:dstm:recs:<user>` for `RECS_TTL` (1 day). A 204 (no recs generated)
+  degrades quietly.
+- **Streaming-first resolution (the discovery fix).** Both mixers resolve via
+  `Browse::_resolveTracks(..., 'fallback')`. `_findPlayableTrack` gained a `$libMode`: **first**
+  (library→streaming, the playlist default from `prefer_library`), **fallback** (streaming first,
+  library only if no service matched — what the mixers use, so the queue fills with new music not
+  owned copies), **never** (streaming only). Non-`first` modes use a `:<mode>`-suffixed cache key so
+  a streaming-first result can't collide with the playlist feature's library-preferring
+  `lbf:track:2:*` cache. A per-player served-set keeps successive top-ups varied (every *attempted*
+  candidate is marked served, incl. dead ends). **No streaming services installed?** The empty-
+  `@adapters` guard in `_findPlayableTrack` runs *after* the library tier (0.9.0), so a no-streaming
+  user gets a local-library radio/recommendations instead of nothing — and the Created-for-You
+  playlists match owned tracks too. ('never' mode is the only one that still returns nothing without
+  streaming, by definition.)
+- **Prefs:** `dstm_count` (recs pulled into the Recommended pool, default 100), `dstm_batch` (tracks
+  added per top-up, default 10). Reuses `svc_priority_*`. No settings UI yet (defaults work).
+- **Why not LB Radio?** ListenBrainz's `/1/explore/lb-radio` prompt engine is the obvious "radio",
+  but it was returning `503` during development; the similar-artists + top-recordings-for-artist
+  combo gives the same flow from endpoints that are up and is cacheable.
 
 ## Branded cover images (`tools/make_covers.py`)
 
