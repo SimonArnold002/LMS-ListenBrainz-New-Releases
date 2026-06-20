@@ -1540,6 +1540,17 @@ sub _orderedAdapters {
     return @ordered;   # named array → safe count in scalar/boolean context
 }
 
+# Is a cached track match still serveable given the CURRENT service config?
+# 'Library' and untagged/no-match entries always are; a streaming match is only
+# usable while its service is still enabled (svc_priority > 0). Lets a service
+# set to 0 stop being served from cache immediately, instead of lingering for the
+# 30-day track-cache TTL.
+sub _cachedSvcUsable {
+    my ($svc) = @_;
+    return 1 if !defined $svc || $svc eq '' || lc $svc eq 'library';
+    return scalar grep { lc($_->{name}) eq lc $svc } _orderedAdapters();
+}
+
 # Detection + priority for every service we know how to integrate (installed or
 # not), in display order — drives the settings page's "Streaming Services" list.
 sub serviceStatus {
@@ -1845,8 +1856,15 @@ sub _findPlayableTrack {
     $key .= ":$libMode" unless $libMode eq 'first';
     utf8::encode($key) if utf8::is_utf8($key);
     if (!$force && (my $c = $cache->get($key))) {
-        $callback->($c->{item});
-        return;
+        my $item = $c->{item};
+        # Re-validate a cached streaming match against the CURRENT service config:
+        # if its service was since disabled (svc_priority 0) or removed, ignore the
+        # stale entry and re-resolve so the change takes effect immediately rather
+        # than after the 30-day cache TTL. Library / no-match entries are always OK.
+        if (!$item || _cachedSvcUsable($item->{_svc})) {
+            $callback->($item);
+            return;
+        }
     }
 
     # Cache TTL for a resolved item: library hits can go stale on a rescan/delete,

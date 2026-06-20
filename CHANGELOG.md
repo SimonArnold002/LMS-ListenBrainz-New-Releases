@@ -3,6 +3,11 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.7 (dev)
+
+### Fixed
+- **Disabling a streaming service (svc_priority 0) now takes effect immediately, even for already-resolved tracks.** Live resolution already skipped a priority-0 service, but per-track results are cached for 30 days, so tracks resolved while a service was enabled kept being served from that service after it was set to 0 (e.g. Tidal tracks still appearing/queued after Tidal was disabled). `_findPlayableTrack` now re-validates a cached streaming match against the current config (`_cachedSvcUsable`): if its service is no longer enabled (priority 0) or installed, the stale entry is ignored and the track re-resolves to an enabled service (or library). Library and no-match cache entries are unaffected. NB: tracks already sitting in the current play queue aren't retro-removed — clear the queue (or let it cycle) to flush ones added before the fix.
+
 ## 0.9.6 (dev)
 
 ### Added

@@ -46,7 +46,7 @@ tools/
 ```
 
 ## Current Version
-0.9.6 (dev)
+0.9.7 (dev)
 
 ## Created-for-You Playlists (0.8.0)
 
