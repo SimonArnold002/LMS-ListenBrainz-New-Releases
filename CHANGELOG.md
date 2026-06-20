@@ -3,6 +3,11 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.8.24 (dev)
+
+### Changed
+- **Settings section headers now match the rest of the plugin.** The four settings sections (General / Streaming Services / For You / All Releases) used raw `<h2>` tags, which Material Skin doesn't theme, so they looked out of place. Each is now a proper Material settings section: a `prefHead collapsableSection` header (`id="lbf_<section>_Header"`) with the section's settings wrapped in a matching `<div id="lbf_<section>">` panel. Material renders these as its themed bold accent-bar headers — consistent with the section dividers on the browse pages — and they collapse/expand like the native LMS settings sections (a bare `prefHead` only gets Material's faint per-setting label style, so the panel + `_Header` id is what makes the accent header and the expander appear).
+
 ## 0.8.22 (dev)
 
 ### Internal

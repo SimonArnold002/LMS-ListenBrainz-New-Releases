@@ -1,6 +1,7 @@
 [% PROCESS settings/header.html %]
 
-<h2>[% 'PLUGIN_LBF_SECTION_GENERAL' | string %]</h2>
+<div class="prefHead collapsableSection" id="lbf_general_Header">[% 'PLUGIN_LBF_SECTION_GENERAL' | string %]</div>
+<div id="lbf_general">
 
 [% WRAPPER setting title="PLUGIN_LBF_USERNAME" desc="PLUGIN_LBF_USERNAME_HINT" %]
 <input type="text" name="pref_username" value="[% prefs.username %]" size="40" autocomplete="off">
@@ -47,7 +48,10 @@
 <input type="checkbox" name="pref_prefer_library" value="1" [% IF prefs.prefer_library %]checked="checked"[% END %]>
 [% END %]
 
-<h2>[% 'PLUGIN_LBF_SECTION_SERVICES' | string %]</h2>
+</div>
+
+<div class="prefHead collapsableSection" id="lbf_services_Header">[% 'PLUGIN_LBF_SECTION_SERVICES' | string %]</div>
+<div id="lbf_services">
 
 [% WRAPPER setting title="PLUGIN_LBF_SVC_PRIORITY" desc="PLUGIN_LBF_SVC_PRIORITY_DESC" %]
 <div>
@@ -62,7 +66,10 @@
 </div>
 [% END %]
 
-<h2>[% 'PLUGIN_LBF_SECTION_FORYOU' | string %]</h2>
+</div>
+
+<div class="prefHead collapsableSection" id="lbf_foryou_Header">[% 'PLUGIN_LBF_SECTION_FORYOU' | string %]</div>
+<div id="lbf_foryou">
 
 [% WRAPPER setting title="PLUGIN_LBF_ALL_TYPES" desc="PLUGIN_LBF_ALL_TYPES_DESC" %]
 <div>
@@ -95,7 +102,10 @@
 <input type="checkbox" name="pref_foryou_various" value="1" [% IF prefs.foryou_various %]checked="checked"[% END %]>
 [% END %]
 
-<h2>[% 'PLUGIN_LBF_SECTION_ALL' | string %]</h2>
+</div>
+
+<div class="prefHead collapsableSection" id="lbf_all_Header">[% 'PLUGIN_LBF_SECTION_ALL' | string %]</div>
+<div id="lbf_all">
 
 [% WRAPPER setting title="PLUGIN_LBF_ALL_PAST" desc="PLUGIN_LBF_ALL_PAST_DESC" %]
 <input type="checkbox" name="pref_all_past" value="1" [% IF prefs.all_past %]checked="checked"[% END %]>
@@ -127,6 +137,8 @@
 [% WRAPPER setting title="PLUGIN_LBF_DISPLAY_VARIOUS" desc="PLUGIN_LBF_DISPLAY_VARIOUS_DESC" %]
 <input type="checkbox" name="pref_all_various" value="1" [% IF prefs.all_various %]checked="checked"[% END %]>
 [% END %]
+
+</div>
 
 [%# Inline credential checks. Material loads plugin settings in an iframe and does %]
 [%# NOT surface the server-side "warning" message, so validate the ListenBrainz token %]

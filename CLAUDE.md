@@ -45,7 +45,7 @@ tools/
 ```
 
 ## Current Version
-0.8.22 (dev)
+0.8.24 (dev)
 
 ## Created-for-You Playlists (0.8.0)
 
@@ -182,7 +182,16 @@ convention documented under "Icon System".
 
 ## Settings Structure
 
-Four sections in the settings page (General / Streaming Services / For You / All Releases):
+Four sections in the settings page (General / Streaming Services / For You / All Releases). Each is a
+proper Material settings section (0.8.24): the header is `<div class="prefHead collapsableSection"
+id="lbf_<section>_Header">` and the section's settings are wrapped in a matching `<div
+id="lbf_<section>">` panel. Material's `addExpanders` (iframe-dialog.js) finds `.collapsableSection`
+divs, styles them as the themed bold accent-bar header (matching the browse `type=>'header'`
+dividers), adds an expander, and on click toggles the panel whose id is the header id **minus
+`_Header`** — so the `id="lbf_X_Header"` ↔ `<div id="lbf_X">` pairing is required. **Don't** use a
+bare `<h2>` (Material doesn't theme it) or a standalone `<div class="prefHead">` (that's the faint
+per-setting *label* style, positioned right-aligned/narrow inside a `settingGroup` — not a section
+divider, and it gives no accent bar). The panels also collapse/expand like native LMS settings.
 
 ### General Settings
 - `username` — ListenBrainz username
