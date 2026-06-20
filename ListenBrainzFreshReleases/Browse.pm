@@ -72,6 +72,13 @@ use constant MENU_NEW      => IMG_BASE . 'menu-new-releases.png';
 use constant MENU_PLAYLISTS=> IMG_BASE . 'menu-playlists.png';
 use constant MENU_ALL      => IMG_BASE . 'menu-all-releases.png';
 use constant MENU_COG      => IMG_BASE . 'lbf-cog_MTL_icon_settings.png';
+use constant MENU_REFRESH  => IMG_BASE . 'lbf-refresh_MTL_icon_refresh.png';
+# All Releases per-week covers — branded cover + a relative-week badge (This Week
+# / Last Week / Earlier), matching the playlist look. Literal dates can't be drawn
+# server-side (no image lib), so the badge is relative; the exact date is in the row label.
+use constant AR_THIS    => IMG_BASE . 'allrel-this-week.png';
+use constant AR_LAST    => IMG_BASE . 'allrel-last-week.png';
+use constant AR_EARLIER => IMG_BASE . 'allrel-earlier.png';
 
 # Various Artists MBID — used to detect VA releases
 use constant VA_MBID => '89ad4ac3-39f7-470e-963a-56509c546377';
@@ -95,20 +102,13 @@ sub topLevel {
 
     # --- section child items ---------------------------------------------
     my $newReleases = ($username && $token)
-        ? { name => cstring($client, 'PLUGIN_LBF_FOR_YOU'), type => 'link',
-            url => \&fetchForYou, passthrough => [{ features => $feat }], image => MENU_NEW }
+        ? _categoryTile($client, 'user', MENU_NEW, \&fetchForYou, $feat)
         : { name => cstring($client, 'PLUGIN_LBF_SETUP_REQUIRED'), type => 'text', image => ICON };
 
     my @createdFor = ($newReleases);
-    push @createdFor, {
-        name => cstring($client, 'PLUGIN_LBF_PLAYLISTS'), type => 'link',
-        url => \&fetchPlaylists, passthrough => [{ features => $feat }], image => MENU_PLAYLISTS,
-    } if $username;
+    push @createdFor, _playlistsTile($client, $feat) if $username;
 
-    my @allReleases = ({
-        name => cstring($client, 'PLUGIN_LBF_ALL_RELEASES'), type => 'link',
-        url => \&fetchAll, passthrough => [{ features => $feat }], image => MENU_ALL,
-    });
+    my @allReleases = ( _categoryTile($client, 'all', MENU_ALL, \&fetchAll, $feat) );
 
     my @settings = ({
         name => cstring($client, 'PLUGIN_LBF_SETTINGS'), type => 'link',
@@ -144,6 +144,86 @@ sub _sectionHeader {
     return $hdr;
 }
 
+# A top-level category tile (New Releases for You / All Releases). The branded
+# cover image already carries the category title, so the row's text is the date
+# span actually being shown — the real min/max of the cached feed once loaded,
+# else the window implied by the user's days/past/future settings — plus the
+# release count, rather than repeating the title under the thumbnail.
+sub _categoryTile {
+    my ($client, $which, $img, $urlSub, $feat) = @_;
+
+    my $s    = $cache->get('lbf:summary:' . $which);
+    my $span = ($s && $s->{max}) ? _dateSpan($s->{min}, $s->{max}) : _windowSpan($which);
+
+    my %tile = (
+        name        => $span,
+        type        => 'link',
+        url         => $urlSub,
+        passthrough => [{ features => $feat }],
+        image       => $img,
+    );
+    $tile{line2} = sprintf(cstring($client, 'PLUGIN_LBF_N_RELEASES'), $s->{count})
+        if $s && defined $s->{count};
+    return \%tile;
+}
+
+# The Playlists menu tile. The branded cover already says "Playlists", so the row
+# text is the date span the playlists inside actually cover (earliest week-start /
+# day → today), stashed from the playlist list. No text until that's known.
+sub _playlistsTile {
+    my ($client, $feat) = @_;
+
+    # Always a date span (never an empty name — that would make Material drop the
+    # row). Prefer the real span stashed from the playlist list; otherwise compute
+    # it synchronously like _categoryTile does: ListenBrainz keeps the current +
+    # previous week, so the covered span is last week's Monday → today.
+    my $s    = $cache->get('lbf:summary:playlists');
+    my $name = ($s && $s->{min})
+        ? _dateSpan($s->{min}, _ymd(time))
+        : _dateSpan(_weekStart(_ymd(time - 7 * 86400)), _ymd(time));
+
+    return {
+        name        => $name,
+        type        => 'link',
+        url         => \&fetchPlaylists,
+        passthrough => [{ features => $feat }],
+        image       => MENU_PLAYLISTS,
+    };
+}
+
+# Stash the earliest period the Created-for-You playlists cover (weekly → the
+# week-commencing Monday, else the day), so _playlistsTile can show the span
+# without re-fetching. Called wherever the playlist list is fetched.
+sub _stashPlaylistSummary {
+    my ($playlists) = @_;
+    return unless ref $playlists eq 'ARRAY' && @$playlists;
+    my @starts;
+    for my $pl (@$playlists) {
+        my $lm    = $pl->{last_modified} // '';
+        my $start = (lc($pl->{source_patch} // '') =~ /^weekly-/)
+            ? _weekStart($lm)
+            : ($lm =~ /^(\d{4}-\d{2}-\d{2})/ ? $1 : '');
+        push @starts, $start if $start;
+    }
+    return unless @starts;
+    my ($min) = sort @starts;
+    eval { $cache->set('lbf:summary:playlists', { min => $min }, 25 * 3600); 1 };
+}
+
+# Cache a section feed's summary (release count + actual earliest/latest release
+# date) so _categoryTile can render its subtitle instantly without re-fetching.
+# Keyed by section ('user' | 'all'); rewritten each time the feed is built.
+sub _stashSummary {
+    my ($which, $releases) = @_;
+    return unless ref $releases eq 'ARRAY';
+    my @d = sort grep { length } map { $_->{release_date} // '' } @$releases;
+    eval { $cache->set('lbf:summary:' . $which, {
+        count => scalar(@$releases),
+        min   => ($d[0]  // ''),
+        max   => ($d[-1] // ''),
+    }, 25 * 3600); 1 };
+}
+
 # ---------------------------------------------------------------------------
 # Fetch For You — applies For You prefs
 # ---------------------------------------------------------------------------
@@ -162,7 +242,8 @@ sub fetchForYou {
         days    => $prefs->get('days') // 14,
         onDone  => sub {
             my $releases = _sortReleases(_filterForYou(shift));
-            $callback->({ items => _buildItems($releases, $client, $headers) });
+            _stashSummary('user', $releases);
+            $callback->({ items => [ _refreshItem($client, 'user'), @{ _buildItems($releases, $client, $headers) } ] });
         },
         onError => sub {
             $log->error("For You fetch error: " . (shift // ''));
@@ -194,10 +275,59 @@ sub homeForYou {
         days    => $prefs->get('days')          // 14,
         onDone  => sub {
             my $releases = _sortReleases(_filterForYou(shift));
+            _stashSummary('user', $releases);
             $cb->({ items => [ map { _buildReleaseItem($_, $client) } @$releases ] });
         },
         onError => sub {
             $log->error("Home For You fetch error: " . (shift // ''));
+            $cb->({ items => [] });
+        },
+    );
+}
+
+# Material home-page row for the Created-for-You playlists. Flat list of playlist
+# tiles (one per playlist), quantity-stable. Tapping opens the resolved playlist;
+# play queues it (the tiles are playable containers).
+sub homePlaylists {
+    my ($client, $cb, $args) = @_;
+
+    Plugins::ListenBrainzFreshReleases::API->getCreatedForPlaylists(
+        onDone => sub {
+            my $playlists = shift // [];
+            _stashPlaylistSummary($playlists);
+            my %n;
+            for my $pl (@$playlists) {
+                $pl->{_variant} = $n{ lc($pl->{source_patch} // '') }++ ? 'previous' : 'current';
+            }
+            $cb->({ items => [ map { _playlistTile($_, $client) } @$playlists ] });
+        },
+        onError => sub {
+            $log->error("Home Playlists fetch error: " . (shift // ''));
+            $cb->({ items => [] });
+        },
+    );
+}
+
+# Material home-page row for All Releases. Shows the FLATTENED first level — the
+# "All releases" entry plus one card per week-commencing (This/Last/Earlier) — so
+# the carousel is a jump-off into a section rather than the full (large) release
+# list. The landing is a small fixed list (well under 50) so it's the same at
+# every request quantity (carousel vs "show all"), keeping deep drill-in stable.
+sub homeAllReleases {
+    my ($client, $cb, $args) = @_;
+
+    Plugins::ListenBrainzFreshReleases::API->getFreshReleasesAll(
+        sort    => $prefs->get('sort')     // 'release_date',
+        past    => $prefs->get('all_past')   // 1,
+        future  => $prefs->get('all_future') // 0,
+        days    => $prefs->get('days')       // 14,
+        onDone  => sub {
+            my $releases = _sortReleases(_filterAll(shift));
+            _stashSummary('all', $releases);
+            $cb->({ items => _buildAllLanding($releases, $client, 0) });
+        },
+        onError => sub {
+            $log->error("Home All Releases fetch error: " . (shift // ''));
             $cb->({ items => [] });
         },
     );
@@ -221,13 +351,36 @@ sub fetchAll {
         days    => $prefs->get('days') // 14,
         onDone  => sub {
             my $releases = _sortReleases(_filterAll(shift));
-            $callback->({ items => _buildAllLanding($releases, $client, $headers) });
+            _stashSummary('all', $releases);
+            $callback->({ items => [ _refreshItem($client, 'all'), @{ _buildAllLanding($releases, $client, $headers) } ] });
         },
         onError => sub {
             $log->error("All releases fetch error: " . (shift // ''));
             $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_ERROR'), type => 'text' }] });
         },
     );
+}
+
+# A "Refresh" row for the feed lists. The feeds cache for a day; tapping this
+# clears that feed's working cache key (API::clearFeedCache) and reloads the list
+# in place via nextWindow 'refresh' (same mechanism as the detail-page streaming
+# refresh), so the next render cache-misses and re-fetches fresh data. $which is
+# 'user' (New Releases for You) or 'all' (All Releases).
+sub _refreshItem {
+    my ($client, $which) = @_;
+    return {
+        name        => cstring($client, 'PLUGIN_LBF_REFRESH_FEED'),
+        type        => 'link',
+        image       => MENU_REFRESH,
+        nextWindow  => 'refresh',
+        passthrough => [{ which => $which }],
+        url         => sub {
+            my ($c, $cb, $a, $pass) = @_;
+            my $w = (ref $pass eq 'HASH' && $pass->{which}) ? $pass->{which} : 'user';
+            Plugins::ListenBrainzFreshReleases::API->clearFeedCache($w);
+            $cb->({ items => [] });
+        },
+    };
 }
 
 # ===========================================================================
@@ -243,6 +396,7 @@ sub fetchPlaylists {
     Plugins::ListenBrainzFreshReleases::API->getCreatedForPlaylists(
         onDone => sub {
             my $playlists = shift // [];
+            _stashPlaylistSummary($playlists);
             unless (@$playlists) {
                 $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_NO_PLAYLISTS'), type => 'text' }] });
                 return;
@@ -267,12 +421,36 @@ sub fetchPlaylists {
 sub _playlistTile {
     my ($pl, $client) = @_;
 
-    my $line2 = $pl->{annotation} // '';
-    $line2 = substr($line2, 0, 120) . "\x{2026}" if length($line2) > 123;
+    # line2 = the period the playlist covers, then the streaming-match count.
+    # Weekly playlists → "W/C <Monday>"; daily → the day itself; both derived
+    # from last_modified (its generation date). The match count is read from the
+    # resolved-playlist cache (warm pre-resolves it) so it's shown without doing
+    # the resolve here; omitted until that cache is populated.
+    my $patch = lc($pl->{source_patch} // '');
+    my $lastMod = $pl->{last_modified} // '';
 
+    my $period;
+    if ($patch =~ /^weekly-/) {
+        my $ws = _weekStart($lastMod);
+        $period = $ws ? cstring($client, 'PLUGIN_LBF_WEEK_COMMENCING') . ' ' . _fmtDate($ws) : '';
+    }
+    else {
+        $period = ($lastMod =~ /^(\d{4}-\d{2}-\d{2})/) ? _fmtDate($1) : '';
+    }
+
+    my $matched = '';
+    my $svcOrder = join(',', map { lc $_->{name} } _orderedAdapters());
+    my $rkey = 'lbf:pl:resolved:2:' . join('|', ($pl->{mbid} // ''), $lastMod, $svcOrder);
+    if (my $c = $cache->get($rkey)) {
+        $matched = sprintf(cstring($client, 'PLUGIN_LBF_PL_MATCHED'), $c->{matched}, $c->{total});
+    }
+
+    # The branded cover already carries the playlist name, so the row's first line
+    # is the period it covers (W/C date / day), with the match count beneath it.
+    # Fall back to the title only if the date couldn't be derived.
     return {
-        name  => $pl->{title} // 'Playlist',
-        ($line2 ne '' ? (line2 => $line2) : ()),
+        name  => ($period ne '' ? $period : ($pl->{title} // 'Playlist')),
+        ($matched ne '' ? (line2 => $matched) : ()),
         # 'playlist' (not 'link') makes the row a playable container: tapping still
         # drills in (go), but it now also carries Play/Add actions that resolve the
         # feed and queue all its streaming tracks — like a native playlist row.
@@ -325,7 +503,7 @@ sub resolvePlaylist {
 
     # Key includes the service order so changing priorities re-resolves.
     my $svcOrder = join(',', map { lc $_->{name} } _orderedAdapters());
-    my $rkey = 'lbf:pl:resolved:1:' . join('|', $mbid, ($lastMod // ''), $svcOrder);
+    my $rkey = 'lbf:pl:resolved:2:' . join('|', $mbid, ($lastMod // ''), $svcOrder);
 
     my $title = ref $pass eq 'HASH' ? $pass->{title} : undef;
 
@@ -456,6 +634,7 @@ sub warmCache {
     Plugins::ListenBrainzFreshReleases::API->getCreatedForPlaylists(
         onDone => sub {
             my @queue = @{ shift // [] };
+            _stashPlaylistSummary(\@queue);
             $log->info("warm: " . scalar(@queue) . " playlist(s)");
 
             my $svcOrder = join(',', map { lc $_->{name} } _orderedAdapters());
@@ -469,7 +648,7 @@ sub warmCache {
                     sub {
                         my $tracks = shift // [];
 
-                        my $rkey = 'lbf:pl:resolved:1:'
+                        my $rkey = 'lbf:pl:resolved:2:'
                             . join('|', $pl->{mbid}, ($pl->{last_modified} // ''), $svcOrder);
 
                         # Already resolved (same week) or no client → move on.
@@ -738,7 +917,7 @@ sub _buildAllLanding {
     my @items = ({
         name        => cstring($client, 'PLUGIN_LBF_VIEW_ALL'),
         type        => 'link',
-        image       => ICON,
+        image       => MENU_ALL,
         passthrough => [{}],
         url         => sub {
             my ($c, $cb) = @_;
@@ -758,11 +937,10 @@ sub _buildAllLanding {
 
     for my $ws (@order) {
         my $rels  = $bucket{$ws};
-        my $count = scalar @$rels;
         push @items, {
-            name        => _weekLabel($client, $ws) . "  ($count)",
+            name        => _weekLabel($client, $ws),
             type        => 'link',
-            image       => ICON,
+            image       => _weekBadgeImage($ws),
             passthrough => [{}],
             url         => sub {
                 my ($c, $cb) = @_;
@@ -837,14 +1015,79 @@ sub _weekStart {
     return sprintf('%04d-%02d-%02d', $m[5] + 1900, $m[4] + 1, $m[3]);
 }
 
-# Human-readable divider label for a week-start date.
+# Pick the All Releases week cover by how many weeks ago $ws (a Monday) is,
+# relative to the current week: 0 → This Week, 1 → Last Week, else Earlier.
+# Falls back to the plain branded cover if the date can't be parsed.
+sub _weekBadgeImage {
+    my ($ws) = @_;
+    return MENU_ALL unless $ws =~ /^(\d{4})-(\d{2})-(\d{2})$/;
+    my $wsEpoch = eval { Time::Local::timegm(0, 0, 12, $3, $2 - 1, $1) };
+    return MENU_ALL unless defined $wsEpoch;
+
+    my @n = localtime(time);
+    my $curWs = _weekStart(sprintf('%04d-%02d-%02d', $n[5] + 1900, $n[4] + 1, $n[3]));
+    return MENU_ALL unless $curWs =~ /^(\d{4})-(\d{2})-(\d{2})$/;
+    my $curEpoch = Time::Local::timegm(0, 0, 12, $3, $2 - 1, $1);
+
+    my $weeks = int(($curEpoch - $wsEpoch) / (7 * 86400) + 0.5);
+    return $weeks <= 0 ? AR_THIS : $weeks == 1 ? AR_LAST : AR_EARLIER;
+}
+
+# Week-commencing label for a week-start (Monday) date, e.g. "W/C 8 June 2026".
 sub _weekLabel {
     my ($client, $ws) = @_;
-    return cstring($client, 'PLUGIN_LBF_WEEK_UNKNOWN') unless $ws =~ /^(\d{4})-(\d{2})-(\d{2})$/;
+    return cstring($client, 'PLUGIN_LBF_WEEK_UNKNOWN') unless $ws =~ /^\d{4}-\d{2}-\d{2}$/;
+    return cstring($client, 'PLUGIN_LBF_WEEK_COMMENCING') . ' ' . _fmtDate($ws);
+}
 
-    my @months = qw(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec);
-    return sprintf('%s %d %s %d',
-        cstring($client, 'PLUGIN_LBF_WEEK_OF'), $3 + 0, $months[$2 - 1], $1);
+# Date / date-span formatting for the menu (no abbreviations: "8 June 2026").
+my @MONTHS = qw(January February March April May June July August September October November December);
+
+# "8 June 2026" from a YYYY-MM-DD string ('' if unparseable).
+sub _fmtDate {
+    my ($d) = @_;
+    return '' unless ($d // '') =~ /^(\d{4})-(\d{2})-(\d{2})/;
+    return sprintf('%d %s %d', $3 + 0, $MONTHS[$2 - 1], $1);
+}
+
+# A date span "8 – 20 June 2026" (collapsing a shared month/year), or a single
+# date when min==max. Inputs are YYYY-MM-DD; min is the earliest.
+sub _dateSpan {
+    my ($min, $max) = @_;
+    return _fmtDate($min) if !length($max // '') || $min eq $max;
+
+    my ($y1, $m1, $d1) = $min =~ /^(\d{4})-(\d{2})-(\d{2})/ or return _fmtDate($max);
+    my ($y2, $m2, $d2) = $max =~ /^(\d{4})-(\d{2})-(\d{2})/ or return _fmtDate($min);
+
+    if ($y1 == $y2 && $m1 == $m2) {
+        return sprintf("%d \x{2013} %d %s %d", $d1 + 0, $d2 + 0, $MONTHS[$m2 - 1], $y2);
+    }
+    elsif ($y1 == $y2) {
+        return sprintf("%d %s \x{2013} %d %s %d",
+            $d1 + 0, $MONTHS[$m1 - 1], $d2 + 0, $MONTHS[$m2 - 1], $y2);
+    }
+    return _fmtDate($min) . " \x{2013} " . _fmtDate($max);
+}
+
+# The date window implied by the user's settings for a section, used as the tile
+# subtitle until a real feed summary is cached. past → back $days; future →
+# forward $days; both → either side; neither → today only.
+sub _windowSpan {
+    my ($which) = @_;
+    my $days   = $prefs->get('days') // 14;
+    my $prefix = $which eq 'user' ? 'foryou' : 'all';
+    my $past   = $prefs->get("${prefix}_past")   // 1;
+    my $future = $prefs->get("${prefix}_future") // 0;
+
+    my $now    = time;
+    my $startE = $past   ? $now - ($days - 1) * 86400 : $now;
+    my $endE   = $future ? $now + ($days - 1) * 86400 : $now;
+    return _dateSpan(_ymd($startE), _ymd($endE));
+}
+
+sub _ymd {
+    my @t = localtime(shift);
+    return sprintf('%04d-%02d-%02d', $t[5] + 1900, $t[4] + 1, $t[3]);
 }
 
 # ---------------------------------------------------------------------------
@@ -1455,7 +1698,7 @@ sub _findPlayableTrack {
 
     # Cache the per-track decision (item or "no match") keyed by recording MBID
     # where available, else the normalised "artist title". Versioned (:1:).
-    my $key = 'lbf:track:1:' . ($recMbid || _norm($query));
+    my $key = 'lbf:track:2:' . ($recMbid || _norm($query));
     utf8::encode($key) if utf8::is_utf8($key);
     if (!$force && (my $c = $cache->get($key))) {
         $callback->($c->{item});

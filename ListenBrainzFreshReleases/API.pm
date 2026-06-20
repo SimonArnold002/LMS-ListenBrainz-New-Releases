@@ -26,10 +26,11 @@ use constant LFM_EMPTY_TTL =>  7 * 86400;
 # The fresh-releases feed only changes ~daily, but the Material home row reloads
 # it constantly. Without caching, every home/menu view fired a fresh, slow (2-15s)
 # ListenBrainz call — which flooded and rate-limited the API and hung the home
-# page. Cache the parsed feed so repeat views are instant. 6h balances freshness
-# (the data is ~daily) against fetch count; All Releases also rolls over at local
-# midnight anyway via the date in its cache key.
-use constant FEED_TTL => 6 * 3600;   # 6 hours
+# page. Cache the parsed feed so repeat views are instant. The data is ~daily, so
+# refresh once a day; a "Refresh" row in each list lets the user force one sooner
+# (it removes the key below via clearFeedCache). All Releases also rolls over at
+# local midnight via the date in its cache key.
+use constant FEED_TTL => 24 * 3600;   # 1 day
 
 # Network timeout for the feed fetches — kept short so a slow/unreachable
 # ListenBrainz fails fast instead of leaving the menu/home spinning.
@@ -53,7 +54,7 @@ use constant MB_BASE_URL     => 'https://musicbrainz.org/ws/2/';
 use constant LASTFM_BASE_URL => 'https://ws.audioscrobbler.com/2.0/';
 
 # MusicBrainz requires a descriptive User-Agent identifying the application
-use constant USER_AGENT   => 'LMS-ListenBrainzFreshReleases/0.8.7 ( https://github.com/SimonArnold002/LMS-ListenBrainz-New-Releases )';
+use constant USER_AGENT   => 'LMS-ListenBrainzFreshReleases/0.8.15 ( https://github.com/SimonArnold002/LMS-ListenBrainz-New-Releases )';
 
 # ---------------------------------------------------------------------------
 # GET /1/user/<username>/fresh_releases  (personalised, auth required)
@@ -156,6 +157,31 @@ sub _cacheFeed {
     my ($cacheKey, $fbKey, $releases) = @_;
     eval { $cache->set($cacheKey, $releases, FEED_TTL);          1 } or $log->warn("feed cache set failed: $@");
     eval { $cache->set($fbKey,    $releases, FEED_FALLBACK_TTL); 1 } or $log->warn("feed fallback cache set failed: $@");
+}
+
+# Drop the working cache key for a feed so the next view re-fetches (used by the
+# "Refresh" row). $which is 'user' or 'all'. The key here MUST match the one built
+# in getFreshReleasesForUser / getFreshReleasesAll (same prefs, same format). The
+# long-lived fallback copy is left intact — it's only consulted on a fetch error.
+sub clearFeedCache {
+    my ($class, $which) = @_;
+    my $sort = $prefs->get('sort') // 'release_date';
+    my $days = $prefs->get('days') // 14;
+
+    if ($which eq 'all') {
+        my $past   = ($prefs->get('all_past')   // 1) ? 'true' : 'false';
+        my $future = ($prefs->get('all_future') // 0) ? 'true' : 'false';
+        my @t = localtime(time);
+        my $today = sprintf('%04d-%02d-%02d', $t[5]+1900, $t[4]+1, $t[3]);
+        $cache->remove('lbf:feed:all:' . join('|', $sort, $past, $future, $days, $today));
+    }
+    else {
+        my $username = $prefs->get('username') // '';
+        my $past   = ($prefs->get('foryou_past')   // 1) ? 'true' : 'false';
+        my $future = ($prefs->get('foryou_future') // 0) ? 'true' : 'false';
+        $cache->remove('lbf:feed:user:' . join('|', $username, $sort, $past, $future, $days));
+    }
+    $log->info("cleared $which feed cache (forced refresh)");
 }
 
 # On a feed fetch failure, serve the last successfully cached copy if we have one

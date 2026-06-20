@@ -1,8 +1,43 @@
 package Plugins::ListenBrainzFreshReleases::HomeExtras;
 
-# Material Skin home-page scrollable row for the "Newly Released for You" feed.
-# Subclasses Material's HomeExtraBase (only loaded/registered when Material is
-# present — see Plugin::postinitPlugin).
+# Material Skin home-page scrollable rows. Three shelves, each a separate
+# HomeExtraBase subclass (own tag → own CLI dispatch → own feed; separate
+# packages avoid any shared per-class feed state):
+#   - New Releases for You  (LBFForYou      → Browse::homeForYou)
+#   - Playlists             (LBFPlaylists   → Browse::homePlaylists)
+#   - All Releases          (LBFAllReleases → Browse::homeAllReleases)
+# Each feed returns a FLAT card list that does not vary by request quantity — the
+# 0.6.11 rule that keeps deep home-shelf playback resolving the right item.
+
+use strict;
+use base qw(Plugins::MaterialSkin::HomeExtraBase);
+
+use Plugins::ListenBrainzFreshReleases::Browse;
+
+use constant ICON => 'plugins/ListenBrainzFreshReleases/html/images/ListenBrainzFreshReleasesIcon_svg.png';
+
+sub initPlugin {
+    my ($class) = @_;
+
+    # New Releases for You
+    $class->SUPER::initPlugin(
+        feed  => \&feed,
+        tag   => 'LBFForYou',
+        extra => { title => 'PLUGIN_LBF_FOR_YOU', icon => ICON, needsPlayer => 0 },
+    );
+
+    # Playlists + All Releases shelves (own packages, below)
+    Plugins::ListenBrainzFreshReleases::HomePlaylists->initPlugin();
+    Plugins::ListenBrainzFreshReleases::HomeAllReleases->initPlugin();
+}
+
+sub feed {
+    my ($client, $cb, $args) = @_;
+    Plugins::ListenBrainzFreshReleases::Browse::homeForYou($client, $cb, $args);
+}
+
+
+package Plugins::ListenBrainzFreshReleases::HomePlaylists;
 
 use strict;
 use base qw(Plugins::MaterialSkin::HomeExtraBase);
@@ -11,16 +46,12 @@ use Plugins::ListenBrainzFreshReleases::Browse;
 
 sub initPlugin {
     my ($class) = @_;
-
     $class->SUPER::initPlugin(
         feed  => \&feed,
-        tag   => 'LBFForYou',
+        tag   => 'LBFPlaylists',
         extra => {
-            title       => 'PLUGIN_LBF_FOR_YOU',
-            # Material recolours the home-row icon, so use the _svg.png form (as
-            # the browse menu does) rather than the install.xml colour tile,
-            # which renders blank in the home row.
-            icon        => 'plugins/ListenBrainzFreshReleases/html/images/ListenBrainzFreshReleasesIcon_svg.png',
+            title       => 'PLUGIN_LBF_PLAYLISTS',
+            icon        => Plugins::ListenBrainzFreshReleases::HomeExtras::ICON,
             needsPlayer => 0,
         },
     );
@@ -28,9 +59,33 @@ sub initPlugin {
 
 sub feed {
     my ($client, $cb, $args) = @_;
-    # Forward $args — homeForYou reads $args->{params}{_quantity} to tell the
-    # carousel (flat cards) from the "More" click-in (full list with week headers).
-    Plugins::ListenBrainzFreshReleases::Browse::homeForYou($client, $cb, $args);
+    Plugins::ListenBrainzFreshReleases::Browse::homePlaylists($client, $cb, $args);
+}
+
+
+package Plugins::ListenBrainzFreshReleases::HomeAllReleases;
+
+use strict;
+use base qw(Plugins::MaterialSkin::HomeExtraBase);
+
+use Plugins::ListenBrainzFreshReleases::Browse;
+
+sub initPlugin {
+    my ($class) = @_;
+    $class->SUPER::initPlugin(
+        feed  => \&feed,
+        tag   => 'LBFAllReleases',
+        extra => {
+            title       => 'PLUGIN_LBF_ALL_RELEASES',
+            icon        => Plugins::ListenBrainzFreshReleases::HomeExtras::ICON,
+            needsPlayer => 0,
+        },
+    );
+}
+
+sub feed {
+    my ($client, $cb, $args) = @_;
+    Plugins::ListenBrainzFreshReleases::Browse::homeAllReleases($client, $cb, $args);
 }
 
 1;

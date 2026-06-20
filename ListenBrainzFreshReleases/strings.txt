@@ -136,6 +136,12 @@ PLUGIN_LBF_VIEW_ALL
 PLUGIN_LBF_WEEK_OF
 	EN	Week of
 
+PLUGIN_LBF_WEEK_COMMENCING
+	EN	W/C
+
+PLUGIN_LBF_N_RELEASES
+	EN	%s releases
+
 PLUGIN_LBF_WEEK_UNKNOWN
 	EN	Unknown release date
 
@@ -207,6 +213,9 @@ PLUGIN_LBF_PLAY_VIA_SETTING_DESC
 
 PLUGIN_LBF_REFRESH
 	EN	Refresh streaming matches
+
+PLUGIN_LBF_REFRESH_FEED
+	EN	Refresh (force update now)
 
 PLUGIN_LBF_PREFER_LIBRARY
 	EN	Prefer Tracks from My Library
