@@ -3,6 +3,13 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.5 (dev)
+
+### Changed
+- **Same artist appears less often.** `MAX_PER_ARTIST` 2→1 (at most one track per artist per top-up), `ARTIST_COOLDOWN` 16→24 (an artist waits longer before it can recur), and `ARTIST_FANOUT` 12→16 (more distinct artists per refresh, so a batch can still fill without repeating). For a seed with few streaming-findable neighbours a top-up may add fewer than `dstm_batch` tracks rather than repeat an artist.
+- **No track ever repeats within a session.** Each player now keeps a permanent (until server restart) set of every track URL the radio/recommendations have queued; a track is never returned twice, and anything already sitting in the play queue is also excluded. The artist cooldown still resets for variety, but the played-track guard never does.
+- **Owned copies are now used when available.** Resolution switched from streaming-first to **library-first** (`LIB_MODE` `fallback`→`first`): if you have the track in your library it plays your copy (better quality, free, instant), otherwise it streams from Qobuz/Tidal/Bandcamp. The selection is already varied, so preferring owned copies no longer hurts discovery.
+
 ## 0.9.4 (dev)
 
 ### Changed

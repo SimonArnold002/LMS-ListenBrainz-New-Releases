@@ -46,7 +46,7 @@ tools/
 ```
 
 ## Current Version
-0.9.4 (dev)
+0.9.5 (dev)
 
 ## Created-for-You Playlists (0.8.0)
 
@@ -152,18 +152,20 @@ separate LMS plugin; mirrors `HomeExtras.pm`). Gated on `username`. Each mixer's
   → `API::getRecordingMetadata` (`/1/metadata/recording/?inc=artist`, chunked ≤50) to fill
   artist/title. Pool cached `lbf:dstm:recs:<user>` for `RECS_TTL` (1 day). A 204 (no recs generated)
   degrades quietly.
-- **Streaming-first resolution (the discovery fix).** Both mixers resolve via
-  `Browse::_resolveTracks(..., 'fallback')`. `_findPlayableTrack` gained a `$libMode`: **first**
-  (library→streaming, the playlist default from `prefer_library`), **fallback** (streaming first,
-  library only if no service matched — what the mixers use, so the queue fills with new music not
-  owned copies), **never** (streaming only). Non-`first` modes use a `:<mode>`-suffixed cache key so
-  a streaming-first result can't collide with the playlist feature's library-preferring
-  `lbf:track:2:*` cache. A per-player served-set keeps successive top-ups varied (every *attempted*
-  candidate is marked served, incl. dead ends). **No streaming services installed?** The empty-
-  `@adapters` guard in `_findPlayableTrack` runs *after* the library tier (0.9.0), so a no-streaming
-  user gets a local-library radio/recommendations instead of nothing — and the Created-for-You
-  playlists match owned tracks too. ('never' mode is the only one that still returns nothing without
-  streaming, by definition.)
+- **Resolution & no-repeat (`_resolveAndReturn`).** Both mixers resolve via
+  `Browse::_resolveTracks(..., $libMode)`. `_findPlayableTrack`'s `$libMode`: **first**
+  (library→streaming), **fallback** (streaming first, library only if no service matched), **never**
+  (streaming only). The mixers use **`first`** (0.9.5 — library-first: play an owned copy when the
+  user has it, else stream; the selection is varied enough that preferring owned copies no longer
+  hurts). Non-`first` modes use a `:<mode>`-suffixed cache key so they don't collide with the
+  playlist feature's `lbf:track:2:*` cache. **Per-session no-repeat (0.9.5):** `$state{cid}{played}`
+  is a permanent (until restart) set of every track URL ever queued — a track is never returned
+  twice, and anything currently in the play queue is also excluded (`%blocked`). The artist `recent`
+  FIFO still resets for variety; `played` never does. The resettable `served`/`recent` only drive
+  artist variety. **No streaming services installed?** The empty-`@adapters` guard in
+  `_findPlayableTrack` runs *after* the library tier (0.9.0), so a no-streaming user gets a
+  local-library radio (and playlists match owned tracks). ('never' mode is the only one that returns
+  nothing without streaming.)
 - **Prefs:** `dstm_count` (recs pulled into the Recommended pool, default 100), `dstm_batch` (tracks
   added per top-up, default 10). Reuses `svc_priority_*`. No settings UI yet (defaults work).
 - **Why not LB Radio?** ListenBrainz's `/1/explore/lb-radio` prompt engine is the obvious "radio",

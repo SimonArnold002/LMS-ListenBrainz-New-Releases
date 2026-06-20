@@ -16,9 +16,9 @@ package Plugins::ListenBrainzFreshReleases::DSTM;
 #
 # NB: ListenBrainz's cf-recommendation `artist_type` (similar/raw/top) is ignored
 # by the live API (all return the same list), so there's one Recommended mixer,
-# not three. Tracks resolve streaming-first (Browse::_resolveTracks 'fallback'):
-# Qobuz/Tidal/Bandcamp first, library only if no service has it — so the queue
-# fills with new music rather than copies you already own.
+# not three. Tracks resolve library-FIRST (Browse::_resolveTracks 'first'): an
+# owned copy is preferred, otherwise Qobuz/Tidal/Bandcamp. A per-player guard
+# ensures no track repeats within a session.
 
 use strict;
 use warnings;
@@ -39,7 +39,7 @@ use constant RECS_TTL => 24 * 3600;
 # How many artists to fan out across per radio refresh (the seed + similar), and
 # how many top recordings to take from each — the candidate pool per top-up. A
 # wide fan-out with few tracks each keeps the radio varied.
-use constant ARTIST_FANOUT     => 12;
+use constant ARTIST_FANOUT     => 16;
 use constant PER_ARTIST_TRACKS => 8;
 # Sample PER_ARTIST_TRACKS from this many of an artist's top recordings (random
 # within the slice) so it's not always the same greatest hits.
@@ -48,11 +48,13 @@ use constant PER_ARTIST_POOL   => 40;
 # Diversity controls: at most this many tracks from one artist per top-up, and
 # don't reuse an artist until this many others have been served (a per-player
 # FIFO cooldown), so successive top-ups rotate artists instead of repeating.
-use constant MAX_PER_ARTIST => 2;
-use constant ARTIST_COOLDOWN => 16;
+use constant MAX_PER_ARTIST => 1;
+use constant ARTIST_COOLDOWN => 24;
 
-# Streaming-first resolution for both mixers (see header).
-use constant LIB_MODE => 'fallback';
+# Library-FIRST resolution: if the user owns the track, play their copy (better
+# quality, free, instant); otherwise stream it. The selection is already varied
+# (similar-artist driven), so preferring owned copies is desirable here.
+use constant LIB_MODE => 'first';
 
 my $API   = 'Plugins::ListenBrainzFreshReleases::API';
 my $DSTMP = 'Slim::Plugin::DontStopTheMusic::Plugin';
@@ -297,8 +299,20 @@ sub _resolveAndReturn {
     my $tryN  = $batch * 3;   # over-fetch: not every candidate resolves to a playable track
 
     my $cid    = $client->id;
-    my $seen   = $state{$cid}{served} ||= {};   # recording_mbids already served
+    my $seen   = $state{$cid}{served} ||= {};   # recording_mbids served (variety window)
     my $recent = $state{$cid}{recent} ||= [];   # FIFO of recently-served artists
+    my $played = $state{$cid}{played} ||= {};   # track URLs EVER queued this session — never reset
+
+    # Hard no-repeat guard: never return a track URL we've already played this
+    # session, nor anything already sitting in the play queue right now.
+    my %blocked = %$played;
+    my $plist = eval { Slim::Player::Playlist::playList($client) };
+    if (ref $plist eq 'ARRAY') {
+        for my $t (@$plist) {
+            my $u = eval { (ref $t && $t->can('url')) ? $t->url : (!ref $t ? $t : undef) };
+            $blocked{$u} = 1 if defined $u && !ref $u;
+        }
+    }
 
     my @candidates = _selectCandidates($cands, $seen, $recent, $tryN);
     if (!@candidates) {
@@ -327,8 +341,12 @@ sub _resolveAndReturn {
         my @urls;
         for my $it (@$items) {
             last if @urls >= $batch;
-            next unless defined $it->{url} && !ref $it->{url};
-            push @urls, $it->{url};
+            my $u = $it->{url};
+            next unless defined $u && !ref $u;
+            next if $blocked{$u};        # already played this session or already queued
+            $blocked{$u} = 1;            # de-dupe within this batch too
+            $played->{$u} = 1;           # remember for the rest of the session
+            push @urls, $u;
         }
         $log->info("DSTM $which: returning " . scalar(@urls) . " track(s) from "
             . scalar(@candidates) . " candidate(s)");
