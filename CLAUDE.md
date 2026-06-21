@@ -46,7 +46,7 @@ tools/
 ```
 
 ## Current Version
-0.9.19 (dev)
+0.9.20 (dev)
 
 ## Created-for-You Playlists (0.8.0)
 
@@ -225,7 +225,9 @@ one-line title (Weekly Jams) and a two-line title (Weekly Exploration) line thei
 
 Produces: the menu tiles (`menu-new-releases`, `menu-playlists`, `menu-all-releases`), the playlist
 tiles (`playlist-weekly-jams[-prev]`, `playlist-weekly-exploration[-prev]`, `playlist-daily-jams`,
-`playlist-default`), and the All Releases week badges (`allrel-this-week`/`-last-week`/`-earlier`).
+`playlist-default`), and the All Releases week badges — past `allrel-this-week`/`-last-week`/`-earlier`
+("All Releases" title) and future `allrel-next-week`/`-next-fortnight`/`-further` ("Future Releases"
+title, shown for upcoming weeks when "Include Upcoming" is on; selected by `Browse::_weekBadgeImage`).
 **Not** generated: the Material font-icon PNGs (`lbf-cog_MTL_icon_settings.png`,
 `lbf-refresh_MTL_icon_refresh.png`) use Material's `_MTL_icon_<name>` filename convention so Material
 renders its own themed font icon — the PNG is only a minimal non-Material fallback; and the app icon

@@ -77,12 +77,17 @@ use constant MENU_PLAYLISTS=> IMG_BASE . 'menu-playlists.png';
 use constant MENU_ALL      => IMG_BASE . 'menu-all-releases.png';
 use constant MENU_COG      => IMG_BASE . 'lbf-cog_MTL_icon_settings.png';
 use constant MENU_REFRESH  => IMG_BASE . 'lbf-refresh_MTL_icon_refresh.png';
-# All Releases per-week covers — branded cover + a relative-week badge (This Week
-# / Last Week / Earlier), matching the playlist look. Literal dates can't be drawn
-# server-side (no image lib), so the badge is relative; the exact date is in the row label.
-use constant AR_THIS    => IMG_BASE . 'allrel-this-week.png';
-use constant AR_LAST    => IMG_BASE . 'allrel-last-week.png';
-use constant AR_EARLIER => IMG_BASE . 'allrel-earlier.png';
+# All Releases per-week covers — branded cover + a relative-week badge. Past weeks
+# (This Week / Last Week / Earlier) and, when "Include Upcoming" is on, future weeks
+# (Next Week / Next Fortnight / Further, on a "Future Releases" cover). Literal dates
+# can't be drawn server-side (no image lib), so the badge is relative; the exact date
+# is in the row label.
+use constant AR_THIS      => IMG_BASE . 'allrel-this-week.png';
+use constant AR_LAST      => IMG_BASE . 'allrel-last-week.png';
+use constant AR_EARLIER   => IMG_BASE . 'allrel-earlier.png';
+use constant AR_NEXT      => IMG_BASE . 'allrel-next-week.png';
+use constant AR_FORTNIGHT => IMG_BASE . 'allrel-next-fortnight.png';
+use constant AR_FURTHER   => IMG_BASE . 'allrel-further.png';
 
 # Various Artists MBID — used to detect VA releases
 use constant VA_MBID => '89ad4ac3-39f7-470e-963a-56509c546377';
@@ -1105,9 +1110,11 @@ sub _weekStart {
     return sprintf('%04d-%02d-%02d', $m[5] + 1900, $m[4] + 1, $m[3]);
 }
 
-# Pick the All Releases week cover by how many weeks ago $ws (a Monday) is,
-# relative to the current week: 0 → This Week, 1 → Last Week, else Earlier.
-# Falls back to the plain branded cover if the date can't be parsed.
+# Pick the All Releases week cover by how many weeks $ws (a Monday) is from the
+# current week. Past: 0 → This Week, 1 → Last Week, ≥2 → Earlier. Future (negative,
+# shown when "Include Upcoming" is on): -1 → Next Week, -2 → Next Fortnight,
+# ≤-3 → Further (on the "Future Releases" cover). Falls back to the plain branded
+# cover if the date can't be parsed.
 sub _weekBadgeImage {
     my ($ws) = @_;
     return MENU_ALL unless $ws =~ /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -1119,8 +1126,14 @@ sub _weekBadgeImage {
     return MENU_ALL unless $curWs =~ /^(\d{4})-(\d{2})-(\d{2})$/;
     my $curEpoch = Time::Local::timelocal(0, 0, 12, $3, $2 - 1, $1);
 
-    my $weeks = int(($curEpoch - $wsEpoch) / (7 * 86400) + 0.5);
-    return $weeks <= 0 ? AR_THIS : $weeks == 1 ? AR_LAST : AR_EARLIER;
+    # Positive = weeks in the past, negative = weeks in the future.
+    my $weeks = int(($curEpoch - $wsEpoch) / (7 * 86400) + ($curEpoch >= $wsEpoch ? 0.5 : -0.5));
+    return $weeks <= -3 ? AR_FURTHER
+         : $weeks == -2 ? AR_FORTNIGHT
+         : $weeks == -1 ? AR_NEXT
+         : $weeks ==  0 ? AR_THIS
+         : $weeks ==  1 ? AR_LAST
+         :                AR_EARLIER;
 }
 
 # Week-commencing label for a week-start (Monday) date, e.g. "W/C 8 June 2026".
