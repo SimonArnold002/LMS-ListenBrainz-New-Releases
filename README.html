@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ListenBrainz Fresh Releases — LMS Plugin</title>
+<style>
+  :root {
+    --lb-purple: #353070;
+    --lb-purple-dark: #211d4d;
+    --lb-orange: #eb743b;
+    --ink: #1c1c28;
+    --muted: #5b5b6b;
+    --line: #e4e4ec;
+    --bg: #f7f7fa;
+    --card: #ffffff;
+    --code-bg: #f0f0f5;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--ink);
+    background: var(--bg);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--lb-orange); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  header.hero {
+    background: linear-gradient(135deg, var(--lb-purple) 0%, var(--lb-purple-dark) 100%);
+    color: #fff;
+    padding: 56px 24px 48px;
+    text-align: center;
+  }
+  header.hero h1 { margin: 0 0 10px; font-size: 2.1rem; letter-spacing: -0.01em; }
+  header.hero p.tagline { margin: 0 auto; max-width: 660px; color: #d6d4ea; font-size: 1.08rem; }
+  header.hero p.tagline a { color: #ffb58c; }
+  .badges { margin-top: 22px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+  .badge {
+    display: inline-block; padding: 5px 13px; border-radius: 999px;
+    font-size: 0.82rem; font-weight: 600;
+    background: rgba(255,255,255,0.12); color: #fff; border: 1px solid rgba(255,255,255,0.22);
+  }
+  .badge.accent { background: var(--lb-orange); border-color: var(--lb-orange); }
+  .hero-actions { margin-top: 26px; display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .btn { display: inline-block; padding: 11px 22px; border-radius: 8px; font-weight: 600; font-size: 0.95rem; }
+  .btn-primary { background: var(--lb-orange); color: #fff; }
+  .btn-primary:hover { text-decoration: none; filter: brightness(1.06); }
+  .btn-ghost { background: rgba(255,255,255,0.12); color: #fff; border: 1px solid rgba(255,255,255,0.30); }
+  .btn-ghost:hover { text-decoration: none; background: rgba(255,255,255,0.20); }
+
+  main { max-width: 880px; margin: 0 auto; padding: 8px 24px 64px; }
+  section { margin-top: 44px; }
+  h2 {
+    font-size: 1.45rem; margin: 0 0 6px; padding-bottom: 8px;
+    border-bottom: 3px solid var(--lb-orange); display: inline-block;
+  }
+  h3 { font-size: 1.12rem; margin: 26px 0 6px; color: var(--lb-purple); }
+  p { margin: 10px 0; }
+  ul, ol { padding-left: 22px; }
+  li { margin: 5px 0; }
+  li > ul { margin-top: 5px; }
+
+  table {
+    width: 100%; border-collapse: collapse; margin: 14px 0;
+    background: var(--card); border-radius: 10px; overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06); font-size: 0.95rem;
+  }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { background: var(--lb-purple); color: #fff; font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  tr:nth-child(even) td { background: #fafafc; }
+  td strong { color: var(--lb-purple); }
+
+  code {
+    background: var(--code-bg); padding: 2px 6px; border-radius: 5px;
+    font-family: "SF Mono", SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.88em;
+  }
+  pre {
+    background: var(--lb-purple-dark); color: #f3f1ff; padding: 16px 18px;
+    border-radius: 10px; overflow-x: auto; font-size: 0.9rem;
+  }
+  pre code { background: none; padding: 0; color: inherit; }
+
+  blockquote {
+    margin: 14px 0; padding: 12px 18px; background: #fff7f1;
+    border-left: 4px solid var(--lb-orange); border-radius: 0 8px 8px 0; color: var(--muted);
+  }
+  blockquote p { margin: 0; }
+
+  .feature-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; margin-top: 16px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  }
+  .card h4 { margin: 0 0 6px; font-size: 1rem; color: var(--lb-purple); }
+  .card p { margin: 0; font-size: 0.9rem; color: var(--muted); }
+  .card .needs { display: block; margin-top: 8px; font-size: 0.78rem; font-weight: 600; color: var(--lb-orange); }
+
+  footer {
+    text-align: center; color: var(--muted); font-size: 0.88rem;
+    padding: 32px 24px 48px; border-top: 1px solid var(--line); margin-top: 48px;
+  }
+  @media (max-width: 600px) {
+    header.hero h1 { font-size: 1.6rem; }
+    main { padding: 8px 16px 48px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <h1>ListenBrainz Fresh Releases — LMS Plugin</h1>
+  <p class="tagline">A plugin for <strong>Lyrion Music Server (LMS)</strong> built around <a href="https://listenbrainz.org">ListenBrainz</a>. It browses newly released albums (a personalised feed plus the global feed), turns your ListenBrainz playlists and recommendations into playable music, and adds rich release detail pages with artist bios and one-tap streaming.</p>
+  <div class="badges">
+    <span class="badge accent">v0.9.22</span>
+    <span class="badge">LMS 9.0.0+</span>
+    <span class="badge">Material Skin</span>
+    <span class="badge">Powered by ListenBrainz</span>
+  </div>
+  <div class="hero-actions">
+    <a class="btn btn-primary" href="ListenBrainzFreshReleases.zip">Download latest</a>
+    <a class="btn btn-ghost" href="#installation">Installation</a>
+  </div>
+</header>
+
+<main>
+<section id="features-at-a-glance">
+<h2>Features at a glance</h2>
+<div class="feature-cards">
+<div class="card"><h4>New Releases for You</h4><p>Fresh releases from artists you listen to</p><span class="needs">Needs: ListenBrainz username + token</span></div>
+<div class="card"><h4>All Releases</h4><p>The global ListenBrainz fresh-releases feed</p><span class="needs">Needs: nothing</span></div>
+<div class="card"><h4>Release detail pages</h4><p>Streaming matches, artist photo + biography, tracklist, genres, MusicBrainz link</p></div>
+<div class="card"><h4>Created-for-You Playlists</h4><p>Your Weekly Jams / Exploration / Daily Jams as Play-all lists</p><span class="needs">Needs: ListenBrainz username</span></div>
+<div class="card"><h4>Don't Stop The Music</h4><p>Two auto-DJ mixers (Radio + Recommended)</p><span class="needs">Needs: ListenBrainz username</span></div>
+<div class="card"><h4>Streaming playback</h4><p>Play matched albums/tracks on your services</p><span class="needs">Needs: Qobuz / Tidal / Bandcamp plugin</span></div>
+<div class="card"><h4>Artist bios + photos</h4><p>On the detail page and behind "Read more"</p><span class="needs">Needs: MAI plugin, or a Last.fm key (bio only)</span></div>
+<div class="card"><h4>Block artists</h4><p>Hide an artist from every feed</p></div>
+<div class="card"><h4>Material home shelves</h4><p>Three home-screen rows</p><span class="needs">Needs: Material Skin</span></div>
+</div>
+</section>
+<section id="requirements">
+<h2>Requirements</h2>
+<ul>
+<li><strong>LMS / Lyrion Music Server 9.0.0+</strong> (tested with Material Skin).
+</li>
+<li>A <strong>ListenBrainz account + API token</strong> for anything personalised (For You, Playlists, Don't Stop The Music). The global <em>All Releases</em> feed needs nothing. Your token is on your <a href="https://listenbrainz.org/settings/">ListenBrainz settings page</a>; the For You feed only reflects artists you've actually submitted listens for.
+</li>
+<li><strong>Optional add-ons</strong> the plugin uses when present:
+<ul>
+<li><strong>Qobuz</strong>, <strong>Tidal</strong> and/or <strong>Bandcamp</strong> LMS plugins (installed + signed in) → streaming playback.
+</li>
+<li><strong>Music &amp; Artist Information (MAI)</strong> plugin → artist biographies <em>and</em> photos.
+</li>
+<li>A free <strong>Last.fm API key</strong> → genre fallback, artist-bio fallback (no photo), and a similar-artist fallback for the radio. Get one at <a href="https://www.last.fm/api/account/create">last.fm/api/account/create</a>.
+</li></ul>
+</li></ul>
+<p>Every optional integration degrades gracefully — if it isn't there, that part of the UI simply hides itself.</p>
+</section>
+<section id="installation">
+<h2>Installation</h2>
+<p><strong>Via repository (recommended).</strong> In LMS go to <strong>Settings → Plugins → Additional Repositories</strong> and add:</p>
+<pre><code>https://simonarnold002.github.io/LMS-ListenBrainz-New-Releases/repo.xml</code></pre>
+<p>Then install <strong>ListenBrainz Fresh Releases</strong> from the plugin list and restart.</p>
+<p><strong>Manual.</strong> Download <code>ListenBrainzFreshReleases.zip</code> from the <a href="https://github.com/SimonArnold002/LMS-ListenBrainz-New-Releases">repository</a>, unzip into your LMS <code>Plugins/</code> directory so it sits as <code>Plugins/ListenBrainzFreshReleases/</code>, and restart.</p>
+</section>
+<section id="quick-start">
+<h2>Quick start</h2>
+<ol>
+<li>Open <strong>Settings → Advanced → ListenBrainz Fresh Releases</strong> (also linked from the plugin menu as <strong>Plugin Settings</strong>).
+</li>
+<li>Enter your <strong>ListenBrainz username</strong> and <strong>API token</strong> (needed for the personalised features).
+</li>
+<li><em>(Optional)</em> Paste a <strong>Last.fm API key</strong> and set <strong>Streaming Services</strong> priorities if you have Qobuz/Tidal/Bandcamp.
+</li>
+<li>Save. The plugin appears in <strong>Apps → ListenBrainz Fresh Releases</strong>.
+</li></ol>
+</section>
+<section id="using-each-feature">
+<h2>Using each feature</h2>
+<h3>Browsing releases</h3>
+<p>Open the plugin and you'll see <strong>New Releases for You</strong> and <strong>All Releases</strong> tiles (each tile's subtitle shows the date span and release count).</p>
+<ul>
+<li><strong>New Releases for You</strong> drops straight into your personalised list.
+</li>
+<li><strong>All Releases</strong> opens a by-week landing: <strong>Show all</strong>, plus one entry per week (badged <em>This Week / Last Week / Earlier</em>, and <em>Next Week / Next Fortnight / Further</em> for upcoming weeks when you've enabled future releases).
+</li>
+<li>When sorted by date, releases are grouped under a <strong>weekly divider</strong> (tap a week header to focus just that week). <strong>Group by Artist</strong> collapses an artist's multiple new releases into one expandable entry. Both are toggles in settings.
+</li>
+<li>What appears in each feed (date window, past/future, artwork-only, Various Artists, release types) is controlled in the <strong>New Releases for You</strong> and <strong>All Releases</strong> settings sections.
+</li>
+<li>Use <strong>Refresh (force update now)</strong> at the top of a feed to bypass the cache and reload.
+</li></ul>
+<h3>Release detail pages</h3>
+<p>Tap any release for a page in three sections:</p>
+<ul>
+<li><strong>Streaming</strong> — playable matches on your services (and a Refresh to re-search).
+</li>
+<li><strong>Artist Details</strong> — artist photo + a short biography preview with <strong>Read more</strong> for the full text, and <strong>Block this artist</strong>.
+</li>
+<li><strong>Album Details</strong> — tracklist (with durations), genres, tags, and <strong>View on MusicBrainz</strong>.
+</li></ul>
+<h3>Streaming playback</h3>
+<p>With <strong>Qobuz</strong>, <strong>Tidal</strong> and/or <strong>Bandcamp</strong> installed, releases and playlist tracks are matched (by artist + title) and made playable. In <strong>Streaming Services</strong> settings, give each service a <strong>search priority</strong> (lower = tried first, <strong>0 = never use it</strong>); matching stops at the first service that has it.</p>
+<h3>Created-for-You Playlists</h3>
+<p>With a username set, the <strong>Playlists</strong> section turns your ListenBrainz <strong>Weekly Jams</strong>, <strong>Weekly Exploration</strong> and <strong>Daily Jams</strong> into Play-all lists. Each track is matched to your <strong>own library first</strong> (then streaming); unmatched tracks are dropped and the page title shows how many matched.</p>
+<h3>Don't Stop The Music</h3>
+<p>Two auto-DJ mixers keep the queue going when it runs low. Pick one as your player's <strong>Don't Stop The Music</strong> source (LMS/Material player settings):</p>
+<ul>
+<li><strong>ListenBrainz Radio</strong> — seeds from the track you're playing and evolves outward through similar artists, so the music flows rather than loops. A new album by a different artist reseeds it. (If ListenBrainz has no similar artists for the seed and you have a Last.fm key, it falls back to Last.fm's similar artists before anything else.)
+</li>
+<li><strong>ListenBrainz Recommended for You</strong> — plays from your personalised recommendations.
+</li></ul>
+<p>Both prefer a copy from <strong>your own library</strong> when you have it (otherwise stream), spread the selection across many artists, and <strong>never repeat a track within a session</strong>.</p>
+<h3>Block artists</h3>
+<p><strong>Block this artist</strong> on any detail page hides every release by that artist from all feeds. Manage and <strong>Unblock</strong> them in the <strong>Blocked Artists</strong> settings section. (It's a local filter — no ListenBrainz account needed, and it takes effect on the next browse.)</p>
+<h3>Material home shelves</h3>
+<p>The plugin adds <strong>New Releases for You</strong>, <strong>Playlists</strong> and <strong>All Releases</strong> rows to the Material home screen. Enable them via Material's <strong>Customize home menu</strong>. <em>(Material caches the available rows in your browser — if a new one doesn't show, hard-refresh with Ctrl/Cmd-Shift-R.)</em></p>
+</section>
+<section id="settings-reference">
+<h2>Settings reference</h2>
+<h3>General</h3>
+<table>
+<thead><tr>
+<th>Setting</th>
+<th>Default</th>
+<th>Notes</th>
+</tr></thead>
+<tbody>
+<tr><td>ListenBrainz Username</td><td><em>(empty)</em></td><td>Needed for For You, Playlists, Don't Stop The Music</td></tr>
+<tr><td>User Token</td><td><em>(empty)</em></td><td>From listenbrainz.org/settings/</td></tr>
+<tr><td>Last.fm API Key</td><td><em>(empty)</em></td><td>Optional — enables genre + artist-bio + radio similar-artist fallbacks</td></tr>
+<tr><td>Days window</td><td><strong>14</strong></td><td>1–90 days of releases to show</td></tr>
+<tr><td>Default sort</td><td><strong>Release Date</strong></td><td>Date (newest first), Artist, Album, or Confidence</td></tr>
+<tr><td>Group by Artist</td><td><strong>On</strong></td><td>Collapse an artist's multiple new releases into one entry</td></tr>
+<tr><td>Weekly Dividers</td><td><strong>On</strong></td><td>Per-week divider in the date-sorted view (wins over Group by Artist for that sort)</td></tr>
+<tr><td>Find on Streaming Services</td><td><strong>On</strong></td><td>Show playable Qobuz/Tidal/Bandcamp matches on detail pages</td></tr>
+<tr><td>Prefer Tracks from My Library</td><td><strong>On</strong></td><td>Use your own copy (by MusicBrainz ID, then artist + title) before streaming — for Playlists and Don't Stop The Music</td></tr>
+</tbody></table>
+<h3>Streaming Services</h3>
+<p>A <strong>search priority</strong> per detected service (Qobuz / Tidal / Bandcamp): lower number = searched first, <strong>0 = never use it</strong>. Drives detail-page matches, Playlists and Don't Stop The Music.</p>
+<h3>Blocked Artists</h3>
+<p>Lists the artists you've blocked; tick <strong>Unblock</strong> and save to restore them. Various Artists can't be blocked (it would hide unrelated compilations).</p>
+<h3>New Releases for You / All Releases</h3>
+<p>Each section has its own copy of these filters:</p>
+<table>
+<thead><tr>
+<th>Setting</th>
+<th>Default</th>
+</tr></thead>
+<tbody>
+<tr><td>Include Past Releases</td><td><strong>On</strong></td></tr>
+<tr><td>Include Upcoming Releases</td><td><strong>Off</strong></td></tr>
+<tr><td>Only Releases with Artwork</td><td><strong>On</strong></td></tr>
+<tr><td>Include Various Artists</td><td><strong>On</strong></td></tr>
+<tr><td>Release types</td><td><strong>Album</strong> + <strong>Compilation</strong> on; Single, EP, Broadcast, Other, Soundtrack, Live, Remix, Demo off</td></tr>
+</tbody></table>
+<blockquote><p>Don't Stop The Music uses sensible built-in defaults (no settings page of its own).</p></blockquote>
+</section>
+<section id="notes-limitations">
+<h2>Notes &amp; limitations</h2>
+<ul>
+<li><strong>Genre coverage</strong> on brand-new releases is sparse (MusicBrainz often hasn't tagged them yet). Genres show <em>when available</em>. A <strong>Last.fm API key</strong> fills the gap using Last.fm's album/artist tags.
+</li>
+<li><strong>Streaming matches</strong> are by artist + album search, so an album not yet on a service won't appear, and occasionally a close title may mismatch.
+</li>
+<li>Optional integrations (streaming services, MAI, Last.fm) are auto-detected; missing ones just hide their UI.
+</li></ul>
+</section>
+<section id="credits">
+<h2>Credits</h2>
+<ul>
+<li>Release data from <a href="https://listenbrainz.org">ListenBrainz</a> / <a href="https://musicbrainz.org">MusicBrainz</a>; cover art from the <a href="https://coverartarchive.org">Cover Art Archive</a>. All part of the <a href="https://metabrainz.org">MetaBrainz</a> project.
+</li>
+<li>Streaming via the community <strong>Qobuz</strong>, <strong>Tidal</strong> and <strong>Bandcamp</strong> LMS plugins.
+</li>
+<li>Artist biographies and photos via the <strong>Music &amp; Artist Information (MAI)</strong> plugin, with <strong>Last.fm</strong> fallbacks.
+</li></ul>
+<p>See <a href="LICENSE">LICENSE</a> for licensing.</p>
+</section>
+</main>
+
+<footer>
+  <p>ListenBrainz Fresh Releases — LMS Plugin — a plugin for Lyrion Music Server ·
+  <a href="https://github.com/SimonArnold002/LMS-ListenBrainz-New-Releases">View on GitHub</a></p>
+</footer>
+
+</body>
+</html>

@@ -55,7 +55,7 @@ use constant MB_BASE_URL     => 'https://musicbrainz.org/ws/2/';
 use constant LASTFM_BASE_URL => 'https://ws.audioscrobbler.com/2.0/';
 
 # MusicBrainz requires a descriptive User-Agent identifying the application
-use constant USER_AGENT   => 'LMS-ListenBrainzFreshReleases/0.8.22 ( https://github.com/SimonArnold002/LMS-ListenBrainz-New-Releases )';
+use constant USER_AGENT   => 'LMS-ListenBrainzFreshReleases/0.9.22 ( https://github.com/SimonArnold002/LMS-ListenBrainz-New-Releases )';
 
 # ---------------------------------------------------------------------------
 # GET /1/user/<username>/fresh_releases  (personalised, auth required)
@@ -1043,6 +1043,69 @@ sub _parseLastfmTags {
         last if @out >= 5;
     }
     return \@out;
+}
+
+# ---------------------------------------------------------------------------
+# Similar artists from Last.fm (artist.getsimilar) — the FALLBACK for the radio
+# propagator when ListenBrainz's similar-artists dataset has nothing for the seed.
+# Needs lastfm_api_key (graceful empty list otherwise). Returns an arrayref of
+# { name, artist_mbid (may be ''), score }, match-desc. Last.fm gives artist NAMES
+# (its mbids are spotty), so the caller resolves names to MBIDs before fanning out.
+# Cached lbf:lfmsimilar:* (found = SIMILAR_TTL, empty = LFM_EMPTY_TTL).
+# ---------------------------------------------------------------------------
+use constant LFM_SIMILAR_LIMIT => 30;
+
+sub getSimilarArtistsLastfm {
+    my ($class, $artist, $onDone, $onError) = @_;
+    $onDone  ||= sub {};
+    $onError ||= sub { $onDone->([]) };
+
+    my $key = $prefs->get('lastfm_api_key');
+    unless ($key && length($artist // '')) { $onDone->([]); return; }
+
+    # Octets — safe md5 cache key and per-byte URL encoding for CJK/emoji names.
+    utf8::encode($artist) if utf8::is_utf8($artist);
+
+    my $cacheKey = 'lbf:lfmsimilar:' . lc $artist;
+    if (my $cached = $cache->get($cacheKey)) { $onDone->($cached); return; }
+
+    my %p = (method => 'artist.getsimilar', artist => $artist, autocorrect => 1,
+             limit => LFM_SIMILAR_LIMIT, api_key => $key, format => 'json');
+    my $qs = join('&', map {
+        (my $v = defined $p{$_} ? $p{$_} : '')
+            =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X", ord($1))/ge;
+        "$_=$v";
+    } sort keys %p);
+    my $url = LASTFM_BASE_URL . '?' . $qs;
+
+    my $http = Slim::Networking::SimpleAsyncHTTP->new(
+        sub {
+            my $resp = shift;
+            my $data = eval { from_json($resp->content) };
+            my @out;
+            if (!$@ && ref $data eq 'HASH' && ref $data->{similarartists} eq 'HASH') {
+                my $a = $data->{similarartists}{artist};
+                my @arts = ref $a eq 'ARRAY' ? @$a : ($a ? ($a) : ());
+                for my $r (@arts) {
+                    next unless ref $r eq 'HASH';
+                    my $name = $r->{name};
+                    next unless defined $name && length $name;
+                    push @out, {
+                        name        => $name,
+                        artist_mbid => ($r->{mbid} && $r->{mbid} =~ /^[0-9a-f-]{36}$/i) ? lc $r->{mbid} : '',
+                        score       => $r->{match} // 0,
+                    };
+                }
+            }
+            eval { $cache->set($cacheKey, \@out, @out ? SIMILAR_TTL : LFM_EMPTY_TTL); 1 }
+                or $log->warn("lfm-similar cache set failed: $@");
+            $log->info("Last.fm similar artists for '$artist': " . scalar(@out));
+            $onDone->(\@out);
+        },
+        sub { _handleError(shift, $onError) },
+        { timeout => 15 }
+    );
+    $http->get($url, 'User-Agent' => USER_AGENT);
 }
 
 # Normalise a MusicBrainz release lookup into { media => [...] }. Genres are NOT

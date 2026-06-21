@@ -51,6 +51,18 @@ use constant PER_ARTIST_POOL   => 40;
 use constant MAX_PER_ARTIST => 1;
 use constant ARTIST_COOLDOWN => 24;
 
+# Last.fm similar-artist fallback (used when ListenBrainz has no similar artists
+# for the seed AND the user has a Last.fm API key). Capped lower than ARTIST_FANOUT
+# because Last.fm gives artist NAMES — each one without an inline MBID costs a
+# MusicBrainz name->MBID lookup to become fannable.
+use constant LFM_FANOUT => 12;
+
+# Cap simultaneous MusicBrainz name->MBID lookups when resolving Last.fm artists.
+# MusicBrainz's anonymous limit is ~1 req/s, so firing all LFM_FANOUT at once gets
+# the bulk throttled (503) and silently dropped — defeating the fallback on a cold
+# cache. A small bound drips them out; cached after the first run.
+use constant MBID_RESOLVE_CONCURRENCY => 4;
+
 # Library-FIRST resolution: if the user owns the track, play their copy (better
 # quality, free, instant); otherwise stream it. The selection is already varied
 # (similar-artist driven), so preferring owned copies is desirable here.
@@ -112,7 +124,7 @@ sub radio {
 
     # 1. The current/last-played track has a MusicBrainz artist MBID → seed from it.
     if ($seedMbid) {
-        _radioFromArtist($client, $cb, $seedMbid);
+        _radioFromArtist($client, $cb, $seedMbid, $seedName);
         return;
     }
 
@@ -127,7 +139,7 @@ sub radio {
         $API->getArtistMbidByName($seedName,
             sub {
                 my $mbid = shift;
-                if ($mbid) { _radioFromArtist($client, $cb, $mbid); }
+                if ($mbid) { _radioFromArtist($client, $cb, $mbid, $seedName); }
                 else {
                     $log->info("DSTM radio: '$seedName' unresolved; drift/recommendations");
                     $drift->();
@@ -143,23 +155,137 @@ sub radio {
 }
 
 # Run the similar-artists → top-recordings → resolve chain for a seed artist MBID.
+# $seedName (when known) enables the Last.fm fallback if ListenBrainz has no
+# similar artists for the seed.
 sub _radioFromArtist {
-    my ($client, $cb, $seed) = @_;
+    my ($client, $cb, $seed, $seedName) = @_;
 
-    $log->info("DSTM radio: seed artist $seed");
+    $log->info("DSTM radio: seed artist $seed" . (length($seedName // '') ? " ($seedName)" : ''));
     $API->getSimilarArtists($seed,
         sub {
             my $similar = shift // [];
-            # The seed artist itself plus a weighted-random pick of similar artists
-            # (higher score = likelier, but randomised so the radio varies/evolves).
-            my @artists = ($seed, _pickSimilar($similar, ARTIST_FANOUT - 1));
-            _collectArtistTracks(\@artists, sub {
-                my $cands = shift // [];
-                _resolveAndReturn($client, $cb, $cands, 'radio');
+            if (@$similar) {
+                # The seed artist itself plus a weighted-random pick of similar
+                # artists (higher score = likelier, but randomised so it evolves).
+                my @artists = ($seed, _pickSimilar($similar, ARTIST_FANOUT - 1));
+                _collectArtistTracks(\@artists, sub {
+                    _resolveAndReturn($client, $cb, shift // [], 'radio');
+                });
+            }
+            else {
+                # ListenBrainz has no similar artists for this seed → try Last.fm
+                # before giving up. Final fallback = the seed's own top recordings
+                # (then DSTM's own random if even that's empty), as before.
+                $log->info("DSTM radio: no LB similar artists for $seed");
+                _radioViaLastfm($client, $cb, $seed, $seedName,
+                    sub { _radioSeedOnly($client, $cb, $seed) });
+            }
+        },
+        # LB request failed → try Last.fm too; final fallback = recommendations.
+        sub {
+            _radioViaLastfm($client, $cb, $seed, $seedName,
+                sub { _recommendedFill($client, $cb) });
+        },
+    );
+}
+
+# Seed-only fan-out — the original empty-similar behaviour (just the seed artist's
+# own top recordings). Empty pool → _resolveAndReturn returns [] → DSTM goes random.
+sub _radioSeedOnly {
+    my ($client, $cb, $seed) = @_;
+    _collectArtistTracks([$seed], sub {
+        _resolveAndReturn($client, $cb, shift // [], 'radio');
+    });
+}
+
+# Last.fm similar-artist fallback for the radio. Needs the seed's NAME and a
+# Last.fm key; resolves the returned artist names to MBIDs (bounded, parallel) and
+# fans out from them plus the seed. No key / no name / nothing usable → $orig->().
+sub _radioViaLastfm {
+    my ($client, $cb, $seed, $seedName, $orig) = @_;
+
+    unless (length($seedName // '') && length($prefs->get('lastfm_api_key') // '')) {
+        $orig->();
+        return;
+    }
+
+    $log->info("DSTM radio: trying Last.fm similar artists for '$seedName'");
+    $API->getSimilarArtistsLastfm($seedName,
+        sub {
+            my $similar = shift // [];
+            unless (@$similar) {
+                $log->info("DSTM radio: Last.fm had no similar artists for '$seedName'");
+                $orig->();
+                return;
+            }
+
+            # Bias toward Last.fm's match score and cap the fan-out (each name
+            # without an inline MBID costs a MusicBrainz lookup to resolve).
+            my @ranked = sort { ($b->{score} // 0) <=> ($a->{score} // 0) } @$similar;
+            @ranked = @ranked[0 .. LFM_FANOUT - 1] if @ranked > LFM_FANOUT;
+
+            _resolveArtistMbids(\@ranked, sub {
+                my $mbids = shift // [];
+                unless (@$mbids) {
+                    $log->info("DSTM radio: no Last.fm artists resolved to MBIDs");
+                    $orig->();
+                    return;
+                }
+                $log->info("DSTM radio: Last.fm gave " . scalar(@$mbids) . " artist MBID(s)");
+                _collectArtistTracks([ $seed, @$mbids ], sub {
+                    _resolveAndReturn($client, $cb, shift // [], 'radio');
+                });
             });
         },
-        sub { _recommendedFill($client, $cb) },
+        sub { $orig->() },
     );
+}
+
+# Resolve Last.fm similar entries ({ name, artist_mbid }) to artist MBIDs: use the
+# inline MBID when present, else a MusicBrainz name→MBID lookup (cached). The MB
+# lookups are bounded to MBID_RESOLVE_CONCURRENCY at a time (MB rate limit) via a
+# pump; $done gets a de-duplicated arrayref of MBIDs.
+sub _resolveArtistMbids {
+    my ($list, $done) = @_;
+    my @list = @$list;
+    unless (@list) { $done->([]); return; }
+
+    my @mbids;
+    my $total     = scalar @list;
+    my $next      = 0;
+    my $active    = 0;
+    my $completed = 0;
+    my $finished  = 0;
+
+    my $finish = sub {
+        return if $finished; $finished = 1;
+        my %seen;
+        $done->([ grep { length && !$seen{$_}++ } @mbids ]);
+    };
+
+    my $pump;
+    $pump = sub {
+        return if $finished;
+        while ($active < MBID_RESOLVE_CONCURRENCY && $next < $total) {
+            my $a = $list[$next++];
+            $active++;
+            my $one = sub {
+                my $m = shift;
+                push @mbids, lc $m if $m;
+                $active--;
+                $completed++;
+                ($completed >= $total) ? $finish->() : $pump->();
+            };
+            # Inline MBID needs no lookup — complete it immediately (still counts
+            # against $active so the loop accounts for it before resolving).
+            if ($a->{artist_mbid}) { $one->($a->{artist_mbid}); }
+            else {
+                $API->getArtistMbidByName($a->{name}, $one, sub { $one->(undef) });
+            }
+        }
+    };
+
+    $pump->();
 }
 
 # Inspect the currently-playing track (scanning a few back if it has no usable

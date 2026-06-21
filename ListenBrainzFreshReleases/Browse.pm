@@ -1673,8 +1673,13 @@ sub _fetchArtistInfo {
         my $ok = eval {
             $photoFn->($client, sub {
                 my $photos = shift || [];
+                # MAI's getArtistPhotos puts the photo URL in each item's `image`
+                # key (it renders `image => $_->{url}` internally); the older `url`
+                # check here was always undef, so no artist photo ever loaded.
                 for my $p (@$photos) {
-                    if (ref $p eq 'HASH' && $p->{url}) { $info{image} = $p->{url}; last; }
+                    next unless ref $p eq 'HASH';
+                    my $u = $p->{image} || $p->{url};
+                    if ($u) { $info{image} = $u; last; }
                 }
                 $log->info(sprintf("artist-info '%s': MAI photos=%d image=%s",
                     $artist, scalar(@$photos), $info{image} // '-'));

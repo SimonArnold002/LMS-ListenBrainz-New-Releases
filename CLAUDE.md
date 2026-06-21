@@ -42,11 +42,25 @@ ListenBrainzFreshReleases/
         └── lbf-*_MTL_icon_*.png                               # Material font-icon convention (settings cog / feed refresh)
 
 tools/
-└── make_covers.py                     # Pillow generator for ALL branded covers/badges (see "Branded cover images")
+├── make_covers.py                     # Pillow generator for ALL branded covers/badges (see "Branded cover images")
+└── make_readme_html.py                # Zero-dep Markdown→HTML generator: README.md → README.html (styled) + index.html (Pages redirect)
 ```
 
+## Project docs / GitHub Pages
+
+`README.md` is the source of truth for user docs. `README.html` is a **generated**, styled,
+self-contained HTML version (ListenBrainz brand palette, hero with Download/Installation buttons,
+the "Features at a glance" table rendered as a card grid, every other table styled). It is built by
+`tools/make_readme_html.py` (stdlib only — a focused converter for the Markdown subset README.md
+uses). The hero's **version badge is read live from `install.xml`** (`read_version`), so a regen
+always reflects the current release — bump the version, then re-run the script. `index.html` (the
+GitHub Pages landing, served from the repo root) is emitted by the same
+script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `README.html`/`index.html`**
+— edit `README.md`, then re-run `python3 tools/make_readme_html.py`. These are repo docs only, NOT
+part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
+
 ## Current Version
-0.9.20 (dev)
+0.9.22 (dev)
 
 ## Created-for-You Playlists (0.8.0)
 
@@ -139,6 +153,18 @@ separate LMS plugin; mirrors `HomeExtras.pm`). Gated on `username`. Each mixer's
   **evolves** because each top-up stashes a random served artist MBID as `$state{cid}{next_seed}`,
   used when the live queue offers no fresh MB-tagged seed (e.g. our own streaming adds aren't
   tagged). Cold start / no seed at all → falls back to the Recommended pool so it still plays.
+- **Last.fm similar-artist fallback (0.9.21).** When ListenBrainz's `similar-artists` dataset returns
+  **nothing** for the seed (a known gap for some artists) and the user has a `lastfm_api_key`, the
+  radio tries `API::getSimilarArtistsLastfm` (Last.fm `artist.getsimilar`) before giving up
+  (`DSTM::_radioViaLastfm`). Last.fm returns artist NAMES (mbids are spotty), so up to `LFM_FANOUT`=12
+  are resolved to MBIDs via `getArtistMbidByName` (inline mbid used when present; `_resolveArtistMbids`,
+  which bounds the MusicBrainz name→MBID lookups to `MBID_RESOLVE_CONCURRENCY`=4 at a time via a pump
+  — MB's anonymous ~1 req/s limit means an unbounded burst of all 12 gets the bulk throttled/dropped on
+  a cold cache, defeating the fallback) then fanned out with the seed. If Last.fm is also empty / no key / nothing
+  resolves, it falls back exactly as before (empty-LB-similar → the seed's own top recordings
+  `_radioSeedOnly`; LB request error → the Recommended pool). Needs the seed's NAME, so it's threaded
+  through `_radioFromArtist` (the current-track and resolved-name seed paths have it; the drift seed
+  doesn't and skips Last.fm).
 - **Artist diversity (`_selectCandidates`/`_artistKey`, 0.9.3).** To stop the same artist clustering
   or recurring: candidates are grouped by artist, capped at `MAX_PER_ARTIST`=1 per top-up, artists
   not on a per-player cooldown FIFO (`ARTIST_COOLDOWN`=24) are preferred, and the short-list is
@@ -188,12 +214,20 @@ callback (never serialised), so `url` coderefs (Read-more, Block, Refresh) are s
   **text size** is set by Material's skin CSS for `type=>'header'` and is NOT settable from the OPML
   feed — enlarging it needs a Material/skin change.
 - **Row builders.** `_artistRows($rel,$client,$img,$bio)` = artist name (with the artist photo as a
-  small thumbnail when present) + bio + Block-artist. `_albumRows` = album/date/type/tags only;
+  small thumbnail when present) + bio + Block-artist. The inline thumbnail is **fixed-size by
+  Material's skin CSS** (not settable from the feed). NB: a `jive => { showBigArtwork => 1, actions =>
+  { do => { cmd => ['artwork', $img] } } }` tap-to-enlarge was tried and **reverted** — on a
+  `type=>'text'` row Material strips the action (`itemNoAction`) and the photo stopped rendering
+  entirely, so the row keeps a plain `image => $img` thumbnail. `_albumRows` = album/date/type/tags only;
   genres + tracklist are appended by `_releaseDetail`, and `_mbLink` (the MusicBrainz weblink, UUID-
   validated) is appended LAST.
 - **Biography (`_fetchArtistInfo`).** Prefers the **MAI** plugin (`Plugins::MusicArtistInfo::ArtistInfo`
   `getBiography`/`getArtistPhotos`, signature `($client,$cb,$params,$args)`, `$args={artist,mbid}`;
-  bio text in each item's `name`, photo url in each item's `url`) — bio AND photo. Falls back to
+  bio text in each item's `name`, photo url in each item's **`image`** key — MAI renders
+  `image => $_->{url}` internally, so the photo arrives as `image`, NOT `url` (reading `url`
+  silently yielded no photo until the 0.9.21 fix). NB: MAI's `getArtistPhotos` looks photos up by
+  artist **name** only — it passes `undef` for the artist_id and ignores `$args->{mbid}`, so the
+  mbid we pass is honoured for the bio but not the photo) — bio AND photo. Falls back to
   `API::getArtistBio` (Last.fm `artist.getinfo`, needs `lastfm_api_key`) for a bio only (no photo).
   Runs inside the detail-page async barrier; fully eval-guarded — no MAI and no key = name +
   Block-artist only. INFO-logs MAI detection + photo count for diagnosis. `API::_cleanBio` uses
@@ -288,7 +322,7 @@ divider, and it gives no accent bar). The panels also collapse/expand like nativ
 ### General Settings
 - `username` — ListenBrainz username
 - `token` — ListenBrainz API token
-- `lastfm_api_key` — optional Last.fm API key; enables the detail-page genre fallback when MusicBrainz has none (default empty = disabled)
+- `lastfm_api_key` — optional Last.fm API key; enables three fallbacks: detail-page genres when MusicBrainz has none, the artist biography when MAI isn't installed (bio only, no photo), and similar artists for the DSTM radio when ListenBrainz has none (default empty = disabled)
 - `days` — days window (1-90, default 14)
 - `sort` — default sort (release_date / artist_credit_name / release_name / confidence)
 - `group_by_artist` — collapse multi-release artists into one tappable entry (default ON)

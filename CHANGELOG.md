@@ -3,6 +3,21 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.22 (dev)
+
+### Fixed
+- **Restored the artist photo on the release detail page.** A tap-to-enlarge experiment (a `showBigArtwork` + `artwork` action on the artist row) backfired — Material strips the action on a `type=>'text'` row (`itemNoAction`) and, with the action present, stopped rendering the thumbnail at all, so the photo disappeared. Reverted to the plain `image => $img` thumbnail, so the artist photo shows again. (The thumbnail stays Material's fixed size; a genuinely larger inline image needs a skin/CSS change, not an OPML-feed tweak.)
+
+## 0.9.21 (dev)
+
+### Added
+- **Last.fm similar-artist fallback for the DSTM Radio mixer.** When ListenBrainz's similar-artists dataset has nothing for the seed (a real gap for some artists), the radio previously dropped straight to DSTM's own random play. Now, if a **Last.fm API key** is set, it tries Last.fm's `artist.getsimilar` first (`API::getSimilarArtistsLastfm`), resolves up to `LFM_FANOUT`=12 of the returned artist names to MBIDs (inline mbid used when present, else MusicBrainz lookup), and fans out from them. Only if Last.fm is also empty / no key / nothing resolves does it fall back as before (seed's own top recordings, then random; recommendations on an LB request error). Needs the seed's artist name, threaded through `_radioFromArtist` (current-track and resolved-name seeds have it; the drift seed skips it).
+
+### Fixed (QC)
+- **Bounded the MusicBrainz name→MBID lookups in the Last.fm fallback.** `_resolveArtistMbids` fired all up to `LFM_FANOUT`=12 lookups at once; against MusicBrainz's anonymous ~1 req/s limit that got the bulk throttled (503) and silently dropped on a cold cache — weakening the fallback exactly when it's first used. It now pumps them `MBID_RESOLVE_CONCURRENCY`=4 at a time (same pattern as the playlist resolver), inline-MBID entries completing without a call.
+- **`USER_AGENT` version string** corrected `0.8.22` → `0.9.21` (was stale; only sent to MusicBrainz/Last.fm).
+- **Artist photo now actually loads on the release detail page.** `_fetchArtistInfo` read each MAI `getArtistPhotos` item's `url` key, but MAI returns the photo URL in the **`image`** key (it builds `image => $_->{url}` internally) — so `url` was always undef and no artist photo ever appeared. Now reads `image` (with a `url` fallback for older MAI). NB: MAI matches the photo by artist **name** (it ignores the mbid for photos), so the image is name-driven even though we pass the mbid.
+
 ## 0.9.20 (dev)
 
 ### Added
