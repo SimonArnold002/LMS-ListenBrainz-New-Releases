@@ -5,6 +5,9 @@ Versions follow `MAJOR.MINOR.PATCH`.
 
 ## 0.9.22 (dev)
 
+### Changed
+- **Manage Plugins "more info" link now opens the HTML README, not the raw repo.** `install.xml` `<homepageURL>` changed from the GitHub repo to the styled GitHub Pages page `https://simonarnold002.github.io/LMS-ListenBrainz-New-Releases/README.html`, so choosing "more info" in LMS → Manage Plugins lands the user on a readable page. (Link-only change folded into the 0.9.22 zip; sha refreshed, no version bump.)
+
 ### Fixed
 - **Restored the artist photo on the release detail page.** A tap-to-enlarge experiment (a `showBigArtwork` + `artwork` action on the artist row) backfired — Material strips the action on a `type=>'text'` row (`itemNoAction`) and, with the action present, stopped rendering the thumbnail at all, so the photo disappeared. Reverted to the plain `image => $img` thumbnail, so the artist photo shows again. (The thumbnail stays Material's fixed size; a genuinely larger inline image needs a skin/CSS change, not an OPML-feed tweak.)
 

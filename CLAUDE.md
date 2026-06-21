@@ -397,7 +397,7 @@ dividers / group-by-artist per prefs). The Playlists section is gated on `userna
 - Uses `<extension>` (singular) root element — matches manually installed plugins like NowPlayingShare
 - `<extensions>` (plural) format is for repo-installed plugins — DO NOT use for manual plugins
 - `<optionsURL>` points to `plugins/ListenBrainzFreshReleases/settings.html`
-- `<homepageURL>` points to the GitHub repo so a "more info" link shows in Manage Plugins (NOT `<link>` — that's ignored; Qobuz/Bandcamp use `homepageURL`)
+- `<homepageURL>` is the Manage Plugins **"more info"** link (NOT `<link>` — that's ignored; Qobuz/Bandcamp use `homepageURL`). Points to the styled GitHub Pages README `https://simonarnold002.github.io/LMS-ListenBrainz-New-Releases/README.html` (the in-git `README.html` served by Pages; `index.html` redirects to it) so users land on a readable page rather than the raw GitHub repo. Shipped in the 0.9.22 zip (link-only change, no version bump)
 - `<icon>` points to `ListenBrainzFreshReleasesIcon_svg.png` — the Material `_svg.png` convention. **OPMLBased uses `_pluginDataFor('icon')` (i.e. install.xml) for the app icon and ignores any `icon =>` arg** (confirmed in `OPMLBased.pm` lines 62/185), so this single ref serves the Material app/menu tile, Material's Manage Plugins, AND non-Material skins. Material sees the `_svg.png` name, loads the sibling `.svg`, and recolours it per theme (white on dark, black on light). Non-Material skins show the real transparent PNG fallback.
 
 ### Icon System (Material Skin) — authoritative rules from Material's developer
