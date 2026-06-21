@@ -58,7 +58,7 @@ $prefs->init({
     # how many resolved tracks to append per queue top-up. Track resolution reuses
     # prefer_library + svc_priority_* (library first, then streaming).
     dstm_count => 100,
-    dstm_batch => 10,
+    dstm_batch => 15,
 
     # For You section
     foryou_past             => 1,

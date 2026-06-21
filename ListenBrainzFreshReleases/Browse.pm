@@ -35,6 +35,10 @@ use constant STREAM_MAX_RESULTS => 12;
 # hang, partial failure), render the detail page anyway rather than hang.
 use constant DETAIL_TIMEOUT => 10;
 
+# Length of the artist-bio preview shown on the detail page (~2 lines); the full
+# bio is behind a "Read more" drill-in.
+use constant BIO_PREVIEW => 150;
+
 # A local-library match points at a file URL that could disappear on a rescan, so
 # cache library hits (and any resolved playlist that contains one) for only a day.
 use constant LIBRARY_TTL => 1 * 86400;
@@ -130,11 +134,14 @@ sub topLevel {
 # (or its "More") shows that section rather than an empty page. Non-Material skins
 # get a plain text divider.
 sub _sectionHeader {
-    my ($client, $stringToken, $useH, $children) = @_;
+    my ($client, $stringToken, $useH, $children, $noIcon) = @_;
+    # $noIcon: drop the logo thumbnail (detail-page section headers — there's
+    # nothing to drill into, the rows sit right below, so the icon just adds
+    # clutter). List pages keep the icon so Material's grid toggle stays enabled.
     my $hdr = {
         name  => cstring($client, $stringToken),
         type  => $useH ? 'header' : 'text',
-        image => ICON,
+        ($noIcon ? () : (image => ICON)),
     };
     if ($useH) {
         my @kids = @$children;
@@ -1294,28 +1301,33 @@ sub _buildReleaseItem {
 # Either async source can fail/empty without breaking the page.
 # ---------------------------------------------------------------------------
 sub _releaseDetail {
-    my ($rel, $client, $callback) = @_;
+    my ($rel, $client, $callback, $useH) = @_;
+    $useH = 1 unless defined $useH;   # the detail page is a Material experience by default
 
-    my @base   = _detailMeta($rel, $client);
     my $mbid   = $rel->{release_mbid}       // '';
     my $rgMbid = $rel->{release_group_mbid} // '';
     my $artist = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist') // '';
     my $album  = _pickValue($rel, 'release_name', 'title', 'name') // '';
+    my $artistMbid = (ref $rel->{artist_mbids} eq 'ARRAY' && @{ $rel->{artist_mbids} })
+                   ? $rel->{artist_mbids}[0] : undef;
 
-    my @streamItems;   # playable streaming matches (with a header)
+    my @streamItems;   # playable streaming matches
     my @trackItems;    # tracklist (from the release)
     my $mbGenres;      # arrayref: genres from the MusicBrainz release-group
     my $lfmGenres;     # arrayref: tags from Last.fm (fallback)
+    my $bio;           # artist biography text (MAI plugin or Last.fm)
+    my $artistImg;     # artist photo url (MAI only)
 
     my $wantStream = ($prefs->get('play_via') && length $album && _orderedAdapters()) ? 1 : 0;
     my $wantGenres = $rgMbid ? 1 : 0;
     my $wantLastfm = ($prefs->get('lastfm_api_key') && (length $artist || length $album)) ? 1 : 0;
     my $wantTracks = $mbid   ? 1 : 0;
+    my $wantArtist = length $artist ? 1 : 0;
 
     # Count all tasks up front: a cache hit completes its callback synchronously,
     # so per-task incrementing could let the barrier fire after the first one
     # finishes (before the others launched) and drop their data.
-    my $pending = $wantStream + $wantGenres + $wantLastfm + $wantTracks;
+    my $pending = $wantStream + $wantGenres + $wantLastfm + $wantTracks + $wantArtist;
     my $done    = 0;
 
     my $finish = sub {
@@ -1331,11 +1343,30 @@ sub _releaseDetail {
         my @genreItems = $g
             ? ({ name => cstring($client, 'PLUGIN_LBF_GENRES') . ': ' . join(', ', @$g), type => 'text' })
             : ();
-        $callback->({ items => [ @base, @streamItems, @genreItems, @trackItems ] });
+
+        # Three Material sections, Streaming first: Streaming (matches + refresh),
+        # Artist (photo + bio + block), Album (metadata + genres + tracklist, then
+        # the MB link at the end). A section is emitted only if it has rows;
+        # _sectionHeader gives a plain text divider when $useH is false.
+        my @streamRows = @streamItems;
+        my @artistRows = _artistRows($rel, $client, $artistImg, $bio);
+        my @albumRows  = (_albumRows($rel, $client), @genreItems, @trackItems, _mbLink($rel, $client));
+
+        my @items;
+        push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_STREAMING', $useH, \@streamRows, 1), @streamRows if @streamRows;
+        push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_ARTIST',    $useH, \@artistRows, 1), @artistRows if @artistRows;
+        push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_ALBUM',     $useH, \@albumRows,  1), @albumRows  if @albumRows;
+
+        $callback->({ items => \@items });
     };
 
     unless ($pending) {
-        $callback->({ items => \@base });
+        my @artistRows = _artistRows($rel, $client, undef, undef);
+        my @albumRows  = (_albumRows($rel, $client), _mbLink($rel, $client));
+        my @items;
+        push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_ARTIST', $useH, \@artistRows, 1), @artistRows if @artistRows;
+        push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_ALBUM',  $useH, \@albumRows,  1), @albumRows  if @albumRows;
+        $callback->({ items => \@items });
         return;
     }
 
@@ -1352,7 +1383,7 @@ sub _releaseDetail {
             my $res   = shift;
             my @items = (ref $res eq 'HASH' && ref $res->{items} eq 'ARRAY') ? @{ $res->{items} } : ();
             @items    = grep { ($_->{type} // '') ne 'text' } @items;   # drop "no match" placeholders
-            @streamItems = ({ name => cstring($client, 'PLUGIN_LBF_PLAY_VIA'), type => 'text' }, @items);
+            @streamItems = (@items);   # the section header replaces the old text label
             # "Refresh" re-renders THIS detail page in place (no navigation). It's
             # a normal link whose coderef clears the play-via cache and returns an
             # EMPTY list: Material treats an empty browse response + nextWindow
@@ -1361,7 +1392,6 @@ sub _releaseDetail {
             push @streamItems, {
                 name        => cstring($client, 'PLUGIN_LBF_REFRESH'),
                 type        => 'link',
-                image       => ICON,
                 nextWindow  => 'refresh',
                 passthrough => [{}],
                 url         => sub {
@@ -1433,56 +1463,72 @@ sub _releaseDetail {
             },
         );
     }
+
+    # Artist biography + photo — MAI plugin when installed, else Last.fm bio.
+    # Feeds the Artist section; always graceful (guarded inside _fetchArtistInfo).
+    if ($wantArtist) {
+        _fetchArtistInfo($client, $artist, $artistMbid, sub {
+            my $i = shift || {};
+            $bio       = $i->{bio};
+            $artistImg = $i->{image};
+            $pending--;
+            $finish->();
+        });
+    }
 }
 
-# Base metadata lines shown at the top of every release detail page
-sub _detailMeta {
-    my ($rel, $client) = @_;
+# Artist-section rows: the artist name (with the artist photo as a small row
+# thumbnail when available), an optional biography, and the Block-this-artist
+# action (or a "blocked" note). The photo/bio are fetched async in _releaseDetail.
+sub _artistRows {
+    my ($rel, $client, $img, $bio) = @_;
 
-    my $artist  = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist') // 'Unknown Artist';
-    my $album   = _pickValue($rel, 'release_name', 'title', 'name') // 'Unknown Album';
-    my $date    = $rel->{release_date} // '';
-    my $type    = _displayType($rel);   # primary + secondary, e.g. "Album / Live"
-    my $mbid    = $rel->{release_mbid} // '';
+    my $artist = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist') // 'Unknown Artist';
 
-    my @detail = (
-        { name => cstring($client, 'PLUGIN_LBF_ARTIST') . ": $artist", type => 'text' },
-        { name => cstring($client, 'PLUGIN_LBF_ALBUM')  . ": $album",  type => 'text' },
-        { name => cstring($client, 'PLUGIN_LBF_DATE')   . ": $date",   type => 'text' },
-        { name => cstring($client, 'PLUGIN_LBF_TYPE')   . ": $type",   type => 'text' },
-    );
+    my @rows = ({
+        name => cstring($client, 'PLUGIN_LBF_ARTIST') . ": $artist",
+        type => 'text',
+        ($img ? (image => $img) : ()),
+    });
 
-    # Folksonomy tags ride along in the fresh_releases payload (no extra call).
-    # Coverage is low (~9%) and noisy, so only show when present after cleanup.
-    my @tags = _releaseTags($rel);
-    push @detail, { name => cstring($client, 'PLUGIN_LBF_TAGS') . ': ' . join(', ', @tags), type => 'text' }
-        if @tags;
+    # Biography: a short (~2 line) preview as plain text on the page, then a
+    # "Read more" link that drills in to the FULL bio (all paragraphs, no cap).
+    # Material renders text rows in full, so the preview must be pre-trimmed; the
+    # complete bio lives behind the drill. A short bio shows inline with no link.
+    # Live feed node, so the url coderef is fine (page is returned, never cached).
+    if (defined $bio && length $bio) {
+        (my $oneLine = $bio) =~ s/\s+/ /g;   # collapse to one line for the preview
+        if (length $oneLine > BIO_PREVIEW) {
+            my $short = substr($oneLine, 0, BIO_PREVIEW);
+            $short =~ s/\s+\S*$//;           # back off to a word boundary
+            $short .= "\x{2026}";
+            push @rows, { name => $short, type => 'text' };
 
-    # Only build the link for a well-formed MBID (UUID) — the value comes from
-    # the API but lands in an href Material renders, so validate before trusting.
-    push @detail, {
-        name    => cstring($client, 'PLUGIN_LBF_VIEW_ON_MB'),
-        type    => 'link',
-        weblink => "https://musicbrainz.org/release/$mbid",
-        image   => ICON,
-    } if $mbid =~ /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-    # "Block this artist" — hides every release by this artist from all feeds
-    # (managed/unblocked on the settings page). If already blocked, show a static
-    # note instead of the action. Skip entirely for Various Artists (blocking the
-    # VA umbrella would hide unrelated compilations).
-    unless (_isVariousArtists($rel)) {
-        if (_isBlocked($rel, _blockedSet())) {
-            push @detail, {
-                name => cstring($client, 'PLUGIN_LBF_ARTIST_BLOCKED'),
-                type => 'text',
+            my @paras = map { { name => $_, type => 'text' } } split /\n{2,}/, $bio;
+            push @rows, {
+                name => cstring($client, 'PLUGIN_LBF_READ_MORE'),
+                type => 'link',
+                url  => sub {
+                    my ($c, $cb) = @_;
+                    $cb->({ items => \@paras });
+                },
             };
         }
         else {
-            push @detail, {
+            push @rows, { name => $bio, type => 'text' };   # short enough to show inline
+        }
+    }
+
+    # Block this artist (managed/unblocked on the settings page). If already
+    # blocked, show a static note. Never offered for Various Artists.
+    unless (_isVariousArtists($rel)) {
+        if (_isBlocked($rel, _blockedSet())) {
+            push @rows, { name => cstring($client, 'PLUGIN_LBF_ARTIST_BLOCKED'), type => 'text' };
+        }
+        else {
+            push @rows, {
                 name  => cstring($client, 'PLUGIN_LBF_BLOCK_ARTIST'),
                 type  => 'link',
-                image => ICON,
                 url   => sub {
                     my ($c, $cb) = @_;
                     my $name = _blockArtist($rel);
@@ -1495,7 +1541,138 @@ sub _detailMeta {
         }
     }
 
-    return @detail;
+    return @rows;
+}
+
+# Album-section rows: album / date / type / tags. Genres, the tracklist and the
+# "View on MusicBrainz" link (via _mbLink) are appended after these by _releaseDetail.
+sub _albumRows {
+    my ($rel, $client) = @_;
+
+    my $album = _pickValue($rel, 'release_name', 'title', 'name') // 'Unknown Album';
+    my $date  = $rel->{release_date} // '';
+    my $type  = _displayType($rel);   # primary + secondary, e.g. "Album / Live"
+
+    my @rows = (
+        { name => cstring($client, 'PLUGIN_LBF_ALBUM') . ": $album", type => 'text' },
+        { name => cstring($client, 'PLUGIN_LBF_DATE')  . ": $date",  type => 'text' },
+        { name => cstring($client, 'PLUGIN_LBF_TYPE')  . ": $type",  type => 'text' },
+    );
+
+    my @tags = _releaseTags($rel);
+    push @rows, { name => cstring($client, 'PLUGIN_LBF_TAGS') . ': ' . join(', ', @tags), type => 'text' }
+        if @tags;
+
+    return @rows;
+}
+
+# The "View on MusicBrainz" link — placed at the END of the Album section (after
+# the tracklist). Only built for a well-formed release MBID (it lands in a
+# Material-rendered href). Returns an empty list otherwise.
+sub _mbLink {
+    my ($rel, $client) = @_;
+    my $mbid = $rel->{release_mbid} // '';
+    return () unless $mbid =~ /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    return {
+        name    => cstring($client, 'PLUGIN_LBF_VIEW_ON_MB'),
+        type    => 'link',
+        weblink => "https://musicbrainz.org/release/$mbid",
+    };
+}
+
+# Fetch an artist biography + photo for the detail page's Artist section. Prefers
+# the MAI (Music Artist Info) plugin when installed — it already aggregates bios
+# and photos — and falls back to a Last.fm bio (no photo) otherwise. Calls
+# $cb->({ bio => $text|undef, image => $url|undef }). Fully guarded: any MAI/HTTP
+# failure degrades to "no bio / no photo" and never breaks or hangs the page (the
+# _releaseDetail watchdog still applies).
+sub _fetchArtistInfo {
+    my ($client, $artist, $artistMbid, $cb) = @_;
+
+    my %info;
+    unless (length($artist // '')) { $cb->(\%info); return; }
+
+    # MAI's bio/photo are plain functions ($client, $cb, $params, $args); take the
+    # coderefs from ->can so we never accidentally pass the package as $client.
+    my ($bioFn, $photoFn);
+    my $maiOn = 0;
+    eval {
+        $maiOn = Slim::Utils::PluginManager->isEnabled('Plugins::MusicArtistInfo::Plugin') ? 1 : 0;
+        if ($maiOn) {
+            $bioFn   = Plugins::MusicArtistInfo::ArtistInfo->can('getBiography');
+            $photoFn = Plugins::MusicArtistInfo::ArtistInfo->can('getArtistPhotos');
+        }
+        1;
+    };
+    $log->info(sprintf("artist-info '%s': MAI enabled=%d bioFn=%d photoFn=%d mbid=%s",
+        $artist, $maiOn, (defined $bioFn ? 1 : 0), (defined $photoFn ? 1 : 0), $artistMbid // '-'));
+
+    my $pending = 0;
+    my $fired   = 0;
+    my $maybeDone = sub {
+        return if $fired || $pending > 0;
+        $fired = 1;
+        $cb->(\%info);
+    };
+
+    my $lastfmBio = sub {
+        Plugins::ListenBrainzFreshReleases::API->getArtistBio($artist,
+            sub { $info{bio} = shift; $pending--; $maybeDone->(); },
+            sub { $pending--; $maybeDone->(); },
+        );
+    };
+
+    # --- Biography: MAI first, else Last.fm ---
+    $pending++;
+    if ($bioFn) {
+        my $ok = eval {
+            $bioFn->($client, sub {
+                my $items = shift || [];
+                for my $it (@$items) {
+                    next unless ref $it eq 'HASH';
+                    my $t = $it->{name};
+                    if (defined $t && length $t) {
+                        $info{bio} = Plugins::ListenBrainzFreshReleases::API::_cleanBio($t);
+                        last;
+                    }
+                }
+                # MAI gave nothing usable → Last.fm (reuses the same pending slot)
+                if ($info{bio}) {
+                    $log->info(sprintf("artist-info '%s': MAI bio len=%d", $artist, length $info{bio}));
+                    $pending--; $maybeDone->();
+                }
+                else {
+                    $log->info("artist-info '$artist': MAI bio empty -> Last.fm");
+                    $lastfmBio->();
+                }
+            }, {}, { artist => $artist, ($artistMbid ? (mbid => $artistMbid) : ()) });
+            1;
+        };
+        $lastfmBio->() unless $ok;   # MAI threw → Last.fm
+    }
+    else {
+        $lastfmBio->();
+    }
+
+    # --- Photo: MAI only ---
+    if ($photoFn) {
+        $pending++;
+        my $ok = eval {
+            $photoFn->($client, sub {
+                my $photos = shift || [];
+                for my $p (@$photos) {
+                    if (ref $p eq 'HASH' && $p->{url}) { $info{image} = $p->{url}; last; }
+                }
+                $log->info(sprintf("artist-info '%s': MAI photos=%d image=%s",
+                    $artist, scalar(@$photos), $info{image} // '-'));
+                $pending--; $maybeDone->();
+            }, {}, { artist => $artist, ($artistMbid ? (mbid => $artistMbid) : ()) });
+            1;
+        };
+        unless ($ok) { $pending--; $maybeDone->(); }
+    }
+
+    $maybeDone->();   # in case everything resolved synchronously
 }
 
 # Which supported streaming-service adapters are available on this server.
@@ -2063,19 +2240,28 @@ sub _searchQobuzTrack {
     my ($client, $query, $artistNorm, $titleNorm, $album, $collect) = @_;
 
     my $api = Plugins::Qobuz::Plugin::getAPIHandler($client);
-    unless ($api) { $collect->([]); return; }
+    unless ($api) { $log->info("Qobuz track-match: no API handler"); $collect->([]); return; }
 
     $api->search(sub {
         my $res = shift;
+        # Tolerate response-shape differences across Qobuz plugin versions.
+        my $items = (ref $res eq 'HASH' && ref $res->{tracks} eq 'HASH' && ref $res->{tracks}{items} eq 'ARRAY')
+                      ? $res->{tracks}{items}
+                  : (ref $res eq 'HASH' && ref $res->{items} eq 'ARRAY') ? $res->{items}
+                  : [];
         my @out;
-        for my $tr (@{ ($res && $res->{tracks} && $res->{tracks}{items}) || [] }) {
+        for my $tr (@$items) {
             next unless ref $tr eq 'HASH';
-            my $performer = ref $tr->{performer} eq 'HASH' ? $tr->{performer}{name}
-                          : ref $tr->{artist}    eq 'HASH' ? $tr->{artist}{name}
-                          : '';
-            $performer ||= (ref $tr->{album} eq 'HASH' && ref $tr->{album}{artist} eq 'HASH')
-                         ? $tr->{album}{artist}{name} : '';
-            next unless _trackMatches($artistNorm, $titleNorm, $performer, $tr->{title});
+            # Qobuz exposes the artist under several fields, and the track-level
+            # `performer` is often a featured/credited name rather than the main
+            # artist — matching only that field rejected valid Qobuz hits and forced
+            # a fall-through to Tidal. Try them ALL; accept if any matches.
+            my @artists = grep { defined && length } (
+                (ref $tr->{performer} eq 'HASH') ? $tr->{performer}{name} : undef,
+                (ref $tr->{artist}    eq 'HASH') ? $tr->{artist}{name}    : undef,
+                (ref $tr->{album} eq 'HASH' && ref $tr->{album}{artist} eq 'HASH') ? $tr->{album}{artist}{name} : undef,
+            );
+            next unless grep { _trackMatches($artistNorm, $titleNorm, $_, $tr->{title}) } @artists;
             my $id = $tr->{id} or next;
 
             my $albumName = ref $tr->{album} eq 'HASH' ? $tr->{album}{title} : '';
@@ -2086,13 +2272,14 @@ sub _searchQobuzTrack {
             my $url = "qobuz://$id.flac";
             push @out, {
                 name  => $tr->{title},
-                line2 => join(" \x{2013} ", grep { length } $performer, $albumName),
+                line2 => join(" \x{2013} ", grep { length } $artists[0], $albumName),
                 type  => 'audio',
                 url   => $url,
                 play  => $url,
                 image => $cover,
             };
         }
+        $log->info("Qobuz track-match '$query': " . scalar(@$items) . " results, " . scalar(@out) . " matched");
         $collect->(\@out);
     }, lc($query), 'tracks');
 }
@@ -2120,6 +2307,7 @@ sub _searchTidalTrack {
             next unless ref $item eq 'HASH' && defined $item->{url} && !ref $item->{url};
             push @out, $item;
         }
+        $log->info("Tidal track-match '$query': " . scalar(@{ $tracks || [] }) . " results, " . scalar(@out) . " matched");
         $collect->(\@out);
     }, { type => 'tracks', search => $query, limit => 20 });
 }

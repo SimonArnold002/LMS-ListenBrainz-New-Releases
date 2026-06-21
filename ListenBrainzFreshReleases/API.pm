@@ -848,6 +848,89 @@ sub _parseGenres {
 }
 
 # ---------------------------------------------------------------------------
+# Artist biography from Last.fm (artist.getinfo) — the FALLBACK bio source for
+# the detail page's Artist section when the MAI plugin isn't installed. Requires
+# lastfm_api_key (graceful no-op otherwise). Calls $onDone with the cleaned, FULL
+# bio string (content, not the short summary), or undef. Cached lbf:bio:2:* (30d/7d).
+# ---------------------------------------------------------------------------
+use constant BIO_MAX => 20000;   # pure DoS guard; never trims a real bio (no visible cap)
+
+sub getArtistBio {
+    my ($class, $artist, $onDone, $onError) = @_;
+    $onDone  ||= sub {};
+    $onError ||= sub { $onDone->(undef) };
+
+    my $key = $prefs->get('lastfm_api_key');
+    unless ($key && length($artist // '')) { $onDone->(undef); return; }
+
+    # Octets, so the md5 cache key and per-byte URL encoding are safe for CJK/emoji.
+    utf8::encode($artist) if utf8::is_utf8($artist);
+
+    my $cacheKey = 'lbf:bio:2:' . lc $artist;   # :2: = full-content bio (was the short summary)
+    if (defined(my $c = $cache->get($cacheKey))) {
+        $onDone->($c || undef);   # '' = cached "no bio"
+        return;
+    }
+
+    my %p = (method => 'artist.getinfo', artist => $artist, autocorrect => 1,
+             api_key => $key, format => 'json');
+    my $qs = join('&', map {
+        (my $v = defined $p{$_} ? $p{$_} : '')
+            =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X", ord($1))/ge;
+        "$_=$v";
+    } sort keys %p);
+    my $url = LASTFM_BASE_URL . '?' . $qs;
+
+    my $http = Slim::Networking::SimpleAsyncHTTP->new(
+        sub {
+            my $resp = shift;
+            my $data = eval { from_json($resp->content) };
+            my $bio  = '';
+            if (!$@ && ref $data eq 'HASH' && ref $data->{artist} eq 'HASH'
+                   && ref $data->{artist}{bio} eq 'HASH') {
+                # Prefer the FULL bio (content); summary is only Last.fm's short teaser.
+                $bio = _cleanBio($data->{artist}{bio}{content} // $data->{artist}{bio}{summary} // '');
+            }
+            eval { $cache->set($cacheKey, $bio, $bio ? LFM_FOUND_TTL : LFM_EMPTY_TTL); 1 }
+                or $log->warn("bio cache set failed: $@");
+            $onDone->($bio || undef);
+        },
+        sub { $onError->('Last.fm bio fetch failed') },
+        { timeout => 12 }
+    );
+    $http->get($url, 'User-Agent' => USER_AGENT);
+}
+
+# Strip Last.fm's trailing "Read more on Last.fm" link + any HTML and decode the
+# common entities, but KEEP the full text (and paragraph breaks) so Material's
+# "more" expander reveals the whole biography. Only caps at BIO_MAX as a safety net.
+sub _cleanBio {
+    my ($s) = @_;
+    return '' unless defined $s && length $s;
+    $s =~ s{<a\b[^>]*>.*?</a>}{}gis;   # drop the "Read more on Last.fm" link
+    $s =~ s/\s*\.?\s*User-contributed text is available.*$//is;  # Last.fm CC licence boilerplate
+    $s =~ s{</p>\s*<p[^>]*>}{\n\n}gis; # paragraph breaks -> blank lines
+    $s =~ s{<br\s*/?>}{\n}gis;
+    $s =~ s/<[^>]+>/ /g;               # any other tags
+    $s =~ s/&amp;/&/gi;
+    $s =~ s/&lt;/</gi;
+    $s =~ s/&gt;/>/gi;
+    $s =~ s/&quot;/"/gi;
+    $s =~ s/&#0?39;|&apos;/'/gi;
+    $s =~ s/&[a-z]+;/ /gi;             # any remaining named entity
+    $s =~ s/[ \t]+/ /g;                # collapse spaces/tabs, but keep newlines
+    $s =~ s/ *\n */\n/g;
+    $s =~ s/\n{3,}/\n\n/g;             # at most one blank line between paragraphs
+    $s =~ s/^\s+|\s+$//g;
+    if (length $s > BIO_MAX) {
+        $s = substr($s, 0, BIO_MAX);
+        $s =~ s/\s+\S*$//;             # back off to a word boundary
+        $s .= "\x{2026}";
+    }
+    return $s;
+}
+
+# ---------------------------------------------------------------------------
 # Last.fm genre/style tags — fallback for when MusicBrainz genres AND the
 # payload's release_tags are both empty (common for brand-new releases). Tries
 # the album's top tags, then the artist's (the artist almost always has tags

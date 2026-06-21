@@ -46,7 +46,7 @@ tools/
 ```
 
 ## Current Version
-0.9.7 (dev)
+0.9.19 (dev)
 
 ## Created-for-You Playlists (0.8.0)
 
@@ -135,13 +135,13 @@ separate LMS plugin; mirrors `HomeExtras.pm`). Gated on `username`. Each mixer's
   (labs `similar-artists` dataset) → a
   weighted-random pick of similar artists (`_pickSimilar`: score-biased top-slice, then shuffled,
   so it varies) → `API::getTopRecordingsForArtist` (`/1/popularity/top-recordings-for-artist/<m>`)
-  fanned out across `ARTIST_FANOUT`=12 artists, `PER_ARTIST_TRACKS`=8 each → a candidate pool. It
+  fanned out across `ARTIST_FANOUT`=24 artists, `PER_ARTIST_TRACKS`=8 each → a candidate pool. It
   **evolves** because each top-up stashes a random served artist MBID as `$state{cid}{next_seed}`,
   used when the live queue offers no fresh MB-tagged seed (e.g. our own streaming adds aren't
   tagged). Cold start / no seed at all → falls back to the Recommended pool so it still plays.
 - **Artist diversity (`_selectCandidates`/`_artistKey`, 0.9.3).** To stop the same artist clustering
-  or recurring: candidates are grouped by artist, capped at `MAX_PER_ARTIST`=2 per top-up, artists
-  not on a per-player cooldown FIFO (`ARTIST_COOLDOWN`=16) are preferred, and the short-list is
+  or recurring: candidates are grouped by artist, capped at `MAX_PER_ARTIST`=1 per top-up, artists
+  not on a per-player cooldown FIFO (`ARTIST_COOLDOWN`=24) are preferred, and the short-list is
   **round-robin interleaved by artist** so the returned order alternates. `$state{cid}` holds
   `served` (recording_mbids), `recent` (the artist FIFO) and `next_seed`. Both mixers use this — the
   Recommended pool keys on artist *name* (`n:<name>`) since CF recs carry no artist MBID.
@@ -167,10 +167,44 @@ separate LMS plugin; mirrors `HomeExtras.pm`). Gated on `username`. Each mixer's
   local-library radio (and playlists match owned tracks). ('never' mode is the only one that returns
   nothing without streaming.)
 - **Prefs:** `dstm_count` (recs pulled into the Recommended pool, default 100), `dstm_batch` (tracks
-  added per top-up, default 10). Reuses `svc_priority_*`. No settings UI yet (defaults work).
+  added per top-up, default 15 — adds the max it can for a seed, fewer if too few resolve). Reuses
+  `svc_priority_*`. No settings UI yet (defaults work).
 - **Why not LB Radio?** ListenBrainz's `/1/explore/lb-radio` prompt engine is the obvious "radio",
   but it was returning `503` during development; the similar-artists + top-recordings-for-artist
   combo gives the same flow from endpoints that are up and is cacheable.
+
+## Release detail page (0.9.10–0.9.19)
+
+`Browse::_releaseDetail` builds the album detail page as **three Material sections** via
+`_sectionHeader`, in this order: **Streaming** (playable matches + Refresh), **Artist Details**
+(photo + bio + Block-artist), **Album Details** (album/date/type/tags → genres → tracklist →
+**View on MusicBrainz** last). Each section is emitted only if it has rows; on non-Material skins
+`_sectionHeader` falls back to a plain text divider. The page is a live feed returned straight to the
+callback (never serialised), so `url` coderefs (Read-more, Block, Refresh) are safe here.
+
+- **Section headers (`_sectionHeader($client, $token, $useH, $children, $noIcon)`).** Detail-page
+  sections pass `$noIcon=1` (no LB-logo thumbnail — there's nothing to drill into, the rows sit right
+  below). List-page headers (top menu) keep the icon so Material's grid toggle stays enabled. Header
+  **text size** is set by Material's skin CSS for `type=>'header'` and is NOT settable from the OPML
+  feed — enlarging it needs a Material/skin change.
+- **Row builders.** `_artistRows($rel,$client,$img,$bio)` = artist name (with the artist photo as a
+  small thumbnail when present) + bio + Block-artist. `_albumRows` = album/date/type/tags only;
+  genres + tracklist are appended by `_releaseDetail`, and `_mbLink` (the MusicBrainz weblink, UUID-
+  validated) is appended LAST.
+- **Biography (`_fetchArtistInfo`).** Prefers the **MAI** plugin (`Plugins::MusicArtistInfo::ArtistInfo`
+  `getBiography`/`getArtistPhotos`, signature `($client,$cb,$params,$args)`, `$args={artist,mbid}`;
+  bio text in each item's `name`, photo url in each item's `url`) — bio AND photo. Falls back to
+  `API::getArtistBio` (Last.fm `artist.getinfo`, needs `lastfm_api_key`) for a bio only (no photo).
+  Runs inside the detail-page async barrier; fully eval-guarded — no MAI and no key = name +
+  Block-artist only. INFO-logs MAI detection + photo count for diagnosis. `API::_cleanBio` uses
+  Last.fm's FULL `content` (not the short `summary`), strips HTML/"Read more"/CC boilerplate, keeps
+  paragraph breaks; capped only by `BIO_MAX`=20000 (DoS guard, never visibly trims). Bio cache key
+  `lbf:bio:2:*`.
+- **Bio display — KEY Material fact.** A `type=>'text'` row renders its `name` IN FULL; Material has
+  NO auto-collapse / "more" for plain text. So "compact preview + expand" MUST be a drill-in: the
+  Artist section shows a `BIO_PREVIEW`=150-char text preview, then a **Read more** (`PLUGIN_LBF_READ_MORE`)
+  link whose `url` coderef returns the full bio split into paragraph rows. (Don't "fix" this by
+  putting the whole bio in a text row — it dominates the page, which is the bug this replaced.)
 
 ## Branded cover images (`tools/make_covers.py`)
 
@@ -389,6 +423,12 @@ Detected in `_isVariousArtists()`:
 - Material Skin's grouped artist release page layout is NOT achievable from OPML feeds — only via native library `albums_loop` responses. Solved in earlier versions by using Browse by Type sub-menus, removed in v0.3.0 in favour of settings-driven filtering.
 
 ## Version History
+- **0.9.0 → 0.9.19 (dev)** — the **Don't Stop The Music propagators** (ListenBrainz Radio + Recommended;
+  seed/evolve, library-first, no-repeat, artist diversity, Qobuz multi-artist matching, batch=15) and the
+  **release detail page restructure** (three Material sections Streaming/Artist/Album, artist photo +
+  biography via MAI or Last.fm, Read-more drill-in, logo-free section headers + action links, MB link
+  moved after the tracklist). Architecture in the topical sections above (**Don't Stop The Music
+  propagators**, **Release detail page**); per-version detail in **CHANGELOG.md**.
 - **0.8.0 → 0.8.15 (dev)** — the **Created-for-You Playlists** feature plus the surrounding polish
   (track matching incl. local-library preference, weekly-cadence caching, background warm, branded
   bundled covers/badges, the section-header menu, date-span tiles + W/C labels, manual feed refresh +

@@ -3,6 +3,74 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.19 (dev)
+
+### Changed
+- **No LB logo on the detail-page action links — text only.** Removed `image => ICON` from the **Refresh**, **Block this artist** and **View on MusicBrainz** links so they render as plain text. The streaming match rows keep their per-service logos (Qobuz/Tidal) as those indicate the source.
+
+## 0.9.18 (dev)
+
+### Changed
+- **Detail-page section order: Streaming first; MusicBrainz link last.** The **Streaming** section now sits at the top of the release detail page (above Artist and Album). The **View on MusicBrainz** link moved to the end of the Album section, after the tracklist (extracted from `_albumRows` into a new `_mbLink` helper, appended after the genre/tracklist rows).
+
+## 0.9.17 (dev)
+
+### Changed
+- **No logo on the detail-page section headers (Artist/Album/Streaming).** Those headers have nothing meaningful to drill into (the rows sit right below them), so the LB-logo thumbnail just added clutter. `_sectionHeader` gained a `$noIcon` flag, passed only by the detail-page sections; the top-level menu headers (Created for You / All Releases / Settings) keep the icon so Material's grid toggle stays enabled there. NB: header **text size** is set by Material's skin CSS for `type=>'header'` items and isn't exposed to plugins via the OPML feed — enlarging it would need a Material/skin change, not something the plugin can set per-item.
+
+## 0.9.16 (dev)
+
+### Changed
+- **Bio: ~2-line preview on the page + "Read more" drill-in to the full text.** Established that Material renders a `type=>'text'` row in full (no auto-collapse/"more" for plain text), so a full-text bio always dominated the page. The Artist Details section now shows a ~150-char preview (`BIO_PREVIEW`) followed by a **Read more** link (`PLUGIN_LBF_READ_MORE`) that drills into the complete biography (all paragraphs, no cap). A short bio still shows inline with no link. The drill page is a live coderef sub-feed (not serialised), so no caching concerns.
+
+## 0.9.15 (dev)
+
+### Changed
+- **No display cap on the bio — "more" shows the complete biography.** Dropped the 2000-char preview cap (and the now-unused `BIO_PREVIEW` constant); the bio row carries the full cleaned text. `_cleanBio`'s `BIO_MAX` raised 8000→20000 so it's purely a DoS guard and never visibly trims even a long MAI/Wikipedia bio. Material keeps the collapsed row compact and "more" expands to the whole thing.
+
+## 0.9.14 (dev)
+
+### Changed
+- **Bio row carries the whole bio so "more" expands to the full text.** 0.9.13 put only the opening paragraph in the row, so Material's "more" had nothing extra to reveal (collapsed and expanded looked identical). The row now holds the entire bio (all paragraphs), still capped at `BIO_PREVIEW` (2000) chars at a word boundary — the collapsed row stays compact and "more" reveals the full text.
+
+## 0.9.13 (dev)
+
+### Changed
+- **Bio shows the opening paragraph as plain text (no link/logo).** Replaced the 0.9.12 single-line link-with-logo treatment (which looked odd) — the bio is now a normal `type=>'text'` row in the Artist Details section showing the **opening paragraph**, capped at `BIO_PREVIEW` (2000) chars at a word boundary. Reading it is just the section's own drill-in; nothing special to tap.
+
+## 0.9.12 (dev)
+
+### Changed
+- **Bio is compact in the section, full text on click-in.** The full biography (0.9.11) dominated the Artist Details page. Now `_artistRows` shows a one-line ~200-char preview that drills in to the complete bio (split into paragraphs) when tapped; a short bio still shows inline with no drill. Keeps the section tidy while the whole bio is one tap away. (Superseded by 0.9.13.)
+
+## 0.9.11 (dev)
+
+### Fixed
+- **Artist biography is now the FULL text, not a short teaser.** Tapping "more" on the Artist Details bio revealed the same short blurb instead of the whole biography. Two causes in `API::getArtistBio`/`_cleanBio`: (1) the Last.fm path read `bio.summary` (the short teaser ending in "Read more on Last.fm") instead of `bio.content` (the full bio); (2) `_cleanBio` then hard-truncated to 600 chars, so there was nothing left for "more" to expand. Now it uses the full `content`, keeps paragraph breaks, decodes common HTML entities, strips the trailing Last.fm CC-licence boilerplate, and only caps at a high 8000-char safety ceiling. Applies to the MAI bio path too (it shares `_cleanBio`). Bio cache key bumped `lbf:bio:`→`lbf:bio:2:` so the old short cached bios re-fetch automatically.
+
+### Added
+- **Diagnostics for the missing artist photo.** `_fetchArtistInfo` now logs (INFO) whether MAI is detected (`MAI enabled=`/`bioFn=`/`photoFn=`), how many photos MAI returned, and the chosen image URL — so the no-photo case can be diagnosed from `log.txt` instead of guessed at. (MAI must be installed+enabled for any artist photo; the Last.fm fallback supplies a bio only, no photo.)
+
+## 0.9.10 (dev)
+
+### Changed
+- **Album detail page restructured into Material sections.** The flat, undivided detail list is now split under three Material accent-bar headers — **Artist Details** (artist name, an artist **photo** thumbnail + **biography** when available, Block-artist), **Album Details** (album/date/type/tags, genres, the tracklist, MusicBrainz link), and **Streaming** (the playable matches + Refresh). Reuses `Browse::_sectionHeader`; `_detailMeta` split into `_artistRows`/`_albumRows`.
+
+### Added
+- **Artist biography + photo on the detail page.** Prefers the **MAI (Music Artist Info)** plugin when installed (`Plugins::MusicArtistInfo::ArtistInfo` — bio *and* photo), falling back to a **Last.fm** bio (`API::getArtistBio` → `artist.getinfo`, needs `lastfm_api_key`) when MAI isn't present. New `Browse::_fetchArtistInfo` runs in the existing detail-page async barrier (so the watchdog still guarantees the page renders); fully guarded — no MAI and no Last.fm key just means name + Block-artist, no errors. Bio cleaned of HTML/"Read more" and truncated (~600 chars).
+
+## 0.9.9 (dev)
+
+### Changed
+- **Bigger top-ups (15 instead of 10).** `dstm_batch` default 10→15 and `ARTIST_FANOUT` 16→24 so a 15-track batch can fill with the one-track-per-artist cap. It still adds the **maximum it can** for a seed — if too few of the similar artists' tracks resolve, it appends fewer rather than padding or repeating. NB: changing the default does not move an already-saved `dstm_batch`; set the pref to 15 to apply on an existing install.
+- **Seed stays on the currently-playing track.** Confirmed current-track seeding (reverted a brief tail-seeding experiment): DSTM only tops up when the queue is nearly empty, so the current track is effectively the tail — it evolves the queue forward either way, and current-track is more responsive when you skip or drop on a new album.
+
+## 0.9.8 (dev)
+
+### Fixed
+- **Qobuz matches more tracks (less falling through to Tidal / dropping tracks).** Qobuz track-matching only checked the track-level `performer` field, which is often a featured/credited name rather than the main artist — so valid Qobuz hits were rejected and resolution fell to the next service (Tidal) or, with Tidal at 0, dropped the track (the "only a few tracks added" symptom). It now matches against **all** of Qobuz's artist fields (`performer`, `artist`, `album.artist`) and tolerates response-shape differences across Qobuz plugin versions. Added INFO diagnostics: `Qobuz/Tidal track-match '<query>': N results, M matched` (raise the plugin log to INFO to see exactly where a track resolves).
+- **Radio now actually reseeds when you play a new album.** Playing a new album by a very different artist still produced tracks from a previous session's genre, because a streaming seed track (no MusicBrainz ID) fell straight through to the leftover **drift seed** (`next_seed`) from the last session *before* the new album's artist name was resolved. Reordered `DSTM::radio` so the **current track always wins**: MBID → else resolve its artist name → and only if neither is available fall back to the drift seed, then recommendations. So a brand-new album reseeds the radio immediately instead of following the old neighbourhood.
+
 ## 0.9.7 (dev)
 
 ### Fixed

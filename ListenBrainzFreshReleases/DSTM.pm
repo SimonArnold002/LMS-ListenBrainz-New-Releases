@@ -39,7 +39,7 @@ use constant RECS_TTL => 24 * 3600;
 # How many artists to fan out across per radio refresh (the seed + similar), and
 # how many top recordings to take from each — the candidate pool per top-up. A
 # wide fan-out with few tracks each keeps the radio varied.
-use constant ARTIST_FANOUT     => 16;
+use constant ARTIST_FANOUT     => 24;
 use constant PER_ARTIST_TRACKS => 8;
 # Sample PER_ARTIST_TRACKS from this many of an artist's top recordings (random
 # within the slice) so it's not always the same greatest hits.
@@ -94,40 +94,52 @@ sub radio {
 
     my $cid = $client->id;
     my ($seedMbid, $seedName) = _seedArtist($client);
-    $seedMbid ||= $state{$cid}{next_seed};
 
-    # Best case: we already have a MusicBrainz artist MBID (library track, or our
-    # own drift seed) → straight into the similar-artists engine.
+    # Fallback used ONLY when the current track gives us no usable artist at all:
+    # drift from the last batch's artist if we have one, else recommendations.
+    # The current track must always take precedence over this (see below) so that
+    # playing a brand-new album actually reseeds the radio.
+    my $drift = sub {
+        if (my $ns = $state{$cid}{next_seed}) {
+            $log->info("DSTM radio: drifting from $ns");
+            _radioFromArtist($client, $cb, $ns);
+        }
+        else {
+            $log->info("DSTM radio: no seed, using recommendations");
+            _recommendedFill($client, $cb);
+        }
+    };
+
+    # 1. The current/last-played track has a MusicBrainz artist MBID → seed from it.
     if ($seedMbid) {
         _radioFromArtist($client, $cb, $seedMbid);
         return;
     }
 
-    # Common case: the seed track is from a streaming service (Qobuz/Tidal/…) so it
-    # has NO MusicBrainz ID. Resolve its artist NAME to an MBID, then seed from
-    # that. This is what makes the radio actually follow a streaming track instead
-    # of silently falling back to generic recommendations.
+    # 2. It's a streaming track (no MBID) but we know its artist NAME → resolve the
+    #    name to an MBID and seed from THAT. This MUST take precedence over the
+    #    drift seed: otherwise playing a new streaming album never reseeds the radio
+    #    — it'd keep following the leftover drift artist from a previous session
+    #    (the "tracks didn't suit the seed" bug). Drift is only the fallback if the
+    #    name can't be resolved.
     if (length($seedName // '')) {
         $log->info("DSTM radio: no seed MBID; resolving artist '$seedName'");
         $API->getArtistMbidByName($seedName,
             sub {
                 my $mbid = shift;
-                if ($mbid) {
-                    _radioFromArtist($client, $cb, $mbid);
-                }
+                if ($mbid) { _radioFromArtist($client, $cb, $mbid); }
                 else {
-                    $log->info("DSTM radio: '$seedName' unresolved, using recommendations");
-                    _recommendedFill($client, $cb);
+                    $log->info("DSTM radio: '$seedName' unresolved; drift/recommendations");
+                    $drift->();
                 }
             },
-            sub { _recommendedFill($client, $cb) },
+            sub { $drift->() },
         );
         return;
     }
 
-    # Nothing to seed from at all (cold start) → personalised recommendations.
-    $log->info("DSTM radio: no seed, using recommendations");
-    _recommendedFill($client, $cb);
+    # 3. No artist info on the current track at all → drift, else recommendations.
+    $drift->();
 }
 
 # Run the similar-artists → top-recordings → resolve chain for a seed artist MBID.
@@ -150,11 +162,12 @@ sub _radioFromArtist {
     );
 }
 
-# Inspect the most-recent queue track that carries any artist info and return
-# (artist_mbid_or_undef, artist_name_or_undef). Prefers the current track so the
-# radio follows what's actually playing; only looks back if the current track has
-# no usable metadata. Uses DSTM's own property extractor:
-# ($artist, $title, $duration, $id, $mbid, $artist_mbid, $extid).
+# Inspect the currently-playing track (scanning a few back if it has no usable
+# metadata) and return (artist_mbid_or_undef, artist_name_or_undef). DSTM only
+# fires when the queue is nearly empty, so the current track is effectively the
+# tail — this both follows what you're hearing and evolves the queue forward, and
+# it's more responsive than tail-seeding if you skip or drop on a new album. Uses
+# DSTM's extractor: ($artist, $title, $duration, $id, $mbid, $artist_mbid, $extid).
 sub _seedArtist {
     my ($client) = @_;
     return (undef, undef) unless $DSTMP->can('getMixablePropertiesFromTrack');
