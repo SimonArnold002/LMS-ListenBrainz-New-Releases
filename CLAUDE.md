@@ -3,6 +3,30 @@
 ## Project Overview
 A plugin for Lyrion Music Server (LMS) that browses ListenBrainz Fresh Releases. It provides a personalised "For You" feed and a global "All Releases" feed. Filtering is controlled via settings, and the browse menu stays intentionally simple. The current build targets LMS v9.x and has been tested with Material Skin.
 
+## Feature Summary & Release Posts (social media)
+
+**Maintain this section.** Two living artefacts for announcing the plugin:
+1. **Overall feature summary** (below) — the social-media / GitHub Pages "drop page" copy. **Update it whenever a key feature is added, changed or removed** (not for bug fixes). Keep it key-features-only, user-facing, no internals.
+2. **Per-release post** — when cutting a release, generate a short social post from the new **CHANGELOG.md** entries since the last main release: lead with new **features**, then a short "Fixes & polish" line for the notable bug fixes. Install line is the Pages repo URL. Hashtags: `#LyrionMusicServer #ListenBrainz #Squeezebox #SelfHosted`.
+
+### Overall feature summary (keep current)
+
+> **ListenBrainz Fresh Releases — for Lyrion Music Server.** Turn your ListenBrainz listening into a living, playable music feed inside LMS.
+
+- **New Releases for You** — personalised feed of fresh releases from artists in your ListenBrainz history (needs username + token). Newest-first, grouped by week, tap-through detail pages.
+- **All Releases** — the global ListenBrainz fresh-releases feed (no account). By-week landing page to jump to any week.
+- **Created-for-You Playlists** — your **Weekly Jams / Weekly Exploration / Daily Jams** as fully-streaming **Play-all** lists; every track matched **library-first**, then streaming.
+- **Don't Stop The Music — two auto-DJ mixers** — **ListenBrainz Radio** (seeds from what's playing and evolves through similar artists) + **Recommended for You** (personalised CF picks, shuffled). Owned copies first, no per-session repeats, varied artists.
+- **Rich release detail pages** — artist **photo + biography**, **tracklist** with durations, **genres**, tags, **View on MusicBrainz**, and inline **one-tap streaming matches**.
+- **Direct streaming playback** — matched albums/tracks play from **Qobuz / Tidal / Bandcamp**; you choose the per-service search order.
+- **Block artists** — one tap hides an artist from every feed.
+- **Material home shelves** — optional New Releases for You / Playlists / All Releases home rows.
+- **Your taste** — filter by type / artwork-only / Various Artists; sort by date / artist / album / confidence; release-window, weekly dividers, group-by-artist. Cached & pre-warmed (instant), **no extra server software**.
+
+**Requirements:** LMS 9.0.0+ (Material Skin); ListenBrainz account + token for personalised features (All Releases needs nothing); optional Qobuz/Tidal/Bandcamp (playback), MAI plugin (artist photos+bios), free Last.fm key (genre/bio fallbacks). Every optional add-on degrades gracefully.
+
+**Install:** add `https://simonarnold002.github.io/LMS-ListenBrainz-New-Releases/repo.xml` in LMS → Settings → Plugins.
+
 ## Server Details
 - **LMS Server**: 192.168.1.234:9000
 - **OS**: DietPi (Debian Bookworm)
