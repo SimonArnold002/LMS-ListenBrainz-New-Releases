@@ -3,6 +3,11 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.30
+
+### Fixed
+- **Streaming match for albums whose title begins with the artist name** (e.g. *Placebo – Placebo RE:CREATED*). The service search query is built as `artist + album`, which for these titles produced a doubled token (`placebo placebo re created`) that some service searches (Qobuz/Tidal/Bandcamp) failed to retrieve, so the detail page showed *No match* even though the album was available. When the album title already begins with the artist name **and has more after it**, the query now searches on the title alone (`placebo re created`). Self-titled releases (album == artist, e.g. *Placebo / Placebo*) and every other release are byte-for-byte unchanged — the artist disambiguation is unaffected because `_albumMatches`/`_artistMatch` still validate against the full, separate artist/album terms.
+
 ## 0.9.29
 
 ### Fixed

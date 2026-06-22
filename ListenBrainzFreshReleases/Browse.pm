@@ -1803,6 +1803,17 @@ sub _findPlayable {
     # credits like 'Lee "Scratch" Perry & Mouse on Mars' otherwise make the
     # service search miss the album.
     my $query      = join(' ', grep { length } $artistNorm, $albumNorm);
+    # When the album title already BEGINS with the artist name AND has more after
+    # it (e.g. "Placebo RE:CREATED" by Placebo), prefixing the artist again yields
+    # a doubled token ("placebo placebo re created") that some service searches
+    # fail to retrieve. In that one case the title already carries the artist, so
+    # search on the title alone. Self-titled releases (album == artist, e.g.
+    # "Placebo"/"Placebo") have nothing after the prefix, so index() misses and
+    # they keep the existing "artist album" query unchanged — no regression there.
+    # _albumMatches still validates the full title + artist regardless.
+    if (length $artistNorm && index($albumNorm, "$artistNorm ") == 0) {
+        $query = $albumNorm;
+    }
     # Octet copy for the service HTTP search (a wide-char query warns/breaks in the
     # URI layer). artistNorm/albumNorm stay as characters for _albumMatches.
     my $queryEnc   = $query;
