@@ -30,6 +30,7 @@ ListenBrainzFreshReleases/
 ├── Browse.pm                          # ALL browse feeds: top-level sections, For You / All Releases (+ by-week landing), Created-for-You Playlists (streaming + local-library track matching), the Material home-shelf feeds, branded tiles
 ├── API.pm                             # Async ListenBrainz HTTP: fresh_releases + createdfor/playlist endpoints, feed caching, MusicBrainz/Last.fm enrichment
 ├── HomeExtras.pm                      # Material home-page shelves — three HomeExtraBase subclasses (New Releases for You / Playlists / All Releases)
+├── DSTM.pm                            # Don't Stop The Music propagators — 2 mixers: Radio (seeds from last-played artist → similar-artists → top-recordings, evolves) + Recommended (CF pool); streaming-first resolution via Browse::_resolveTracks
 ├── Settings.pm                        # CSRF-protected settings page (General / Streaming Services / For You / All Releases)
 ├── install.xml                        # <extension> format, icon_svg.png (version in <version>)
 ├── strings.txt                        # All localisation strings (EN)
@@ -41,11 +42,26 @@ ListenBrainzFreshReleases/
         └── lbf-*_MTL_icon_*.png                               # Material font-icon convention (settings cog / feed refresh)
 
 tools/
-└── make_covers.py                     # Pillow generator for ALL branded covers/badges (see "Branded cover images")
+├── make_covers.py                     # Pillow generator for ALL branded covers/badges (see "Branded cover images")
+└── make_readme_html.py                # Zero-dep Markdown→HTML generator: README.md → README.html (styled) + index.html (Pages redirect)
 ```
 
+## Project docs / GitHub Pages
+
+`README.md` is the source of truth for user docs. `README.html` is a **generated**, styled,
+self-contained HTML version (ListenBrainz brand palette, hero with Download/Installation buttons,
+the "Features at a glance" table rendered as a card grid, every other table styled). It is built by
+`tools/make_readme_html.py` (stdlib only — a focused converter for the Markdown subset README.md
+uses). The hero's **version badge is read live from `install.xml`** (`read_version`), so a regen
+always reflects the current release — bump the version, then re-run the script. `index.html` (the
+GitHub Pages landing, served from the repo root) is emitted by the same
+script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `README.html`/`index.html`**
+— edit `README.md`, then re-run `python3 tools/make_readme_html.py`. These are repo docs only, NOT
+part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
+
 ## Current Version
-0.8.24
+0.9.29
+
 ## Created-for-You Playlists (0.8.0)
 
 New **Playlists** browse section (`Browse::fetchPlaylists` → `resolvePlaylist`), gated on
@@ -86,10 +102,54 @@ fully-streaming, Play-all-able playlist.
   once — so resolved playlists AND per-track results are cached **30d for both full and partial**
   matches (was 7d/1d). 30d matters: a Weekly Jams playlist lives ~2 weeks, so the cache must
   survive into its SECOND week or the "previous week" entry would re-resolve all 50 tracks
-  needlessly. No-match tracks keep 7d (recur across weeks). The createdfor LISTING uses
-  `PLAYLIST_LIST_TTL` = 24h (was the 6h feed TTL). Trade-off: a track that only later lands on a
-  service isn't picked up until next week's playlist — intentional, to avoid the slow re-resolve. Items are string-url `type=>audio` nodes (no coderef
-  rebuild needed, unlike the album play-via cache).
+  needlessly. No-match tracks keep 7d (recur across weeks). Trade-off: a track that only later lands
+  on a service isn't picked up until next week's playlist — intentional, to avoid the slow
+  re-resolve. Items are string-url `type=>audio` nodes (no coderef rebuild needed, unlike the album
+  play-via cache).
+- **Monday-aligned listing refresh (0.9.23):** the createdfor LISTING (`lbf:pl:list:<user>`) was a
+  rolling 24h TTL, so the new week was only picked up "within a day" of Monday and the exact moment
+  drifted with whenever the cache was first populated (install/browse time). It now expires AT the
+  Monday boundary via `API::_secsUntilNextWeeklyRefresh` (Monday `PLAYLIST_REFRESH_HOUR` = 03:00
+  **UTC** — LB regenerates ~00:15–00:27 UTC, so this gives a buffer), so the first browse after the
+  rollover always re-pulls the fresh listing. Three coordinated parts: (1) working key expires at the
+  boundary, **capped at 24h** (0.9.26) so a sub-weekly playlist still refreshes daily on the lazy path —
+  Daily Jams is in the same listing whenever LB enables it, and the cap also stops the warm being a
+  single point of failure; (2) the fallback copy (`lbf:pl:listfb:`) is bounded to `PLAYLIST_LIST_FALLBACK_TTL` = 8d
+  (NOT the feeds' shared 30d `FEED_FALLBACK_TTL`) so a persistent createdfor outage degrades to an
+  empty/refresh state rather than masking the new week with a >1-week-old listing; (3) `getCreatedForPlaylists`
+  takes `force => 1` (skips the working-cache READ, still writes both keys) and the background warm
+  passes it, so a warm tick that runs while the listing cache is still valid can't short-circuit on
+  the old listing and miss the new week. Each week still mints a new `mbid` (confirmed live), so the
+  per-week resolved/track caches auto-bust regardless. **Scoped to the playlist path only — the For
+  You / All Releases feeds (own `FEED_TTL`/`FEED_FALLBACK_TTL`, shared `_feedError`) are untouched.**
+- **Stale-per-player browse views — `cachetime => 0` (0.9.25):** even with the server data correct,
+  the playlists/releases could still show a *previous* week **on a given player** — because **Material
+  caches each player's browse/home views client-side and doesn't re-request after the weekly
+  rollover** (it's a per-player client cache, NOT the plugin or the server). Confirmed it's the
+  client: direct JSON-RPC queries returned the current week to every player, and navigating out/back
+  on a stale player refreshed it. Fix: every dynamic feed callback now returns `cachetime => 0`
+  (`topLevel`, `fetchForYou`, `fetchAll`, `fetchPlaylists`, `homeForYou`, `homePlaylists`,
+  `homeAllReleases`), which makes Material re-fetch on each open instead of rendering its cached copy.
+  **Verified in the server log**: three Playlists opens produced three fresh
+  `Created-for playlists cache hit` fetches rather than one. The re-fetch is cheap (served from the
+  plugin's own server-side caches — `lbf:pl:list`, `lbf:feed:*` — not ListenBrainz). NB: a plugin
+  **reinstall resets its log category to the default WARN**, so the INFO diagnostic lines
+  (`Created-for playlists cache hit`, `warm:`) stop until you re-set `plugin.listenbrainzfreshreleases`
+  to INFO in Settings → Logging. Also: the LMS log-over-HTTP (`log.txt`) lags/snapshots badly — it can
+  freeze at `Server done init` for minutes — so trust the live in-LMS log viewer over an HTTP pull.
+- **Home-shelf `cachetime` — same XMLBrowser path, so the plugin side is complete (don't re-investigate).**
+  The three Material home shelves are NOT a separate dispatch: `Plugins::MaterialSkin::HomeExtraBase`
+  subclasses `Slim::Plugin::OPMLBased`, and its `handleExtra` just runs
+  `executeRequest($client, [<tag>, 'items', $index, $quantity, 'menu:1'])` — i.e. the **same
+  `Slim::Control::XMLBrowser` `items` query** as the browse menu, calling our `homeForYou`/
+  `homePlaylists`/`homeAllReleases` feeds. So `cachetime => 0` sits on the right hash and XMLBrowser
+  honours it identically; **there is no extra plugin lever for the home carousels.** **Verified
+  (0.9.26):** two consecutive home-page loads produced two full re-fetches of all three shelves in the
+  log (`For-you` + `All releases` + `Created-for playlists` each time), so Material re-requests the
+  home extras on each load rather than serving a cached carousel — the home shelves are fixed too, no
+  Material-bundle change required. (If a home carousel ever DID go stale per-player again, it would be
+  Material's client-side home-page cache, i.e. a Material-bundle fix, not a plugin one — but that is
+  not the case today.)
 - **Cover art — per-category bundled images (0.8.4):** a real 2×2 track-art grid needs
   server-side compositing (GD/Imager/ImageMagick). The target DietPi box has **none** of those and
   LMS bundles only `Image::Scale` (resize, can't composite), and per [[no-extra-server-installs]] we
@@ -113,7 +173,118 @@ fully-streaming, Play-all-able playlist.
   startup, re-armed daily (`Slim::Utils::Timers`). It pre-fetches the playlist list and pre-resolves
   every playlist's track matches into `lbf:pl:resolved:*` (using the first connected player for the
   streaming-service API context), so the Playlists view and each playlist open instantly. Cheap
-  daily: keyed by `last_modified`, real work only when a new week's playlist appears.
+  daily: keyed by `last_modified`, real work only when a new week's playlist appears. The list fetch
+  uses `force => 1` (0.9.23) so it always re-pulls rather than short-circuiting on a still-valid
+  listing cache — required for the daily tick to actually discover Monday's new playlists.
+
+## Don't Stop The Music propagators (0.9.0)
+
+**Two** DSTM mixers backed by ListenBrainz — when the play queue runs low, DSTM tops it up.
+Registered in `DSTM.pm` (a module of this plugin, loaded by `Plugin::postinitPlugin` — **not** a
+separate LMS plugin; mirrors `HomeExtras.pm`). Gated on `username`. Each mixer's handler is
+`($client, $cb)` and MUST call `$cb->($client, \@urls)` — plain track URLs (streaming protocol urls
+**or** library file urls); `[]` if nothing.
+
+- **ListenBrainz Radio** (`PLUGIN_LBF_DSTM_RADIO` → `DSTM::radio`) — **seeds from what you were
+  playing and evolves**. Reads the artist MBID of the current/last queue track via DSTM's own
+  `getMixablePropertiesFromTrack` (`_seedArtist`, scans back ≤3 tracks for the most-recent track
+  with artist info). **Streaming seed tracks (Qobuz/Tidal/…) carry no MusicBrainz ID**, so when
+  there's no artist MBID the artist *name* is resolved to one via `API::getArtistMbidByName`
+  (MusicBrainz search, strong-match≥90 only, cached) — without this the radio fell back to generic
+  recommendations after every streaming track (the 0.9.2 fix). Then: `API::getSimilarArtists`
+  (labs `similar-artists` dataset) → a
+  weighted-random pick of similar artists (`_pickSimilar`: score-biased top-slice, then shuffled,
+  so it varies) → `API::getTopRecordingsForArtist` (`/1/popularity/top-recordings-for-artist/<m>`)
+  fanned out across `ARTIST_FANOUT`=24 artists, `PER_ARTIST_TRACKS`=8 each → a candidate pool. It
+  **evolves** because each top-up stashes a random served artist MBID as `$state{cid}{next_seed}`,
+  used when the live queue offers no fresh MB-tagged seed (e.g. our own streaming adds aren't
+  tagged). Cold start / no seed at all → falls back to the Recommended pool so it still plays.
+- **Last.fm similar-artist fallback (0.9.21).** When ListenBrainz's `similar-artists` dataset returns
+  **nothing** for the seed (a known gap for some artists) and the user has a `lastfm_api_key`, the
+  radio tries `API::getSimilarArtistsLastfm` (Last.fm `artist.getsimilar`) before giving up
+  (`DSTM::_radioViaLastfm`). Last.fm returns artist NAMES (mbids are spotty), so up to `LFM_FANOUT`=12
+  are resolved to MBIDs via `getArtistMbidByName` (inline mbid used when present; `_resolveArtistMbids`,
+  which bounds the MusicBrainz name→MBID lookups to `MBID_RESOLVE_CONCURRENCY`=4 at a time via a pump
+  — MB's anonymous ~1 req/s limit means an unbounded burst of all 12 gets the bulk throttled/dropped on
+  a cold cache, defeating the fallback) then fanned out with the seed. If Last.fm is also empty / no key / nothing
+  resolves, it falls back exactly as before (empty-LB-similar → the seed's own top recordings
+  `_radioSeedOnly`; LB request error → the Recommended pool). Needs the seed's NAME, so it's threaded
+  through `_radioFromArtist` (the current-track and resolved-name seed paths have it; the drift seed
+  doesn't and skips Last.fm).
+- **Artist diversity (`_selectCandidates`/`_artistKey`, 0.9.3).** To stop the same artist clustering
+  or recurring: candidates are grouped by artist, capped at `MAX_PER_ARTIST`=1 per top-up, artists
+  not on a per-player cooldown FIFO (`ARTIST_COOLDOWN`=24) are preferred, and the short-list is
+  **round-robin interleaved by artist** so the returned order alternates. `$state{cid}` holds
+  `served` (recording_mbids), `recent` (the artist FIFO) and `next_seed`. Both mixers use this — the
+  Recommended pool keys on artist *name* (`n:<name>`) since CF recs carry no artist MBID.
+- **ListenBrainz Recommended for You** (`PLUGIN_LBF_DSTM_RECOMMENDED` → `DSTM::recommended`) — your
+  personalised collaborative-filtering pool, shuffled. `API::getRecommendations` →
+  `GET /1/cf/recommendation/user/<user>/recording` (the `artist_type` param is **ignored by the
+  live API** — similar/raw/top all return the same list, which is why there's one mixer, not three)
+  → `API::getRecordingMetadata` (`/1/metadata/recording/?inc=artist`, chunked ≤50) to fill
+  artist/title. Pool cached `lbf:dstm:recs:<user>` for `RECS_TTL` (1 day). A 204 (no recs generated)
+  degrades quietly.
+- **Resolution & no-repeat (`_resolveAndReturn`).** Both mixers resolve via
+  `Browse::_resolveTracks(..., $libMode)`. `_findPlayableTrack`'s `$libMode`: **first**
+  (library→streaming), **fallback** (streaming first, library only if no service matched), **never**
+  (streaming only). The mixers use **`first`** (0.9.5 — library-first: play an owned copy when the
+  user has it, else stream; the selection is varied enough that preferring owned copies no longer
+  hurts). Non-`first` modes use a `:<mode>`-suffixed cache key so they don't collide with the
+  playlist feature's `lbf:track:2:*` cache. **Per-session no-repeat (0.9.5):** `$state{cid}{played}`
+  is a permanent (until restart) set of every track URL ever queued — a track is never returned
+  twice, and anything currently in the play queue is also excluded (`%blocked`). The artist `recent`
+  FIFO still resets for variety; `played` never does. The resettable `served`/`recent` only drive
+  artist variety. **No streaming services installed?** The empty-`@adapters` guard in
+  `_findPlayableTrack` runs *after* the library tier (0.9.0), so a no-streaming user gets a
+  local-library radio (and playlists match owned tracks). ('never' mode is the only one that returns
+  nothing without streaming.)
+- **Prefs:** `dstm_count` (recs pulled into the Recommended pool, default 100), `dstm_batch` (tracks
+  added per top-up, default 15 — adds the max it can for a seed, fewer if too few resolve). Reuses
+  `svc_priority_*`. No settings UI yet (defaults work).
+- **Why not LB Radio?** ListenBrainz's `/1/explore/lb-radio` prompt engine is the obvious "radio",
+  but it was returning `503` during development; the similar-artists + top-recordings-for-artist
+  combo gives the same flow from endpoints that are up and is cacheable.
+
+## Release detail page (0.9.10–0.9.19)
+
+`Browse::_releaseDetail` builds the album detail page as **three Material sections** via
+`_sectionHeader`, in this order: **Streaming** (playable matches + Refresh), **Artist Details**
+(photo + bio + Block-artist), **Album Details** (album/date/type/tags → genres → tracklist →
+**View on MusicBrainz** last). Each section is emitted only if it has rows; on non-Material skins
+`_sectionHeader` falls back to a plain text divider. The page is a live feed returned straight to the
+callback (never serialised), so `url` coderefs (Read-more, Block, Refresh) are safe here.
+
+- **Section headers (`_sectionHeader($client, $token, $useH, $children, $noIcon)`).** Detail-page
+  sections pass `$noIcon=1` (no LB-logo thumbnail — there's nothing to drill into, the rows sit right
+  below). List-page headers (top menu) keep the icon so Material's grid toggle stays enabled. Header
+  **text size** is set by Material's skin CSS for `type=>'header'` and is NOT settable from the OPML
+  feed — enlarging it needs a Material/skin change.
+- **Row builders.** `_artistRows($rel,$client,$img,$bio)` = artist name (with the artist photo as a
+  small thumbnail when present) + bio + Block-artist. The inline thumbnail is **fixed-size by
+  Material's skin CSS** (not settable from the feed). NB: a `jive => { showBigArtwork => 1, actions =>
+  { do => { cmd => ['artwork', $img] } } }` tap-to-enlarge was tried and **reverted** — on a
+  `type=>'text'` row Material strips the action (`itemNoAction`) and the photo stopped rendering
+  entirely, so the row keeps a plain `image => $img` thumbnail. `_albumRows` = album/date/type/tags only;
+  genres + tracklist are appended by `_releaseDetail`, and `_mbLink` (the MusicBrainz weblink, UUID-
+  validated) is appended LAST.
+- **Biography (`_fetchArtistInfo`).** Prefers the **MAI** plugin (`Plugins::MusicArtistInfo::ArtistInfo`
+  `getBiography`/`getArtistPhotos`, signature `($client,$cb,$params,$args)`, `$args={artist,mbid}`;
+  bio text in each item's `name`, photo url in each item's **`image`** key — MAI renders
+  `image => $_->{url}` internally, so the photo arrives as `image`, NOT `url` (reading `url`
+  silently yielded no photo until the 0.9.21 fix). NB: MAI's `getArtistPhotos` looks photos up by
+  artist **name** only — it passes `undef` for the artist_id and ignores `$args->{mbid}`, so the
+  mbid we pass is honoured for the bio but not the photo) — bio AND photo. Falls back to
+  `API::getArtistBio` (Last.fm `artist.getinfo`, needs `lastfm_api_key`) for a bio only (no photo).
+  Runs inside the detail-page async barrier; fully eval-guarded — no MAI and no key = name +
+  Block-artist only. INFO-logs MAI detection + photo count for diagnosis. `API::_cleanBio` uses
+  Last.fm's FULL `content` (not the short `summary`), strips HTML/"Read more"/CC boilerplate, keeps
+  paragraph breaks; capped only by `BIO_MAX`=20000 (DoS guard, never visibly trims). Bio cache key
+  `lbf:bio:2:*`.
+- **Bio display — KEY Material fact.** A `type=>'text'` row renders its `name` IN FULL; Material has
+  NO auto-collapse / "more" for plain text. So "compact preview + expand" MUST be a drill-in: the
+  Artist section shows a `BIO_PREVIEW`=150-char text preview, then a **Read more** (`PLUGIN_LBF_READ_MORE`)
+  link whose `url` coderef returns the full bio split into paragraph rows. (Don't "fix" this by
+  putting the whole bio in a text row — it dominates the page, which is the bug this replaced.)
 
 ## Branded cover images (`tools/make_covers.py`)
 
@@ -134,7 +305,9 @@ one-line title (Weekly Jams) and a two-line title (Weekly Exploration) line thei
 
 Produces: the menu tiles (`menu-new-releases`, `menu-playlists`, `menu-all-releases`), the playlist
 tiles (`playlist-weekly-jams[-prev]`, `playlist-weekly-exploration[-prev]`, `playlist-daily-jams`,
-`playlist-default`), and the All Releases week badges (`allrel-this-week`/`-last-week`/`-earlier`).
+`playlist-default`), and the All Releases week badges — past `allrel-this-week`/`-last-week`/`-earlier`
+("All Releases" title) and future `allrel-next-week`/`-next-fortnight`/`-further` ("Future Releases"
+title, shown for upcoming weeks when "Include Upcoming" is on; selected by `Browse::_weekBadgeImage`).
 **Not** generated: the Material font-icon PNGs (`lbf-cog_MTL_icon_settings.png`,
 `lbf-refresh_MTL_icon_refresh.png`) use Material's `_MTL_icon_<name>` filename convention so Material
 renders its own themed font icon — the PNG is only a minimal non-Material fallback; and the app icon
@@ -181,7 +354,7 @@ convention documented under "Icon System".
 
 ## Settings Structure
 
-Four sections in the settings page (General / Streaming Services / For You / All Releases). Each is a
+Five sections in the settings page (General / Blocked Artists / Streaming Services / For You / All Releases). Each is a
 proper Material settings section (0.8.24): the header is `<div class="prefHead collapsableSection"
 id="lbf_<section>_Header">` and the section's settings are wrapped in a matching `<div
 id="lbf_<section>">` panel. Material's `addExpanders` (iframe-dialog.js) finds `.collapsableSection`
@@ -195,13 +368,16 @@ divider, and it gives no accent bar). The panels also collapse/expand like nativ
 ### General Settings
 - `username` — ListenBrainz username
 - `token` — ListenBrainz API token
-- `lastfm_api_key` — optional Last.fm API key; enables the detail-page genre fallback when MusicBrainz has none (default empty = disabled)
+- `lastfm_api_key` — optional Last.fm API key; enables three fallbacks: detail-page genres when MusicBrainz has none, the artist biography when MAI isn't installed (bio only, no photo), and similar artists for the DSTM radio when ListenBrainz has none (default empty = disabled)
 - `days` — days window (1-90, default 14)
 - `sort` — default sort (release_date / artist_credit_name / release_name / confidence)
 - `group_by_artist` — collapse multi-release artists into one tappable entry (default ON)
 - `week_dividers` — when sorted by release date, insert a divider per week; takes precedence over group_by_artist for the date sort (default ON)
 - `play_via` — show inline playable streaming matches on the detail page (default ON)
 - `prefer_library` — when building a Created-for-You playlist, use a track from the user's own LMS library (matched by MusicBrainz ID, then artist + title) before searching streaming services (default ON; see "Prefer local library")
+
+### Blocked Artists Settings
+- `blocked_artists` — arrayref of `{ mbid, name }`. Releases by these artists are hidden from EVERY feed (For You / All Releases / home shelves) by `Browse::_filterSection` → `_isBlocked` (matches any blocked `artist_mbids` OR normalised credit name). No ListenBrainz API exists for this — the `fresh_releases` endpoint takes only date/sort params and the feedback API is per-recording (love/hate, `score 1/-1`) and isn't consumed by the feed — so it's a purely local, render-time filter (takes effect on next browse; no feed-cache clear). Added from a release detail page's **"Block this artist"** link (`Browse::_blockArtist`); VA is never offered (would hide unrelated compilations). The settings section lists each blocked artist with an Unblock checkbox (`lbf_unblock_<i>`); `Settings::handler` removes ticked entries on save (the pref is NOT in the `prefs()` list, so it's mutated directly).
 
 ### Streaming Services Settings
 - `svc_priority_<qobuz|bandcamp|tidal>` — search priority per service (number 0–9; lower = searched first, **0 = never search it**). Search stops at the first service that matches. Drives BOTH album play-via and playlist track matching. The page lists each known service as detected/not installed via `Browse::serviceStatus`.
@@ -267,7 +443,7 @@ dividers / group-by-artist per prefs). The Playlists section is gated on `userna
 - Uses `<extension>` (singular) root element — matches manually installed plugins like NowPlayingShare
 - `<extensions>` (plural) format is for repo-installed plugins — DO NOT use for manual plugins
 - `<optionsURL>` points to `plugins/ListenBrainzFreshReleases/settings.html`
-- `<homepageURL>` points to the GitHub repo so a "more info" link shows in Manage Plugins (NOT `<link>` — that's ignored; Qobuz/Bandcamp use `homepageURL`)
+- `<homepageURL>` is the Manage Plugins **"more info"** link (NOT `<link>` — that's ignored; Qobuz/Bandcamp use `homepageURL`). Points to the styled GitHub Pages README `https://simonarnold002.github.io/LMS-ListenBrainz-New-Releases/README.html` (the in-git `README.html` served by Pages; `index.html` redirects to it) so users land on a readable page rather than the raw GitHub repo. Shipped in the 0.9.22 zip (link-only change, no version bump)
 - `<icon>` points to `ListenBrainzFreshReleasesIcon_svg.png` — the Material `_svg.png` convention. **OPMLBased uses `_pluginDataFor('icon')` (i.e. install.xml) for the app icon and ignores any `icon =>` arg** (confirmed in `OPMLBased.pm` lines 62/185), so this single ref serves the Material app/menu tile, Material's Manage Plugins, AND non-Material skins. Material sees the `_svg.png` name, loads the sibling `.svg`, and recolours it per theme (white on dark, black on light). Non-Material skins show the real transparent PNG fallback.
 
 ### Icon System (Material Skin) — authoritative rules from Material's developer
@@ -329,6 +505,12 @@ Detected in `_isVariousArtists()`:
 - Material Skin's grouped artist release page layout is NOT achievable from OPML feeds — only via native library `albums_loop` responses. Solved in earlier versions by using Browse by Type sub-menus, removed in v0.3.0 in favour of settings-driven filtering.
 
 ## Version History
+- **0.9.0 → 0.9.19** — the **Don't Stop The Music propagators** (ListenBrainz Radio + Recommended;
+  seed/evolve, library-first, no-repeat, artist diversity, Qobuz multi-artist matching, batch=15) and the
+  **release detail page restructure** (three Material sections Streaming/Artist/Album, artist photo +
+  biography via MAI or Last.fm, Read-more drill-in, logo-free section headers + action links, MB link
+  moved after the tracklist). Architecture in the topical sections above (**Don't Stop The Music
+  propagators**, **Release detail page**); per-version detail in **CHANGELOG.md**.
 - **0.8.0 → 0.8.15** — the **Created-for-You Playlists** feature plus the surrounding polish
   (track matching incl. local-library preference, weekly-cadence caching, background warm, branded
   bundled covers/badges, the section-header menu, date-span tiles + W/C labels, manual feed refresh +

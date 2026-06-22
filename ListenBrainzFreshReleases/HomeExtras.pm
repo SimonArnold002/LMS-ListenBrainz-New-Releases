@@ -8,6 +8,14 @@ package Plugins::ListenBrainzFreshReleases::HomeExtras;
 #   - All Releases          (LBFAllReleases → Browse::homeAllReleases)
 # Each feed returns a FLAT card list that does not vary by request quantity — the
 # 0.6.11 rule that keeps deep home-shelf playback resolving the right item.
+#
+# NB (cachetime): HomeExtraBase subclasses Slim::Plugin::OPMLBased and its
+# handleExtra runs executeRequest($client, [<tag>,'items',...]) — i.e. the SAME
+# Slim::Control::XMLBrowser path as the browse menu. So the `cachetime => 0` the
+# home* feeds set (Browse.pm) is honoured here exactly as on the browse feeds;
+# there is no separate home-shelf dispatch and no extra plugin lever. Any residual
+# per-player staleness in a home carousel is Material's client-side home-page cache,
+# i.e. a Material-bundle fix, not a plugin one. (See CLAUDE.md "Home-shelf cachetime".)
 
 use strict;
 use base qw(Plugins::MaterialSkin::HomeExtraBase);

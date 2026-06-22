@@ -4,6 +4,12 @@ PLUGIN_LISTENBRAINZ_FRESH_RELEASES
 PLUGIN_LISTENBRAINZ_FRESH_RELEASES_DESC
 	EN	Browse ListenBrainz Fresh Releases on your Squeezebox.
 
+PLUGIN_LBF_DSTM_RADIO
+	EN	ListenBrainz Radio (similar to what's playing)
+
+PLUGIN_LBF_DSTM_RECOMMENDED
+	EN	ListenBrainz Recommended for You
+
 PLUGIN_LBF_SECTION_GENERAL
 	EN	General Settings
 
@@ -196,6 +202,18 @@ PLUGIN_LBF_TYPE
 PLUGIN_LBF_VIEW_ON_MB
 	EN	View on MusicBrainz
 
+PLUGIN_LBF_SECTION_ARTIST
+	EN	Artist Details
+
+PLUGIN_LBF_SECTION_ALBUM
+	EN	Album Details
+
+PLUGIN_LBF_SECTION_STREAMING
+	EN	Streaming
+
+PLUGIN_LBF_READ_MORE
+	EN	Read more
+
 PLUGIN_LBF_GENRES
 	EN	Genres
 
@@ -261,3 +279,27 @@ PLUGIN_LBF_SVC_DETECTED
 
 PLUGIN_LBF_SVC_NOT_DETECTED
 	EN	not installed
+
+PLUGIN_LBF_SECTION_BLOCKED
+	EN	Blocked Artists
+
+PLUGIN_LBF_BLOCKED_ARTISTS
+	EN	Blocked Artists
+
+PLUGIN_LBF_BLOCKED_ARTISTS_DESC
+	EN	Releases by these artists are hidden from every feed. Tick an artist and save to unblock them. Block an artist from a release's detail page ("Block this artist").
+
+PLUGIN_LBF_NO_BLOCKED
+	EN	No artists blocked yet.
+
+PLUGIN_LBF_UNBLOCK
+	EN	Unblock
+
+PLUGIN_LBF_BLOCK_ARTIST
+	EN	Block this artist (hide from feeds)
+
+PLUGIN_LBF_ARTIST_BLOCKED
+	EN	This artist is blocked (unblock in Settings)
+
+PLUGIN_LBF_BLOCKED_DONE
+	EN	Blocked %s — hidden from your feeds. Unblock in Settings.

@@ -8,13 +8,13 @@
 
 <module>Plugins::ListenBrainzFreshReleases::Plugin</module>
 
-<version>0.8.24</version>
+<version>0.9.29</version>
 
 <description>Browse ListenBrainz Fresh Releases on your Squeezebox. Shows personalised For You releases and a global feed with sort and filter options.</description>
 
 <creator>CrystalGipsy</creator>
 
-<homepageURL>https://github.com/SimonArnold002/LMS-ListenBrainz-New-Releases</homepageURL>
+<homepageURL>https://simonarnold002.github.io/LMS-ListenBrainz-New-Releases/README.html</homepageURL>
 
 <icon>plugins/ListenBrainzFreshReleases/html/images/ListenBrainzFreshReleasesIcon_svg.png</icon>
 

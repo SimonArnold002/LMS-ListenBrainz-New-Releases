@@ -18,7 +18,8 @@ Covers produced (500x500):
   - menu tiles (main page / section): New Releases for You, Playlists, All Releases
   - playlist tiles: Weekly Jams / Weekly Exploration (+ -prev = Last Week),
     Daily Jams, and a generic default
-  - All Releases week badges: This Week / Last Week / Earlier
+  - All Releases week badges: This Week / Last Week / Earlier (past),
+    Next Week / Next Fortnight / Further (future, "Future Releases" title)
 
 Design rules (keep these stable so tiles line up across the plugin):
   * The wordmark and (when present) the pill sit at FIXED y positions, so a
@@ -67,10 +68,14 @@ COVERS = {
     "playlist-weekly-exploration-prev": ("Weekly Exploration",   TEAL,   "LAST WEEK"),
     "playlist-daily-jams":              ("Daily Jams",           PURPLE, None),
     "playlist-default":                 ("Playlist",             INDIGO, None),
-    # All Releases per-week badges
+    # All Releases per-week badges — past
     "allrel-this-week":                 ("All Releases",         AMBER,  "THIS WEEK"),
     "allrel-last-week":                 ("All Releases",         AMBER,  "LAST WEEK"),
     "allrel-earlier":                   ("All Releases",         AMBER,  "EARLIER"),
+    # All Releases per-week badges — future (when "Include Upcoming" is on)
+    "allrel-next-week":                 ("Future Releases",      AMBER,  "NEXT WEEK"),
+    "allrel-next-fortnight":            ("Future Releases",      AMBER,  "NEXT FORTNIGHT"),
+    "allrel-further":                   ("Future Releases",      AMBER,  "FURTHER"),
 }
 
 

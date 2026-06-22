@@ -39,11 +39,26 @@ $prefs->init({
     play_via             => 1,
     prefer_library       => 1,
 
+    # Artists the user has blocked: an arrayref of { mbid => <artist MBID or ''>,
+    # name => <display name> }. Releases by any of these are hidden from every
+    # feed (For You / All Releases + the home shelves) by Browse::_filterSection.
+    # Built from the release detail page's "Block this artist" action; managed
+    # (unblocked) on the settings page. There is no ListenBrainz API for this —
+    # it is a purely local filter applied at render time.
+    blocked_artists      => [],
+
     # Streaming-service search priority. Services are searched in ascending order
     # and the search stops at the first one with a match; 0 = never search it.
     svc_priority_qobuz    => 1,
     svc_priority_bandcamp => 2,
     svc_priority_tidal    => 3,
+
+    # Don't Stop The Music propagators (Similar / Raw / Top). dstm_count = how many
+    # recommended recordings to pull from ListenBrainz into the pool; dstm_batch =
+    # how many resolved tracks to append per queue top-up. Track resolution reuses
+    # prefer_library + svc_priority_* (library first, then streaming).
+    dstm_count => 100,
+    dstm_batch => 15,
 
     # For You section
     foryou_past             => 1,
@@ -143,6 +158,15 @@ sub postinitPlugin {
             1;
         } or $log->error("Failed to register Material home extra: $@");
     }
+
+    # Register the Don't Stop The Music propagators (Similar / Raw / Top). DSTM is
+    # a core plugin (normally enabled); DSTM->register guards on registerHandler so
+    # a disabled DSTM is a quiet no-op.
+    eval {
+        require Plugins::ListenBrainzFreshReleases::DSTM;
+        Plugins::ListenBrainzFreshReleases::DSTM->register();
+        1;
+    } or $log->error("Failed to register DSTM propagators: $@");
 
     # Warm the Created-for-You caches (playlist list, per-track matches, grid
     # covers) shortly after startup, then daily — so the Playlists view and each
