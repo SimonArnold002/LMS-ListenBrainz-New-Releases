@@ -3,6 +3,11 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.28 (dev)
+
+### Fixed
+- **`cachetime => 0` now also on the feeds' error/empty paths.** 0.9.25 added the no-cache hint to the success path of every dynamic feed, but the error and empty returns (a transient "Error" / "No playlists" tile, or an empty home shelf) still had no `cachetime`, so Material could cache *that* per-player and keep showing it after the backend recovered — the same staleness class, in the failure path. The hint is now on every error/empty return of the seven dynamic listing feeds (`topLevel`, `fetchForYou`, `fetchAll`, `fetchPlaylists`, `homeForYou`, `homePlaylists`, `homeAllReleases`). Scoped to those listing feeds only — resolved playlists, the release-detail page, the refresh action, and per-week content sub-feeds are unchanged (they return stable per-key content, not the rolling listing).
+
 ## 0.9.27 (dev)
 
 ### Docs

@@ -264,7 +264,9 @@ sub fetchForYou {
         },
         onError => sub {
             $log->error("For You fetch error: " . (shift // ''));
-            $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_ERROR'), type => 'text' }] });
+            # cachetime => 0 on the error path too, so a transient failure tile isn't
+            # cached per-player and left stuck after the backend recovers.
+            $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_ERROR'), type => 'text' }], cachetime => 0 });
         },
     );
 }
@@ -297,7 +299,7 @@ sub homeForYou {
         },
         onError => sub {
             $log->error("Home For You fetch error: " . (shift // ''));
-            $cb->({ items => [] });
+            $cb->({ items => [], cachetime => 0 });
         },
     );
 }
@@ -320,7 +322,7 @@ sub homePlaylists {
         },
         onError => sub {
             $log->error("Home Playlists fetch error: " . (shift // ''));
-            $cb->({ items => [] });
+            $cb->({ items => [], cachetime => 0 });
         },
     );
 }
@@ -345,7 +347,7 @@ sub homeAllReleases {
         },
         onError => sub {
             $log->error("Home All Releases fetch error: " . (shift // ''));
-            $cb->({ items => [] });
+            $cb->({ items => [], cachetime => 0 });
         },
     );
 }
@@ -373,7 +375,7 @@ sub fetchAll {
         },
         onError => sub {
             $log->error("All releases fetch error: " . (shift // ''));
-            $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_ERROR'), type => 'text' }] });
+            $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_ERROR'), type => 'text' }], cachetime => 0 });
         },
     );
 }
@@ -415,7 +417,7 @@ sub fetchPlaylists {
             my $playlists = shift // [];
             _stashPlaylistSummary($playlists);
             unless (@$playlists) {
-                $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_NO_PLAYLISTS'), type => 'text' }] });
+                $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_NO_PLAYLISTS'), type => 'text' }], cachetime => 0 });
                 return;
             }
             # Mark each playlist current/previous within its category (list is
@@ -435,7 +437,7 @@ sub fetchPlaylists {
         },
         onError => sub {
             $log->error("Playlists fetch error: " . (shift // ''));
-            $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_ERROR'), type => 'text' }] });
+            $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_ERROR'), type => 'text' }], cachetime => 0 });
         },
     );
 }
