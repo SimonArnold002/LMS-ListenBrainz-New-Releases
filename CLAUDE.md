@@ -60,7 +60,7 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-0.9.24 (dev)
+0.9.25 (dev)
 
 ## Created-for-You Playlists (0.8.0)
 
@@ -120,6 +120,21 @@ fully-streaming, Play-all-able playlist.
   the old listing and miss the new week. Each week still mints a new `mbid` (confirmed live), so the
   per-week resolved/track caches auto-bust regardless. **Scoped to the playlist path only — the For
   You / All Releases feeds (own `FEED_TTL`/`FEED_FALLBACK_TTL`, shared `_feedError`) are untouched.**
+- **Stale-per-player browse views — `cachetime => 0` (0.9.25):** even with the server data correct,
+  the playlists/releases could still show a *previous* week **on a given player** — because **Material
+  caches each player's browse/home views client-side and doesn't re-request after the weekly
+  rollover** (it's a per-player client cache, NOT the plugin or the server). Confirmed it's the
+  client: direct JSON-RPC queries returned the current week to every player, and navigating out/back
+  on a stale player refreshed it. Fix: every dynamic feed callback now returns `cachetime => 0`
+  (`topLevel`, `fetchForYou`, `fetchAll`, `fetchPlaylists`, `homeForYou`, `homePlaylists`,
+  `homeAllReleases`), which makes Material re-fetch on each open instead of rendering its cached copy.
+  **Verified in the server log**: three Playlists opens produced three fresh
+  `Created-for playlists cache hit` fetches rather than one. The re-fetch is cheap (served from the
+  plugin's own server-side caches — `lbf:pl:list`, `lbf:feed:*` — not ListenBrainz). NB: a plugin
+  **reinstall resets its log category to the default WARN**, so the INFO diagnostic lines
+  (`Created-for playlists cache hit`, `warm:`) stop until you re-set `plugin.listenbrainzfreshreleases`
+  to INFO in Settings → Logging. Also: the LMS log-over-HTTP (`log.txt`) lags/snapshots badly — it can
+  freeze at `Server done init` for minutes — so trust the live in-LMS log viewer over an HTTP pull.
 - **Cover art — per-category bundled images (0.8.4):** a real 2×2 track-art grid needs
   server-side compositing (GD/Imager/ImageMagick). The target DietPi box has **none** of those and
   LMS bundles only `Image::Scale` (resize, can't composite), and per [[no-extra-server-installs]] we

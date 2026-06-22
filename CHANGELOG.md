@@ -3,6 +3,11 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.25 (dev)
+
+### Fixed
+- **Stale-per-player browse views are gone.** Material caches each player's browse/home views independently and wasn't re-requesting after the weekly rollover, so a given player could keep showing last week's playlist/release dates even though the server data was current. The `cachetime => 0` hint trialled on the Playlists feed in 0.9.24 is **confirmed working** (verified in the server log: three opens produced three fresh `Created-for playlists cache hit` fetches instead of one cached render), so it's now applied to **all** the plugin's dynamic feeds — the top-level menu (date-span tiles), New Releases for You, All Releases, the Created-for-You playlists, and the three Material home shelves. Each open now re-fetches (served from the plugin's own server-side caches, so it stays cheap), keeping every view in step with the Monday rollover.
+
 ## 0.9.24 (dev)
 
 ### Experimental

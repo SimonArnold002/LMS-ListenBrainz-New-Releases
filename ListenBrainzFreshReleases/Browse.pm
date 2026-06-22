@@ -130,7 +130,9 @@ sub topLevel {
     push @items, _sectionHeader($client, 'PLUGIN_LBF_ALL_RELEASES',           $useH, \@allReleases), @allReleases;
     push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_SETTINGS',       $useH, \@settings),    @settings;
 
-    $callback->({ items => \@items });
+    # cachetime => 0 so Material doesn't cache the top menu per-player — keeps the
+    # date-span tiles in step with the weekly rollover (same rationale as the feeds).
+    $callback->({ items => \@items, cachetime => 0 });
 }
 
 # A Material section-divider header. Material renders type=>'header' bold/accented
@@ -255,7 +257,10 @@ sub fetchForYou {
         onDone  => sub {
             my $releases = _sortReleases(_filterForYou(shift));
             _stashSummary('user', $releases);
-            $callback->({ items => [ _refreshItem($client, 'user'), @{ _buildItems($releases, $client, $headers) } ] });
+            # cachetime => 0: don't let Material cache this dynamic feed per-player
+            # (proven for Playlists in 0.9.24 — forces a re-fetch on each open so the
+            # weekly rollover shows immediately rather than a stale cached copy).
+            $callback->({ items => [ _refreshItem($client, 'user'), @{ _buildItems($releases, $client, $headers) } ], cachetime => 0 });
         },
         onError => sub {
             $log->error("For You fetch error: " . (shift // ''));
@@ -288,7 +293,7 @@ sub homeForYou {
         onDone  => sub {
             my $releases = _sortReleases(_filterForYou(shift));
             _stashSummary('user', $releases);
-            $cb->({ items => [ map { _buildReleaseItem($_, $client) } @$releases ] });
+            $cb->({ items => [ map { _buildReleaseItem($_, $client) } @$releases ], cachetime => 0 });
         },
         onError => sub {
             $log->error("Home For You fetch error: " . (shift // ''));
@@ -311,7 +316,7 @@ sub homePlaylists {
             for my $pl (@$playlists) {
                 $pl->{_variant} = $n{ lc($pl->{source_patch} // '') }++ ? 'previous' : 'current';
             }
-            $cb->({ items => [ map { _playlistTile($_, $client) } @$playlists ] });
+            $cb->({ items => [ map { _playlistTile($_, $client) } @$playlists ], cachetime => 0 });
         },
         onError => sub {
             $log->error("Home Playlists fetch error: " . (shift // ''));
@@ -336,7 +341,7 @@ sub homeAllReleases {
         onDone  => sub {
             my $releases = _sortReleases(_filterAll(shift));
             _stashSummary('all', $releases);
-            $cb->({ items => _buildAllLanding($releases, $client, 0) });
+            $cb->({ items => _buildAllLanding($releases, $client, 0), cachetime => 0 });
         },
         onError => sub {
             $log->error("Home All Releases fetch error: " . (shift // ''));
@@ -364,7 +369,7 @@ sub fetchAll {
         onDone  => sub {
             my $releases = _sortReleases(_filterAll(shift));
             _stashSummary('all', $releases);
-            $callback->({ items => [ _refreshItem($client, 'all'), @{ _buildAllLanding($releases, $client, $headers) } ] });
+            $callback->({ items => [ _refreshItem($client, 'all'), @{ _buildAllLanding($releases, $client, $headers) } ], cachetime => 0 });
         },
         onError => sub {
             $log->error("All releases fetch error: " . (shift // ''));
