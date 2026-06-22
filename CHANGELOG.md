@@ -3,6 +3,15 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.23 (dev)
+
+### Fixed
+- **Created-for-You playlists now refresh on the Monday boundary, not on a rolling timer.** The weekly playlist *listing* was cached for a rolling 24h, so the new week's Weekly Jams / Exploration were only picked up "within a day" of Monday and the exact moment drifted with whenever the cache was first populated (install/first-browse time). The working listing cache (`lbf:pl:list:<user>`) now expires **at** the Monday boundary (`API::_secsUntilNextWeeklyRefresh` → Monday 03:00 **UTC**, a few hours after ListenBrainz regenerates around 00:15–00:27 UTC), so the first browse after the rollover always re-pulls the fresh listing. Each week still mints a new playlist `mbid`, so the per-week resolved/track caches (keyed by `mbid|last_modified`) auto-bust as before.
+- **A flaky `createdfor` response can no longer mask the new week for weeks.** The listing's fallback copy (served only on a fetch error) was reusing the feeds' 30-day `FEED_FALLBACK_TTL`; on a persistent outage that could keep showing a >1-week-old listing. It now uses a bounded `PLAYLIST_LIST_FALLBACK_TTL` = 8 days, so a sustained outage degrades to an empty/refresh state rather than a confidently-stale week.
+- **The daily background warm now actually discovers Monday's new playlists.** `warmCache` called `getCreatedForPlaylists`, which short-circuited on the still-valid listing cache — so a warm tick running before the cache expired never saw the new week. The list fetch now takes `force => 1` (skips the working-cache read, still writes both keys) and the warm passes it, so each daily run re-pulls the listing and pre-resolves any new week's tracks.
+
+These changes are **scoped to the Created-for-You playlist path only**; the New Releases (For You) and All Releases feeds keep their own `FEED_TTL` / `FEED_FALLBACK_TTL` and the shared `_feedError` behaviour unchanged (verified both feeds still serve current data, incl. this week).
+
 ## 0.9.22 (dev)
 
 ### Changed

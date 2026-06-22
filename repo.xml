@@ -3,13 +3,13 @@
     <title lang="EN">ListenBrainz Fresh Releases</title>
   </details>
   <plugins>
-    <plugin name="ListenBrainzFreshReleases" version="0.9.22" minTarget="9.0.0" maxTarget="*">
+    <plugin name="ListenBrainzFreshReleases" version="0.9.23" minTarget="9.0.0" maxTarget="*">
       <title lang="EN">ListenBrainz Fresh Releases</title>
       <desc lang="EN">Browse your ListenBrainz Fresh Releases feed in Lyrion Music Server</desc>
       <url>https://raw.githubusercontent.com/SimonArnold002/LMS-ListenBrainz-New-Releases/dev/ListenBrainzFreshReleases.zip</url>
       <creator>CrystalGipsy</creator>
       <email></email>
-      <sha>8b68bc16ed6e8a41442929b23c8299dcd79cc201</sha>
+      <sha>7700d3317ce0f5b721ba7c4aa51805557e2a25fe</sha>
     </plugin>
   </plugins>
 </extensions>

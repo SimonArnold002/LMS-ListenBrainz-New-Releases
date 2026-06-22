@@ -41,12 +41,35 @@ use constant FEED_TIMEOUT => 10;
 use constant FEED_FALLBACK_TTL => 30 * 86400;
 
 # The Created-for-You playlist LISTING only changes weekly (new Weekly Jams /
-# Exploration generated each Monday in the user's timezone; ListenBrainz keeps the
-# current + previous week). A 6h feed TTL would refetch it pointlessly all week, so
-# cache it a day — fresh enough to pick up Monday's rollover within 24h, but a
-# fraction of the API calls. The per-playlist tracks/resolved caches (keyed by
-# last_modified) are what's expensive, and they're immutable per key.
-use constant PLAYLIST_LIST_TTL => 24 * 3600;   # 1 day
+# Exploration generated each Monday; ListenBrainz keeps the current + previous
+# week). Rather than a rolling 24h TTL (which expires relative to whenever the
+# cache was first populated, so the new week is only picked up "within a day" of
+# Monday and the exact moment drifts with install/browse time), the working copy
+# is expired AT the Monday boundary by _secsUntilNextWeeklyRefresh — so the first
+# browse after the rollover always re-pulls the fresh listing. The per-playlist
+# tracks/resolved caches (keyed by last_modified) remain immutable per key.
+#
+# ListenBrainz regenerates the weekly playlists shortly after 00:00 UTC Monday
+# (observed ~00:15–00:27 UTC); expire a few hours later to give it a buffer.
+use constant PLAYLIST_REFRESH_HOUR => 3;   # UTC hour on Monday to expire the listing
+
+# Fallback copy of the playlist listing (served only when a fetch fails). Unlike
+# the feeds' 30d FEED_FALLBACK_TTL, this is bounded to ~8 days: a persistent
+# createdfor outage then degrades to an empty/refresh state rather than confidently
+# showing a >1-week-old listing that masks the new Monday playlists indefinitely.
+use constant PLAYLIST_LIST_FALLBACK_TTL => 8 * 86400;
+
+# Seconds from now until the next weekly refresh boundary (Monday
+# PLAYLIST_REFRESH_HOUR:00 UTC). Strictly future: if this Monday's boundary has
+# already passed (or it's later on Monday), the next one is a week out.
+sub _secsUntilNextWeeklyRefresh {
+    my @g = gmtime(time);                       # [0]=sec [1]=min [2]=hour [6]=wday(0=Sun)
+    my $secsIntoDay = $g[2]*3600 + $g[1]*60 + $g[0];
+    my $daysAhead   = (8 - $g[6]) % 7;          # Mon->0, Tue->6, …, Sun->1
+    my $secs = $daysAhead*86400 - $secsIntoDay + PLAYLIST_REFRESH_HOUR*3600;
+    $secs += 7*86400 if $secs <= 0;             # boundary already passed today
+    return $secs;
+}
 
 use constant BASE_URL        => 'https://api.listenbrainz.org';
 use constant LABS_URL        => 'https://labs.api.listenbrainz.org';
@@ -232,7 +255,10 @@ sub getCreatedForPlaylists {
 
     my $cacheKey = 'lbf:pl:list:'   . $username;
     my $fbKey    = 'lbf:pl:listfb:' . $username;
-    if (my $cached = $cache->get($cacheKey)) {
+    # $args{force} skips the working-cache READ (used by the background warm) so a
+    # still-valid-but-stale listing can't short-circuit discovery of a new week;
+    # the fetched result is still written back to both keys below.
+    if (!$args{force} && (my $cached = $cache->get($cacheKey))) {
         $log->info("Created-for playlists cache hit ($cacheKey)");
         $args{onDone}->($cached);
         return;
@@ -258,8 +284,8 @@ sub getCreatedForPlaylists {
             my $playlists = _parsePlaylistList($data);
             # Use the feed-style dual cache so a later outage degrades to the
             # last good copy rather than an empty section.
-            eval { $cache->set($cacheKey, $playlists, PLAYLIST_LIST_TTL);  1 } or $log->warn("pl list cache set failed: $@");
-            eval { $cache->set($fbKey,    $playlists, FEED_FALLBACK_TTL); 1 } or $log->warn("pl list fallback set failed: $@");
+            eval { $cache->set($cacheKey, $playlists, _secsUntilNextWeeklyRefresh()); 1 } or $log->warn("pl list cache set failed: $@");
+            eval { $cache->set($fbKey,    $playlists, PLAYLIST_LIST_FALLBACK_TTL);    1 } or $log->warn("pl list fallback set failed: $@");
             $args{onDone}->($playlists);
         },
         sub { _feedError(shift, $fbKey, $args{onDone}, $args{onError}) },

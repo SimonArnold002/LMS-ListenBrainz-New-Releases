@@ -60,7 +60,7 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-0.9.22 (dev)
+0.9.23 (dev)
 
 ## Created-for-You Playlists (0.8.0)
 
@@ -102,10 +102,24 @@ fully-streaming, Play-all-able playlist.
   once — so resolved playlists AND per-track results are cached **30d for both full and partial**
   matches (was 7d/1d). 30d matters: a Weekly Jams playlist lives ~2 weeks, so the cache must
   survive into its SECOND week or the "previous week" entry would re-resolve all 50 tracks
-  needlessly. No-match tracks keep 7d (recur across weeks). The createdfor LISTING uses
-  `PLAYLIST_LIST_TTL` = 24h (was the 6h feed TTL). Trade-off: a track that only later lands on a
-  service isn't picked up until next week's playlist — intentional, to avoid the slow re-resolve. Items are string-url `type=>audio` nodes (no coderef
-  rebuild needed, unlike the album play-via cache).
+  needlessly. No-match tracks keep 7d (recur across weeks). Trade-off: a track that only later lands
+  on a service isn't picked up until next week's playlist — intentional, to avoid the slow
+  re-resolve. Items are string-url `type=>audio` nodes (no coderef rebuild needed, unlike the album
+  play-via cache).
+- **Monday-aligned listing refresh (0.9.23):** the createdfor LISTING (`lbf:pl:list:<user>`) was a
+  rolling 24h TTL, so the new week was only picked up "within a day" of Monday and the exact moment
+  drifted with whenever the cache was first populated (install/browse time). It now expires AT the
+  Monday boundary via `API::_secsUntilNextWeeklyRefresh` (Monday `PLAYLIST_REFRESH_HOUR` = 03:00
+  **UTC** — LB regenerates ~00:15–00:27 UTC, so this gives a buffer), so the first browse after the
+  rollover always re-pulls the fresh listing. Three coordinated parts: (1) working key expires at the
+  boundary; (2) the fallback copy (`lbf:pl:listfb:`) is bounded to `PLAYLIST_LIST_FALLBACK_TTL` = 8d
+  (NOT the feeds' shared 30d `FEED_FALLBACK_TTL`) so a persistent createdfor outage degrades to an
+  empty/refresh state rather than masking the new week with a >1-week-old listing; (3) `getCreatedForPlaylists`
+  takes `force => 1` (skips the working-cache READ, still writes both keys) and the background warm
+  passes it, so a warm tick that runs while the listing cache is still valid can't short-circuit on
+  the old listing and miss the new week. Each week still mints a new `mbid` (confirmed live), so the
+  per-week resolved/track caches auto-bust regardless. **Scoped to the playlist path only — the For
+  You / All Releases feeds (own `FEED_TTL`/`FEED_FALLBACK_TTL`, shared `_feedError`) are untouched.**
 - **Cover art — per-category bundled images (0.8.4):** a real 2×2 track-art grid needs
   server-side compositing (GD/Imager/ImageMagick). The target DietPi box has **none** of those and
   LMS bundles only `Image::Scale` (resize, can't composite), and per [[no-extra-server-installs]] we
@@ -129,7 +143,9 @@ fully-streaming, Play-all-able playlist.
   startup, re-armed daily (`Slim::Utils::Timers`). It pre-fetches the playlist list and pre-resolves
   every playlist's track matches into `lbf:pl:resolved:*` (using the first connected player for the
   streaming-service API context), so the Playlists view and each playlist open instantly. Cheap
-  daily: keyed by `last_modified`, real work only when a new week's playlist appears.
+  daily: keyed by `last_modified`, real work only when a new week's playlist appears. The list fetch
+  uses `force => 1` (0.9.23) so it always re-pulls rather than short-circuiting on a still-valid
+  listing cache — required for the daily tick to actually discover Monday's new playlists.
 
 ## Don't Stop The Music propagators (0.9.0)
 

@@ -647,6 +647,11 @@ sub warmCache {
     $client ||= (Slim::Player::Client::clients())[0];
 
     Plugins::ListenBrainzFreshReleases::API->getCreatedForPlaylists(
+        # force => 1: bypass the working-cache READ so the warm always re-pulls the
+        # listing from ListenBrainz. Without this, a warm tick that ran while the
+        # (Monday-aligned) listing cache was still valid would short-circuit on the
+        # old listing and never discover/resolve the new week's playlists.
+        force  => 1,
         onDone => sub {
             my @queue = @{ shift // [] };
             _stashPlaylistSummary(\@queue);
