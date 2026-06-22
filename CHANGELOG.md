@@ -3,6 +3,11 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.26 (dev)
+
+### Fixed
+- **Cap the playlist-listing cache at 24h so a sub-weekly playlist stays fresh.** The listing's working cache (0.9.23) expired at the Monday boundary, which is right for the weekly playlists but would freeze a **Daily Jams** playlist (in the same listing whenever ListenBrainz enables it, regenerating daily) for up to a week on the lazy browse path. The working TTL is now `min(_secsUntilNextWeeklyRefresh(), 24h)`: it still lands exactly on the Monday rollover (the smaller boundary value wins as Monday nears) but never holds longer than a day, so sub-weekly content refreshes daily without depending on the background warm running. This is a **listing-metadata** re-check only — playlist track resolution stays gated on `mbid|last_modified` (30‑day cache), so no extra streaming searches.
+
 ## 0.9.25 (dev)
 
 ### Fixed

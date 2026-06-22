@@ -60,7 +60,7 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-0.9.25 (dev)
+0.9.26 (dev)
 
 ## Created-for-You Playlists (0.8.0)
 
@@ -112,7 +112,9 @@ fully-streaming, Play-all-able playlist.
   Monday boundary via `API::_secsUntilNextWeeklyRefresh` (Monday `PLAYLIST_REFRESH_HOUR` = 03:00
   **UTC** — LB regenerates ~00:15–00:27 UTC, so this gives a buffer), so the first browse after the
   rollover always re-pulls the fresh listing. Three coordinated parts: (1) working key expires at the
-  boundary; (2) the fallback copy (`lbf:pl:listfb:`) is bounded to `PLAYLIST_LIST_FALLBACK_TTL` = 8d
+  boundary, **capped at 24h** (0.9.26) so a sub-weekly playlist still refreshes daily on the lazy path —
+  Daily Jams is in the same listing whenever LB enables it, and the cap also stops the warm being a
+  single point of failure; (2) the fallback copy (`lbf:pl:listfb:`) is bounded to `PLAYLIST_LIST_FALLBACK_TTL` = 8d
   (NOT the feeds' shared 30d `FEED_FALLBACK_TTL`) so a persistent createdfor outage degrades to an
   empty/refresh state rather than masking the new week with a >1-week-old listing; (3) `getCreatedForPlaylists`
   takes `force => 1` (skips the working-cache READ, still writes both keys) and the background warm

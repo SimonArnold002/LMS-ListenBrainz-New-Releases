@@ -284,8 +284,16 @@ sub getCreatedForPlaylists {
             my $playlists = _parsePlaylistList($data);
             # Use the feed-style dual cache so a later outage degrades to the
             # last good copy rather than an empty section.
-            eval { $cache->set($cacheKey, $playlists, _secsUntilNextWeeklyRefresh()); 1 } or $log->warn("pl list cache set failed: $@");
-            eval { $cache->set($fbKey,    $playlists, PLAYLIST_LIST_FALLBACK_TTL);    1 } or $log->warn("pl list fallback set failed: $@");
+            # Expire at the Monday boundary, but never hold longer than a day: if
+            # ListenBrainz (re)enables Daily Jams for the account it regenerates
+            # *daily*, and the listing carries it — the 24h cap keeps that fresh on
+            # the lazy browse path (no dependence on the warm running), while the
+            # boundary value still wins as Monday nears so the weekly rollover lands
+            # exactly on Monday.
+            my $listTtl = _secsUntilNextWeeklyRefresh();
+            $listTtl = 24 * 3600 if $listTtl > 24 * 3600;
+            eval { $cache->set($cacheKey, $playlists, $listTtl);                   1 } or $log->warn("pl list cache set failed: $@");
+            eval { $cache->set($fbKey,    $playlists, PLAYLIST_LIST_FALLBACK_TTL); 1 } or $log->warn("pl list fallback set failed: $@");
             $args{onDone}->($playlists);
         },
         sub { _feedError(shift, $fbKey, $args{onDone}, $args{onError}) },
