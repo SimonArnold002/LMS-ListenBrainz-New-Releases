@@ -60,7 +60,7 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-0.9.26 (dev)
+0.9.27 (dev)
 
 ## Created-for-You Playlists (0.8.0)
 
@@ -137,6 +137,19 @@ fully-streaming, Play-all-able playlist.
   (`Created-for playlists cache hit`, `warm:`) stop until you re-set `plugin.listenbrainzfreshreleases`
   to INFO in Settings → Logging. Also: the LMS log-over-HTTP (`log.txt`) lags/snapshots badly — it can
   freeze at `Server done init` for minutes — so trust the live in-LMS log viewer over an HTTP pull.
+- **Home-shelf `cachetime` — same XMLBrowser path, so the plugin side is complete (don't re-investigate).**
+  The three Material home shelves are NOT a separate dispatch: `Plugins::MaterialSkin::HomeExtraBase`
+  subclasses `Slim::Plugin::OPMLBased`, and its `handleExtra` just runs
+  `executeRequest($client, [<tag>, 'items', $index, $quantity, 'menu:1'])` — i.e. the **same
+  `Slim::Control::XMLBrowser` `items` query** as the browse menu, calling our `homeForYou`/
+  `homePlaylists`/`homeAllReleases` feeds. So `cachetime => 0` sits on the right hash and XMLBrowser
+  honours it identically; **there is no extra plugin lever for the home carousels.** **Verified
+  (0.9.26):** two consecutive home-page loads produced two full re-fetches of all three shelves in the
+  log (`For-you` + `All releases` + `Created-for playlists` each time), so Material re-requests the
+  home extras on each load rather than serving a cached carousel — the home shelves are fixed too, no
+  Material-bundle change required. (If a home carousel ever DID go stale per-player again, it would be
+  Material's client-side home-page cache, i.e. a Material-bundle fix, not a plugin one — but that is
+  not the case today.)
 - **Cover art — per-category bundled images (0.8.4):** a real 2×2 track-art grid needs
   server-side compositing (GD/Imager/ImageMagick). The target DietPi box has **none** of those and
   LMS bundles only `Image::Scale` (resize, can't composite), and per [[no-extra-server-installs]] we

@@ -3,6 +3,11 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.27 (dev)
+
+### Docs
+- **Documented that the Material home shelves need no separate cache handling.** `HomeExtraBase` subclasses OPMLBased and dispatches `[<tag>, items, …]` through the same `Slim::Control::XMLBrowser` path as the browse menus, so the `cachetime => 0` on the `home*` feeds is honoured there too — verified in the server log (two home-page loads → two full re-fetches of all three shelves), so the per-player staleness fix covers the carousels as well, with no Material-bundle change required. Captured in CLAUDE.md and a HomeExtras.pm comment so it isn't re-investigated. No functional change.
+
 ## 0.9.26 (dev)
 
 ### Fixed
