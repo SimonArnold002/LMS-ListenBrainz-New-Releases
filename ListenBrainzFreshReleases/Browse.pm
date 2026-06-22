@@ -419,7 +419,14 @@ sub fetchPlaylists {
             for my $pl (@$playlists) {
                 $pl->{_variant} = $n{ lc($pl->{source_patch} // '') }++ ? 'previous' : 'current';
             }
-            $callback->({ items => [ map { _playlistTile($_, $client) } @$playlists ] });
+            # cachetime => 0: experiment (0.9.24) — ask the client not to cache this
+            # dynamic weekly list, to see if it stops Material serving a stale
+            # per-player browse copy after the Monday rollover. The data is already
+            # fresh server-side; this only tests whether the hint forces a re-fetch.
+            $callback->({
+                items     => [ map { _playlistTile($_, $client) } @$playlists ],
+                cachetime => 0,
+            });
         },
         onError => sub {
             $log->error("Playlists fetch error: " . (shift // ''));

@@ -3,6 +3,11 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.24 (dev)
+
+### Experimental
+- **`cachetime => 0` on the Playlists feed.** The weekly playlist list was found to go stale **per player** in Material — Material caches each player's browse view independently and doesn't re-request after the Monday rollover (the server data is already fresh; the staleness is Material's client cache). This adds a `cachetime => 0` hint to the `fetchPlaylists` feed to test whether it makes the client re-fetch instead of serving its cached per-player copy. Server-side behaviour is unchanged. If the hint has no effect on Material's client cache it will be reverted.
+
 ## 0.9.23 (dev)
 
 ### Fixed
