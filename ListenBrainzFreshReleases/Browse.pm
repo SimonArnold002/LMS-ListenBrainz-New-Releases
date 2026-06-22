@@ -2095,7 +2095,7 @@ sub _findPlayableTrack {
     # 'first': a copy in the user's own LMS library short-circuits streaming
     # (instant, free, often higher quality). MBID-exact first, then artist+title.
     if ($libMode eq 'first') {
-        my $local = _findLocalTrack($artist, $title, $recMbid);
+        my $local = eval { _findLocalTrack($artist, $title, $recMbid) };
         if ($local) {
             $cacheItem->($local);
             $callback->($local);

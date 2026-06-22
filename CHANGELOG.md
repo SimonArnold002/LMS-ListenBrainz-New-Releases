@@ -3,6 +3,11 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.29 (dev)
+
+### Fixed
+- **Guard the library-first track lookup like the fallback path does.** In `_findPlayableTrack`, the `'fallback'` library modes already wrapped `_findLocalTrack` in `eval`, but the `'first'` mode (the playlist default, `prefer_library` on) called it bare. It was safe in practice — `_findLocalTrack`'s DB access is internally eval-guarded — but the asymmetry was a latent trap: any future un-guarded code in that path would die through the playlist/DSTM resolve instead of falling through to streaming. The `'first'` call now uses the same `eval` guard, so a local-library hiccup always degrades to a streaming search.
+
 ## 0.9.28 (dev)
 
 ### Fixed
