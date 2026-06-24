@@ -1379,7 +1379,12 @@ sub _releaseDetail {
     my $bio;           # artist biography text (MAI plugin or Last.fm)
     my $artistImg;     # artist photo url (MAI only)
 
-    my $wantStream = ($prefs->get('play_via') && length $album && _orderedAdapters()) ? 1 : 0;
+    # Auto-search runs for the non-Bandcamp services (Qobuz/Tidal). Bandcamp is a
+    # manual action only (see _searchBandcampOnly) — offered whenever its plugin is
+    # installed and play-via is on, regardless of the auto result.
+    my $playVia    = $prefs->get('play_via') && length $album;
+    my $wantStream = ($playVia && (grep { $_->{name} ne 'Bandcamp' } _orderedAdapters())) ? 1 : 0;
+    my $canBandcamp = ($playVia && (grep { $_->{name} eq 'Bandcamp' } _streamingAdapters())) ? 1 : 0;
     my $wantGenres = $rgMbid ? 1 : 0;
     my $wantLastfm = ($prefs->get('lastfm_api_key') && (length $artist || length $album)) ? 1 : 0;
     my $wantTracks = $mbid   ? 1 : 0;
@@ -1410,6 +1415,10 @@ sub _releaseDetail {
         # the MB link at the end). A section is emitted only if it has rows;
         # _sectionHeader gives a plain text divider when $useH is false.
         my @streamRows = @streamItems;
+        # Manual "Search Bandcamp" — Bandcamp isn't auto-searched (it blocks the
+        # loop), so offer it as a deliberate one-tap action that runs the search
+        # and shows its matches in a sub-page.
+        push @streamRows, _bandcampSearchRow($client, $artist, $album) if $canBandcamp;
         my @artistRows = _artistRows($rel, $client, $artistImg, $bio);
         my @albumRows  = (_albumRows($rel, $client), @genreItems, @trackItems, _mbLink($rel, $client));
 
@@ -1836,7 +1845,7 @@ sub _pluginIcon {
 sub _streamKey {
     my ($idPart) = @_;
     my $svcOrder = join(',', map { lc $_->{name} } _orderedAdapters());
-    my $key = 'lbf:stream:5:' . $svcOrder . ':' . ($idPart // '');
+    my $key = 'lbf:stream:6:' . $svcOrder . ':' . ($idPart // '');
     utf8::encode($key) if utf8::is_utf8($key);   # octet key — non-Latin fallback can't crash md5
     return $key;
 }
@@ -1847,28 +1856,28 @@ sub _streamKey {
 sub _findPlayable {
     my ($client, $callback, $artist, $album, $mbid, $force) = @_;
 
-    my @adapters   = _orderedAdapters();
     my $albumNorm  = _norm($album);
     my $artistNorm = _norm($artist);
-    # Search with normalised terms (quotes, &, commas stripped). Raw multi-artist
-    # credits like 'Lee "Scratch" Perry & Mouse on Mars' otherwise make the
-    # service search miss the album.
-    my $query      = join(' ', grep { length } $artistNorm, $albumNorm);
-    # When the album title already BEGINS with the artist name AND has more after
-    # it (e.g. "Placebo RE:CREATED" by Placebo), prefixing the artist again yields
-    # a doubled token ("placebo placebo re created") that some service searches
-    # fail to retrieve. In that one case the title already carries the artist, so
-    # search on the title alone. Self-titled releases (album == artist, e.g.
-    # "Placebo"/"Placebo") have nothing after the prefix, so index() misses and
-    # they keep the existing "artist album" query unchanged — no regression there.
-    # _albumMatches still validates the full title + artist regardless.
-    if (length $artistNorm && index($albumNorm, "$artistNorm ") == 0) {
-        $query = $albumNorm;
-    }
+
+    # Search the ARTIST only, then filter the results by album title locally
+    # (_albumMatches). Searching "artist album" as one string made the services'
+    # own fuzzy search rank/drop the target — Tidal missed "Sweating Someone
+    # Else's Fever", Qobuz missed "Placebo RE:CREATED" — whereas an artist search
+    # returns the discography and we pick the album ourselves. Far better recall;
+    # _albumMatches still guarantees the right album AND artist, so the broader
+    # query can't admit a wrong album.
+    my $query      = $artistNorm;
     # Octet copy for the service HTTP search (a wide-char query warns/breaks in the
     # URI layer). artistNorm/albumNorm stay as characters for _albumMatches.
     my $queryEnc   = $query;
     utf8::encode($queryEnc) if utf8::is_utf8($queryEnc);
+
+    # Bandcamp is deliberately NOT auto-searched: its plugin search is
+    # cookie-dependent / often broken AND does heavy SYNCHRONOUS response-parsing
+    # that blocks the event loop when it returns data (confirmed by loop-stall
+    # probing). It's offered as a manual "Search Bandcamp" action on the detail
+    # page instead (_searchBandcampOnly) — one deliberate tap, never on auto-open.
+    my @adapters = grep { $_->{name} ne 'Bandcamp' } _orderedAdapters();
 
     unless (@adapters) {
         $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_NO_SERVICES'), type => 'text' }] });
@@ -1878,9 +1887,10 @@ sub _findPlayable {
     # Cache hit → rebuild the playable items from the stored data (no re-search).
     # Key is versioned so a change to the matching logic invalidates stale entries
     # (:2: matching rework, :3: added Tidal, :4: decode non-Latin names, :5: key
-    # now includes the service configuration — see _streamKey).
+    # includes the service configuration, :6: artist-only search — see _streamKey).
     # $force (manual refresh) skips the read so the services are searched again.
-    my $key = _streamKey($mbid || _norm($query));
+    # The id part stays album-specific (the query itself is now artist-only).
+    my $key = _streamKey($mbid || _norm(join(' ', grep { length } $artistNorm, $albumNorm)));
     if (!$force && (my $c = $cache->get($key))) {
         $log->info("play-via cache hit: $key (" . scalar(@{ $c->{items} || [] }) . " match(es))");
         $callback->({ items => _streamResult($client, _rebuildStreamItems($c->{items})) });
@@ -2067,6 +2077,59 @@ sub _searchBandcamp {
     }, { search => $query });
 }
 
+# The detail-page "Search Bandcamp" row: a deliberate one-tap manual search
+# (Bandcamp is excluded from the auto search). Tapping drills into a sub-page
+# showing the Bandcamp match(es) via _searchBandcampOnly.
+sub _bandcampSearchRow {
+    my ($client, $artist, $album) = @_;
+    return {
+        name        => cstring($client, 'PLUGIN_LBF_SEARCH_BANDCAMP'),
+        type        => 'link',
+        image       => _pluginIcon('Plugins::Bandcamp::Plugin'),
+        passthrough => [{}],
+        url         => sub {
+            my ($c, $cb) = @_;
+            _searchBandcampOnly($c, $cb, $artist, $album);
+        },
+    };
+}
+
+# Manual "Search Bandcamp" for the detail page. Bandcamp is excluded from the
+# automatic search (heavy synchronous response-parsing blocks the loop when it
+# returns data), so it runs ONLY on a deliberate user tap. Same artist-only query
+# + _albumMatches filter as the auto path. Results aren't cached under the shared
+# lbf:stream key (that holds the auto Qobuz/Tidal result); the user re-taps to
+# re-run. Returns a feed hash via $cb.
+sub _searchBandcampOnly {
+    my ($client, $cb, $artist, $album) = @_;
+
+    my $artistNorm = _norm($artist);
+    my $albumNorm  = _norm($album);
+    my $queryEnc   = $artistNorm;
+    utf8::encode($queryEnc) if utf8::is_utf8($queryEnc);
+
+    my ($bc) = grep { $_->{name} eq 'Bandcamp' } _streamingAdapters();
+    unless ($bc) {
+        $cb->({ items => [{ name => cstring($client, 'PLUGIN_LBF_NO_MATCH'), type => 'text' }] });
+        return;
+    }
+
+    my $done   = 0;
+    my $finish = sub {
+        return if $done; $done = 1;
+        my @items = (ref $_[0] eq 'ARRAY') ? @{ $_[0] } : ();
+        for my $it (@items) { $it->{image} = $bc->{icon} if $bc->{icon}; $it->{_svc} = 'Bandcamp'; }
+        $cb->({ items => _streamResult($client, \@items) });
+    };
+
+    # Watchdog in case the search hangs (can't bound a synchronous block, but
+    # covers an async hang) — mirrors the auto path's per-service timeout.
+    Slim::Utils::Timers::setTimer(undef, time() + STREAM_SVC_TIMEOUT, sub { $finish->([]) });
+
+    eval { $bc->{run}->($client, $queryEnc, $artistNorm, $albumNorm, 'Bandcamp', sub { $finish->($_[0]) }); 1 }
+        or do { $log->warn("manual bandcamp search failed: $@"); $finish->([]); };
+}
+
 # Tidal: search albums via the plugin's API handler, keep title+artist matches,
 # and reuse the plugin's _renderAlbum so each result is a native, playable album
 # node (url => getAlbum, plus play/add/insert itemActions keyed by album id).
@@ -2090,7 +2153,7 @@ sub _searchTidal {
             push @out, Plugins::TIDAL::Plugin::_renderAlbum($album);
         }
         $collect->(\@out);
-    }, { type => 'albums', search => $query, limit => 20 });
+    }, { type => 'albums', search => $query, limit => 50 });   # artist-only search → fetch more so a prolific artist's target album isn't truncated
 }
 
 # ===========================================================================

@@ -3,6 +3,12 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.34
+
+### Changed
+- **Streaming matches now search by artist, then filter by album title — much better recall.** Searching the services with `"artist album"` as one string made their own fuzzy search rank/drop the target (Tidal missed *Sweating Someone Else's Fever*, Qobuz missed *Placebo RE:CREATED*). The detail page now searches the **artist** and matches the album locally with `_albumMatches`, which returns the artist's catalogue and lets us pick the right release — while still guaranteeing the correct album+artist, so a broader search can't admit a wrong album. Tidal's result limit raised to 50 so a prolific artist's target isn't truncated. (Stream cache version bumped → albums re-resolve once after updating.)
+- **Bandcamp moved to a manual "Search Bandcamp" action on the detail page.** Bandcamp's plugin search is cookie-dependent/unreliable and does heavy **synchronous** response-parsing that blocks the LMS event loop when it returns data (the 2–7s freeze / players dropping off). It's no longer part of the automatic search; instead a "Search Bandcamp" row runs it only on a deliberate tap (artist-only search + title filter), so the freeze can only happen on explicit user action, never on auto-open. Qobuz/Tidal remain automatic and async.
+
 ## 0.9.33
 
 ### Changed

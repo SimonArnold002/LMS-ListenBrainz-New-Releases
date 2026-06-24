@@ -253,6 +253,9 @@ PLUGIN_LBF_PLAY_VIA_SETTING
 PLUGIN_LBF_PLAY_VIA_SETTING_DESC
 	EN	On the album detail page, offer to search and play the release on your installed streaming services (Qobuz, Bandcamp, etc.)
 
+PLUGIN_LBF_SEARCH_BANDCAMP
+	EN	Search Bandcamp
+
 PLUGIN_LBF_REFRESH
 	EN	Refresh streaming matches
 
