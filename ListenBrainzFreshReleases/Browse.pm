@@ -1389,7 +1389,11 @@ sub _releaseDetail {
         push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_ARTIST',    $useH, \@artistRows, 1), @artistRows if @artistRows;
         push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_ALBUM',     $useH, \@albumRows,  1), @albumRows  if @albumRows;
 
-        $callback->({ items => \@items });
+        # cachetime => 0: don't let Material cache the detail page per-player, or a
+        # Refresh (which clears the server-side play-via cache) — and any change to
+        # streaming matches / settings — won't show until the client cache expires.
+        # Same per-player staleness class fixed for the listing feeds in 0.9.25.
+        $callback->({ items => \@items, cachetime => 0 });
     };
 
     unless ($pending) {
@@ -1398,7 +1402,7 @@ sub _releaseDetail {
         my @items;
         push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_ARTIST', $useH, \@artistRows, 1), @artistRows if @artistRows;
         push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_ALBUM',  $useH, \@albumRows,  1), @albumRows  if @albumRows;
-        $callback->({ items => \@items });
+        $callback->({ items => \@items, cachetime => 0 });   # see cachetime note above
         return;
     }
 

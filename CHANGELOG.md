@@ -3,6 +3,11 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.31
+
+### Fixed
+- **Release detail page now refreshes reliably (no more stale per-player view).** The detail page was returned without `cachetime => 0`, so Material cached it client-side per player — the in-page **Refresh** (which clears the server-side play-via cache) and any settings change wouldn't show until that client cache expired, making Refresh look like it did nothing. The detail render now sends `cachetime => 0` on both paths, so it re-fetches on each open and Refresh takes effect immediately. (Same per-player staleness class fixed for the listing feeds in 0.9.25; the detail page had been deliberately excluded.)
+
 ## 0.9.30
 
 ### Fixed
