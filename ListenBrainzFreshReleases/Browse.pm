@@ -23,6 +23,10 @@ my $cache = Slim::Utils::Cache->new();
 # a few days) → recheck daily.
 use constant STREAM_FOUND_TTL   => 7 * 86400;
 use constant STREAM_NOMATCH_TTL => 1 * 86400;
+# A manually-found Bandcamp match persists much longer (and in its own key): it's
+# the only way a Bandcamp-only release becomes playable, so it shouldn't quietly
+# expire and force a re-search. Re-tapping (after a Refresh) refreshes it.
+use constant BC_MATCH_TTL       => 30 * 86400;
 # Per-service streaming-search timeout: a slow/hung service is treated as "no
 # match" after this so it can't hold up the (parallel) lookup.
 use constant STREAM_SVC_TIMEOUT => 8;
@@ -48,16 +52,28 @@ use constant LIBRARY_TTL => 1 * 86400;
 # is wasted API calls for no real benefit.
 use constant TRACK_FOUND_TTL   => 30 * 86400;
 use constant TRACK_NOMATCH_TTL =>  7 * 86400;
+# A no-match where a streaming service couldn't even be QUERIED (API handler not
+# ready at resolve time, timeout, or error) is inconclusive — NOT a real miss.
+# Cache it only briefly so it retries soon instead of locking in a false "no
+# match" for the full week. (This is what left a playlist stuck on local-only
+# when its warm resolve ran before the streaming plugins' auth was ready.)
+use constant TRACK_INCONCLUSIVE_TTL => 1 * 3600;
 # Resolved whole-playlist cache. The JSPF content is IMMUTABLE for a given
 # mbid|last_modified, so there's no correctness reason to expire early — a new
-# week brings a new mbid (a fresh key) which re-resolves once. We keep BOTH full
-# and partial results long: the Weekly Jams/Exploration playlists live ~2 weeks
-# (current + previous week), so the cache must survive into the playlist's SECOND
-# week or the "previous week" entry would re-resolve all 50 tracks needlessly.
+# week brings a new mbid (a fresh key) which re-resolves once. The Weekly Jams/
+# Exploration playlists only exist ~2 weeks (current + previous week, 14 days from
+# the Monday they're created), then ListenBrainz drops them — so the cache only
+# needs to survive that long; a longer TTL just leaves dead entries that are never
+# requested again. 14 days covers the playlist's whole life incl. its second week.
 # (Trade-off: a track that only later appears on a service isn't picked up until
 # next week's playlist — an intentional choice to avoid the slow re-resolve.)
-use constant PLAYLIST_FOUND_TTL   => 30 * 86400;
-use constant PLAYLIST_PARTIAL_TTL => 30 * 86400;
+use constant PLAYLIST_FOUND_TTL   => 14 * 86400;
+use constant PLAYLIST_PARTIAL_TTL => 14 * 86400;
+# A resolve in which one or more tracks were inconclusive (a service couldn't be
+# queried) is cached only briefly, so a list that came back stuck on local-only /
+# few matches because streaming was momentarily unavailable re-resolves soon
+# rather than being pinned for the full partial TTL (a month).
+use constant PLAYLIST_INCONCLUSIVE_TTL => 1 * 3600;
 # Max tracks resolved in parallel — bounds the burst of service searches a 50-track
 # playlist would otherwise fire all at once (rate-limit friendliness).
 use constant PLAYLIST_CONCURRENCY => 6;
@@ -123,6 +139,14 @@ sub topLevel {
         name => cstring($client, 'PLUGIN_LBF_SETTINGS'), type => 'link',
         weblink => '/plugins/ListenBrainzFreshReleases/settings.html', image => MENU_COG,
     });
+    # Diagnostics: list the playlist tracks that didn't resolve to any service, so a
+    # matcher gap (e.g. a stylised title the service search couldn't find) is
+    # visible without the web settings page (blocked off-network). Needs a username
+    # (to fetch the created-for playlists).
+    push @settings, {
+        name  => cstring($client, 'PLUGIN_LBF_UNMATCHED'), type => 'link',
+        image => MENU_COG, url => \&fetchUnmatchedPlaylists,
+    } if $username;
 
     # --- assemble with Material section headers --------------------------
     my @items;
@@ -496,9 +520,13 @@ sub _playlistTile {
 
     my $matched = '';
     my $svcOrder = join(',', map { lc $_->{name} } _orderedAdapters());
-    my $rkey = 'lbf:pl:resolved:2:' . join('|', ($pl->{mbid} // ''), $lastMod, $svcOrder);
+    my $rkey = 'lbf:pl:resolved:4:' . join('|', ($pl->{mbid} // ''), $lastMod, $svcOrder);
     if (my $c = $cache->get($rkey)) {
-        $matched = sprintf(cstring($client, 'PLUGIN_LBF_PL_MATCHED'), $c->{matched}, $c->{total});
+        # Count only tracks whose service is still usable, so the tile agrees with
+        # the count shown when the playlist is opened (_playlistResult applies the
+        # same filter) after a service is disabled/uninstalled.
+        my $usable = grep { _cachedSvcUsable($_->{_svc}) } @{ $c->{items} || [] };
+        $matched = sprintf(cstring($client, 'PLUGIN_LBF_PL_MATCHED'), $usable, $c->{total});
     }
 
     # The branded cover already carries the playlist name, so the row's first line
@@ -559,7 +587,7 @@ sub resolvePlaylist {
 
     # Key includes the service order so changing priorities re-resolves.
     my $svcOrder = join(',', map { lc $_->{name} } _orderedAdapters());
-    my $rkey = 'lbf:pl:resolved:2:' . join('|', $mbid, ($lastMod // ''), $svcOrder);
+    my $rkey = 'lbf:pl:resolved:4:' . join('|', $mbid, ($lastMod // ''), $svcOrder);
 
     my $title = ref $pass eq 'HASH' ? $pass->{title} : undef;
 
@@ -580,18 +608,107 @@ sub resolvePlaylist {
             }
 
             _resolveTracks($client, $tracks, sub {
-                my $items   = shift // [];
+                my ($items, $inconclusive) = @_;
+                $items //= [];
                 my $payload = { items => $items, matched => scalar(@$items), total => scalar(@$tracks) };
-                my $ttl     = _playlistTtl($items, scalar @$tracks);
+                my $ttl     = _playlistTtl($items, scalar @$tracks, $inconclusive);
                 eval { $cache->set($rkey, $payload, $ttl); 1 }
                     or $log->warn("resolved playlist cache set failed: $@");
-                $log->info("resolved playlist $mbid: $payload->{matched}/$payload->{total} matched");
+                $log->info("resolved playlist $mbid: $payload->{matched}/$payload->{total} matched"
+                    . ($inconclusive ? " ($inconclusive inconclusive — short TTL)" : ""));
                 $callback->(_playlistResult($client, $payload, $title));
             });
         },
         sub {
             $log->error("Playlist resolve error: " . (shift // ''));
             $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_ERROR'), type => 'text' }] });
+        },
+    );
+}
+
+# ===========================================================================
+# Diagnostics: "Unmatched tracks (debug)" — list, per playlist, the source tracks
+# that didn't resolve to any service, so a matcher/recall gap (e.g. a stylised
+# title the service search can't find) is visible in the UI on or off-network.
+# ===========================================================================
+
+# Level 1: the created-for playlists, each drilling into its unmatched list.
+sub fetchUnmatchedPlaylists {
+    my ($client, $callback, $args) = @_;
+
+    Plugins::ListenBrainzFreshReleases::API->getCreatedForPlaylists(
+        onDone => sub {
+            my $playlists = shift // [];
+            unless (@$playlists) {
+                $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_NO_PLAYLISTS'), type => 'text' }], cachetime => 0 });
+                return;
+            }
+            my %n;
+            my @items = map {
+                my $pl = $_;
+                $pl->{_variant} = $n{ lc($pl->{source_patch} // '') }++ ? 'previous' : 'current';
+                {
+                    name        => $pl->{title} // 'Playlist',
+                    type        => 'link',
+                    image       => _categoryCover($pl->{source_patch}, $pl->{_variant}),
+                    url         => \&showUnmatched,
+                    passthrough => [{
+                        mbid          => $pl->{mbid},
+                        title         => $pl->{title},
+                        last_modified => $pl->{last_modified},
+                    }],
+                }
+            } @$playlists;
+            $callback->({ items => \@items, cachetime => 0 });
+        },
+        onError => sub {
+            $log->error("Unmatched: playlist list fetch failed: " . (shift // ''));
+            $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_ERROR'), type => 'text' }], cachetime => 0 });
+        },
+    );
+}
+
+# Level 2: fetch one playlist's source tracks and resolve them (cache-warm after a
+# normal open, so usually instant), then list the SOURCE tracks that matched
+# nothing as plain "Artist — Title" rows. Reuses _resolveTracks' new unmatched
+# return, so it reflects exactly what the playlist view dropped.
+sub showUnmatched {
+    my ($client, $callback, $args, $pass) = @_;
+
+    my $mbid    = ref $pass eq 'HASH' ? $pass->{mbid}          : undef;
+    my $lastMod = ref $pass eq 'HASH' ? $pass->{last_modified} : '';
+    my $title   = ref $pass eq 'HASH' ? $pass->{title}         : '';
+    unless ($mbid) {
+        $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_ERROR'), type => 'text' }] });
+        return;
+    }
+
+    my $libMode = ($prefs->get('prefer_library') // 1) ? 'first' : 'never';
+
+    Plugins::ListenBrainzFreshReleases::API->getPlaylistTracks(
+        $mbid, $lastMod,
+        sub {
+            my $tracks = shift // [];
+            unless (@$tracks) {
+                $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_NO_RESULTS'), type => 'text' }], cachetime => 0 });
+                return;
+            }
+            _resolveTracks($client, $tracks, sub {
+                my ($matched, $inconclusive, $unmatched) = @_;
+                $unmatched //= [];
+                my @rows = map {
+                    my $a = $_->{artist} // ''; my $t = $_->{title} // '';
+                    { name => (length $a ? "$a \x{2014} $t" : $t), type => 'text' }
+                } @$unmatched;
+                @rows = ({ name => cstring($client, 'PLUGIN_LBF_ALL_MATCHED'), type => 'text' }) unless @rows;
+                my $heading = (length $title ? $title : cstring($client, 'PLUGIN_LBF_UNMATCHED'))
+                            . ' (' . scalar(@$unmatched) . '/' . scalar(@$tracks) . ')';
+                $callback->({ title => $heading, items => \@rows, cachetime => 0 });
+            }, $libMode);
+        },
+        sub {
+            $log->error("Unmatched: playlist tracks fetch failed: " . (shift // ''));
+            $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_ERROR'), type => 'text' }], cachetime => 0 });
         },
     );
 }
@@ -604,9 +721,16 @@ sub resolvePlaylist {
 sub _playlistResult {
     my ($client, $payload, $title) = @_;
 
-    my @items   = @{ $payload->{items} || [] };
-    my $matched = $payload->{matched} // scalar(@items);
-    my $total   = $payload->{total}   // scalar(@items);
+    # Drop any track whose streaming service is no longer usable — uninstalled or
+    # disabled (priority 0) since this playlist was cached — so a cached list never
+    # offers a dead link to a service you've removed. Same on-read guard the album
+    # section uses (_rebuildStreamItems). Library tracks always stay. The resolved
+    # cache key already re-resolves on a service change; this filters the moment
+    # the cached payload is served, matching the album behaviour exactly, and the
+    # match count reflects what's actually playable now.
+    my @items   = grep { _cachedSvcUsable($_->{_svc}) } @{ $payload->{items} || [] };
+    my $matched = scalar @items;
+    my $total   = $payload->{total} // scalar(@items);
 
     # Page title carries the match count, e.g. "Weekly Exploration … (47/50)".
     my $heading = defined $title && length $title ? $title : cstring($client, 'PLUGIN_LBF_PLAYLISTS');
@@ -622,7 +746,11 @@ sub _playlistResult {
 # is kept only a day (the file URL can go stale on a rescan/delete); otherwise it
 # follows the long full/partial streaming TTLs.
 sub _playlistTtl {
-    my ($items, $total) = @_;
+    my ($items, $total, $inconclusive) = @_;
+    # Any track left unresolved because a service couldn't be queried → keep the
+    # whole resolve short so it retries soon rather than pinning a streaming outage
+    # for a month. Takes precedence (it's the reason a list looks under-matched).
+    return PLAYLIST_INCONCLUSIVE_TTL if $inconclusive;
     return LIBRARY_TTL if grep { ($_->{_svc} // '') eq 'Library' } @$items;
     return (scalar(@$items) == $total) ? PLAYLIST_FOUND_TTL : PLAYLIST_PARTIAL_TTL;
 }
@@ -633,17 +761,23 @@ sub _playlistTtl {
 sub _resolveTracks {
     my ($client, $tracks, $done, $libMode) = @_;
 
-    my $total     = scalar @$tracks;
-    my @slots     = (undef) x $total;   # per-index: hashref (match) / 0 (miss) / undef (pending)
-    my $next      = 0;
-    my $active    = 0;
-    my $completed = 0;
-    my $finished  = 0;
+    my $total        = scalar @$tracks;
+    my @slots        = (undef) x $total;   # per-index: hashref (match) / 0 (miss) / undef (pending)
+    my $next         = 0;
+    my $active       = 0;
+    my $completed    = 0;
+    my $finished     = 0;
+    my $inconclusive = 0;   # tracks whose no-match was inconclusive (svc unavailable)
 
     my $finish = sub {
         return if $finished;
         $finished = 1;
-        $done->([ grep { ref $_ } @slots ]);   # matched items, in order
+        # Also hand back the SOURCE tracks that didn't resolve (slot still 0/undef),
+        # so the diagnostics view can list what couldn't be matched. Pass the
+        # inconclusive count too, so the caller can keep the resolved-playlist cache
+        # short when streaming was momentarily unavailable.
+        my @unmatched = map { $tracks->[$_] } grep { !ref $slots[$_] } 0 .. $#slots;
+        $done->([ grep { ref $_ } @slots ], $inconclusive, \@unmatched);   # matched items, in order
     };
 
     Slim::Utils::Timers::setTimer(undef, time() + PLAYLIST_TIMEOUT, sub { $finish->() });
@@ -656,8 +790,9 @@ sub _resolveTracks {
             my $tr = $tracks->[$i];
             $active++;
             _findPlayableTrack($client, sub {
-                my $item = shift;
+                my ($item, $inc) = @_;
                 $slots[$i] = (ref $item eq 'HASH') ? $item : 0;
+                $inconclusive++ if $inc;
                 $active--;
                 $completed++;
                 ($completed >= $total) ? $finish->() : $pump->();
@@ -709,7 +844,7 @@ sub warmCache {
                     sub {
                         my $tracks = shift // [];
 
-                        my $rkey = 'lbf:pl:resolved:2:'
+                        my $rkey = 'lbf:pl:resolved:4:'
                             . join('|', $pl->{mbid}, ($pl->{last_modified} // ''), $svcOrder);
 
                         # Already resolved (same week) or no client → move on.
@@ -719,12 +854,14 @@ sub warmCache {
                         }
 
                         _resolveTracks($client, $tracks, sub {
-                            my $items = shift // [];
+                            my ($items, $inconclusive) = @_;
+                            $items //= [];
                             my $payload = { items => $items, matched => scalar(@$items), total => scalar(@$tracks) };
-                            my $ttl = _playlistTtl($items, scalar @$tracks);
+                            my $ttl = _playlistTtl($items, scalar @$tracks, $inconclusive);
                             eval { $cache->set($rkey, $payload, $ttl); 1 }
                                 or $log->warn("warm resolved cache set failed: $@");
-                            $log->info("warm: resolved $pl->{mbid} $payload->{matched}/$payload->{total}");
+                            $log->info("warm: resolved $pl->{mbid} $payload->{matched}/$payload->{total}"
+                                . ($inconclusive ? " ($inconclusive inconclusive)" : ""));
                             $next->();
                         });
                     },
@@ -1383,8 +1520,11 @@ sub _releaseDetail {
     # manual action only (see _searchBandcampOnly) — offered whenever its plugin is
     # installed and play-via is on, regardless of the auto result.
     my $playVia    = $prefs->get('play_via') && length $album;
-    my $wantStream = ($playVia && (grep { $_->{name} ne 'Bandcamp' } _orderedAdapters())) ? 1 : 0;
-    my $canBandcamp = ($playVia && (grep { $_->{name} eq 'Bandcamp' } _streamingAdapters())) ? 1 : 0;
+    # Route through _findPlayable whenever ANY service is enabled (not just the
+    # auto-searched ones): it surfaces a persisted manual Bandcamp match too, so a
+    # Bandcamp-only release shows even when Bandcamp is the only enabled service.
+    my $wantStream  = ($playVia && scalar(_orderedAdapters())) ? 1 : 0;
+    my $canBandcamp = ($playVia && (grep { $_->{name} eq 'Bandcamp' } _orderedAdapters())) ? 1 : 0;
     my $wantGenres = $rgMbid ? 1 : 0;
     my $wantLastfm = ($prefs->get('lastfm_api_key') && (length $artist || length $album)) ? 1 : 0;
     my $wantTracks = $mbid   ? 1 : 0;
@@ -1416,9 +1556,24 @@ sub _releaseDetail {
         # _sectionHeader gives a plain text divider when $useH is false.
         my @streamRows = @streamItems;
         # Manual "Search Bandcamp" — Bandcamp isn't auto-searched (it blocks the
-        # loop), so offer it as a deliberate one-tap action that runs the search
-        # and shows its matches in a sub-page.
-        push @streamRows, _bandcampSearchRow($client, $artist, $album) if $canBandcamp;
+        # loop), so offer it as a deliberate one-tap action. It searches, caches
+        # the match and re-renders this page so the match shows inline (above). The
+        # row's label depends on state: a "Re-search Bandcamp" action when a match
+        # is already shown (force-refresh a stale match — kept if the re-search
+        # comes back empty), a "retry" prompt after a prior empty search, else a
+        # plain "Search Bandcamp".
+        if ($canBandcamp) {
+            my $bcMatched = grep { ($_->{_svc} // '') eq 'Bandcamp' } @streamItems;
+            if ($bcMatched) {
+                push @streamRows, _bandcampSearchRow($client, $artist, $album, $mbid,
+                    'PLUGIN_LBF_RESEARCH_BANDCAMP', MENU_REFRESH);
+            }
+            else {
+                my $bcSearched = $cache->get(_bcMarkerKey(_streamId($artist, $album, $mbid)));
+                push @streamRows, _bandcampSearchRow($client, $artist, $album, $mbid,
+                    $bcSearched ? 'PLUGIN_LBF_SEARCH_BANDCAMP_RETRY' : 'PLUGIN_LBF_SEARCH_BANDCAMP');
+            }
+        }
         my @artistRows = _artistRows($rel, $client, $artistImg, $bio);
         my @albumRows  = (_albumRows($rel, $client), @genreItems, @trackItems, _mbLink($rel, $client));
 
@@ -1470,7 +1625,8 @@ sub _releaseDetail {
                 passthrough => [{}],
                 url         => sub {
                     my ($c, $cb) = @_;
-                    $cache->remove(_streamKey($mbid));
+                    $cache->remove(_streamKey(_streamId($artist, $album, $mbid)));
+                    $cache->remove(_bcMarkerKey(_streamId($artist, $album, $mbid)));
                     $cb->({ items => [] });
                 },
             } if $mbid;
@@ -1845,8 +2001,39 @@ sub _pluginIcon {
 sub _streamKey {
     my ($idPart) = @_;
     my $svcOrder = join(',', map { lc $_->{name} } _orderedAdapters());
-    my $key = 'lbf:stream:6:' . $svcOrder . ':' . ($idPart // '');
+    my $key = 'lbf:stream:7:' . $svcOrder . ':' . ($idPart // '');
     utf8::encode($key) if utf8::is_utf8($key);   # octet key — non-Latin fallback can't crash md5
+    return $key;
+}
+
+# The album-identifying part of a stream cache key: the MusicBrainz id when we
+# have one, else the normalised "artist album" string. Shared by the auto search,
+# the manual Bandcamp search and the detail render so all three agree on the key.
+sub _streamId {
+    my ($artist, $album, $mbid) = @_;
+    return $mbid if defined $mbid && length $mbid;
+    return _norm(join(' ', grep { length } _norm($artist), _norm($album)));
+}
+
+# Marker recording that a manual Bandcamp search has already run for this album,
+# so the detail page can show a "not found — retry" prompt rather than a fresh
+# "Search Bandcamp" when Bandcamp returned nothing. Keyed on the album id only
+# (not the service order — a Bandcamp miss doesn't depend on the Qobuz/Tidal set).
+sub _bcMarkerKey {
+    my ($idPart) = @_;
+    my $key = 'lbf:bcdone:6:' . ($idPart // '');
+    utf8::encode($key) if utf8::is_utf8($key);
+    return $key;
+}
+
+# Long-lived store for a manually-found Bandcamp match (url stripped, reattached
+# on read). Separate from the auto Qobuz/Tidal cache and NOT keyed on service
+# order — a Bandcamp match is intrinsic to the album. _findPlayable appends it to
+# every render so a Bandcamp-only release stays playable / primary.
+sub _bcMatchKey {
+    my ($idPart) = @_;
+    my $key = 'lbf:bcmatch:6:' . ($idPart // '');
+    utf8::encode($key) if utf8::is_utf8($key);
     return $key;
 }
 
@@ -1866,10 +2053,14 @@ sub _findPlayable {
     # returns the discography and we pick the album ourselves. Far better recall;
     # _albumMatches still guarantees the right album AND artist, so the broader
     # query can't admit a wrong album.
-    my $query      = $artistNorm;
-    # Octet copy for the service HTTP search (a wide-char query warns/breaks in the
-    # URI layer). artistNorm/albumNorm stay as characters for _albumMatches.
-    my $queryEnc   = $query;
+    my $query      = $artistNorm;   # normalised form — for logging only
+    # Send the RAW artist to the service search, NOT the normalised form: the
+    # normaliser turns punctuation into spaces, which mangles stylised artist names
+    # ("P!nk" -> "p nk", "will.i.am" -> "will i am") so the service's own search
+    # can't find them — the same bug that lost the L.U.C.K.Y track. Normalisation
+    # stays for our _albumMatches validation only. (Octet-encode for the URI layer:
+    # a wide-char query warns/breaks; artistNorm/albumNorm stay characters.)
+    my $queryEnc   = $artist;
     utf8::encode($queryEnc) if utf8::is_utf8($queryEnc);
 
     # Bandcamp is deliberately NOT auto-searched: its plugin search is
@@ -1877,23 +2068,31 @@ sub _findPlayable {
     # that blocks the event loop when it returns data (confirmed by loop-stall
     # probing). It's offered as a manual "Search Bandcamp" action on the detail
     # page instead (_searchBandcampOnly) — one deliberate tap, never on auto-open.
+    # BUT a match found by a previous manual search is persisted (_bcMatchItems)
+    # and appended to every result below, so a Bandcamp-only release stays playable
+    # and — when no other service has it — is the primary (sole) entry.
+    my $id       = _streamId($artist, $album, $mbid);
+    my @bc       = _bcMatchItems($id);
     my @adapters = grep { $_->{name} ne 'Bandcamp' } _orderedAdapters();
 
+    # No auto-searchable service (e.g. only Bandcamp enabled): show the persisted
+    # Bandcamp match if there is one, else the no-match placeholder.
     unless (@adapters) {
-        $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_NO_SERVICES'), type => 'text' }] });
+        $callback->({ items => _streamResult($client, [ @bc ]) });
         return;
     }
 
     # Cache hit → rebuild the playable items from the stored data (no re-search).
     # Key is versioned so a change to the matching logic invalidates stale entries
     # (:2: matching rework, :3: added Tidal, :4: decode non-Latin names, :5: key
-    # includes the service configuration, :6: artist-only search — see _streamKey).
+    # includes the service configuration, :6: artist-only search, :7: raw (un-
+    # normalised) query to the service search — see _streamKey).
     # $force (manual refresh) skips the read so the services are searched again.
     # The id part stays album-specific (the query itself is now artist-only).
-    my $key = _streamKey($mbid || _norm(join(' ', grep { length } $artistNorm, $albumNorm)));
+    my $key = _streamKey($id);
     if (!$force && (my $c = $cache->get($key))) {
         $log->info("play-via cache hit: $key (" . scalar(@{ $c->{items} || [] }) . " match(es))");
-        $callback->({ items => _streamResult($client, _rebuildStreamItems($c->{items})) });
+        $callback->({ items => _streamResult($client, [ @{ _rebuildStreamItems($c->{items}) }, @bc ]) });
         return;
     }
 
@@ -1918,7 +2117,7 @@ sub _findPlayable {
         $log->info("play-via '$query': "
             . (defined $win ? "matched on $adapters[$win]{name} (" . scalar(@$items) . ")"
                             : "no match on any service"));
-        $callback->({ items => _streamResult($client, $items) });
+        $callback->({ items => _streamResult($client, [ @$items, @bc ]) });
     };
 
     for my $i (0 .. $#adapters) {
@@ -2030,6 +2229,17 @@ sub _rebuildStreamItems {
     return \@out;
 }
 
+# Rebuild the persisted manual Bandcamp match (if any) into live, playable items.
+# Returns () when there's no stored match or Bandcamp is currently disabled
+# (_rebuildStreamItems drops items whose service isn't enabled), so disabling
+# Bandcamp hides it without discarding the stored match.
+sub _bcMatchItems {
+    my ($id) = @_;
+    my $c = $cache->get(_bcMatchKey($id));
+    return () unless $c && ref $c->{items} eq 'ARRAY' && @{ $c->{items} };
+    return @{ _rebuildStreamItems($c->{items}) };
+}
+
 # Qobuz: search albums via the plugin's own API, keep title matches, and reuse
 # the plugin's _albumItem so each result is a native, playable album node.
 sub _searchQobuz {
@@ -2078,39 +2288,59 @@ sub _searchBandcamp {
 }
 
 # The detail-page "Search Bandcamp" row: a deliberate one-tap manual search
-# (Bandcamp is excluded from the auto search). Tapping drills into a sub-page
-# showing the Bandcamp match(es) via _searchBandcampOnly.
+# (Bandcamp is excluded from the auto search because it blocks the loop). It uses
+# the SAME in-place refresh mechanism as the streaming "Refresh" row
+# (nextWindow 'refresh'): the tap searches, persists any match (_bcMatchKey),
+# then pops back so the detail page re-renders with the Bandcamp match shown
+# INLINE in the Streaming section (not a separate sub-page) — and when no other
+# service has the album it's the primary (sole) playable entry. $retry switches
+# the label to the "not found — tap to retry" prompt after an empty search.
 sub _bandcampSearchRow {
-    my ($client, $artist, $album) = @_;
+    my ($client, $artist, $album, $mbid, $labelKey, $icon) = @_;
+    $labelKey ||= 'PLUGIN_LBF_SEARCH_BANDCAMP';
     return {
-        name        => cstring($client, 'PLUGIN_LBF_SEARCH_BANDCAMP'),
+        name        => cstring($client, $labelKey),
         type        => 'link',
-        image       => _pluginIcon('Plugins::Bandcamp::Plugin'),
+        image       => $icon || _pluginIcon('Plugins::Bandcamp::Plugin'),
+        nextWindow  => 'refresh',
         passthrough => [{}],
         url         => sub {
             my ($c, $cb) = @_;
-            _searchBandcampOnly($c, $cb, $artist, $album);
+            _searchBandcampOnly($c, $cb, $artist, $album, $mbid);
         },
     };
 }
 
 # Manual "Search Bandcamp" for the detail page. Bandcamp is excluded from the
 # automatic search (heavy synchronous response-parsing blocks the loop when it
-# returns data), so it runs ONLY on a deliberate user tap. Same artist-only query
-# + _albumMatches filter as the auto path. Results aren't cached under the shared
-# lbf:stream key (that holds the auto Qobuz/Tidal result); the user re-taps to
-# re-run. Returns a feed hash via $cb.
+# returns data), so it runs ONLY on a deliberate user tap. A match is persisted in
+# its own long-lived key (_bcMatchKey); _findPlayable appends it to every render,
+# so it shows inline AND — when no other service has the album — is the primary
+# (sole) playable entry, surviving auto re-search and the streaming Refresh.
+# Always returns an empty list: the row's nextWindow 'refresh' then pops back and
+# re-renders the detail page.
 sub _searchBandcampOnly {
-    my ($client, $cb, $artist, $album) = @_;
+    my ($client, $cb, $artist, $album, $mbid) = @_;
 
     my $artistNorm = _norm($artist);
     my $albumNorm  = _norm($album);
-    my $queryEnc   = $artistNorm;
+    # Bandcamp recall is the OPPOSITE of Qobuz/Tidal: a bare-artist search often
+    # doesn't surface the album in its item results (the album only shows by
+    # drilling into the artist page, which we don't do), whereas the combined
+    # "artist album" string returns it directly. So Bandcamp uses the combined
+    # query (the pre-0.9.34 behaviour) — _albumMatches still validates album+artist
+    # on each result, so the broader query can't admit a wrong album. Use the RAW
+    # artist+album, not the normalised form, so stylised names/titles aren't mangled
+    # before the service search (same fix as the track/album auto search).
+    my $queryEnc   = join(' ', grep { length } $artist, $album);
     utf8::encode($queryEnc) if utf8::is_utf8($queryEnc);
+
+    my $id        = _streamId($artist, $album, $mbid);
+    my $markerKey = _bcMarkerKey($id);
 
     my ($bc) = grep { $_->{name} eq 'Bandcamp' } _streamingAdapters();
     unless ($bc) {
-        $cb->({ items => [{ name => cstring($client, 'PLUGIN_LBF_NO_MATCH'), type => 'text' }] });
+        $cb->({ items => [] });   # row's nextWindow 'refresh' pops back
         return;
     }
 
@@ -2119,7 +2349,18 @@ sub _searchBandcampOnly {
         return if $done; $done = 1;
         my @items = (ref $_[0] eq 'ARRAY') ? @{ $_[0] } : ();
         for my $it (@items) { $it->{image} = $bc->{icon} if $bc->{icon}; $it->{_svc} = 'Bandcamp'; }
-        $cb->({ items => _streamResult($client, \@items) });
+        if (@items) {
+            # Persist the match (own long-lived key) so it survives auto re-search
+            # and Refresh, and clear the "searched" marker so no retry prompt shows.
+            _cacheStream(_bcMatchKey($id), \@items, BC_MATCH_TTL);
+            $cache->remove($markerKey);
+        }
+        else {
+            # No match → remember so the row shows "retry", not a fresh "Search".
+            $cache->set($markerKey, 1, STREAM_NOMATCH_TTL);
+        }
+        $log->info("manual bandcamp '$artistNorm': " . scalar(@items) . " match(es)");
+        $cb->({ items => [] });   # nextWindow 'refresh' → pop back, re-render inline
     };
 
     # Watchdog in case the search hangs (can't bound a synchronous block, but
@@ -2183,8 +2424,14 @@ sub _findPlayableTrack {
     my @adapters   = grep { $_->{runTrack} } _orderedAdapters();
     my $titleNorm  = _norm($title);
     my $artistNorm = _norm($artist);
-    my $query      = join(' ', grep { length } $artistNorm, $titleNorm);
-    my $queryEnc   = $query;
+    my $query      = join(' ', grep { length } $artistNorm, $titleNorm);   # for the cache key only
+    # Search the services with the RAW artist+title, NOT the normalised form. The
+    # normaliser turns punctuation into spaces ("L.U.C.K.Y" -> "l u c k y"), which
+    # mangles stylised titles so the service's OWN search returns nothing —
+    # confirmed against Tidal: it returns "L.U.C.K.Y" for the raw query but not for
+    # the spaced one. Normalisation is only for OUR match validation (_trackMatches);
+    # the outgoing query must stay faithful to what the service indexed.
+    my $queryEnc   = join(' ', grep { length } $artist, $title);
     utf8::encode($queryEnc) if utf8::is_utf8($queryEnc);
 
     # A title is the one thing we always need; missing streaming adapters is NOT
@@ -2196,29 +2443,42 @@ sub _findPlayableTrack {
     }
 
     # Cache the per-track decision (item or "no match") keyed by recording MBID
-    # where available, else the normalised "artist title". Versioned (:2:). The
-    # non-default library modes get their own key suffix so a streaming-first
+    # where available, else the normalised "artist title". Versioned (:3:). The
+    # key now includes the track-capable service set in priority order, like the
+    # album play-via key (_streamKey) and the resolved-playlist key — so adding /
+    # enabling / reordering a service re-resolves the track instead of returning a
+    # stale entry. This is essential for the NO-MATCH case: a track that missed
+    # while only Tidal was enabled was cached as "no match", and without the
+    # service in the key, enabling Qobuz re-resolved the playlist but each track
+    # lookup hit that stale miss and never tried Qobuz (the 6/50 symptom).
+    # The non-default library modes get their own key suffix so a streaming-first
     # result can't collide with the playlist feature's library-preferring cache.
-    my $key = 'lbf:track:2:' . ($recMbid || _norm($query));
+    my $svcOrder = join(',', map { lc $_->{name} } @adapters);
+    my $key = 'lbf:track:4:' . $svcOrder . ':' . ($recMbid || _norm($query));
     $key .= ":$libMode" unless $libMode eq 'first';
     utf8::encode($key) if utf8::is_utf8($key);
     if (!$force && (my $c = $cache->get($key))) {
         my $item = $c->{item};
-        # Re-validate a cached streaming match against the CURRENT service config:
-        # if its service was since disabled (svc_priority 0) or removed, ignore the
-        # stale entry and re-resolve so the change takes effect immediately rather
-        # than after the 30-day cache TTL. Library / no-match entries are always OK.
+        # The service set is in the key, so a cached entry already matches the
+        # current config; _cachedSvcUsable stays as a belt-and-braces guard for an
+        # item whose service was uninstalled mid-TTL. Library / no-match always OK.
         if (!$item || _cachedSvcUsable($item->{_svc})) {
             $callback->($item);
             return;
         }
     }
 
+    # Set when a streaming service couldn't be queried (no API handler / timeout /
+    # error) — makes a resulting no-match INCONCLUSIVE (short TTL, see cacheItem).
+    my $inconclusive = 0;
+
     # Cache TTL for a resolved item: library hits can go stale on a rescan/delete,
-    # so they get the short LIBRARY_TTL; a streaming match is durable.
+    # so they get the short LIBRARY_TTL; a streaming match is durable. A no-match is
+    # kept a week UNLESS it's inconclusive (a service was unavailable), in which
+    # case it retries within the hour rather than poisoning for the week.
     my $cacheItem = sub {
         my $item = shift;
-        my $ttl = !$item ? TRACK_NOMATCH_TTL
+        my $ttl = !$item ? ($inconclusive ? TRACK_INCONCLUSIVE_TTL : TRACK_NOMATCH_TTL)
                 : (($item->{_svc} // '') eq 'Library') ? LIBRARY_TTL
                 : TRACK_FOUND_TTL;
         eval { $cache->set($key, { item => $item }, $ttl); 1 }
@@ -2269,7 +2529,9 @@ sub _findPlayableTrack {
             $item = $local if $local;
         }
         $cacheItem->($item);
-        $callback->($item);
+        # Tell the caller this no-match was inconclusive (a service couldn't be
+        # queried) so it can keep the resolved-playlist cache short too.
+        $callback->($item, (!$item && $inconclusive) ? 1 : 0);
     };
 
     for my $i (0 .. $#adapters) {
@@ -2280,9 +2542,16 @@ sub _findPlayableTrack {
         my $settle  = sub {
             return if $settled || $resolved;
             $settled = 1;
-            my @matched = (ref $_[0] eq 'ARRAY') ? @{ $_[0] } : ();
+            # undef arg = the service couldn't be queried (no API handler / timeout
+            # / error) → contributes no match, but INCONCLUSIVELY (not a real miss).
+            if (!defined $_[0]) {
+                $inconclusive++;
+                $result[$i] = [];
+                $resolve->();
+                return;
+            }
             # String-url, directly-playable items only (see header note); keep the first.
-            @matched = grep { defined $_->{url} && !ref $_->{url} } @matched;
+            my @matched = grep { defined $_->{url} && !ref $_->{url} } @{ $_[0] };
             my $first = $matched[0];
             $first->{_svc} = $svc if $first;
             $result[$i] = $first ? [$first] : [];
@@ -2292,12 +2561,12 @@ sub _findPlayableTrack {
         Slim::Utils::Timers::setTimer(undef, time() + STREAM_SVC_TIMEOUT, sub {
             return if $settled || $resolved;
             $log->warn("track-match $svc timed out");
-            $settle->([]);
+            $settle->(undef);   # inconclusive, not a confirmed miss
         });
 
         eval { $a->{runTrack}->($client, $queryEnc, $artistNorm, $titleNorm, $album, $settle); 1 } or do {
             $log->warn("track-match $svc failed: $@");
-            $settle->([]);
+            $settle->(undef);   # inconclusive, not a confirmed miss
         };
     }
 }
@@ -2410,10 +2679,14 @@ sub _searchQobuzTrack {
     my ($client, $query, $artistNorm, $titleNorm, $album, $collect) = @_;
 
     my $api = Plugins::Qobuz::Plugin::getAPIHandler($client);
-    unless ($api) { $log->info("Qobuz track-match: no API handler"); $collect->([]); return; }
+    # undef (not []) → "couldn't query", treated as inconclusive so a transient
+    # missing handler doesn't get cached as a durable no-match.
+    unless ($api) { $log->info("Qobuz track-match: no API handler"); $collect->(undef); return; }
 
     $api->search(sub {
         my $res = shift;
+        # No response at all → the search errored, not "no results" → inconclusive.
+        return $collect->(undef) unless defined $res;
         # Tolerate response-shape differences across Qobuz plugin versions.
         my $items = (ref $res eq 'HASH' && ref $res->{tracks} eq 'HASH' && ref $res->{tracks}{items} eq 'ARRAY')
                       ? $res->{tracks}{items}
@@ -2461,10 +2734,14 @@ sub _searchTidalTrack {
     my ($client, $query, $artistNorm, $titleNorm, $album, $collect) = @_;
 
     my $api = Plugins::TIDAL::Plugin::getAPIHandler($client);
-    unless ($api) { $collect->([]); return; }
+    # undef (not []) → inconclusive, so a transient missing handler isn't cached
+    # as a durable no-match (see _findPlayableTrack).
+    unless ($api) { $log->info("Tidal track-match: no API handler"); $collect->(undef); return; }
 
     $api->search(sub {
         my $tracks = shift;
+        # No response at all → the search errored, not "no results" → inconclusive.
+        return $collect->(undef) unless defined $tracks;
         my @out;
         for my $tr (@{ $tracks || [] }) {
             next unless ref $tr eq 'HASH';

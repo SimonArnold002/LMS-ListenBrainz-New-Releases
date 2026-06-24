@@ -3,6 +3,41 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.39
+
+### Fixed
+- **The raw-query fix now also covers album (Releases) matching and the manual Bandcamp search.** 0.9.37 fixed it for playlist/DSTM *track* search; the album auto-search still sent the *normalised* artist (`P!nk` → `p nk`, `will.i.am` → `will i am`) and the manual Bandcamp search sent the normalised `artist album`, so a stylised name/title could be missed the same way `L.U.C.K.Y` was. Both now send the **raw** text to the service search, with normalisation kept for match validation only. (Album play-via cache bumped `:6:`→`:7:`, so albums re-search once on next open. DSTM needed no change — it resolves through the shared track search, already fixed in 0.9.37.)
+
+## 0.9.38
+
+### Added
+- **"Unmatched tracks (debug)" diagnostics view** (Settings section). Lists each created-for playlist; opening one shows the source tracks that resolved to **nothing** (not in your library, not on any enabled service), as plain `Artist — Title` rows, with the count in the title. It resolves against the warm cache so it usually opens instantly and reflects exactly what the playlist dropped — making a matcher/recall gap (like the `L.U.C.K.Y` case) visible in the UI, on or off-network (no web settings page needed).
+
+## 0.9.37
+
+### Fixed
+- **Stylised track titles (e.g. `L.U.C.K.Y`) now match.** We were sending the *normalised* artist+title to each streaming service's search — and normalisation turns punctuation into spaces (`L.U.C.K.Y` → `l u c k y`), which the service's own search engine can't match, so it returned nothing even though the track is right there. Confirmed against Tidal: the raw query `Fcukers L.U.C.K.Y` returns the track as the top hit; the spaced query returns 100 results without it. The outgoing search query is now the **raw** artist+title; normalisation is still used for our own match validation (so a wrong title/artist can't slip through). With this, the 22 June Weekly Exploration goes from 49/50 to a full match. (Per-track and resolved-playlist cache versions bumped so this re-resolves on update.)
+
+## 0.9.36
+
+### Fixed
+- **The 0.9.35 playlist re-resolve now actually takes effect on update.** 0.9.35 bumped the *per-track* cache so a service change re-resolves, but left the **outer resolved-playlist cache** at the old version — so opening a playlist still hit the stale local-only result and the per-track re-resolve never ran (playlists looked unchanged after updating). The resolved-playlist cache version is now bumped too (`lbf:pl:resolved:2:`→`:3:`), so every playlist re-resolves once on this update and picks up streaming matches.
+
+## 0.9.35
+
+### Changed
+- **A Bandcamp match you find by hand now sticks and becomes the primary playable version when no other service has the release.** "Search Bandcamp" no longer opens a throwaway sub-page; it uses the same in-place refresh as the streaming Refresh, and the match is **persisted in its own long-lived store** (30 days, separate from the auto Qobuz/Tidal cache). On re-render it shows **inline** in the Streaming section, and `_findPlayable` appends it to every result — so a **Bandcamp-only release** (common for obscure artists) becomes the sole = primary entry, plays from the detail page, and **survives both the auto re-search and the streaming Refresh** instead of vanishing. When other services also have the album, the Bandcamp match is listed after them. Disabling Bandcamp (priority 0) hides it without discarding the stored match; the manual search now also runs even when Bandcamp is your only enabled service.
+
+### Added
+- **"Re-search Bandcamp" row.** When a Bandcamp match is already shown, the Streaming section offers a re-search action (refresh icon) to force-refresh a stale match. If the re-search comes back empty the existing match is kept, so you never lose playability. A prior empty search shows a "Search Bandcamp (not found — tap to retry)" prompt instead.
+
+### Fixed
+- **Playlists now drop AND re-match a removed service, exactly like the Releases section.** If you set a service to priority 0 or uninstall it (e.g. you stop subscribing to Qobuz), any playlist track that was matched to it is no longer offered as a dead link: the resolved-playlist and per-track caches re-resolve against your remaining services, so those tracks re-match to (say) Tidal — or drop if they're nowhere. A cached list also filters out any now-unusable service's tracks the moment it's served (the belt-and-braces twin of the album section's `_rebuildStreamItems`), and the playlist-grid tile's "X/50" count uses the same filter so it never disagrees with the opened list.
+- **Resolved-playlist cache TTL cut from 30 to 14 days.** These Weekly Jams/Exploration lists only exist ~2 weeks (current + previous week) before ListenBrainz drops them, so a 30-day cache just kept dead entries that are never requested again.
+- **A momentary streaming outage no longer pins a playlist on "local-only / few matches" for weeks.** A track resolves by trying each streaming service; previously, if a service couldn't even be *queried* (its API handler wasn't ready at resolve time — e.g. the startup warm-cache running before Qobuz/Tidal finished authenticating — or it timed out / errored), that was cached as a genuine "no match" for a week (per-track) and the whole resolved playlist for a month. So a list resolved at a bad moment stayed stuck showing only the handful of tracks owned locally, and even enabling Qobuz didn't recover it. These cases are now treated as **inconclusive**: the per-track and resolved-playlist caches are kept ~1 hour instead, so the list re-resolves and picks up streaming as soon as it's available. (Diagnosis: the 15 June playlists matched 44–45 via Tidal with the same matcher, while the 22 June lists — resolved when streaming wasn't reachable — got 0 streaming; the matcher was never the problem.)
+- **Playlist tracks now actually re-resolve when you enable/change a streaming service.** The per-track match cache wasn't keyed by the service set, and a cached "no match" was returned without re-searching — so a track that missed while only Tidal was enabled stayed missed even after Qobuz was turned on (the playlist re-resolved but each track hit the stale miss and never tried Qobuz; the "6 of 50" symptom). The per-track cache key now includes the track-capable services in priority order (consistent with the album play-via and resolved-playlist keys) and its version was bumped, so enabling/adding/reordering a service re-resolves the affected tracks. (Diagnosis note: this means the low match count was the stale cache masking Qobuz, not necessarily the track search itself.)
+- **Manual Bandcamp search now uses the combined "artist album" query again.** Bandcamp's recall is the opposite of Qobuz/Tidal: a bare-artist search frequently doesn't surface the album in its item results (it only appears by drilling into the artist page), so the 0.9.34 artist-only model returned nothing for some releases (e.g. *Lost Colossus — protocol://shibuya.rain*). Bandcamp reverts to the combined query (the album shows directly), while Qobuz/Tidal keep the artist-only model where it has better recall. `_albumMatches` still validates album+artist on every result.
+
 ## 0.9.34
 
 ### Changed

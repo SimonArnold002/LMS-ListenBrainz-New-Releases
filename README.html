@@ -116,7 +116,7 @@
   <h1>ListenBrainz Fresh Releases — LMS Plugin</h1>
   <p class="tagline">A plugin for <strong>Lyrion Music Server (LMS)</strong> built around <a href="https://listenbrainz.org">ListenBrainz</a>. It browses newly released albums (a personalised feed plus the global feed), turns your ListenBrainz playlists and recommendations into playable music, and adds rich release detail pages with artist bios and one-tap streaming.</p>
   <div class="badges">
-    <span class="badge accent">v0.9.29</span>
+    <span class="badge accent">v0.9.39</span>
     <span class="badge">LMS 9.0.0+</span>
     <span class="badge">Material Skin</span>
     <span class="badge">Powered by ListenBrainz</span>
@@ -197,16 +197,16 @@
 <h3>Release detail pages</h3>
 <p>Tap any release for a page in three sections:</p>
 <ul>
-<li><strong>Streaming</strong> — playable matches on your services (and a Refresh to re-search).
+<li><strong>Streaming</strong> — playable matches on your services. Qobuz/Tidal are matched automatically; <strong>Bandcamp</strong> is a one-tap <strong>Search Bandcamp</strong> button (it's slower/heavier, so it runs only when you ask, and a found match is remembered). A <strong>Refresh</strong> re-searches.
 </li>
 <li><strong>Artist Details</strong> — artist photo + a short biography preview with <strong>Read more</strong> for the full text, and <strong>Block this artist</strong>.
 </li>
 <li><strong>Album Details</strong> — tracklist (with durations), genres, tags, and <strong>View on MusicBrainz</strong>.
 </li></ul>
 <h3>Streaming playback</h3>
-<p>With <strong>Qobuz</strong>, <strong>Tidal</strong> and/or <strong>Bandcamp</strong> installed, releases and playlist tracks are matched (by artist + title) and made playable. In <strong>Streaming Services</strong> settings, give each service a <strong>search priority</strong> (lower = tried first, <strong>0 = never use it</strong>); matching stops at the first service that has it.</p>
+<p>With <strong>Qobuz</strong>, <strong>Tidal</strong> and/or <strong>Bandcamp</strong> installed, releases and playlist tracks are matched and made playable. In <strong>Streaming Services</strong> settings, give each service a <strong>search priority</strong> (lower = tried first, <strong>0 = never use it</strong>); matching stops at the first service that has it. Qobuz/Tidal are searched automatically; <strong>Bandcamp</strong> is searched on demand from the detail page (a found Bandcamp match is remembered, so a Bandcamp-only release stays playable). Change a service's priority — or remove its plugin — and affected tracks <strong>re-match</strong> to your remaining services automatically.</p>
 <h3>Created-for-You Playlists</h3>
-<p>With a username set, the <strong>Playlists</strong> section turns your ListenBrainz <strong>Weekly Jams</strong>, <strong>Weekly Exploration</strong> and <strong>Daily Jams</strong> into Play-all lists. Each track is matched to your <strong>own library first</strong> (then streaming); unmatched tracks are dropped and the page title shows how many matched.</p>
+<p>With a username set, the <strong>Playlists</strong> section turns your ListenBrainz <strong>Weekly Jams</strong>, <strong>Weekly Exploration</strong> and <strong>Daily Jams</strong> into Play-all lists. Each track is matched to your <strong>own library first</strong> (then streaming); unmatched tracks are dropped and the page title shows how many matched. A <strong>Settings → Unmatched tracks (debug)</strong> view lists, per playlist, any tracks that couldn't be matched — handy for spotting a gap.</p>
 <h3>Don't Stop The Music</h3>
 <p>Two auto-DJ mixers keep the queue going when it runs low. Pick one as your player's <strong>Don't Stop The Music</strong> source (LMS/Material player settings):</p>
 <ul>
@@ -265,7 +265,7 @@
 <ul>
 <li><strong>Genre coverage</strong> on brand-new releases is sparse (MusicBrainz often hasn't tagged them yet). Genres show <em>when available</em>. A <strong>Last.fm API key</strong> fills the gap using Last.fm's album/artist tags.
 </li>
-<li><strong>Streaming matches</strong> are by artist + album search, so an album not yet on a service won't appear, and occasionally a close title may mismatch.
+<li><strong>Streaming matches</strong> search each service by artist and confirm the album/track title locally, so something not on a service won't appear, and occasionally a close title may mismatch.
 </li>
 <li>Optional integrations (streaming services, MAI, Last.fm) are auto-detected; missing ones just hide their UI.
 </li></ul>

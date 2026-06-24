@@ -84,7 +84,7 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-0.9.34
+0.9.39
 
 ## Created-for-You Playlists (0.8.0)
 
@@ -118,7 +118,8 @@ fully-streaming, Play-all-able playlist.
   `_playlistResult` returns a PURE track list (no "no match" placeholder rows) with the match count
   in the page TITLE rather than a leading row — a mixed menu (text row + tracks) suppresses Material's
   Play-all, so the level must be tracks only. Whole result cached under
-  `lbf:pl:resolved:2:<mbid>|<last_modified>|<svc-order>` (per-track results under `lbf:track:2:…`),
+  `lbf:pl:resolved:4:<mbid>|<last_modified>|<svc-order>` (per-track results under `lbf:track:4:…`;
+  versions/TTLs current as of 0.9.39 — see "Streaming matching & playlist robustness" below),
   so revisits and play-by-item_id are instant and stable.
 - **Caching tuned to the weekly cadence (0.8.0):** the Created-for-You playlists only regenerate
   weekly (Mon, user TZ; ListenBrainz keeps current + previous week). The JSPF content is IMMUTABLE
@@ -200,6 +201,59 @@ fully-streaming, Play-all-able playlist.
   daily: keyed by `last_modified`, real work only when a new week's playlist appears. The list fetch
   uses `force => 1` (0.9.23) so it always re-pulls rather than short-circuiting on a still-valid
   listing cache — required for the daily tick to actually discover Monday's new playlists.
+- **Streaming matching & playlist robustness (0.9.34–0.9.39).** A cluster of matching/caching fixes
+  shared by album play-via, playlist track resolution and DSTM. **Supersedes the cache versions/TTLs
+  and the "Qobuz is the only fully-working service" notes above.**
+  - **Artist-only album search + RAW query to every service (0.9.34 / 0.9.37 / 0.9.39).** Album
+    auto-search now queries the **artist only** and filters by title locally (`_albumMatches`) — far
+    better recall than "artist album" as one string (which made the services' own fuzzy search
+    rank/drop the target; Qobuz missed *Placebo RE:CREATED*, Tidal missed *Sweating Someone Else's
+    Fever*). Crucially, the query **sent to a service** is the **RAW** artist/title, not the normalised
+    form: normalisation turns punctuation into spaces (`L.U.C.K.Y` → `l u c k y`, `P!nk` → `p nk`),
+    which the services' own search can't match — confirmed live on Tidal (raw query returns the track,
+    spaced query returns 100 results without it). Normalisation is kept for **our** validation
+    (`_trackMatches` / `_albumMatches`) only. Applies to track search (`_findPlayableTrack`, so DSTM
+    too), album auto-search (`_findPlayable`, raw artist) and the manual Bandcamp search (raw
+    artist+album). Both **Tidal and Qobuz** are fully-working track/album services now.
+  - **Bandcamp is manual + persistent (0.9.34 / 0.9.35).** Bandcamp is **not** auto-searched — its
+    plugin search does heavy **synchronous** response-parsing that blocks the event loop when it
+    returns data (confirmed by external loop-stall probing; the 2–7s freeze / players dropping off).
+    It's a deliberate one-tap **"Search Bandcamp"** row on the detail page (`_searchBandcampOnly`,
+    combined "artist album" query — Bandcamp recall is the *opposite* of Qobuz/Tidal: a bare-artist
+    search doesn't surface the album). A found match is **persisted in its own long-lived key**
+    (`lbf:bcmatch:6:`, 30d) and appended to every render (`_bcMatchItems`), so a Bandcamp-only release
+    becomes the **primary (sole) playable entry**, shows **inline** via the in-place `nextWindow =>
+    'refresh'` mechanism, and **survives auto re-search and the Refresh**. A **"Re-search Bandcamp"**
+    row force-refreshes (keeps the old match if the re-search is empty); a miss shows a "not found —
+    retry" prompt (`lbf:bcdone:6:` marker). Bandcamp manual is gated on the plugin being installed.
+  - **Service-aware caches → drop AND re-match on a service change (0.9.33 / 0.9.35 / 0.9.36).** The
+    per-track cache (`lbf:track:N:`) and the resolved-playlist cache (`lbf:pl:resolved:N:`) now both
+    include the **service set in priority order** (like the album `_streamKey`). So setting a service
+    to priority 0, reordering, or uninstalling it **re-resolves** the affected tracks against the
+    remaining services — a Qobuz track re-matches to Tidal, or drops if it's nowhere — exactly like the
+    Releases section. `_playlistResult` also filters cached tracks via `_cachedSvcUsable` on read (the
+    playlist twin of `_rebuildStreamItems`), and the playlist-tile count uses the same filter. **LESSON
+    (cost a release): these caches are LAYERED — bumping the inner (per-track) key alone does nothing
+    if the outer (resolved-playlist) key still hits and serves stale; bump BOTH. The file cache
+    persists across plugin updates/restarts.**
+  - **Transient outage no longer poisons (0.9.35).** A no-match where a service couldn't even be
+    *queried* (no API handler at resolve time — e.g. the startup warm running before Qobuz/Tidal
+    authenticated — or a timeout/error, signalled by `$collect->(undef)`) is treated as **inconclusive**,
+    not a real miss: the per-track and resolved-playlist caches keep it only ~1h
+    (`TRACK_INCONCLUSIVE_TTL` / `PLAYLIST_INCONCLUSIVE_TTL`) so it retries soon, instead of pinning a
+    whole playlist on "local-only / few matches" for a week/month. `_resolveTracks` propagates the
+    inconclusive count up to `_playlistTtl`.
+  - **Current cache versions / TTLs.** Resolved playlist `lbf:pl:resolved:4:` (TTL **14d** — these
+    playlists only live ~2 weeks; was 30d); per-track `lbf:track:4:` (30d found / 7d no-match / 1h
+    inconclusive; key = `:4:` + svc-order + the non-`first` libMode suffix); album play-via
+    `lbf:stream:7:`; persisted Bandcamp match `lbf:bcmatch:6:` (30d).
+  - **"Unmatched tracks (debug)" view (0.9.38).** Settings → a browsable diagnostic
+    (`fetchUnmatchedPlaylists` → `showUnmatched`): lists each created-for playlist; opening one shows
+    the **source** tracks that resolved to nothing (not library, not any enabled service) as plain
+    `Artist — Title` rows, count in the title. `_resolveTracks` now also returns the unmatched source
+    tracks; the view resolves against the warm cache so it's usually instant and reflects exactly what
+    the playlist dropped. Read-only. (Used live to find the `L.U.C.K.Y` miss — see
+    [[lbf-find-unmatched-tracks]] for the manual HTTP version of the same diff.)
 
 ## Don't Stop The Music propagators (0.9.0)
 
@@ -254,7 +308,7 @@ separate LMS plugin; mirrors `HomeExtras.pm`). Gated on `username`. Each mixer's
   (streaming only). The mixers use **`first`** (0.9.5 — library-first: play an owned copy when the
   user has it, else stream; the selection is varied enough that preferring owned copies no longer
   hurts). Non-`first` modes use a `:<mode>`-suffixed cache key so they don't collide with the
-  playlist feature's `lbf:track:2:*` cache. **Per-session no-repeat (0.9.5):** `$state{cid}{played}`
+  playlist feature's `lbf:track:*` cache. **Per-session no-repeat (0.9.5):** `$state{cid}{played}`
   is a permanent (until restart) set of every track URL ever queued — a track is never returned
   twice, and anything currently in the play queue is also excluded (`%blocked`). The artist `recent`
   FIFO still resets for variety; `played` never does. The resettable `served`/`recent` only drive
@@ -278,6 +332,12 @@ separate LMS plugin; mirrors `HomeExtras.pm`). Gated on `username`. Each mixer's
 `_sectionHeader` falls back to a plain text divider. The page is a live feed returned straight to the
 callback (never serialised), so `url` coderefs (Read-more, Block, Refresh) are safe here.
 
+- **Streaming section.** Auto-matched Qobuz/Tidal albums (`_findPlayable`: raw artist search +
+  `_albumMatches`), plus a manual **"Search Bandcamp"** action and, when Bandcamp matched before, its
+  **persisted** result inline (it's the primary entry when no other service has the release); a
+  **Refresh** re-searches. Full matching/caching detail is under **Created-for-You Playlists →
+  "Streaming matching & playlist robustness (0.9.34–0.9.39)"** (album play-via, Bandcamp persistence,
+  raw query, service-aware caches all live there).
 - **Section headers (`_sectionHeader($client, $token, $useH, $children, $noIcon)`).** Detail-page
   sections pass `$noIcon=1` (no LB-logo thumbnail — there's nothing to drill into, the rows sit right
   below). List-page headers (top menu) keep the icon so Material's grid toggle stays enabled. Header
@@ -358,7 +418,8 @@ convention documented under "Icon System".
     `lbf:summary:playlists`, else a synchronous fallback of last week's Monday → today).
   - **Playlist tiles** (`_playlistTile`): first line = the period the playlist covers — `W/C <Monday>`
     for the weekly playlists, the day for Daily Jams (derived from `last_modified`) — second line = the
-    match count read from the pre-resolved `lbf:pl:resolved:2:` cache.
+    match count read from the pre-resolved `lbf:pl:resolved:*` cache (only still-usable tracks counted,
+    via `_cachedSvcUsable`, so the tile agrees with the opened list after a service change).
   - **All Releases week rows / `_weekLabel`:** `W/C 8 June 2026` (full month, no abbreviations); date
     helpers `_fmtDate`/`_dateSpan`/`_ymd` live in `Browse.pm`.
   - **CRITICAL lesson (0.8.14→0.8.15 regression):** a top-level menu row with an **empty `name`** is
@@ -431,7 +492,8 @@ ListenBrainz Fresh Releases
 │   │   └── … For You feed (weekly dividers / grouping per prefs)
 │   └── <date span>                            ← Playlists tile (covered span; title on cover)
 │       ├── W/C <date> / <day>                  ← one playlist per category (Weekly Jams / Exploration / Daily Jams)
-│       │   └── matched streaming/library tracks (Play-all; unmatched dropped; count in page title)
+│       │   └── matched streaming/library tracks (Play-all; unmatched dropped; count in page title;
+│       │       a disabled/uninstalled service's tracks drop + re-match on re-resolve)
 │       └── …
 ├── ── All Releases ──                         ← Material section header
 │   └── <date span> · N releases               ← All Releases tile
@@ -440,7 +502,8 @@ ListenBrainz Fresh Releases
 │       ├── W/C <date>  [This/Last/Earlier badge]  ← that week's releases only
 │       └── …                                  ← one entry per week-commencing
 └── ── Settings ──                             ← Material section header
-    └── Plugin Settings                         ← weblink to settings.html
+    ├── Plugin Settings                         ← weblink to settings.html
+    └── Unmatched tracks (debug)                ← per-playlist list of tracks that matched nothing (0.9.38; username-gated)
 ```
 
 All section filtering (artwork/type/VA) is still driven entirely by settings prefs. The All Releases
@@ -529,6 +592,17 @@ Detected in `_isVariousArtists()`:
 - Material Skin's grouped artist release page layout is NOT achievable from OPML feeds — only via native library `albums_loop` responses. Solved in earlier versions by using Browse by Type sub-menus, removed in v0.3.0 in favour of settings-driven filtering.
 
 ## Version History
+- **0.9.20 → 0.9.39** — **streaming-match & playlist robustness, Bandcamp rework, diagnostics.**
+  `header-basic` dividers on Material 6.4.3+; **artist-only** album search and a **RAW (un-normalised)
+  query** to every service search — fixing stylised names/titles (`L.U.C.K.Y`, `P!nk`) the services'
+  own search couldn't match; **Bandcamp** moved to a manual, **persistent** "Search Bandcamp" (own
+  long-lived match key, primary when it's the sole source) + "Re-search"; **service-aware**
+  per-track/resolved-playlist caches so disabling/uninstalling a service **drops AND re-matches**
+  (parity with Releases); transient-outage resolves cached **short (inconclusive)** instead of
+  poisoning for weeks; resolved-playlist TTL cut **30d→14d**; **layered-cache** version bumps
+  (`lbf:pl:resolved:4:`, `lbf:track:4:`, `lbf:stream:7:`); and a browsable **"Unmatched tracks
+  (debug)"** view. Architecture in **Created-for-You Playlists** above; per-version detail in
+  **CHANGELOG.md**.
 - **0.9.0 → 0.9.19** — the **Don't Stop The Music propagators** (ListenBrainz Radio + Recommended;
   seed/evolve, library-first, no-repeat, artist diversity, Qobuz multi-artist matching, batch=15) and the
   **release detail page restructure** (three Material sections Streaming/Artist/Album, artist photo +

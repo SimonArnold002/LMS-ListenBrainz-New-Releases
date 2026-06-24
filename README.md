@@ -72,15 +72,15 @@ Open the plugin and you'll see **New Releases for You** and **All Releases** til
 ### Release detail pages
 Tap any release for a page in three sections:
 
-- **Streaming** — playable matches on your services (and a Refresh to re-search).
+- **Streaming** — playable matches on your services. Qobuz/Tidal are matched automatically; **Bandcamp** is a one-tap **Search Bandcamp** button (it's slower/heavier, so it runs only when you ask, and a found match is remembered). A **Refresh** re-searches.
 - **Artist Details** — artist photo + a short biography preview with **Read more** for the full text, and **Block this artist**.
 - **Album Details** — tracklist (with durations), genres, tags, and **View on MusicBrainz**.
 
 ### Streaming playback
-With **Qobuz**, **Tidal** and/or **Bandcamp** installed, releases and playlist tracks are matched (by artist + title) and made playable. In **Streaming Services** settings, give each service a **search priority** (lower = tried first, **0 = never use it**); matching stops at the first service that has it.
+With **Qobuz**, **Tidal** and/or **Bandcamp** installed, releases and playlist tracks are matched and made playable. In **Streaming Services** settings, give each service a **search priority** (lower = tried first, **0 = never use it**); matching stops at the first service that has it. Qobuz/Tidal are searched automatically; **Bandcamp** is searched on demand from the detail page (a found Bandcamp match is remembered, so a Bandcamp-only release stays playable). Change a service's priority — or remove its plugin — and affected tracks **re-match** to your remaining services automatically.
 
 ### Created-for-You Playlists
-With a username set, the **Playlists** section turns your ListenBrainz **Weekly Jams**, **Weekly Exploration** and **Daily Jams** into Play-all lists. Each track is matched to your **own library first** (then streaming); unmatched tracks are dropped and the page title shows how many matched.
+With a username set, the **Playlists** section turns your ListenBrainz **Weekly Jams**, **Weekly Exploration** and **Daily Jams** into Play-all lists. Each track is matched to your **own library first** (then streaming); unmatched tracks are dropped and the page title shows how many matched. A **Settings → Unmatched tracks (debug)** view lists, per playlist, any tracks that couldn't be matched — handy for spotting a gap.
 
 ### Don't Stop The Music
 Two auto-DJ mixers keep the queue going when it runs low. Pick one as your player's **Don't Stop The Music** source (LMS/Material player settings):
@@ -137,7 +137,7 @@ Each section has its own copy of these filters:
 ## Notes & limitations
 
 - **Genre coverage** on brand-new releases is sparse (MusicBrainz often hasn't tagged them yet). Genres show *when available*. A **Last.fm API key** fills the gap using Last.fm's album/artist tags.
-- **Streaming matches** are by artist + album search, so an album not yet on a service won't appear, and occasionally a close title may mismatch.
+- **Streaming matches** search each service by artist and confirm the album/track title locally, so something not on a service won't appear, and occasionally a close title may mismatch.
 - Optional integrations (streaming services, MAI, Last.fm) are auto-detected; missing ones just hide their UI.
 
 ---

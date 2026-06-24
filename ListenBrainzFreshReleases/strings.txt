@@ -4,6 +4,12 @@ PLUGIN_LISTENBRAINZ_FRESH_RELEASES
 PLUGIN_LISTENBRAINZ_FRESH_RELEASES_DESC
 	EN	Browse ListenBrainz Fresh Releases on your Squeezebox.
 
+PLUGIN_LBF_UNMATCHED
+	EN	Unmatched tracks (debug)
+
+PLUGIN_LBF_ALL_MATCHED
+	EN	All tracks matched — nothing unmatched
+
 PLUGIN_LBF_DSTM_RADIO
 	EN	ListenBrainz Radio (similar to what's playing)
 
@@ -255,6 +261,12 @@ PLUGIN_LBF_PLAY_VIA_SETTING_DESC
 
 PLUGIN_LBF_SEARCH_BANDCAMP
 	EN	Search Bandcamp
+
+PLUGIN_LBF_SEARCH_BANDCAMP_RETRY
+	EN	Search Bandcamp (not found — tap to retry)
+
+PLUGIN_LBF_RESEARCH_BANDCAMP
+	EN	Re-search Bandcamp
 
 PLUGIN_LBF_REFRESH
 	EN	Refresh streaming matches
