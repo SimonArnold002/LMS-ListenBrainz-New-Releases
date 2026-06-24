@@ -1941,10 +1941,19 @@ sub _streamResult {
 sub _rebuildStreamItems {
     my ($cached) = @_;
 
+    # Only surface matches from services the user currently has ENABLED. The cache
+    # is keyed by mbid (not by service set), so a match found while e.g. Qobuz was
+    # enabled would otherwise keep showing after Qobuz is disabled (svc_priority 0).
+    # Filtering on read (rather than re-searching) hides it immediately without
+    # re-triggering a service search — important since a service search can block.
+    my %enabled = map { $_->{name} => 1 } _orderedAdapters();
+
     my @out;
     for my $c (@{ $cached || [] }) {
         my %item = %$c;
         my $svc  = $item{_svc} // '';
+
+        next unless $enabled{$svc};   # service disabled in settings → drop its cached match
 
         if ($svc eq 'Qobuz' && Plugins::Qobuz::Plugin->can('QobuzGetTracks')) {
             $item{url} = \&Plugins::Qobuz::Plugin::QobuzGetTracks;

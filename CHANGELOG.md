@@ -3,6 +3,11 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.32
+
+### Fixed
+- **Cached streaming matches now respect the enabled-services setting.** The per-album play-via cache is keyed by release mbid only, so a match found while a service was enabled kept showing on the detail page after that service was disabled (`svc_priority_* = 0`) — e.g. a Qobuz link still appearing with Qobuz turned off. `_rebuildStreamItems` now drops cached matches whose service is no longer enabled, filtering on read rather than re-searching (re-searching would re-trigger a service search, which can block the loop). Re-enable the service or use the Streaming section's Refresh to re-search.
+
 ## 0.9.31
 
 ### Fixed
