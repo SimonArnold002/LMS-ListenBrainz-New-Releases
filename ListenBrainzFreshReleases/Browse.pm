@@ -135,11 +135,38 @@ sub topLevel {
     $callback->({ items => \@items, cachetime => 0 });
 }
 
-# A Material section-divider header. Material renders type=>'header' bold/accented
-# but forces a drill action onto it (can't be suppressed), so — as with the week
-# dividers — give it a url returning its own child items, so tapping the header
-# (or its "More") shows that section rather than an empty page. Non-Material skins
-# get a plain text divider.
+# Which header item-type to emit for a header-capable (Material) client.
+# Material's 'header-basic' (a non-actionable, full-width divider) only exists
+# from Material 6.4.3 onwards. On the newer Material dev line an ACTIONABLE
+# type=>'header' is drawn as a grid CARD (mixed in with the album artwork)
+# instead of a full-width divider; 'header-basic' clears the item's action so it
+# renders as a plain divider again. Both skins advertise the same features string
+# ('hi'), so the request can't distinguish them — check the running Material
+# version server-side: use 'header-basic' iff Material >= 6.4.3 (or a non-release
+# dev/test build), else the long-standing 'header' (no regression on older
+# skins). Cached — the Material version can't change at runtime.
+# (Same approach as the Listen to Later plugin.)
+my $_headerTypeCache;
+sub _headerType {
+    return $_headerTypeCache if defined $_headerTypeCache;
+    my $ver = eval { Plugins::MaterialSkin::Plugin->getPluginVersion() };
+    my $useBasic;
+    if (!defined $ver) {
+        $useBasic = 0;                                                   # can't tell -> stay safe ('header')
+    } elsif ($ver =~ /^(\d+)\.(\d+)\.(\d+)/) {
+        $useBasic = ( $1 <=> 6 || $2 <=> 4 || $3 <=> 3 ) >= 0 ? 1 : 0;   # >= 6.4.3
+    } else {
+        $useBasic = 1;                                                   # dev/test build -> new type
+    }
+    return $_headerTypeCache = $useBasic ? 'header-basic' : 'header';
+}
+
+# A Material section-divider header. Older Material renders type=>'header'
+# bold/accented but forces a drill action onto it (can't be suppressed), so — as
+# with the week dividers — give it a url returning its own child items, so tapping
+# the header (or its "More") shows that section rather than an empty page. On
+# Material 6.4.3+ _headerType() returns 'header-basic', which strips the action
+# (no grid-card) and harmlessly ignores the url. Non-Material skins get plain text.
 sub _sectionHeader {
     my ($client, $stringToken, $useH, $children, $noIcon) = @_;
     # $noIcon: drop the logo thumbnail (detail-page section headers — there's
@@ -147,7 +174,7 @@ sub _sectionHeader {
     # clutter). List pages keep the icon so Material's grid toggle stays enabled.
     my $hdr = {
         name  => cstring($client, $stringToken),
-        type  => $useH ? 'header' : 'text',
+        type  => $useH ? _headerType() : 'text',
         ($noIcon ? () : (image => ICON)),
     };
     if ($useH) {
@@ -1071,7 +1098,9 @@ sub _buildWeekly {
     my ($releases, $client, $headers) = @_;
 
     # Real header item for Material (bold, accent colour); plain text elsewhere.
-    my $divType = $headers ? 'header' : 'text';
+    # _headerType() => 'header-basic' on Material 6.4.3+ (a non-actionable divider,
+    # so the week row isn't drawn as a grid card), else the long-standing 'header'.
+    my $divType = $headers ? _headerType() : 'text';
 
     # Group into weeks (input is already date-sorted, so same-week rows are
     # adjacent and week order is preserved).
@@ -1432,7 +1461,7 @@ sub _releaseDetail {
                 passthrough => [{}],
                 url         => sub {
                     my ($c, $cb) = @_;
-                    $cache->remove('lbf:stream:4:' . $mbid);
+                    $cache->remove(_streamKey($mbid));
                     $cb->({ items => [] });
                 },
             } if $mbid;
@@ -1794,6 +1823,24 @@ sub _pluginIcon {
     return eval { $class->_pluginDataFor('icon') } || undef;
 }
 
+# Cache key for an album's streaming matches. Keyed by the current service
+# CONFIGURATION (enabled+installed services in priority order, via
+# _orderedAdapters) as well as the release id, so ANY change to the streaming
+# setup — reordering priorities, disabling a service (priority 0), or
+# (un)installing one — yields a different key. The detail page then RE-MATCHES
+# against the new set on next open, automatically (no manual refresh), instead of
+# serving stale links to a service the user no longer wants (or that's gone).
+# Re-matching only happens when the config actually changes (a stable config hits
+# the same key); the feed-list refresh is separate and never re-matches. Mirrors
+# the playlist resolved cache, whose key already carries the service order.
+sub _streamKey {
+    my ($idPart) = @_;
+    my $svcOrder = join(',', map { lc $_->{name} } _orderedAdapters());
+    my $key = 'lbf:stream:5:' . $svcOrder . ':' . ($idPart // '');
+    utf8::encode($key) if utf8::is_utf8($key);   # octet key — non-Latin fallback can't crash md5
+    return $key;
+}
+
 # Find the release on installed streaming services and present each service's
 # matching album as a directly-playable node (one tap to play / add), using
 # each plugin's own search API rather than a generic search drill-down.
@@ -1829,12 +1876,11 @@ sub _findPlayable {
     }
 
     # Cache hit → rebuild the playable items from the stored data (no re-search).
-    # Key is versioned so a change to the set of searched services / matching
-    # logic invalidates stale entries (:2: matching rework, :3: added Tidal,
-    # :4: decode non-Latin names so the artist disambiguator works).
+    # Key is versioned so a change to the matching logic invalidates stale entries
+    # (:2: matching rework, :3: added Tidal, :4: decode non-Latin names, :5: key
+    # now includes the service configuration — see _streamKey).
     # $force (manual refresh) skips the read so the services are searched again.
-    my $key = 'lbf:stream:4:' . ($mbid || _norm($query));
-    utf8::encode($key) if utf8::is_utf8($key);   # octet key — non-Latin fallback can't crash md5
+    my $key = _streamKey($mbid || _norm($query));
     if (!$force && (my $c = $cache->get($key))) {
         $log->info("play-via cache hit: $key (" . scalar(@{ $c->{items} || [] }) . " match(es))");
         $callback->({ items => _streamResult($client, _rebuildStreamItems($c->{items})) });

@@ -3,6 +3,14 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.33
+
+### Changed
+- **Streaming matches auto-re-match when you change your streaming services.** The album detail page's play-via cache is now keyed by the current service configuration (enabled+installed services in priority order), not the release alone. So disabling a service (priority 0), reordering priorities, or removing a service plugin makes the next album open **re-resolve against the new set automatically — no manual Refresh** — instead of showing a stale link to a service you no longer use (the 0.9.32 read-filter hid such links but didn't replace them). A stable service config still hits the cache normally; the feed-list refresh is separate and never re-matches. One-time effect: because the cache key format changed, each album re-matches once on its first open after updating (any re-match can hit the known Bandcamp search slowness, to be addressed separately).
+
+### Fixed
+- **Section/week-divider headers render as full-width dividers (not grid cards) on Material 6.4.3+.** Newer Material draws an actionable `type => 'header'` item as a grid card mixed into the artwork. Headers now emit `type => 'header-basic'` on Material 6.4.3+ (a non-actionable divider that clears the item's action); Material ≤ 6.4.2 keeps the existing `'header'` behaviour unchanged, and an unknown version stays on the safe `'header'`. Covers the top-level section headers and the weekly "W/C …" dividers. The settings page is unaffected (its section headers are HTML/CSS, a different rendering path).
+
 ## 0.9.32
 
 ### Fixed

@@ -84,7 +84,7 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-0.9.32
+0.9.33
 
 ## Created-for-You Playlists (0.8.0)
 
