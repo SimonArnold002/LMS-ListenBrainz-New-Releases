@@ -84,7 +84,7 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-0.9.39
+0.9.41
 
 ## Created-for-You Playlists (0.8.0)
 
@@ -94,7 +94,7 @@ fully-streaming, Play-all-able playlist.
 
 - **API** (`API.pm`): `getCreatedForPlaylists` → `GET /1/user/<user>/playlists/createdfor`
   (no token needed to read; sent if present), parsed by `_parsePlaylistList` into
-  `{ mbid, title, annotation, source_patch, last_modified }` (mbid from the `…/playlist/<mbid>`
+  `{ mbid, title, source_patch, last_modified }` (mbid from the `…/playlist/<mbid>`
   identifier). `getPlaylistTracks($mbid,$lastMod,…)` → `GET /1/playlist/<mbid>`, parsed by
   `_parsePlaylistTracks` into `{ title, artist(=creator), album, duration_ms, recording_mbid,
   caa_id, caa_release_mbid }`. The createdfor *listing* has empty `track` arrays and no track
@@ -246,7 +246,8 @@ fully-streaming, Play-all-able playlist.
   - **Current cache versions / TTLs.** Resolved playlist `lbf:pl:resolved:4:` (TTL **14d** — these
     playlists only live ~2 weeks; was 30d); per-track `lbf:track:4:` (30d found / 7d no-match / 1h
     inconclusive; key = `:4:` + svc-order + the non-`first` libMode suffix); album play-via
-    `lbf:stream:7:`; persisted Bandcamp match `lbf:bcmatch:6:` (30d).
+    `lbf:stream:7:` (7d found / 1d no-match / **1h inconclusive** since 0.9.41 — see the 0.9.41 note);
+    persisted Bandcamp match `lbf:bcmatch:6:` (30d).
   - **"Unmatched tracks (debug)" view (0.9.38).** Settings → a browsable diagnostic
     (`fetchUnmatchedPlaylists` → `showUnmatched`): lists each created-for playlist; opening one shows
     the **source** tracks that resolved to nothing (not library, not any enabled service) as plain
@@ -556,7 +557,7 @@ dividers / group-by-artist per prefs). The Playlists section is gated on `userna
   - Tracklist: `GET …/release/<mbid>?inc=recordings&fmt=json` (`getReleaseDetails`)
   - Genres: `GET …/release-group/<release_group_mbid>?inc=genres&fmt=json` (`getReleaseGroupGenres`) — genres live on the **release-group**, not the release; release-level genres are nearly always empty (this was a bug fixed in 0.6.15). Cached by release-group MBID so releases sharing a group reuse it
   - Fetched on-demand when a release is opened (so the anonymous MusicBrainz 1 req/sec limit is generally fine; two near-simultaneous calls degrade gracefully if one is throttled)
-  - Requires a descriptive `User-Agent` (set in `API::USER_AGENT`) or MusicBrainz returns 403
+  - Requires a descriptive `User-Agent` or MusicBrainz returns 403. `API::USER_AGENT` is a memoised sub (NOT a constant) that derives the version from the plugin manifest at runtime, so it never drifts from the release (0.9.40) — don't reintroduce a hardcoded version string
   - `API::getReleaseDetails` returns `{ genres => [names], media => [{ position, format, tracks => [{position,title,length}] }] }`
   - Detail page degrades gracefully to base metadata if the lookup fails
 
@@ -572,7 +573,7 @@ dividers / group-by-artist per prefs). The Playlists section is gated on `userna
 - Matches against both `release_group_primary_type` and `release_group_secondary_types`
 - MusicBrainz primary types: Album, Single, EP, Broadcast, Other
 - MusicBrainz secondary types tracked: Compilation, Soundtrack, Spokenword, Interview, Audiobook, Audio drama, Live, Remix, Mixtape/Street, Demo
-- For You section uses `foryou_albums` (boolean, albums-only when ON)
+- For You section uses individual `foryou_type_<name>` checkboxes (since 0.6.15 — replaced the old single `foryou_albums` toggle)
 - All Releases section uses individual `all_type_<name>` checkboxes
 - Browse item rendering now uses the actual API title/type fields so All Releases shows the real release title and type rather than falling back to a generic album label
 
@@ -592,6 +593,40 @@ Detected in `_isVariousArtists()`:
 - Material Skin's grouped artist release page layout is NOT achievable from OPML feeds — only via native library `albums_loop` responses. Solved in earlier versions by using Browse by Type sub-menus, removed in v0.3.0 in favour of settings-driven filtering.
 
 ## Version History
+- **0.9.41** — **code-review fixes: streaming robustness + dead-code cleanup.**
+  (1) **Album streaming search guards the foreign renderer.** `_searchQobuz`/`_searchTidal` now wrap
+  the service's own album renderer (`Qobuz::_albumItem` / `TIDAL::_renderAlbum`) in an eval INSIDE the
+  async search callback — where `_findPlayable`'s invocation-time eval doesn't reach. A broken/changed
+  renderer now skips that item instead of leaving the service un-settled until its 8s timeout (matching
+  the track path's long-standing `_renderTrack` guard). One bad item is skipped, not the whole service.
+  (2) **Album play-via gained the track path's "inconclusive" concept.** A service that couldn't be
+  QUERIED (no API handler at search time, a timeout, an error, or a renderer that produced nothing from
+  a real match) signals `undef` (not `[]`) and is cached as a no-match only `STREAM_INCONCLUSIVE_TTL` =
+  1h, so it retries soon. A genuine "searched fine, not there" miss still caches 1 day
+  (`STREAM_NOMATCH_TTL`); a found match still 7 days. So a transient outage or a just-released album
+  recovers within the hour (or instantly via Refresh) instead of being pinned for a day — the album path
+  now mirrors `_findPlayableTrack` exactly. **Verified against the live `/cf/recommendation` API** that
+  `artist_type` similar/raw/top return the identical payload and that omitting it returns the same data.
+  (3) **Cleanup, no behaviour change.** Removed the dead `annotation`/`track_count` fields and the now-
+  orphaned `_stripHtml` from `_parsePlaylistList` (neither was ever read — the tile shows the period +
+  resolved match count, not the annotation); dropped the unused DSTM recommendation `flavour`/`artist_type`
+  parameter (request unchanged, fixed at `similar`; the endpoint feeds both the Recommended mixer and
+  Radio's cold-start fallback); and removed a redundant double-`_norm` in `_streamId` (proven byte-
+  identical, so cache keys are unchanged). Matching logic (`_albumMatches`/`_trackMatches`/`_norm`) untouched.
+- **0.9.40** — **code-review housekeeping (no behaviour change beyond one bugfix).**
+  (1) **Bugfix:** a dead `//` fallback (`_pickValue` returns `''`, never undef) meant a release with
+  no artist/album credit rendered as `" — Album"` with no name — the `// 'Unknown Artist'` /
+  `'Unknown Album'` fallbacks are now `||` so they actually apply. (2) **`USER_AGENT` no longer
+  hardcodes the version** — `API::USER_AGENT` is now a memoised sub that reads the version from the
+  plugin manifest (`Slim::Utils::PluginManager->dataForPlugin(...)->{version}`); it had silently
+  lagged 17 releases (stuck at 0.9.22). **Rule: never restate the version in code — derive it from
+  install.xml via the manifest.** (3) **`_cachedSvcUsable($svc, $enabled?)`** takes an optional
+  precomputed `{ lc-name => 1 }` enabled-set; `_playlistResult` / `_playlistTile` build it once per
+  render instead of rebuilding the whole adapter set (3 `->can` probes + prefs reads) once per track.
+  (4) **Watchdog timers cancelled on normal completion** (`Slim::Utils::Timers::killSpecific`) in
+  `_resolveTracks`, `_releaseDetail`, `_searchBandcampOnly` and the per-service timeouts in
+  `_findPlayable` / `_findPlayableTrack` — they were harmless idempotent no-ops but lingered holding
+  closures for their TTL. (5) **`dstm_batch` fallback** `|| 10` → `|| 15` to match the init default.
 - **0.9.20 → 0.9.39** — **streaming-match & playlist robustness, Bandcamp rework, diagnostics.**
   `header-basic` dividers on Material 6.4.3+; **artist-only** album search and a **RAW (un-normalised)
   query** to every service search — fixing stylised names/titles (`L.U.C.K.Y`, `P!nk`) the services'

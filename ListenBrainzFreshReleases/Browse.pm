@@ -23,6 +23,12 @@ my $cache = Slim::Utils::Cache->new();
 # a few days) → recheck daily.
 use constant STREAM_FOUND_TTL   => 7 * 86400;
 use constant STREAM_NOMATCH_TTL => 1 * 86400;
+# A no-match where a service couldn't even be QUERIED (no API handler at search
+# time, a timeout, an error, or a broken/changed renderer that produced nothing
+# from a real match) is inconclusive — NOT a confirmed miss. Cache it only briefly
+# so it retries soon, rather than pinning a transient outage as "no match" for the
+# day. Mirrors the track path's TRACK_INCONCLUSIVE_TTL.
+use constant STREAM_INCONCLUSIVE_TTL => 1 * 3600;
 # A manually-found Bandcamp match persists much longer (and in its own key): it's
 # the only way a Bandcamp-only release becomes playable, so it shouldn't quietly
 # expire and force a re-search. Re-tapping (after a Refresh) refreshes it.
@@ -493,8 +499,10 @@ sub fetchPlaylists {
     );
 }
 
-# One browse tile for a playlist: title, a trimmed annotation as line2, and the
-# 2x2 grid cover (a real server-served PNG, so every skin shows it).
+# One browse tile for a playlist: line1 = the period it covers (the branded cover
+# already carries the playlist name), line2 = the streaming-match count, plus the
+# per-category bundled cover image (_categoryCover) — a real server-served PNG, so
+# every skin shows it.
 sub _playlistTile {
     my ($pl, $client) = @_;
 
@@ -519,13 +527,15 @@ sub _playlistTile {
     }
 
     my $matched = '';
-    my $svcOrder = join(',', map { lc $_->{name} } _orderedAdapters());
+    my @adapters = _orderedAdapters();
+    my $svcOrder = join(',', map { lc $_->{name} } @adapters);
     my $rkey = 'lbf:pl:resolved:4:' . join('|', ($pl->{mbid} // ''), $lastMod, $svcOrder);
     if (my $c = $cache->get($rkey)) {
         # Count only tracks whose service is still usable, so the tile agrees with
         # the count shown when the playlist is opened (_playlistResult applies the
         # same filter) after a service is disabled/uninstalled.
-        my $usable = grep { _cachedSvcUsable($_->{_svc}) } @{ $c->{items} || [] };
+        my $enabled = { map { lc($_->{name}) => 1 } @adapters };
+        my $usable = grep { _cachedSvcUsable($_->{_svc}, $enabled) } @{ $c->{items} || [] };
         $matched = sprintf(cstring($client, 'PLUGIN_LBF_PL_MATCHED'), $usable, $c->{total});
     }
 
@@ -728,7 +738,8 @@ sub _playlistResult {
     # cache key already re-resolves on a service change; this filters the moment
     # the cached payload is served, matching the album behaviour exactly, and the
     # match count reflects what's actually playable now.
-    my @items   = grep { _cachedSvcUsable($_->{_svc}) } @{ $payload->{items} || [] };
+    my $enabled = { map { lc($_->{name}) => 1 } _orderedAdapters() };
+    my @items   = grep { _cachedSvcUsable($_->{_svc}, $enabled) } @{ $payload->{items} || [] };
     my $matched = scalar @items;
     my $total   = $payload->{total} // scalar(@items);
 
@@ -769,9 +780,11 @@ sub _resolveTracks {
     my $finished     = 0;
     my $inconclusive = 0;   # tracks whose no-match was inconclusive (svc unavailable)
 
+    my $watchdog;
     my $finish = sub {
         return if $finished;
         $finished = 1;
+        Slim::Utils::Timers::killSpecific($watchdog) if $watchdog;   # cancel the unused watchdog
         # Also hand back the SOURCE tracks that didn't resolve (slot still 0/undef),
         # so the diagnostics view can list what couldn't be matched. Pass the
         # inconclusive count too, so the caller can keep the resolved-playlist cache
@@ -780,7 +793,7 @@ sub _resolveTracks {
         $done->([ grep { ref $_ } @slots ], $inconclusive, \@unmatched);   # matched items, in order
     };
 
-    Slim::Utils::Timers::setTimer(undef, time() + PLAYLIST_TIMEOUT, sub { $finish->() });
+    $watchdog = Slim::Utils::Timers::setTimer(undef, time() + PLAYLIST_TIMEOUT, sub { $finish->() });
 
     my $pump;
     $pump = sub {
@@ -1422,7 +1435,7 @@ sub _buildGrouped {
             next;
         }
 
-        my $artist = _pickValue($rels->[0], 'artist_credit_name', 'artist_name', 'artist') // 'Unknown Artist';
+        my $artist = _pickValue($rels->[0], 'artist_credit_name', 'artist_name', 'artist') || 'Unknown Artist';
         my $image  = Plugins::ListenBrainzFreshReleases::API->coverArtUrl($rels->[0]) // ICON;
         my $count  = scalar @$rels;
 
@@ -1446,8 +1459,8 @@ sub _buildGrouped {
 sub _buildReleaseItem {
     my ($rel, $client) = @_;
 
-    my $artist     = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist') // 'Unknown Artist';
-    my $album      = _pickValue($rel, 'release_name', 'title', 'name') // 'Unknown Album';
+    my $artist     = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist') || 'Unknown Artist';
+    my $album      = _pickValue($rel, 'release_name', 'title', 'name') || 'Unknown Album';
     my $date       = $rel->{release_date} // '';
     my $type       = _displayType($rel);   # includes the secondary type, e.g. "Album / Live"
     my $mbid       = $rel->{release_mbid} // '';
@@ -1535,12 +1548,14 @@ sub _releaseDetail {
     # finishes (before the others launched) and drop their data.
     my $pending = $wantStream + $wantGenres + $wantLastfm + $wantTracks + $wantArtist;
     my $done    = 0;
+    my $watchdog;
 
     my $finish = sub {
         my ($force) = @_;
         return if $done;
         return if !$force && $pending > 0;   # $force (watchdog) renders regardless
         $done = 1;
+        Slim::Utils::Timers::killSpecific($watchdog) if $watchdog;   # cancel the unused watchdog
         # One "Genres" line: prefer curated MusicBrainz genres, fall back to
         # Last.fm tags (MB is usually empty for fresh releases).
         my $g = (ref $mbGenres  eq 'ARRAY' && @$mbGenres)  ? $mbGenres
@@ -1603,7 +1618,7 @@ sub _releaseDetail {
     # render with whatever arrived ($finish->(1) bypasses the pending check) so
     # the page can never hang the client. $finish is idempotent ($done), so a
     # normal completion makes this a no-op.
-    Slim::Utils::Timers::setTimer(undef, time() + DETAIL_TIMEOUT, sub { $finish->(1) });
+    $watchdog = Slim::Utils::Timers::setTimer(undef, time() + DETAIL_TIMEOUT, sub { $finish->(1) });
 
     # Streaming services — search automatically and show matches inline, with a
     # manual "refresh" that re-searches (bypasses the cache) for this album.
@@ -1713,7 +1728,7 @@ sub _releaseDetail {
 sub _artistRows {
     my ($rel, $client, $img, $bio) = @_;
 
-    my $artist = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist') // 'Unknown Artist';
+    my $artist = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist') || 'Unknown Artist';
 
     my @rows = ({
         name => cstring($client, 'PLUGIN_LBF_ARTIST') . ": $artist",
@@ -1779,7 +1794,7 @@ sub _artistRows {
 sub _albumRows {
     my ($rel, $client) = @_;
 
-    my $album = _pickValue($rel, 'release_name', 'title', 'name') // 'Unknown Album';
+    my $album = _pickValue($rel, 'release_name', 'title', 'name') || 'Unknown Album';
     my $date  = $rel->{release_date} // '';
     my $type  = _displayType($rel);   # primary + secondary, e.g. "Album / Live"
 
@@ -1957,10 +1972,14 @@ sub _orderedAdapters {
 # usable while its service is still enabled (svc_priority > 0). Lets a service
 # set to 0 stop being served from cache immediately, instead of lingering for the
 # 30-day track-cache TTL.
+# $enabled (optional) is a precomputed { lc-name => 1 } set of currently-enabled
+# adapters — pass it when filtering a whole list so we don't rebuild the adapter
+# set (three ->can probes + prefs reads) once per item. Built on demand otherwise.
 sub _cachedSvcUsable {
-    my ($svc) = @_;
+    my ($svc, $enabled) = @_;
     return 1 if !defined $svc || $svc eq '' || lc $svc eq 'library';
-    return scalar grep { lc($_->{name}) eq lc $svc } _orderedAdapters();
+    $enabled ||= { map { lc($_->{name}) => 1 } _orderedAdapters() };
+    return $enabled->{ lc $svc } ? 1 : 0;
 }
 
 # Detection + priority for every service we know how to integrate (installed or
@@ -2012,7 +2031,10 @@ sub _streamKey {
 sub _streamId {
     my ($artist, $album, $mbid) = @_;
     return $mbid if defined $mbid && length $mbid;
-    return _norm(join(' ', grep { length } _norm($artist), _norm($album)));
+    # Each part is already normalised and empties are filtered before the join, so
+    # the joined string is itself normalised — no outer _norm needed. (Keep the
+    # output byte-identical: this string is a cache-key component, not a matcher.)
+    return join(' ', grep { length } _norm($artist), _norm($album));
 }
 
 # Marker recording that a manual Bandcamp search has already run for this album,
@@ -2101,8 +2123,9 @@ sub _findPlayable {
     # service has come back (matched or not). Each service has its own timeout so a
     # slow/hung one is treated as "no match" and can't stall the result. The chosen
     # service's matches (or an empty result if nothing matched) are cached.
-    my @result   = map { undef } @adapters;   # undef = pending, [] = miss, [..] = match
-    my $resolved = 0;
+    my @result       = map { undef } @adapters;   # undef = pending, [] = miss, [..] = match
+    my $resolved     = 0;
+    my $inconclusive = 0;   # services that couldn't be queried (no handler / timeout / error)
 
     my $resolve = sub {
         return if $resolved;
@@ -2113,10 +2136,16 @@ sub _findPlayable {
         }
         $resolved = 1;
         my $items = defined $win ? $result[$win] : [];
-        _cacheStream($key, $items, @$items ? STREAM_FOUND_TTL : STREAM_NOMATCH_TTL);
+        # A miss caused (wholly or partly) by a service we couldn't query is
+        # inconclusive → cache it briefly so it retries soon, rather than pinning a
+        # transient outage as a confirmed no-match for the day (mirrors the track path).
+        my $ttl = @$items       ? STREAM_FOUND_TTL
+                : $inconclusive ? STREAM_INCONCLUSIVE_TTL
+                :                 STREAM_NOMATCH_TTL;
+        _cacheStream($key, $items, $ttl);
         $log->info("play-via '$query': "
             . (defined $win ? "matched on $adapters[$win]{name} (" . scalar(@$items) . ")"
-                            : "no match on any service"));
+                            : "no match on any service" . ($inconclusive ? " ($inconclusive inconclusive — short TTL)" : "")));
         $callback->({ items => _streamResult($client, [ @$items, @bc ]) });
     };
 
@@ -2126,9 +2155,20 @@ sub _findPlayable {
         my $icon = $a->{icon};
 
         my $settled = 0;
+        my $svcTimer;
         my $settle  = sub {
             return if $settled || $resolved;
             $settled = 1;
+            Slim::Utils::Timers::killSpecific($svcTimer) if $svcTimer;   # cancel this service's timeout
+            # undef arg = the service couldn't be queried (no API handler / timeout /
+            # error / broken renderer) → contributes no match, but INCONCLUSIVELY (a
+            # short-TTL retry), not a confirmed miss. Same signal as the track path.
+            if (!defined $_[0]) {
+                $inconclusive++;
+                $result[$i] = [];
+                $resolve->();
+                return;
+            }
             my @matched = (ref $_[0] eq 'ARRAY') ? @{ $_[0] } : ();
             for my $it (@matched) {
                 $it->{image} = $icon if $icon;   # service logo as thumbnail
@@ -2138,16 +2178,17 @@ sub _findPlayable {
             $resolve->();
         };
 
-        # Per-service timeout → treat as "no match" so it can't hold up the others.
-        Slim::Utils::Timers::setTimer(undef, time() + STREAM_SVC_TIMEOUT, sub {
+        # Per-service timeout → inconclusive (not a confirmed miss) so a slow/hung
+        # service retries soon rather than caching a false no-match for the day.
+        $svcTimer = Slim::Utils::Timers::setTimer(undef, time() + STREAM_SVC_TIMEOUT, sub {
             return if $settled || $resolved;
             $log->warn("play-via $svc timed out");
-            $settle->([]);
+            $settle->(undef);
         });
 
         eval { $a->{run}->($client, $queryEnc, $artistNorm, $albumNorm, $svc, $settle); 1 } or do {
             $log->warn("play-via $svc failed: $@");
-            $settle->([]);
+            $settle->(undef);
         };
     }
 }
@@ -2246,19 +2287,38 @@ sub _searchQobuz {
     my ($client, $query, $artistNorm, $albumNorm, $svc, $collect) = @_;
 
     my $api = Plugins::Qobuz::Plugin::getAPIHandler($client);
+    # undef (not []) → "couldn't query" → inconclusive, so a transient missing
+    # handler isn't cached as a durable no-match (see _findPlayable).
     unless ($api) {
-        $collect->([]);
+        $collect->(undef);
         return;
     }
 
     $api->search(sub {
         my $res = shift;
+        # No response at all → the search errored, not "no results" → inconclusive.
+        return $collect->(undef) unless defined $res;
         my @out;
+        my $rendererFailed = 0;
         for my $album (@{ ($res && $res->{albums} && $res->{albums}{items}) || [] }) {
             my $candArtist = ref $album->{artist} eq 'HASH' ? $album->{artist}{name} : '';
             next unless _albumMatches($artistNorm, $albumNorm, $candArtist, $album->{title});
-            push @out, Plugins::Qobuz::Plugin::_albumItem($client, $album);
+            # Guard the foreign renderer: a die here runs INSIDE this async search
+            # callback (not under _findPlayable's invocation-time eval), so an
+            # unguarded throw would leave the service un-settled until its 8s
+            # timeout. Skip a bad item instead (mirrors the track path's _renderTrack).
+            my $item = eval { Plugins::Qobuz::Plugin::_albumItem($client, $album) };
+            if ($@ || ref $item ne 'HASH') {
+                $log->warn("Qobuz _albumItem failed: $@") if $@;
+                $rendererFailed = 1;
+                next;
+            }
+            push @out, $item;
         }
+        # Matched the album but the renderer produced nothing usable → inconclusive
+        # (the service HAD it; a broken/changed renderer mustn't cache a false
+        # no-match for the day). A clean empty (nothing matched) stays a real miss.
+        return $collect->(undef) if !@out && $rendererFailed;
         $collect->(\@out);
     }, lc($query), 'albums');
 }
@@ -2345,8 +2405,10 @@ sub _searchBandcampOnly {
     }
 
     my $done   = 0;
+    my $bcTimer;
     my $finish = sub {
         return if $done; $done = 1;
+        Slim::Utils::Timers::killSpecific($bcTimer) if $bcTimer;   # cancel the unused watchdog
         my @items = (ref $_[0] eq 'ARRAY') ? @{ $_[0] } : ();
         for my $it (@items) { $it->{image} = $bc->{icon} if $bc->{icon}; $it->{_svc} = 'Bandcamp'; }
         if (@items) {
@@ -2365,7 +2427,7 @@ sub _searchBandcampOnly {
 
     # Watchdog in case the search hangs (can't bound a synchronous block, but
     # covers an async hang) — mirrors the auto path's per-service timeout.
-    Slim::Utils::Timers::setTimer(undef, time() + STREAM_SVC_TIMEOUT, sub { $finish->([]) });
+    $bcTimer = Slim::Utils::Timers::setTimer(undef, time() + STREAM_SVC_TIMEOUT, sub { $finish->([]) });
 
     eval { $bc->{run}->($client, $queryEnc, $artistNorm, $albumNorm, 'Bandcamp', sub { $finish->($_[0]) }); 1 }
         or do { $log->warn("manual bandcamp search failed: $@"); $finish->([]); };
@@ -2378,21 +2440,38 @@ sub _searchTidal {
     my ($client, $query, $artistNorm, $albumNorm, $svc, $collect) = @_;
 
     my $api = Plugins::TIDAL::Plugin::getAPIHandler($client);
+    # undef (not []) → inconclusive (see _findPlayable / _searchQobuz).
     unless ($api) {
-        $collect->([]);
+        $collect->(undef);
         return;
     }
 
     $api->search(sub {
         my $albums = shift;   # raw album hashes (type => albums search)
+        # No response at all → the search errored, not "no results" → inconclusive.
+        return $collect->(undef) unless defined $albums;
         my @out;
+        my $rendererFailed = 0;
         for my $album (@{ $albums || [] }) {
             next unless ref $album eq 'HASH';
             my $artistRef  = $album->{artist} || ($album->{artists} && $album->{artists}[0]) || {};
             my $candArtist = ref $artistRef eq 'HASH' ? $artistRef->{name} : '';
             next unless _albumMatches($artistNorm, $albumNorm, $candArtist, $album->{title});
-            push @out, Plugins::TIDAL::Plugin::_renderAlbum($album);
+            # Guard the foreign renderer: a die here runs INSIDE this async search
+            # callback (not under _findPlayable's invocation-time eval), so an
+            # unguarded throw would leave the service un-settled until its 8s
+            # timeout. Skip a bad item instead (mirrors the track path's _renderTrack).
+            my $item = eval { Plugins::TIDAL::Plugin::_renderAlbum($album) };
+            if ($@ || ref $item ne 'HASH') {
+                $log->warn("Tidal _renderAlbum failed: $@") if $@;
+                $rendererFailed = 1;
+                next;
+            }
+            push @out, $item;
         }
+        # Matched the album but the renderer produced nothing usable → inconclusive
+        # (see _searchQobuz). A clean empty (nothing matched) stays a real miss.
+        return $collect->(undef) if !@out && $rendererFailed;
         $collect->(\@out);
     }, { type => 'albums', search => $query, limit => 50 });   # artist-only search → fetch more so a prolific artist's target album isn't truncated
 }
@@ -2443,7 +2522,7 @@ sub _findPlayableTrack {
     }
 
     # Cache the per-track decision (item or "no match") keyed by recording MBID
-    # where available, else the normalised "artist title". Versioned (:3:). The
+    # where available, else the normalised "artist title". Versioned (:4:). The
     # key now includes the track-capable service set in priority order, like the
     # album play-via key (_streamKey) and the resolved-playlist key — so adding /
     # enabling / reordering a service re-resolves the track instead of returning a
@@ -2539,9 +2618,11 @@ sub _findPlayableTrack {
         my $svc = $a->{name};
 
         my $settled = 0;
+        my $svcTimer;
         my $settle  = sub {
             return if $settled || $resolved;
             $settled = 1;
+            Slim::Utils::Timers::killSpecific($svcTimer) if $svcTimer;   # cancel this service's timeout
             # undef arg = the service couldn't be queried (no API handler / timeout
             # / error) → contributes no match, but INCONCLUSIVELY (not a real miss).
             if (!defined $_[0]) {
@@ -2558,7 +2639,7 @@ sub _findPlayableTrack {
             $resolve->();
         };
 
-        Slim::Utils::Timers::setTimer(undef, time() + STREAM_SVC_TIMEOUT, sub {
+        $svcTimer = Slim::Utils::Timers::setTimer(undef, time() + STREAM_SVC_TIMEOUT, sub {
             return if $settled || $resolved;
             $log->warn("track-match $svc timed out");
             $settle->(undef);   # inconclusive, not a confirmed miss

@@ -3,6 +3,23 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.41
+
+### Fixed
+- **A broken or changed streaming-service album renderer can no longer hang the detail page.** The Qobuz/Tidal album search now guards each service's own album-rendering call; if it ever throws (e.g. after a service-plugin update changes that function), the result is skipped rather than leaving the search unanswered until its 8-second timeout. A single bad result is dropped, not the whole service — any other matches still show. (The playlist/track path already worked this way.)
+- **A momentarily-unavailable streaming service no longer hides a release for a day.** When a service can't actually be queried — its plugin isn't authenticated yet, the search times out or errors, or its renderer breaks — the detail page now treats that as *inconclusive* and retries within the hour, instead of caching a false "no match" for a full day. A genuine "searched fine and it's not there" still caches for a day, and a found match for a week. So a just-released album (or a service that was briefly down) shows up within the hour, or instantly via the Refresh row. This brings the Releases page in line with how playlist track-matching already behaved.
+
+### Changed
+- **Internal cleanup, no change to what you see.** Removed some unused playlist-listing fields and a dead helper; dropped an unused recommendation parameter that the ListenBrainz API ignores (verified live — the request is unchanged); and removed a redundant text-normalisation pass in a cache-key helper (keys are byte-identical, so nothing re-searches). Streaming match quality is untouched.
+
+## 0.9.40
+
+### Fixed
+- **Releases with no artist/album credit no longer render blank.** A dead `//` fallback meant a release missing its artist credit showed as `" — Album"` (no name); the "Unknown Artist"/"Unknown Album" fallback now actually applies.
+
+### Changed
+- **Code-review housekeeping (no behaviour change):** per-track service-usability checks no longer rebuild the streaming-adapter set once per track (cheaper Playlists render); the resolve/detail/Bandcamp watchdog timers are now cancelled on normal completion instead of lingering as no-ops; the `dstm_batch` fallback default is aligned to 15; and the MusicBrainz `User-Agent` now reads the version from the plugin manifest at runtime instead of a hardcoded literal, so it can never drift from the actual release again.
+
 ## 0.9.39
 
 ### Fixed

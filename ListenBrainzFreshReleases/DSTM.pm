@@ -434,7 +434,7 @@ sub _resolveAndReturn {
         return;
     }
 
-    my $batch = $prefs->get('dstm_batch') || 10;
+    my $batch = $prefs->get('dstm_batch') || 15;   # match the init default in Plugin.pm
     my $tryN  = $batch * 3;   # over-fetch: not every candidate resolves to a playable track
 
     my $cid    = $client->id;

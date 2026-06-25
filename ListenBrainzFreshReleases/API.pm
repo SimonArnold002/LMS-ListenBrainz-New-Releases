@@ -7,6 +7,7 @@ use Slim::Networking::SimpleAsyncHTTP;
 use Slim::Utils::Log;
 use Slim::Utils::Prefs;
 use Slim::Utils::Cache;
+use Slim::Utils::PluginManager;
 use JSON::XS::VersionOneAndTwo;
 
 my $log   = logger('plugin.listenbrainzfreshreleases');
@@ -77,8 +78,21 @@ use constant CAA_BASE_URL    => 'https://coverartarchive.org/release/';
 use constant MB_BASE_URL     => 'https://musicbrainz.org/ws/2/';
 use constant LASTFM_BASE_URL => 'https://ws.audioscrobbler.com/2.0/';
 
-# MusicBrainz requires a descriptive User-Agent identifying the application
-use constant USER_AGENT   => 'LMS-ListenBrainzFreshReleases/0.9.22 ( https://github.com/SimonArnold002/LMS-ListenBrainz-New-Releases )';
+# MusicBrainz requires a descriptive User-Agent identifying the application. The
+# version is read from the plugin manifest (install.xml) at runtime rather than
+# hardcoded here, so it can never drift from the actual release (it had silently
+# lagged 17 versions behind before). Memoised after first use; the manifest is
+# parsed during the plugin scan, long before any HTTP call, so it's always ready.
+my $_userAgent;
+sub USER_AGENT {
+    return $_userAgent if defined $_userAgent;
+    my $ver = eval {
+        Slim::Utils::PluginManager->dataForPlugin('Plugins::ListenBrainzFreshReleases::Plugin')->{version};
+    };
+    $ver = 'dev' unless defined $ver && length $ver;   # impossible-case fallback
+    return $_userAgent =
+        "LMS-ListenBrainzFreshReleases/$ver ( https://github.com/SimonArnold002/LMS-ListenBrainz-New-Releases )";
+}
 
 # ---------------------------------------------------------------------------
 # GET /1/user/<username>/fresh_releases  (personalised, auth required)
@@ -304,7 +318,7 @@ sub getCreatedForPlaylists {
 }
 
 # Normalise the createdfor response into a newest-first arrayref of
-# { mbid, title, annotation, source_patch, track_count, last_modified }.
+# { mbid, title, source_patch, last_modified }.
 sub _parsePlaylistList {
     my ($data) = @_;
     return [] unless ref $data eq 'HASH' && ref $data->{playlists} eq 'ARRAY';
@@ -330,9 +344,7 @@ sub _parsePlaylistList {
         push @out, {
             mbid          => lc $mbid,
             title         => $p->{title} // 'Playlist',
-            annotation    => _stripHtml($p->{annotation} // ''),
             source_patch  => $algo->{source_patch} // '',
-            track_count   => $meta->{playlist_length} // 0,
             last_modified => $ext->{last_modified_at} // $p->{date} // '',
         };
     }
@@ -423,23 +435,14 @@ sub _parsePlaylistTracks {
     return \@out;
 }
 
-# Strip HTML tags / collapse whitespace from a playlist annotation for line2 use.
-sub _stripHtml {
-    my ($s) = @_;
-    return '' unless defined $s;
-    $s =~ s/<[^>]+>/ /g;
-    $s =~ s/&[a-z]+;/ /gi;
-    $s =~ s/\s+/ /g;
-    $s =~ s/^\s+|\s+$//g;
-    return $s;
-}
-
 # ---------------------------------------------------------------------------
 # GET /1/cf/recommendation/user/<user>/recording — collaborative-filtering
-# recommended recordings, used by the Don't Stop The Music propagators. The
-# flavour (artist_type) selects: 'similar' = artists similar to the user's taste
-# that they don't already listen to (new-music discovery), 'raw' = unfiltered CF
-# output, 'top' = the user's own top artists. Returns an ordered (highest-score
+# recommended recordings, used by BOTH Don't Stop The Music propagators
+# (Recommended directly; Radio as its cold-start / error fallback). The endpoint
+# accepts an artist_type (similar/raw/top), but the live API IGNORES it — all three
+# return the identical payload, and omitting it entirely returns the same data too
+# (verified against the API). So we send a fixed artist_type=similar rather than
+# exposing a flavour the server doesn't honour. Returns an ordered (highest-score
 # first) arrayref of recording MBID strings. A 204 (recs not yet generated for
 # this account) or any non-list payload yields an empty list, not an error.
 # ---------------------------------------------------------------------------
@@ -448,7 +451,6 @@ sub getRecommendations {
 
     my $username = $prefs->get('username') // '';
     my $token    = $prefs->get('token')    // '';
-    my $flavour  = $args{flavour} || 'similar';
     my $count    = $args{count}   || 100;
     my $onDone   = $args{onDone}  || sub {};
     my $onError  = $args{onError} || sub { $onDone->([]) };
@@ -459,10 +461,12 @@ sub getRecommendations {
     }
 
     (my $safe_user = $username) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
-    my $url = sprintf('%s/1/cf/recommendation/user/%s/recording?artist_type=%s&count=%d',
-        BASE_URL, $safe_user, $flavour, $count);
+    # artist_type is sent but ignored by the live API (see header note); fixed at
+    # 'similar' to keep the request stable.
+    my $url = sprintf('%s/1/cf/recommendation/user/%s/recording?artist_type=similar&count=%d',
+        BASE_URL, $safe_user, $count);
 
-    $log->info("Fetching recommendations ($flavour): $url");
+    $log->info("Fetching recommendations: $url");
 
     my @headers = ('Accept' => 'application/json', 'User-Agent' => USER_AGENT);
     push @headers, ('Authorization' => "Token $token") if $token;
@@ -487,7 +491,7 @@ sub getRecommendations {
             my $mbids   = (ref $payload eq 'HASH' && ref $payload->{mbids} eq 'ARRAY')
                 ? $payload->{mbids} : [];
             my @ids = grep { $_ } map { lc($_->{recording_mbid} // '') } @$mbids;
-            $log->info("Recommendations ($flavour): " . scalar(@ids) . " recording MBIDs");
+            $log->info("Recommendations: " . scalar(@ids) . " recording MBIDs");
             $onDone->(\@ids);
         },
         sub { _handleError(shift, $onError) },
