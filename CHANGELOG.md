@@ -3,6 +3,39 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.47
+
+### Fixed
+- **Updating to the favurl build no longer drops your manual Bandcamp matches.** The 0.9.42 favurl work bumped the persisted-Bandcamp-match key `lbf:bcmatch:6:`→`:7:`. Unlike the auto play-via cache (`lbf:stream:*`, which re-resolves itself on the next detail-page open), this key has **no automatic repopulation** — a Bandcamp match only comes back via a manual "Search Bandcamp" tap — so the bump silently discarded every hand-curated Bandcamp-only match on update, leaving those releases with no playable entry until each was re-searched by hand. Reverted the key to `:6:`: existing matches survive the upgrade and keep playing. A *fresh* Bandcamp search still bakes the Listen Later favurl in (`_searchBandcampOnly` → `_attachFavUrl`); an older cached match just plays without the favurl until it's next re-searched (the same "manual refresh adds it" path). The auto play-via favurl bumps (`lbf:stream:*`) are unaffected — that cache re-resolves on its own.
+
+## 0.9.46
+
+### Fixed
+- **Listen Later favurl now url-encodes the cover with `uri_escape_utf8`.** `_attachFavUrl` appended the album-art URL to the favurl via `URI::Escape::uri_escape`, which `carp`s and emits a malformed escape on any code point > 255. In practice service art URLs are ASCII, but this is the one new spot that handed a possibly utf8-flagged string to a non-utf8-safe escaper (the rest of the file is careful to `utf8::encode` before anything that chokes on wide chars). Switched to `uri_escape_utf8` so a wide-char art URL can't warn or produce a broken `?cover=` param. No behaviour change for the ASCII case, so no cache bump.
+
+## 0.9.45
+
+### Changed
+- **Removed the temporary `QOBUZ-DIAG` logging** added in 0.9.44 — the live box confirmed the bogus *Beth Orton – The Ground Above* duplicate is flagged non-streamable, so the `streamable`-only discriminator is sufficient and the diagnostic is no longer needed.
+
+### Fixed
+- **`_attachFavUrl` cover guard now rejects any ref, not just coderefs.** The Listen Later favurl's `?cover=` param is only appended when the row's art is a plain URL string; the guard was `$art !~ /^CODE/` (caught a stringified coderef but not a HASH/ARRAY ref), now `!ref $art` (rejects every ref). Edge-case hardening — in practice the art is only ever a string or coderef here.
+
+## 0.9.44
+
+### Changed
+- **Bogus Qobuz duplicate now dismissed by the `streamable` flag alone.** The 0.9.43 fix dropped a candidate that was non-streamable **and/or** had a `*`-prefixed title. The `*`-prefix heuristic was risky (a real album can legitimately be `*`-titled, and `_norm` strips a leading `*` so it never actually distinguished the two duplicates anyway), so both `*` checks were removed and the **non-streamable** test (`defined $album->{streamable} && !$album->{streamable}`) is now the sole discriminator in `_searchQobuz`. Play-via cache bumped `lbf:stream:9:`→`:10:` so every album re-resolves once (otherwise the old `*`-filtered cache would mask the change).
+
+## 0.9.43
+
+### Fixed
+- **A bogus Qobuz "partial / orphaned" duplicate of a release no longer shows as a dead second streaming match.** Qobuz's catalogue sometimes lists the same album twice — the real, playable one plus a partial/orphaned entry that isn't streamable and whose title is prefixed with `*` (e.g. *Beth Orton – The Ground Above* showed two, only one playable). Because our title normaliser strips the leading `*`, the bogus entry matched too and appeared alongside the real album. The Qobuz album search now skips a candidate that is **non-streamable** and/or whose title (or rendered name) starts with `*`, so only the genuine, playable album shows. (Play-via cache bumped `lbf:stream:8:`→`:9:`, so every album re-resolves once on update and the bogus entry clears automatically — no manual Refresh needed.)
+
+## 0.9.42
+
+### Added
+- **Matched streaming albums on the detail page can now be added to Listen Later properly.** Each Qobuz/Tidal/Bandcamp match now carries a real `favorites_url` (`<service>://album:<id>`), so the sibling **Listen Later** plugin captures it with the correct **service**, a **directly-replayable album** (via the native album id), and the real **album artwork** — instead of the previous broken coderef "link", wrong source and missing art. The detail row still shows the **service logo** as its thumbnail; because that means the row image is the logo (not the cover), the album art is carried alongside the favurl as a private `?cover=` param that Listen Later reads and stores. (Listen Later 0.1.30+ understands the `?cover=` param; older versions simply ignore it and fall back to the row image. The "Add to Listen Later" action itself only appears on a Material build with the merged online-custom-actions support.) The album play-via and persisted-Bandcamp caches are version-bumped (`lbf:stream:7:`→`:8:`, `lbf:bcmatch:6:`→`:7:`), so **every album re-resolves once on first open after updating** and picks up the new favurl automatically — no manual per-section/per-album Refresh needed.
+
 ## 0.9.41
 
 ### Fixed

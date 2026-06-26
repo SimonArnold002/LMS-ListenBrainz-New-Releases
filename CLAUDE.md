@@ -84,7 +84,7 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-0.9.41
+0.9.47
 
 ## Created-for-You Playlists (0.8.0)
 
@@ -246,8 +246,14 @@ fully-streaming, Play-all-able playlist.
   - **Current cache versions / TTLs.** Resolved playlist `lbf:pl:resolved:4:` (TTL **14d** — these
     playlists only live ~2 weeks; was 30d); per-track `lbf:track:4:` (30d found / 7d no-match / 1h
     inconclusive; key = `:4:` + svc-order + the non-`first` libMode suffix); album play-via
-    `lbf:stream:7:` (7d found / 1d no-match / **1h inconclusive** since 0.9.41 — see the 0.9.41 note);
-    persisted Bandcamp match `lbf:bcmatch:6:` (30d).
+    `lbf:stream:10:` (7d found / 1d no-match / **1h inconclusive** since 0.9.41 — see the 0.9.41 note;
+    `:7:`→`:8:` in 0.9.42 to add the ListenLater favurl, `:8:`→`:9:` in 0.9.43 to drop bogus Qobuz duplicates,
+    `:9:`→`:10:` in 0.9.44 to finalise the streamable-only Qobuz dedup — Qobuz/Tidal re-resolve themselves on
+    next open so these bumps are free); persisted Bandcamp match `lbf:bcmatch:6:` (30d) — **deliberately NOT
+    bumped for the favurl**: it has no auto-repopulation (manual "Search Bandcamp" only), so a bump silently
+    drops every hand-curated Bandcamp-only match. 0.9.42 wrongly bumped it `:6:`→`:7:`; 0.9.47 reverted to `:6:`
+    so existing matches survive an update (a fresh search bakes the favurl in; an older match plays without it
+    until re-searched). **Rule: never bump `lbf:bcmatch:` for a change the auto path handles via `lbf:stream:`.**
   - **"Unmatched tracks (debug)" view (0.9.38).** Settings → a browsable diagnostic
     (`fetchUnmatchedPlaylists` → `showUnmatched`): lists each created-for playlist; opening one shows
     the **source** tracks that resolved to nothing (not library, not any enabled service) as plain
@@ -593,6 +599,67 @@ Detected in `_isVariousArtists()`:
 - Material Skin's grouped artist release page layout is NOT achievable from OPML feeds — only via native library `albums_loop` responses. Solved in earlier versions by using Browse by Type sub-menus, removed in v0.3.0 in favour of settings-driven filtering.
 
 ## Version History
+- **0.9.47** — **code-review fix: stop the favurl cache bump from discarding manual Bandcamp matches.**
+  The 0.9.42 favurl work bumped the persisted-Bandcamp-match key `lbf:bcmatch:6:`→`:7:`. Unlike the auto
+  play-via cache (`lbf:stream:*`, which re-resolves itself on the next detail-page open), `lbf:bcmatch:`
+  has **no automatic repopulation** — a match only returns via a manual "Search Bandcamp" tap — so the bump
+  silently dropped every hand-curated Bandcamp-only match on update, leaving those releases with no playable
+  entry until each was re-searched by hand. Reverted the key to `:6:`: existing matches survive the upgrade
+  and keep playing; a *fresh* search still bakes the favurl in (`_searchBandcampOnly` → `_attachFavUrl`), an
+  older cached match just plays without the favurl until it's next re-searched. Qobuz/Tidal are unaffected —
+  their `lbf:stream:10:` bump stands (that cache re-resolves on its own, so bumping it is free). **Rule: never
+  bump `lbf:bcmatch:` for a change the auto path already handles via `lbf:stream:`.**
+- **0.9.46** — **code-review fix: utf8-safe cover encoding in the favurl.** `_attachFavUrl` now
+  encodes the `?cover=` album-art URL with `URI::Escape::uri_escape_utf8` instead of `uri_escape`,
+  which `carp`s + emits a malformed escape on code points > 255. Art URLs are ASCII in practice, so
+  no behaviour change and **no cache bump** — just removes the one new spot that fed a possibly
+  utf8-flagged string to a non-utf8-safe escaper (the file otherwise `utf8::encode`s before every
+  wide-char-sensitive call).
+- **0.9.45** — **Finalise the Qobuz-duplicate fix + favurl guard tidy.** Removed the temporary
+  `QOBUZ-DIAG` log from 0.9.44 (the live box confirmed the bogus *Beth Orton – The Ground Above*
+  entry is flagged non-streamable, so `streamable`-only is enough). Also hardened `_attachFavUrl`:
+  the `?cover=` guard is now `!ref $art` instead of `$art !~ /^CODE/`, so any ref (not just a
+  coderef) is rejected before it can be stringified into the favurl. No cache bump (neither change
+  alters which results match or what gets cached).
+- **0.9.44** — **Dismiss the bogus Qobuz duplicate by the `streamable` flag alone.** Replaced
+  0.9.43's non-streamable-and/or-`*`-prefixed-title test with the **non-streamable** check only
+  (`defined $album->{streamable} && !$album->{streamable}`) in `_searchQobuz` — the `*` heuristic
+  never actually distinguished the two duplicates (`_norm` strips a leading `*`) and risked dropping
+  a real `*`-titled album. Cache `lbf:stream:9:`→`:10:` so albums re-resolve once. (Shipped with a
+  temporary `QOBUZ-DIAG` log to confirm on the live box; removed in 0.9.45.)
+- **0.9.43** — **Skip bogus Qobuz partial/orphaned album duplicates.** Qobuz's catalogue
+  can list a release twice: the real playable album plus a non-streamable partial/orphaned
+  entry whose title is `*`-prefixed (e.g. *Beth Orton – The Ground Above* → two matches, one
+  dead). `_norm` strips the leading `*`, so `_albumMatches` passed the bogus one and it
+  showed as a second streaming row. `_searchQobuz` now drops a candidate when
+  `defined $album->{streamable} && !$album->{streamable}`, or its raw title `=~ /^\s*\*/`,
+  or (belt-and-braces, after rendering) the display `name`/`line1` starts with `*`. Scoped
+  to the Qobuz **album** path; the track path (`_searchQobuzTrack`) is unchanged — revisit
+  if a bogus entry ever surfaces in a playlist. Cache `lbf:stream:8:`→`:9:` so cached albums
+  re-resolve once and drop the dead entry.
+- **0.9.42** — **Listen Later interop for matched streaming albums.** Each matched
+  Qobuz/Tidal/Bandcamp album on the detail page now gets an explicit
+  `favorites_url => "<scheme>://album:<nativeId>"` (`_attachFavUrl`, called from the
+  `_findPlayable` settle loop and the manual-Bandcamp `finish`; the native id is stashed
+  as `$item->{_albumid}` in `_searchQobuz`/`_searchTidal`/`_searchBandcamp`). XMLBrowser
+  copies an explicit `favorites_url` into `presetParams.favorites_url`
+  (`= $item->{favorites_url} || $item->{play} || $item->{url}`) which Material exposes as
+  `$FAVURL` — previously the rows had none, so the coderef `url` leaked through as the
+  favurl (the sibling Listen Later plugin saw a "broken link", couldn't tell the service,
+  and stored the logo as the cover). **Cover-vs-logo trick:** the row's `image` stays the
+  **service logo** (the detail-page indicator), so the album art can't ride `$IMAGE`;
+  instead `_attachFavUrl` appends `?cover=<URI::Escape-d native album art>` to the favurl.
+  Listen Later 0.1.30+ parses `?cover=` off the favurl, prefers it over `$IMAGE`, then
+  strips it so its source/`album:<id>` logic sees a clean URL — a private convention
+  between the two plugins, opaque to Material (which just forwards the favurl). The
+  decorated favurl survives the play-via cache (`_cacheStream`/`_rebuildStreamItems` keep
+  `favorites_url`+`_albumid`). **Cache bumped** `lbf:stream:7:`→`:8:` and `lbf:bcmatch:6:`→`:7:`
+  so every album re-resolves once on update and gains the favurl — old cached matches lacked
+  it, so without the bump a recently-opened album would serve a stale (favurl-less) match for
+  up to its 7d TTL. NB: the "Add to Listen Later" action only renders on a
+  Material build with PR #1235's online-custom-actions support. Side effect: native LMS
+  "Add to Favourites" on these rows would now save the decorated URL (was a broken coderef
+  before, so no regression).
 - **0.9.41** — **code-review fixes: streaming robustness + dead-code cleanup.**
   (1) **Album streaming search guards the foreign renderer.** `_searchQobuz`/`_searchTidal` now wrap
   the service's own album renderer (`Qobuz::_albumItem` / `TIDAL::_renderAlbum`) in an eval INSIDE the

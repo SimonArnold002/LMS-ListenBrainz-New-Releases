@@ -2020,7 +2020,7 @@ sub _pluginIcon {
 sub _streamKey {
     my ($idPart) = @_;
     my $svcOrder = join(',', map { lc $_->{name} } _orderedAdapters());
-    my $key = 'lbf:stream:7:' . $svcOrder . ':' . ($idPart // '');
+    my $key = 'lbf:stream:10:' . $svcOrder . ':' . ($idPart // '');
     utf8::encode($key) if utf8::is_utf8($key);   # octet key — non-Latin fallback can't crash md5
     return $key;
 }
@@ -2052,6 +2052,12 @@ sub _bcMarkerKey {
 # on read). Separate from the auto Qobuz/Tidal cache and NOT keyed on service
 # order — a Bandcamp match is intrinsic to the album. _findPlayable appends it to
 # every render so a Bandcamp-only release stays playable / primary.
+# DELIBERATELY NOT bumped for the ListenLater favurl (kept at :6:): unlike the auto
+# play-via cache (_streamKey), this key has NO automatic repopulation — a Bandcamp
+# match only comes back via a manual "Search Bandcamp" tap. Bumping it would silently
+# drop every hand-curated Bandcamp-only match on update (its sole playable entry).
+# A fresh search bakes the favurl in (_searchBandcampOnly → _attachFavUrl); an older
+# cached match simply keeps playing without the favurl until it's re-searched.
 sub _bcMatchKey {
     my ($idPart) = @_;
     my $key = 'lbf:bcmatch:6:' . ($idPart // '');
@@ -2171,8 +2177,10 @@ sub _findPlayable {
             }
             my @matched = (ref $_[0] eq 'ARRAY') ? @{ $_[0] } : ();
             for my $it (@matched) {
-                $it->{image} = $icon if $icon;   # service logo as thumbnail
+                my $art = $it->{image};          # native album cover, before the logo override
+                $it->{image} = $icon if $icon;   # service logo as thumbnail (LBF detail view)
                 $it->{_svc}  = $svc;             # for cache rebuild
+                _attachFavUrl($it, $svc, $art);  # qobuz://album:<id>?cover=<art> for ListenLater
             }
             $result[$i] = \@matched;
             $resolve->();
@@ -2201,6 +2209,31 @@ sub _cacheStream {
     my @store = map { my %x = %$_; delete $x{url}; \%x } @$items;
     eval { $cache->set($key, { items => \@store }, $ttl); 1 }
         or $log->warn("play-via cache set failed: $@");
+}
+
+# Decorate a matched streaming album item with a ListenLater-friendly favorites_url:
+#   <scheme>://album:<nativeId>[?cover=<url-encoded album art>]
+# The row's own `image` is the service LOGO (so the LBF detail page shows which
+# service the match is on), so $IMAGE can't carry the cover — the album art rides
+# the favurl as a private ?cover= param instead. ListenLater reads the scheme as the
+# source + service indicator, the album:<id> for direct replay, and the cover param
+# as the stored artwork (it strips the param before saving, so its own replay/source
+# logic sees a clean URL). The param is opaque to Material, which just forwards the
+# favurl. XMLBrowser copies an explicit $item->{favorites_url} into
+# presetParams.favorites_url (= $item->{favorites_url} || $item->{play} || $item->{url}),
+# which Material exposes as $FAVURL — without this the coderef `url` leaked through as
+# the favurl (the "broken link"). No native id → no favurl (the row still displays
+# and plays in LBF; it just can't be added to ListenLater with full fidelity).
+sub _attachFavUrl {
+    my ($it, $svc, $art) = @_;
+    my $id = $it->{_albumid};
+    return unless defined $id && length $id;
+    my $fav = lc($svc) . '://album:' . $id;   # scheme = ListenLater's qobuz/tidal/bandcamp source tag
+    if (defined $art && !ref $art && length $art) {   # plain URL string only (not a coderef/other ref)
+        require URI::Escape;
+        $fav .= '?cover=' . URI::Escape::uri_escape_utf8($art);   # _utf8 variant: a wide-char art URL can't carp/emit a malformed escape
+    }
+    $it->{favorites_url} = $fav;
 }
 
 # Collapse duplicate streaming entries — some services (seen with Bandcamp)
@@ -2303,6 +2336,14 @@ sub _searchQobuz {
         for my $album (@{ ($res && $res->{albums} && $res->{albums}{items}) || [] }) {
             my $candArtist = ref $album->{artist} eq 'HASH' ? $album->{artist}{name} : '';
             next unless _albumMatches($artistNorm, $albumNorm, $candArtist, $album->{title});
+            # Qobuz's catalogue sometimes carries a bogus partial/orphaned duplicate of a
+            # release that isn't actually playable (e.g. Beth Orton – The Ground Above lists
+            # two, only one playable). The duplicate is flagged NON-STREAMABLE, so dropping a
+            # candidate whose `streamable` is explicitly false is enough to remove it —
+            # confirmed live (0.9.44). (The earlier "*"-prefixed-title heuristic was removed:
+            # _norm strips a leading "*" so it never actually distinguished the two, and a real
+            # album can be legitimately "*"-titled.)
+            next if defined $album->{streamable} && !$album->{streamable};
             # Guard the foreign renderer: a die here runs INSIDE this async search
             # callback (not under _findPlayable's invocation-time eval), so an
             # unguarded throw would leave the service un-settled until its 8s
@@ -2313,6 +2354,7 @@ sub _searchQobuz {
                 $rendererFailed = 1;
                 next;
             }
+            $item->{_albumid} = $album->{id};   # native id → ListenLater favurl (album:<id>)
             push @out, $item;
         }
         # Matched the album but the renderer produced nothing usable → inconclusive
@@ -2341,6 +2383,7 @@ sub _searchBandcamp {
             my $pt = ref $it->{passthrough} eq 'ARRAY' ? $it->{passthrough}[0] : undef;
             next unless $pt && $pt->{album_id};
             next unless _albumMatches($artistNorm, $albumNorm, $pt->{artist}, $pt->{title});
+            $it->{_albumid} = $pt->{album_id};   # native id → ListenLater favurl (album:<id>)
             push @out, $it;
         }
         $collect->(\@out);
@@ -2410,7 +2453,12 @@ sub _searchBandcampOnly {
         return if $done; $done = 1;
         Slim::Utils::Timers::killSpecific($bcTimer) if $bcTimer;   # cancel the unused watchdog
         my @items = (ref $_[0] eq 'ARRAY') ? @{ $_[0] } : ();
-        for my $it (@items) { $it->{image} = $bc->{icon} if $bc->{icon}; $it->{_svc} = 'Bandcamp'; }
+        for my $it (@items) {
+            my $art = $it->{image};                       # native album cover, before logo override
+            $it->{image} = $bc->{icon} if $bc->{icon};    # service logo (LBF detail view)
+            $it->{_svc}  = 'Bandcamp';
+            _attachFavUrl($it, 'Bandcamp', $art);         # bandcamp://album:<id>?cover=<art> for ListenLater
+        }
         if (@items) {
             # Persist the match (own long-lived key) so it survives auto re-search
             # and Refresh, and clear the "searched" marker so no retry prompt shows.
@@ -2467,6 +2515,7 @@ sub _searchTidal {
                 $rendererFailed = 1;
                 next;
             }
+            $item->{_albumid} = $album->{id};   # native id → ListenLater favurl (album:<id>)
             push @out, $item;
         }
         # Matched the album but the renderer produced nothing usable → inconclusive
