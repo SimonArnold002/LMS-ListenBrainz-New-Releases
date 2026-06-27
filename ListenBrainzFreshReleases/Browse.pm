@@ -2111,12 +2111,11 @@ sub _findPlayable {
     }
 
     # Cache hit → rebuild the playable items from the stored data (no re-search).
-    # Key is versioned so a change to the matching logic invalidates stale entries
-    # (:2: matching rework, :3: added Tidal, :4: decode non-Latin names, :5: key
-    # includes the service configuration, :6: artist-only search, :7: raw (un-
-    # normalised) query to the service search — see _streamKey).
-    # $force (manual refresh) skips the read so the services are searched again.
-    # The id part stays album-specific (the query itself is now artist-only).
+    # The key is versioned so a change to the matching logic invalidates stale
+    # entries; the current version and its history live on _streamKey (don't restate
+    # the version number here — it drifts). $force (manual refresh) skips the read so
+    # the services are searched again. The id part stays album-specific (the query
+    # itself is now artist-only).
     my $key = _streamKey($id);
     if (!$force && (my $c = $cache->get($key))) {
         $log->info("play-via cache hit: $key (" . scalar(@{ $c->{items} || [] }) . " match(es))");
@@ -2229,7 +2228,20 @@ sub _attachFavUrl {
     my $id = $it->{_albumid};
     return unless defined $id && length $id;
     my $fav = lc($svc) . '://album:' . $id;   # scheme = ListenLater's qobuz/tidal/bandcamp source tag
-    if (defined $art && !ref $art && length $art) {   # plain URL string only (not a coderef/other ref)
+    my $url = $it->{_albumurl};               # Bandcamp only: the album PAGE url (exact get_album replay key)
+    if (defined $url && !ref $url && length $url) {
+        # Bandcamp: pack the cover art AND the album page url into ONE escaped param so
+        # ListenLater can replay the EXACT album (get_album needs the page url, not the
+        # id). Single 'art|url' blob, escaped as a whole → no literal '?'/'&'/'|' → it
+        # parses just like a lone '?cover='. The result is longer (~164 chars) and is
+        # confirmed to survive Material's custom-action transport intact (an earlier
+        # "long favurls get dropped" worry turned out to be a shadowed-install artifact,
+        # not real). ListenLater still keeps an album_id-resolve safety net regardless.
+        require URI::Escape;
+        my $blob = (defined $art && !ref $art ? $art : '') . '|' . $url;
+        $fav .= '?b=' . URI::Escape::uri_escape_utf8($blob);
+    }
+    elsif (defined $art && !ref $art && length $art) {   # plain URL string only (not a coderef/other ref)
         require URI::Escape;
         $fav .= '?cover=' . URI::Escape::uri_escape_utf8($art);   # _utf8 variant: a wide-char art URL can't carp/emit a malformed escape
     }
@@ -2383,7 +2395,8 @@ sub _searchBandcamp {
             my $pt = ref $it->{passthrough} eq 'ARRAY' ? $it->{passthrough}[0] : undef;
             next unless $pt && $pt->{album_id};
             next unless _albumMatches($artistNorm, $albumNorm, $pt->{artist}, $pt->{title});
-            $it->{_albumid} = $pt->{album_id};   # native id → ListenLater favurl (album:<id>)
+            $it->{_albumid}  = $pt->{album_id};               # native id → ListenLater favurl (album:<id>)
+            $it->{_albumurl} = $pt->{album_url} || $pt->{url}; # album PAGE url → packed into the favurl ?b= blob (exact Bandcamp replay key)
             push @out, $it;
         }
         $collect->(\@out);
@@ -2613,92 +2626,129 @@ sub _findPlayableTrack {
             or $log->warn("track cache set failed: $@");
     };
 
-    # 'first': a copy in the user's own LMS library short-circuits streaming
-    # (instant, free, often higher quality). MBID-exact first, then artist+title.
-    if ($libMode eq 'first') {
-        my $local = eval { _findLocalTrack($artist, $title, $recMbid) };
-        if ($local) {
-            $cacheItem->($local);
-            $callback->($local);
-            return;
-        }
-    }
-
-    # No streaming services installed (or all deprioritised) → the local library
-    # is the only possible source. 'first' already tried it above and missed;
-    # 'fallback' tries it now (so a no-streaming user still gets a library radio);
-    # 'never' is streaming-only, so there's nothing left to do.
-    unless (@adapters) {
-        my $item;
-        if ($libMode eq 'fallback') {
+    # The local-library probe (_findLocalTrack) is the only SYNCHRONOUS, loop-blocking
+    # step in this otherwise-async resolver: LMS's DB layer (Slim::Schema and the
+    # 'titles' request) has no non-blocking form and can't run off-thread. When a
+    # playlist resolves mostly from the library, each track's probe would call back
+    # synchronously and re-enter _resolveTracks' pump in the SAME event-loop pass — up
+    # to ~50 blocking DB queries with no yield, which starves audio on a low-power box
+    # (a Pi would stutter / drop players). So run every library probe on an idle timer
+    # tick: the event loop services audio/UI between probes. Same total work, just never
+    # one contiguous freeze. (Streaming search is already async — only the DB probe
+    # needs this.) Reached only on a cache MISS; the warm pre-resolves, so normal opens
+    # are cache hits that never get here. MBID-exact first, then artist+title.
+    my $deferLocal = sub {
+        my ($then) = @_;
+        Slim::Utils::Timers::setTimer(undef, time(), sub {
             my $local = eval { _findLocalTrack($artist, $title, $recMbid) };
-            $item = $local if $local;
+            $log->warn("local track lookup failed: $@") if $@;
+            $then->($local);
+        });
+    };
+
+    # Streaming phase — search each service in priority order (async, non-blocking);
+    # the first match by priority wins. Factored into a closure so the library tiers
+    # can run it after their (deferred) probe. Shares $inconclusive / $cacheItem.
+    my $runStreaming = sub {
+        my @result   = map { undef } @adapters;   # undef pending, [] miss, [item] hit
+        my $resolved = 0;
+
+        my $resolve = sub {
+            return if $resolved;
+            my $win;
+            for my $i (0 .. $#adapters) {
+                return if !defined $result[$i];          # higher-priority svc still pending
+                if (@{ $result[$i] }) { $win = $i; last; }
+            }
+            $resolved = 1;
+            my $item = defined $win ? $result[$win][0] : undef;
+            # 'fallback': no streaming match → try the library (deferred) as a last resort.
+            if (!$item && $libMode eq 'fallback') {
+                $deferLocal->(sub {
+                    my $local = shift;
+                    $item = $local if $local;
+                    $cacheItem->($item);
+                    $callback->($item, (!$item && $inconclusive) ? 1 : 0);
+                });
+                return;
+            }
+            $cacheItem->($item);
+            # Tell the caller this no-match was inconclusive (a service couldn't be
+            # queried) so it can keep the resolved-playlist cache short too.
+            $callback->($item, (!$item && $inconclusive) ? 1 : 0);
+        };
+
+        for my $i (0 .. $#adapters) {
+            my $a   = $adapters[$i];
+            my $svc = $a->{name};
+
+            my $settled = 0;
+            my $svcTimer;
+            my $settle  = sub {
+                return if $settled || $resolved;
+                $settled = 1;
+                Slim::Utils::Timers::killSpecific($svcTimer) if $svcTimer;   # cancel this service's timeout
+                # undef arg = the service couldn't be queried (no API handler / timeout
+                # / error) → contributes no match, but INCONCLUSIVELY (not a real miss).
+                if (!defined $_[0]) {
+                    $inconclusive++;
+                    $result[$i] = [];
+                    $resolve->();
+                    return;
+                }
+                # String-url, directly-playable items only (see header note); keep the first.
+                my @matched = grep { defined $_->{url} && !ref $_->{url} } @{ $_[0] };
+                my $first = $matched[0];
+                $first->{_svc} = $svc if $first;
+                $result[$i] = $first ? [$first] : [];
+                $resolve->();
+            };
+
+            $svcTimer = Slim::Utils::Timers::setTimer(undef, time() + STREAM_SVC_TIMEOUT, sub {
+                return if $settled || $resolved;
+                $log->warn("track-match $svc timed out");
+                $settle->(undef);   # inconclusive, not a confirmed miss
+            });
+
+            eval { $a->{runTrack}->($client, $queryEnc, $artistNorm, $titleNorm, $album, $settle); 1 } or do {
+                $log->warn("track-match $svc failed: $@");
+                $settle->(undef);   # inconclusive, not a confirmed miss
+            };
         }
-        $cacheItem->($item);
-        $callback->($item);
+    };
+
+    # 'first': prefer an owned copy. Probe the library (deferred) before streaming — a
+    # hit short-circuits; otherwise fall through to streaming, or to a confirmed miss
+    # when no service is installed.
+    if ($libMode eq 'first') {
+        $deferLocal->(sub {
+            my $local = shift;
+            if ($local) { $cacheItem->($local); $callback->($local); return; }
+            if (@adapters) { $runStreaming->(); }
+            else           { $cacheItem->(undef); $callback->(undef); }
+        });
         return;
     }
 
-    my @result   = map { undef } @adapters;   # undef pending, [] miss, [item] hit
-    my $resolved = 0;
-
-    my $resolve = sub {
-        return if $resolved;
-        my $win;
-        for my $i (0 .. $#adapters) {
-            return if !defined $result[$i];          # higher-priority svc still pending
-            if (@{ $result[$i] }) { $win = $i; last; }
+    # Not 'first'. With no streaming service installed, 'fallback' still tries the
+    # library (deferred, so a no-streaming user gets a library radio); 'never' is
+    # streaming-only, so there's nothing left to do.
+    unless (@adapters) {
+        if ($libMode eq 'fallback') {
+            $deferLocal->(sub {
+                my $local = shift;
+                $cacheItem->($local);
+                $callback->($local);
+            });
         }
-        $resolved = 1;
-        my $item = defined $win ? $result[$win][0] : undef;
-        # 'fallback': no streaming match → try the library as a last resort.
-        if (!$item && $libMode eq 'fallback') {
-            my $local = eval { _findLocalTrack($artist, $title, $recMbid) };
-            $item = $local if $local;
+        else {
+            $cacheItem->(undef);
+            $callback->(undef);
         }
-        $cacheItem->($item);
-        # Tell the caller this no-match was inconclusive (a service couldn't be
-        # queried) so it can keep the resolved-playlist cache short too.
-        $callback->($item, (!$item && $inconclusive) ? 1 : 0);
-    };
-
-    for my $i (0 .. $#adapters) {
-        my $a   = $adapters[$i];
-        my $svc = $a->{name};
-
-        my $settled = 0;
-        my $svcTimer;
-        my $settle  = sub {
-            return if $settled || $resolved;
-            $settled = 1;
-            Slim::Utils::Timers::killSpecific($svcTimer) if $svcTimer;   # cancel this service's timeout
-            # undef arg = the service couldn't be queried (no API handler / timeout
-            # / error) → contributes no match, but INCONCLUSIVELY (not a real miss).
-            if (!defined $_[0]) {
-                $inconclusive++;
-                $result[$i] = [];
-                $resolve->();
-                return;
-            }
-            # String-url, directly-playable items only (see header note); keep the first.
-            my @matched = grep { defined $_->{url} && !ref $_->{url} } @{ $_[0] };
-            my $first = $matched[0];
-            $first->{_svc} = $svc if $first;
-            $result[$i] = $first ? [$first] : [];
-            $resolve->();
-        };
-
-        $svcTimer = Slim::Utils::Timers::setTimer(undef, time() + STREAM_SVC_TIMEOUT, sub {
-            return if $settled || $resolved;
-            $log->warn("track-match $svc timed out");
-            $settle->(undef);   # inconclusive, not a confirmed miss
-        });
-
-        eval { $a->{runTrack}->($client, $queryEnc, $artistNorm, $titleNorm, $album, $settle); 1 } or do {
-            $log->warn("track-match $svc failed: $@");
-            $settle->(undef);   # inconclusive, not a confirmed miss
-        };
+        return;
     }
+
+    $runStreaming->();
 }
 
 # Find a copy of this track in the local LMS library → a playable item (file URL),

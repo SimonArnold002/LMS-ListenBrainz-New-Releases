@@ -244,12 +244,6 @@ PLUGIN_LBF_WEEK_DIVIDERS
 PLUGIN_LBF_WEEK_DIVIDERS_DESC
 	EN	When sorted by release date, add a divider at the start of each week. Takes precedence over Group by Artist for the date sort.
 
-PLUGIN_LBF_PLAY_VIA
-	EN	Find on streaming services
-
-PLUGIN_LBF_NO_SERVICES
-	EN	No streaming services available
-
 PLUGIN_LBF_NO_MATCH
 	EN	No match found on your streaming services
 

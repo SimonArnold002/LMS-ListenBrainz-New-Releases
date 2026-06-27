@@ -3,6 +3,29 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.53
+
+### Changed
+- **Pass the Bandcamp album page URL to Listen Later in the favurl, for exact replay.** The cover art **and** the album page URL are packed into a single escaped `?b=<art>|<url>` favurl param, so Listen Later 0.1.39+ replays the exact album via `get_album` with no second lookup (and Buy-on-Bandcamp opens the page directly). Qobuz/Tidal still use the plain `?cover=` (art only — they replay by id).
+- **Confirmed the full favurl survives Material (correcting an earlier wrong conclusion).** An earlier theory that "Material drops a favurl longer than ~150 chars" was **invalid**: it was drawn while a stale repo-installed LBF was *shadowing* the manual dev build, so the new favurl code never ran and the add arrived with no favurl at all. With the correct build loaded, the full ~164-char `bandcamp://album:<id>?b=<art>|<url>` favurl arrives intact — the saved record keeps the real cover and the exact page URL. The `album_id`-search fallback on the Listen Later side remains only as a safety net.
+
+### Fixed
+- **Bandcamp matches added to Listen Later now play, with their artwork and service intact.** A matched Bandcamp album handed to Listen Later showed its cover and title but played nothing, because Bandcamp's `get_album` resolves a tracklist from the album **page URL**, not the `album:<id>` carried in the favurl. Fixed by carrying the page URL (and the cover) across in the `?b=<art>|<url>` favurl blob, which Listen Later unpacks and replays directly.
+
+## 0.9.49 – 0.9.52
+
+Intermediate iterations of the Bandcamp-favurl work, all **superseded by 0.9.53** (above). These were the in-progress attempts to carry the album page URL across to Listen Later (cover-only `?cover=`, then the `&burl=`/`?burl=`/`?b=` encodings). The conclusion drawn during them — that Material drops long favurls — turned out to be a stale-install artifact (see 0.9.53), so they're consolidated rather than listed individually. If you ran one of these dev builds, no action is needed; 0.9.53 supersedes them.
+
+## 0.9.48
+
+### Changed
+- **Library track matching no longer blocks the event loop — gentler on low-power servers (Raspberry Pi).** Resolving a Created-for-You playlist (or a DSTM mix) with *Prefer local library* on probes the LMS database for each track. That probe (`Slim::Schema` / the `titles` request) is the one **synchronous** step in an otherwise fully-async resolver, and LMS's DB layer has no non-blocking form. When a playlist matched mostly from the library, every track's probe completed synchronously and immediately resolved the next one in the **same** event-loop pass — up to ~50 back-to-back blocking queries with no yield, which on a low-power box (Pi / Pi Zero) could starve audio for long enough to stutter or drop players (the background warm ~60s after startup, or opening a brand-new week's playlist cold, were the worst cases). Each library probe now runs on an idle timer tick, so the event loop services audio and the UI **between** probes. The total work is identical — there's just never one long contiguous freeze. Behaviour, matching and caching are unchanged (cached opens never reach this path), so no cache bump.
+
+### Maintenance (no behaviour change)
+- Trimmed a stale cache-version list in `_findPlayable`'s comment (it named `:7:` as current while the key is at `:10:`); the authoritative history lives on `_streamKey`.
+- Dropped two unused localisation strings (`PLUGIN_LBF_PLAY_VIA`, `PLUGIN_LBF_NO_SERVICES`).
+- `_parsePlaylistTracks` no longer parses the three JSPF fields nothing consumed (`duration_ms`, `caa_id`, `caa_release_mbid`) — resolved tracks carry their own art/duration from the matched streaming result.
+
 ## 0.9.47
 
 ### Fixed

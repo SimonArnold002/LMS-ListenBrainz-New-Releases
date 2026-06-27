@@ -401,7 +401,8 @@ sub getPlaylistTracks {
 }
 
 # Normalise playlist.track[] into an arrayref of
-# { title, artist, album, duration_ms, recording_mbid, caa_id, caa_release_mbid }.
+# { title, artist, album, recording_mbid }. (Only these drive track resolution;
+# duration / cover-art come from the matched streaming result, not the JSPF entry.)
 sub _parsePlaylistTracks {
     my ($data) = @_;
     my $p = (ref $data eq 'HASH') ? $data->{playlist} : undef;
@@ -411,11 +412,6 @@ sub _parsePlaylistTracks {
     for my $t (@{ $p->{track} }) {
         next unless ref $t eq 'HASH';
 
-        my $ext = $t->{extension}
-            && $t->{extension}{'https://musicbrainz.org/doc/jspf#track'};
-        $ext = {} unless ref $ext eq 'HASH';
-        my $meta = ref $ext->{additional_metadata} eq 'HASH' ? $ext->{additional_metadata} : {};
-
         my $recMbid = '';
         if (defined $t->{identifier}) {
             my $id = ref $t->{identifier} eq 'ARRAY' ? $t->{identifier}[0] : $t->{identifier};
@@ -423,13 +419,10 @@ sub _parsePlaylistTracks {
         }
 
         push @out, {
-            title            => $t->{title}   // '',
-            artist           => $t->{creator} // '',
-            album            => $t->{album}   // '',
-            duration_ms      => $t->{duration},
-            recording_mbid   => lc($recMbid // ''),
-            caa_id           => $meta->{caa_id},
-            caa_release_mbid => $meta->{caa_release_mbid},
+            title          => $t->{title}   // '',
+            artist         => $t->{creator} // '',
+            album          => $t->{album}   // '',
+            recording_mbid => lc($recMbid // ''),
         };
     }
     return \@out;

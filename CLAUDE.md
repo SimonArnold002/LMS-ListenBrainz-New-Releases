@@ -84,7 +84,7 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-0.9.47
+0.9.53
 
 ## Created-for-You Playlists (0.8.0)
 
@@ -249,7 +249,9 @@ fully-streaming, Play-all-able playlist.
     `lbf:stream:10:` (7d found / 1d no-match / **1h inconclusive** since 0.9.41 — see the 0.9.41 note;
     `:7:`→`:8:` in 0.9.42 to add the ListenLater favurl, `:8:`→`:9:` in 0.9.43 to drop bogus Qobuz duplicates,
     `:9:`→`:10:` in 0.9.44 to finalise the streamable-only Qobuz dedup — Qobuz/Tidal re-resolve themselves on
-    next open so these bumps are free); persisted Bandcamp match `lbf:bcmatch:6:` (30d) — **deliberately NOT
+    next open so these bumps are free; **0.9.53 changed Bandcamp's favurl to `?b=<art|url>` (was `?cover=`)
+    WITHOUT a bump** — a fresh manual "Search Bandcamp" re-bakes it, same rationale as `lbf:bcmatch:` below);
+    persisted Bandcamp match `lbf:bcmatch:6:` (30d) — **deliberately NOT
     bumped for the favurl**: it has no auto-repopulation (manual "Search Bandcamp" only), so a bump silently
     drops every hand-curated Bandcamp-only match. 0.9.42 wrongly bumped it `:6:`→`:7:`; 0.9.47 reverted to `:6:`
     so existing matches survive an update (a fresh search bakes the favurl in; an older match plays without it
@@ -599,6 +601,41 @@ Detected in `_isVariousArtists()`:
 - Material Skin's grouped artist release page layout is NOT achievable from OPML feeds — only via native library `albums_loop` responses. Solved in earlier versions by using Browse by Type sub-menus, removed in v0.3.0 in favour of settings-driven filtering.
 
 ## Version History
+- **0.9.53** — **Bandcamp page URL now rides the favurl for exact replay (`?b=<art>|<url>`).**
+  Bandcamp's `get_album` resolves a tracklist from the album **page URL**, not the `album:<id>`
+  in the favurl, so handing a Bandcamp match to Listen Later produced no tracks. `_attachFavUrl`
+  now packs the cover art **and** the page URL into one escaped `?b=<art>|<url>` param (Bandcamp
+  only — it sets `_albumurl` from the search passthrough; Qobuz/Tidal keep the plain `?cover=`
+  and replay by id). Listen Later 0.1.39+ unpacks both → exact `get_album` replay + one-tap
+  Buy-on-Bandcamp. **Corrected a wrong conclusion from the 0.9.49–0.9.52 iterations:** the belief
+  that "Material drops a favurl > ~150 chars" was an artifact of a **stale repo-installed LBF
+  shadowing the manual dev build** (the new favurl code never ran, so the add arrived with no
+  favurl). With the right build loaded, the full ~164-char favurl arrives intact — verified by
+  the saved record keeping the real cover *and* the page URL. The discarded
+  `docs/material-favurl-length-issue.md` (written for the Material dev about the non-existent
+  limit) was removed. No cache bump: `lbf:bcmatch:` is never bumped (a fresh manual "Search
+  Bandcamp" bakes the new favurl in; older cached matches play without the `?b=` URL until
+  re-searched — same rule as 0.9.47). 0.9.49–0.9.52 were the intermediate favurl attempts,
+  superseded by this.
+- **0.9.48** — **library track matching no longer blocks the event loop (low-power / Raspberry Pi friendliness).**
+  `_findPlayableTrack`'s local-library probe (`_findLocalTrack` → `Slim::Schema` / the `titles` request) is the
+  one SYNCHRONOUS step in the otherwise-async track resolver, and LMS's DB layer has no non-blocking form (single
+  SQLite connection, single thread — can't be made to `await` or run off-thread). Previously, a playlist that matched
+  mostly from the library completed each probe synchronously and re-entered `_resolveTracks`' pump in the **same**
+  event-loop pass — up to ~50 blocking DB queries with no yield, starving audio on a Pi (the background warm and a
+  cold new-week open were the worst cases, exactly the loop-stall class that got Bandcamp pulled from the auto-search).
+  Fix: every library probe now runs via `Slim::Utils::Timers::setTimer(undef, time(), …)` (an idle tick), so the loop
+  services audio/UI **between** probes. To do this `_findPlayableTrack` was restructured — a `$deferLocal` helper wraps
+  the probe and the streaming phase is factored into a `$runStreaming` closure so the `first`/`fallback`/no-adapter
+  tiers can run it after their deferred probe. **Same total work, no contiguous freeze; matching/caching/behaviour
+  unchanged** (the probe is reached only on a cache MISS — the warm pre-resolves, so normal opens are cache hits that
+  never get here), so **no cache bump**. NB: the DB query itself still blocks for its own (short) duration — deferral
+  isolates each one; it can't make a single query async. If a single `titles` search is ever slow enough to matter on a
+  huge library, the next lever (not taken here, has cache-poisoning subtlety) is MBID-only library lookup during the warm.
+  Also folded in three no-behaviour-change cleanups: trimmed a stale cache-version list in `_findPlayable`'s comment
+  (named `:7:` while the key is `:10:` — authoritative history is on `_streamKey`); dropped two unused strings
+  (`PLUGIN_LBF_PLAY_VIA`, `PLUGIN_LBF_NO_SERVICES`); and `_parsePlaylistTracks` stopped parsing three never-read JSPF
+  fields (`duration_ms`, `caa_id`, `caa_release_mbid`).
 - **0.9.47** — **code-review fix: stop the favurl cache bump from discarding manual Bandcamp matches.**
   The 0.9.42 favurl work bumped the persisted-Bandcamp-match key `lbf:bcmatch:6:`→`:7:`. Unlike the auto
   play-via cache (`lbf:stream:*`, which re-resolves itself on the next detail-page open), `lbf:bcmatch:`
