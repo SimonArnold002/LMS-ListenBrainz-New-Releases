@@ -1061,7 +1061,11 @@ sub _parseLastfmTags {
     my $t = $data->{toptags}{tag};
     return [] unless $t;
     my @tags = ref $t eq 'ARRAY' ? @$t : ($t);
-    @tags = sort { ($b->{count} // 0) <=> ($a->{count} // 0) } @tags;
+    # A tag entry is normally a { name, count, url } hash, but Last.fm can also
+    # send a bare string; guard the count deref so a string entry can't trip a
+    # strict-refs die (the sort and the low-weight filter below both read count).
+    my $count = sub { ref $_[0] eq 'HASH' ? ($_[0]{count} // 0) : 0 };
+    @tags = sort { $count->($b) <=> $count->($a) } @tags;
 
     my @out;
     for my $tag (@tags) {
@@ -1069,7 +1073,7 @@ sub _parseLastfmTags {
         next unless defined $name;
         $name =~ s/^\s+//; $name =~ s/\s+$//;
         next if $name eq '' || length($name) > 30;
-        next if ($tag->{count} // 0) < 10 && @out >= 3;
+        next if $count->($tag) < 10 && @out >= 3;
         push @out, $name;
         last if @out >= 5;
     }

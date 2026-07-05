@@ -10,6 +10,15 @@ PLUGIN_LBF_UNMATCHED
 PLUGIN_LBF_ALL_MATCHED
 	EN	All tracks matched — nothing unmatched
 
+PLUGIN_LBF_REFRESH_MATCHES
+	EN	Refresh playlist matches (re-match now)
+
+PLUGIN_LBF_REFRESH_STARTED
+	EN	Refreshing playlist matches — re-matching in the background. Check back in a minute.
+
+PLUGIN_LBF_REFRESH_NO_PLAYER
+	EN	Connect a player first, then try again (a player is needed to search the streaming services).
+
 PLUGIN_LBF_DSTM_RADIO
 	EN	ListenBrainz Radio (similar to what's playing)
 
@@ -273,6 +282,12 @@ PLUGIN_LBF_PREFER_LIBRARY
 
 PLUGIN_LBF_PREFER_LIBRARY_DESC
 	EN	When building a playlist, use a track from your own music library if you have it (matched by MusicBrainz ID, then artist + title), before searching streaming services.
+
+PLUGIN_LBF_DEBUG_LOG
+	EN	Write a debug log
+
+PLUGIN_LBF_DEBUG_LOG_DESC
+	EN	Record playlist warm/match activity to a dedicated lbf-debug.log file (next to the server log) for troubleshooting. Leave off for normal use; turn on when investigating a matching or caching problem, then off again.
 
 PLUGIN_LBF_SECTION_SERVICES
 	EN	Streaming Services

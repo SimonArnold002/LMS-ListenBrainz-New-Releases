@@ -68,6 +68,12 @@ use constant MBID_RESOLVE_CONCURRENCY => 4;
 # (similar-artist driven), so preferring owned copies is desirable here.
 use constant LIB_MODE => 'first';
 
+# Upper bound on the per-session no-repeat set (played track URLs). The set is
+# never reset for the life of the session (that's the no-repeat guarantee), so
+# cap it FIFO so a very long auto-DJ session can't grow it without limit — evicting
+# the OLDEST url first means only tracks played thousands ago can recur.
+use constant PLAYED_MAX => 5000;
+
 my $API   = 'Plugins::ListenBrainzFreshReleases::API';
 my $DSTMP = 'Slim::Plugin::DontStopTheMusic::Plugin';
 
@@ -438,9 +444,10 @@ sub _resolveAndReturn {
     my $tryN  = $batch * 3;   # over-fetch: not every candidate resolves to a playable track
 
     my $cid    = $client->id;
-    my $seen   = $state{$cid}{served} ||= {};   # recording_mbids served (variety window)
-    my $recent = $state{$cid}{recent} ||= [];   # FIFO of recently-served artists
-    my $played = $state{$cid}{played} ||= {};   # track URLs EVER queued this session — never reset
+    my $seen    = $state{$cid}{served} ||= {};        # recording_mbids served (variety window)
+    my $recent  = $state{$cid}{recent} ||= [];        # FIFO of recently-served artists
+    my $played  = $state{$cid}{played} ||= {};        # track URLs EVER queued this session — never reset
+    my $playedQ = $state{$cid}{played_order} ||= [];  # same urls in insertion order, for the FIFO cap
 
     # Hard no-repeat guard: never return a track URL we've already played this
     # session, nor anything already sitting in the play queue right now.
@@ -485,7 +492,15 @@ sub _resolveAndReturn {
             next if $blocked{$u};        # already played this session or already queued
             $blocked{$u} = 1;            # de-dupe within this batch too
             $played->{$u} = 1;           # remember for the rest of the session
+            push @$playedQ, $u;          # track insertion order for the FIFO cap
             push @urls, $u;
+        }
+        # Bound the never-reset played set FIFO — drop the oldest urls once over the
+        # cap so a marathon session can't grow it without limit (an evicted url can
+        # only recur after PLAYED_MAX others, so no practical repeat).
+        while (@$playedQ > PLAYED_MAX) {
+            my $old = shift @$playedQ;
+            delete $played->{$old};
         }
         $log->info("DSTM $which: returning " . scalar(@urls) . " track(s) from "
             . scalar(@candidates) . " candidate(s)");

@@ -80,7 +80,7 @@ Tap any release for a page in three sections:
 With **Qobuz**, **Tidal** and/or **Bandcamp** installed, releases and playlist tracks are matched and made playable. In **Streaming Services** settings, give each service a **search priority** (lower = tried first, **0 = never use it**); matching stops at the first service that has it. Qobuz/Tidal are searched automatically; **Bandcamp** is searched on demand from the detail page (a found Bandcamp match is remembered, so a Bandcamp-only release stays playable). Change a service's priority — or remove its plugin — and affected tracks **re-match** to your remaining services automatically.
 
 ### Created-for-You Playlists
-With a username set, the **Playlists** section turns your ListenBrainz **Weekly Jams**, **Weekly Exploration** and **Daily Jams** into Play-all lists. Each track is matched to your **own library first** (then streaming); unmatched tracks are dropped and the page title shows how many matched. A **Settings → Unmatched tracks (debug)** view lists, per playlist, any tracks that couldn't be matched — handy for spotting a gap.
+With a username set, the **Playlists** section turns your ListenBrainz **Weekly Jams**, **Weekly Exploration** and **Daily Jams** into Play-all lists. Each track is matched to your **own library first** (then streaming); unmatched tracks are dropped and the page title shows how many matched. A **Refresh playlist matches** row at the top of the Playlists view forces a fresh, library-first re-match of every playlist (handy if the matches were built before your library finished scanning). A **Settings → Unmatched tracks (debug)** view lists, per playlist, any tracks that couldn't be matched — handy for spotting a gap.
 
 ### Don't Stop The Music
 Two auto-DJ mixers keep the queue going when it runs low. Pick one as your player's **Don't Stop The Music** source (LMS/Material player settings):
@@ -112,6 +112,7 @@ The plugin adds **New Releases for You**, **Playlists** and **All Releases** row
 | Weekly Dividers | **On** | Per-week divider in the date-sorted view (wins over Group by Artist for that sort) |
 | Find on Streaming Services | **On** | Show playable Qobuz/Tidal/Bandcamp matches on detail pages |
 | Prefer Tracks from My Library | **On** | Use your own copy (by MusicBrainz ID, then artist + title) before streaming — for Playlists and Don't Stop The Music |
+| Write a debug log | **Off** | Records the playlist warm/match activity to `lbf-debug.log` (next to the server log) — turn on only to troubleshoot a matching/caching issue |
 
 ### Streaming Services
 A **search priority** per detected service (Qobuz / Tidal / Bandcamp): lower number = searched first, **0 = never use it**. Drives detail-page matches, Playlists and Don't Stop The Music.

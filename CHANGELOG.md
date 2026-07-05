@@ -3,6 +3,54 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.60
+
+### Fixed
+- **code-review fix: manual Bandcamp search can't start an extra search after the watchdog gives up.** `_searchBandcampOnly` tries its ordered queries (full `artist album`, each collaborator + album, album-only) one at a time, guarded by a single overall watchdog. If a search hung long enough for the watchdog to fire `$finish->([])` and *then* returned empty, its callback re-entered `$tryNext` and launched the next query's search — a heavy synchronous Bandcamp parse running *after* the row had already re-rendered (exactly the event-loop stall Bandcamp was made manual-only to avoid). `$tryNext` now returns early when `$done` is set (mirroring `$finish`'s idempotency), so a late callback after the watchdog can't start another search. No cache bump (control-flow only; matching/caching unchanged).
+
+## 0.9.59
+
+### Changed
+- **Matched streaming albums also carry the release year to Listen Later** (`&y=<year>` on the favurl, alongside the `&a=<artist>` from 0.9.58). Listen Later 0.1.43 folds the year into its duplicate key (`artist|album|year`), so two same-titled releases from different years — added from the detail page — save as two entries instead of the second being dropped as a duplicate. The year is taken from the release's `release_date`; threaded through `_findPlayable`/`_searchBandcampOnly` to `_attachFavUrl`. Stream play-via cache bumped `lbf:stream:11:`→`:12:` so matched albums re-resolve once and bake in the year (free — Qobuz/Tidal self-resolve); `lbf:bcmatch:` still not bumped.
+
+## 0.9.58
+
+### Changed
+- **Matched streaming albums now carry the artist to Listen Later.** The Add-to-Listen-Later / Wish List actions on the detail-page match rows sent no artist — Material exposes no `$ARTISTNAME` for these rows (the thumbnail is the service logo and the subtitle isn't mapped), so Listen Later stored an artist-less record that never auto-moved to its Played list. `_attachFavUrl` now packs the release artist into the favurl as a private `&a=<artist>` param, alongside the existing `?cover=` (Qobuz/Tidal) / `?b=<art\|url>` (Bandcamp) handshake; Listen Later 0.1.42+ reads it as a fallback and strips it. Native streaming-plugin favurls (no query string) are unaffected. Stream play-via cache bumped `lbf:stream:10:`→`:11:` so matched Qobuz/Tidal albums re-resolve once and gain the artist param (free — they re-resolve themselves); the manual-Bandcamp match cache (`lbf:bcmatch:`) is deliberately **not** bumped (its rows already surface an artist, and it has no auto-repopulation).
+
+## 0.9.57
+
+### Fixed
+- **Accented / diacritic artist & album names now match across spelling variants.** The matcher's normaliser (`_norm`) kept accents as distinct letters, so a name that a streaming catalogue (or a library tag) spells without them — or with a different Unicode form of the same accent — failed to match: `Altın Gün — Neredesin Sen` missed on Qobuz although it's there (dotless `ı` and `ü` vs `Altin Gun`). `_norm` now folds Latin diacritics to their base letter (`é→e`, `ü→u`, `ñ→n`, `ç→c`, and the atomic letters `ı→i`, `ł→l`, `ø→o`, `ð/đ→d`, `þ→th`, `ß→ss`, `æ→ae`, `œ→oe`). Applied to streaming album/track matching, the local-library matcher, and de-dupe. Non-Latin scripts (Japanese, Cyrillic, Arabic, …) are deliberately **not** folded — the fold decomposes, strips only the Latin combining-mark block, then re-composes, so e.g. Japanese voiced kana survives intact. Albums with accented names re-resolve once on next open (their cache key changes); ASCII names are unaffected, so no cache-version bump.
+- **`tools/match_check.py` updated to the shipped fold** (it was modelling a slightly different, Japanese-mangling variant) and now folds by default, with `--fold` showing a pre-fold vs shipped comparison.
+
+## 0.9.56
+
+### Added
+- **"Search Bandcamp" now falls back to per-artist queries for collaborations.** The manual Bandcamp search used one combined `"<artist> <album>"` query, which Bandcamp's search doesn't return for a two-artist release credited to `A & B` (found with *Panda Bear & Sonic Boom – A ? of WHEN*: it exists on each artist's Bandcamp page but not under the combined search). It now tries, in order and stopping at the first hit: the full `artist album`, then **each individual collaborator + album** (splitting `&`/`+`/`feat`/`ft`/`with`/`x`/`vs`), then the album title alone. `_albumMatches` still validates artist + title on every result, so a broader query can't admit a wrong album. Extra searches run only on a miss (the common combined-query case is still a single search), and only on a deliberate tap. (This is search-recall only — it still does not drill an artist's Bandcamp discography.)
+
+_No cache-version bump._
+
+## 0.9.55
+
+### Fixed
+- **A persisted manual Bandcamp match can no longer be truncated off the detail page.** The Streaming section caps auto matches (Qobuz/Tidal) at 12 to keep a generic one-word title sane, but the hand-curated Bandcamp match was appended *before* that cap — so a release with 12+ auto matches could drop the Bandcamp entry, exactly the case where it's meant to be the primary/sole playable row. The cap now applies to the auto matches only; the Bandcamp match is always kept (deduped so it never shows twice).
+- **Hardened the Last.fm tag parser against a non-object tag entry.** `_parseLastfmTags` guarded the tag *name* against a bare-string entry but still dereferenced its `count` unconditionally (in both the sort and the low-weight filter), which would fatally `Can't use string as a HASH ref` under strict refs if Last.fm ever returned a string tag. The count is now read through the same guard.
+
+### Changed
+- **Bounded the Don't Stop The Music per-session no-repeat set.** The set of already-played track URLs is intentionally never reset for the life of a session (that's the no-repeat guarantee), so it's now FIFO-capped at 5000 — a marathon auto-DJ session can't grow it without limit, and an evicted URL can only recur after 5000 others (no practical repeat).
+
+_No cache-version bumps — none of these change what matches or what's stored._
+
+## 0.9.54
+
+### Fixed
+- **The startup warm no longer resolves playlists before the library scan finishes.** If the background warm ran while a library scan was still in progress, the local-library tier was empty, so every owned track fell through to streaming (Qobuz/Tidal) — and that all-streaming result was cached for the resolved-playlist TTL (days), with later warms skipping the already-cached playlist. So a user with the music in their library still saw everything matched to streaming. The warm now **defers while `Slim::Music::Import->stillScanning()` is true** (re-checking every 120s) and only resolves once the scan has completed.
+
+### Added
+- **"Refresh playlist matches (re-match now)"** — a Refresh row at the top of the **Playlists** view (mirroring the New Releases / All Releases feed refresh) that forces a fresh, **library-first** re-resolve of every playlist, bypassing both the resolved-playlist and per-track caches. Use it to recover immediately from a stale all-streaming result (e.g. one cached by a pre-scan warm on an older build) without waiting for the weekly rollover. Re-matches in the background (~a minute); needs a connected player (to search the streaming services for anything not owned).
+- **Opt-in dedicated debug log.** A new **Write a debug log** setting records the playlist warm/match timeline — including the **library-match count per playlist** and scan-defers — to a dedicated `lbf-debug.log` beside the server log (size-capped, one rotation). Off by default; turn it on to track a matching/caching issue, then off again. (The same lines still go to `server.log` at INFO.)
+
 ## 0.9.53
 
 ### Changed

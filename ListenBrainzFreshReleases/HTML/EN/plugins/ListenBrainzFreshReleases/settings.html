@@ -48,6 +48,10 @@
 <input type="checkbox" name="pref_prefer_library" value="1" [% IF prefs.prefer_library %]checked="checked"[% END %]>
 [% END %]
 
+[% WRAPPER setting title="PLUGIN_LBF_DEBUG_LOG" desc="PLUGIN_LBF_DEBUG_LOG_DESC" %]
+<input type="checkbox" name="pref_debug_log" value="1" [% IF prefs.debug_log %]checked="checked"[% END %]>
+[% END %]
+
 </div>
 
 <div class="prefHead collapsableSection" id="lbf_blocked_Header">[% 'PLUGIN_LBF_SECTION_BLOCKED' | string %]</div>
