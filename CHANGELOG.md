@@ -3,6 +3,42 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.68
+
+### Fixed
+- **Owned tracks could still be missed on a library that DOES have full-text search — a common title in a big library fell through to streaming.** The 0.9.67 title-only fallback in `_localByText` only ran when the combined `"artist title"` search returned **zero** candidates (the FTS-off signature). But there's a second way to miss an owned track: with FTS **on**, the fuzzy combined search can return candidates yet rank the owned track **outside** the 20-row window (a common title in a deep library), so pass 1 misses and the old `$n1 == 0` gate skipped the fallback. The title-only pass now runs on **any** pass-1 miss, and its window widened 50 → 100, so a track that ranked out is given a second, order-independent chance and re-verified by artist. Still cheap: the fallback is reached only on a per-track cache miss and the daily warm pre-resolves, so a not-owned track pays one extra title query once, in the background.
+
+### Internal
+- Removed an unused `$svcOrder` parameter from `_warmFollow` (the resolved-cache key is rebuilt from current prefs via `_followResolvedKey()`); documented a future **contributor-scoped `Slim::Schema` query** (a tier-2.5, FTS-independent, window-free library lookup) in CLAUDE.md as the deeper fix to revisit later.
+
+## 0.9.67
+
+### Fixed
+- **Owned tracks weren't matching a library that has full-text search disabled — every track fell through to streaming.** The local-library matcher's text tier (`_localByText`) searched LMS with a **combined `"artist title"` term** (e.g. `search:Dire Straits Six Blade Knife`). LMS only resolves a multi-field term like that when its **Full-Text Search index is present**; with FTS disabled or broken, `titles search:` degrades to a title-only match, so a term whose artist words aren't in the title matches **nothing** — and a whole playlist resolves 0-from-library while the same tracks match fine on streaming (diagnosed live: 248/250 matched, all streaming, 0 library, for a user who owns the MP3s). Now the matcher runs a **second, title-only pass** when the combined search returns nothing: the bare title always hits the title index regardless of FTS, and `_trackMatches` re-verifies the artist. FTS-healthy libraries are unchanged (they match on the first pass and add no extra query). When the opt-in `debug_log` is on, the fallback logs the candidate count so the FTS-off case is visible. Unrelated to a file's MusicBrainz tags — the MBID tier already falls through correctly.
+
+## 0.9.66
+
+### Fixed
+- **"Recommended by People You Follow" hung on open and resolved nothing.** `_followSig` hashed the feed's track set with `Digest::MD5::md5_hex`, which **dies** (`Wide character in subroutine entry`) on any code point > 255 — and the feed is full Unicode (Japanese titles, accented artists, curly quotes). The exception was thrown inside the feed callback, so the tile spun until it gave up with no matches. Fixed by `utf8::encode`-ing the string before hashing (hash the UTF-8 bytes, not the wide string). No other change.
+
+## 0.9.65
+
+### Added
+- **"Recommended by People You Follow" — a new playable playlist built from your ListenBrainz social feed.** A tile in the **Created for You** section (shown when both username and token are set) turns the `recording_recommendation` / `recording_pin` events from the people you follow into a fully-streaming, Play-all-able playlist — every track matched **library-first, then streaming**, exactly like the Created-for-You playlists.
+  - **API** (`API::getFollowFeed` → `GET /1/user/<user>/feed/events?count=75`, token required): `_parseFollowFeed` keeps only the track-bearing events and normalises them to `{ artist, title, album, recording_mbid, recommender }`, **newest-first**, **de-duplicated** by recording MBID (or `artist|title` when a recommendation carries no MBID — ~1 in 6 don't). The recording MBID is dug out of `additional_info`, the `mbid_mapping`, or the pin wrapper. Dual short/fallback cache (`lbf:follow:feed[fb]:<user>`, `FEED_TTL` / `FEED_FALLBACK_TTL`) like the fresh-releases feed.
+  - **Resolve & cache** (`Browse::resolveFollowFeed`): the tile drills straight into the resolved tracks (it's one virtual playlist, not a list). Resolved under `lbf:follow:resolved:1:<user>|<svc-order>` and **validated by a signature of the feed's track set** (`_followSig`) — a cached resolve is reused only while the feed is unchanged; new recommendations bust it. Reuses `_resolveTracks` / `_playlistResult` / `_playlistTtl`, so it inherits service-aware re-matching, the library-1-day TTL, inconclusive-outage handling and the tracks-only Play-all layout.
+  - **Daily cadence:** unlike the weekly createdfor listing, this timeline updates continuously — so it's a 24h cache refreshed by the existing **daily background warm** (`_warmFollow`, chained after the playlist warm in `warmCache`; a no-op without a token). The Playlists "Refresh matches" action also refreshes it (it runs the whole warm forced).
+  - **Branded cover** `menu-follow.png` ("People You Follow", rose gradient; generated by `tools/make_covers.py`). New debug tool `tools/fetch_feed.py` dumps the raw feed as `match_check`-ready lines (needs the token — pass it as an arg or `LB_TOKEN`).
+
+## 0.9.64
+
+### Changed
+- **"Search Bandcamp" now opens a tap-to-choose picker, and the chosen match lands on an album page where "Add to Listen Later / Wish List" actually works.** Previously the manual search re-rendered the detail page in place (`nextWindow => 'refresh'`), which shows the match but leaves it **un-armed** for Material's custom actions when Bandcamp is the sole source — because Material only sets `view.itemCustomActions` on a **fresh drill-in** (`browseHandleListResponse`), never on the in-place `refreshList` (browse-page.js:1568). So Add-to-Listen-Later was missing until you backed out and re-entered the album. Now:
+  - **Match →** the search returns a **picker sub-page**: a "Tap an album to use it as this release's match" prompt followed by one **non-playable** row per candidate (real cover + `Album / Artist`). A non-empty response pushes a new view (Material ignores `nextWindow` when there are items — browse-functions.js:834), so the single `nextWindow => 'refresh'` row drives both outcomes.
+  - **Tap a candidate →** it's **pinned** as this release's Bandcamp match (`_bcMatchKey`; nothing is pinned until you choose) and the album page is **re-rendered via `_releaseDetail` as a fresh drill** — so it shows the match inline **and arms** the custom actions, giving it Add to Listen Later / Wish List.
+  - **No match →** returns an **empty** list, so `nextWindow => 'refresh'` re-renders the album page **inline** and the row flips to "…not found — tap to retry" (no dead-end page).
+  - The pinned candidate is baked into the exact same form as before (service logo as the row image; cover + page URL + artist + year on the favurl for Listen Later), so the inline detail render, replay and the Listen Later handshake are unchanged. No cache bump (`lbf:bcmatch:` unchanged). Supersedes the abandoned 0.9.61 (auto-pop-to-parent) and 0.9.62–0.9.63 (playable-row drill-in) iterations of the same fix.
+
 ## 0.9.60
 
 ### Fixed

@@ -16,6 +16,7 @@ A plugin for Lyrion Music Server (LMS) that browses ListenBrainz Fresh Releases.
 - **New Releases for You** — personalised feed of fresh releases from artists in your ListenBrainz history (needs username + token). Newest-first, grouped by week, tap-through detail pages.
 - **All Releases** — the global ListenBrainz fresh-releases feed (no account). By-week landing page to jump to any week.
 - **Created-for-You Playlists** — your **Weekly Jams / Weekly Exploration / Daily Jams** as fully-streaming **Play-all** lists; every track matched **library-first**, then streaming.
+- **Recommended by People You Follow** — the tracks the people you follow **recommend/pin** on ListenBrainz, gathered from your social feed into one **Play-all** playlist (library-first, then streaming). Refreshes daily.
 - **Don't Stop The Music — two auto-DJ mixers** — **ListenBrainz Radio** (seeds from what's playing and evolves through similar artists) + **Recommended for You** (personalised CF picks, shuffled). Owned copies first, no per-session repeats, varied artists.
 - **Rich release detail pages** — artist **photo + biography**, **tracklist** with durations, **genres**, tags, **View on MusicBrainz**, and inline **one-tap streaming matches**.
 - **Direct streaming playback** — matched albums/tracks play from **Qobuz / Tidal / Bandcamp**; you choose the per-service search order.
@@ -69,7 +70,8 @@ tools/
 ├── make_covers.py                     # Pillow generator for ALL branded covers/badges (see "Branded cover images")
 ├── make_readme_html.py                # Zero-dep Markdown→HTML generator: README.md → README.html (styled) + index.html (Pages redirect)
 ├── match_check.py                     # Faithful port of _norm/_artistMatch/_trackMatches — paste "LB_artist | LB_title || file_artist | file_title" pairs to see MATCH/MISS + which rule fired; folds diacritics by default (matches shipped 0.9.57 _norm), --fold shows pre-fold vs shipped compare (local-match debug)
-└── fetch_playlist.py                  # Dumps a user's created-for playlists from the public ListenBrainz API as match_check-ready lines (local-match debug)
+├── fetch_playlist.py                  # Dumps a user's created-for playlists from the public ListenBrainz API as match_check-ready lines (local-match debug)
+└── fetch_feed.py                      # Dumps a user's SOCIAL FEED (recommendations/pins from followed users) as match_check-ready lines; needs the token (arg 2 or LB_TOKEN) — the follow-feed analogue of fetch_playlist.py
 ```
 
 ## Project docs / GitHub Pages
@@ -86,7 +88,45 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-0.9.60
+0.9.68
+
+## Recommended by People You Follow (0.9.65)
+
+A single playable playlist built from the ListenBrainz **social feed** — the
+`recording_recommendation` / `recording_pin` events from the users you follow.
+Tile in the **Created for You** section, gated on `username` AND `token` (the feed
+endpoint is private). One virtual playlist, so the tile drills straight into the
+resolved tracks (no list level → no natural spot for a per-feature Refresh row;
+covered by the daily warm and the Playlists "Refresh matches" action instead).
+
+- **API** (`API.pm`): `getFollowFeed` → `GET /1/user/<user>/feed/events?count=75`
+  (token required). `_parseFollowFeed` keeps only the track-bearing event types
+  (`%FOLLOW_TRACK_EVENT`) and normalises to `{ artist, title, album,
+  recording_mbid, recommender }`, **newest-first** (feed is reverse-chronological),
+  **deduped** by `m:<mbid>` else `t:<lc artist|title>`. `recording_mbid` pulled from
+  `additional_info` / `mbid_mapping` / the pin wrapper via `_firstRecMbid`
+  (~1 in 6 recommendations carry none — still usable, they match by artist/title).
+  Dual short/fallback cache `lbf:follow:feed[fb]:<user>` (`FEED_TTL` /
+  `FEED_FALLBACK_TTL`). `force => 1` skips the working-READ (the warm passes it).
+- **Browse.pm**: `_followTile` (playable container, `MENU_FOLLOW` cover, count from
+  the resolved cache like `_playlistTile`) → `resolveFollowFeed`. Resolved cache
+  `lbf:follow:resolved:1:<user>|<svc-order>` (`_followResolvedKey`), **content
+  validated by `_followSig`** (md5 of the ordered track set) — a cached resolve is
+  reused only while the feed is unchanged; new recommendations change the sig and
+  re-resolve. **`_followSig` MUST `utf8::encode` before `md5_hex`** — the feed is
+  full Unicode (Japanese/accents/curly quotes) and `md5_hex` dies on any code point
+  > 255 ("Wide character in subroutine entry"), which hung the whole open (0.9.66). Reuses `_resolveTracks` / `_playlistResult` / `_playlistTtl`, so it
+  inherits service-aware re-matching, the 1-day library TTL, inconclusive-outage
+  short TTL and the tracks-only Play-all layout.
+- **Daily cadence** (vs the weekly createdfor listing): this timeline updates
+  continuously, so a 24h cache + the existing **daily warm** is the right fit.
+  `_warmFollow` is chained after the playlist queue drains in `warmCache` (so the
+  two don't hammer the streaming APIs at once) and is a no-op without a token; it
+  skips the re-resolve when the sig is unchanged. Runs on the daily tick and on the
+  forced manual refresh.
+- **Cover**: `menu-follow.png` ("People You Follow", `ROSE` gradient) via
+  `tools/make_covers.py`. **Debug tool**: `tools/fetch_feed.py` dumps the raw feed
+  as `match_check`-ready lines (needs the token: arg 2 or `LB_TOKEN`).
 
 ## Created-for-You Playlists (0.8.0)
 
@@ -191,11 +231,54 @@ fully-streaming, Play-all-able playlist.
 - **Prefer local library (0.8.7):** `_findPlayableTrack` first tries the user's own LMS library
   (`prefer_library` pref, default on) before any streaming adapter — `_findLocalTrack`: tier 1 =
   exact `tracks.musicbrainz_id` via `Slim::Schema->search('Track', …)`, tier 2 = LMS `titles`
-  search (`Slim::Control::Request::executeRequest(undef, ['titles', …, "search:$artist $title"])`)
+  search (`_localByText` → `_titlesSearch` → `Slim::Control::Request::executeRequest(undef, ['titles', …])`)
   gated by `_trackMatches`. A hit returns a string `url` (the file URL) → playable + cacheable like
   a streaming item, tagged `_svc => 'Library'`. Because a file URL can go stale on a rescan, library
   hits (and any resolved playlist containing one, via `_playlistTtl`) cache only `LIBRARY_TTL` (1d).
   All DB access is eval-guarded → falls through to streaming on any hiccup.
+  - **Two-pass text search — full-text-index-independent (0.9.67; pass-2 gate widened 0.9.68).**
+    `_localByText` first searches the combined `"artist title"` term (selective; best recall when LMS's
+    **Full-Text Search** index is present, since FTS spans artist/album/title). **But `titles search:`
+    only resolves a multi-field term when FTS is enabled** — with FTS off/broken it degrades to a
+    title-only `titlesearch LIKE`, so the combined term (artist words absent from the title) matches
+    NOTHING and a whole playlist resolves **0-from-library** while the same tracks match on streaming
+    (diagnosed live for a user with FTS disabled: 248/250 matched, all streaming, 0 library, owning the
+    MP3s). So on a pass-1 miss, `_localByText` runs a **second, title-only pass**
+    (`_titlesSearch($title, …, 100)`) — the bare title hits the title index regardless of FTS, and
+    `_trackMatches` re-verifies the artist. **Pass 2 now runs on ANY pass-1 miss, not only `$n1 == 0`**
+    (0.9.68): there are TWO ways pass 1 misses an owned track and only one gives zero candidates —
+    (a) **FTS off** → combined term matches nothing → `$n1 == 0`; (b) **FTS on** → the fuzzy combined
+    query returns candidates (`$n1 > 0`) but ranks the owned track outside pass 1's 20-row window
+    (common title / deep library) → the wider, order-independent title-only pass rescues it. The old
+    `$n1 == 0` gate silently missed case (b). Cheap despite the wider trigger: pass 2 is reached only
+    on a **per-track cache MISS** and the daily warm pre-resolves, so a not-owned track pays one extra
+    title query **once, in the background** (not per open). Skipped only when there's no separate title
+    to try — artist empty (combined term already == title) or no title. NOT an MBID issue — bogus
+    `MUSICBRAINZ_TRACKID` tags just miss tier 1, which already falls through correctly.
+  - **FUTURE WORK — contributor-scoped `Slim::Schema` query (a tier 2.5, not yet built).** Both text
+    passes above still go through the `titles … search:` **relevance** command, which ranks + windows
+    (so a hit ranked past the window is simply absent — the reason pass 2 widened to 100) and is fuzzy
+    (you can't ask it "title == X AND artist == Y"). The structural fix is to stop using the search
+    command for tier 2 and instead run a **direct relational query** — the same idiom tier 1 already
+    uses for MBID (`Slim::Schema->search('Track', { musicbrainz_id => … })`), extended to join `Track`
+    → `Contributor` and filter on title **and** artist name in SQL: `->search('Track', { title match,
+    'contributor.name' match }, { join => …contributor… })->all`. Properties that make it strictly more
+    robust: **no window / no ranking** (you get every row satisfying both predicates, then `_trackMatches`
+    picks the winner — a common title in a huge library can't rank the owned track out), and **FTS-
+    independent** (a plain indexed WHERE on the normalised title/name columns behaves the same whether
+    the full-text index is on, off, or corrupt). Slot it as tier 2.5 (after MBID, before the fuzzy text
+    search, which stays as a backstop). **Why it's deferred, not done now — the real traps:** (1)
+    **Normalisation mismatch** — our `_norm` folds diacritics/punctuation (0.9.57) but LMS's own
+    `titlesearch`/`namesearch` columns use LMS's rules (no Turkish `ı`/curly-quote folding), so a raw
+    equality can silently miss the accented/stylised catalogue this plugin exists to handle well — a
+    `LIKE` + in-Perl `_trackMatches` re-verify is still needed, so you don't fully escape fuzziness.
+    (2) **Contributor roles** — ARTIST vs ALBUMARTIST vs TRACKARTIST vs BAND: join too narrowly and you
+    miss featured/compilation cases, too broadly and noise returns. (3) **Exact schema relationship/
+    column names must be VERIFIED against the running LMS 9.x `Slim::Schema`** (they've drifted across
+    versions) — a wrong DBIx join throws at runtime and the eval-guard would swallow it into a silent
+    miss (worse than the current behaviour). (4) Same synchronous-DB-blocking class as tier 2, so it
+    must sit behind the existing idle-tick defer (0.9.48) + per-track cache + warm. Prototype against
+    the live server's schema before trusting the join. See [[lbf-local-match-debug-tools]].
 - **Background warm (0.8.3):** `Plugin::postinitPlugin` schedules `Browse::warmCache` ~60s after
   startup, re-armed daily (`Slim::Utils::Timers`). It pre-fetches the playlist list and pre-resolves
   every playlist's track matches into `lbf:pl:resolved:*` (using the first connected player for the
@@ -623,6 +706,7 @@ Detected in `_isVariousArtists()`:
 - Material Skin's grouped artist release page layout is NOT achievable from OPML feeds — only via native library `albums_loop` responses. Solved in earlier versions by using Browse by Type sub-menus, removed in v0.3.0 in favour of settings-driven filtering.
 
 ## Version History
+- **0.9.64** — **"Search Bandcamp" is a tap-to-choose picker; choosing pins the match and re-opens the album armed.** The manual Bandcamp search no longer refreshes the detail page in place — that showed the match but left it un-armed for Material's custom actions when Bandcamp was the **sole** source (Material sets `view.itemCustomActions` only on a fresh drill-in / `browseHandleListResponse`, **never** on the in-place `refreshList` — browse-page.js:1568), so "Add to Listen Later / Wish List" was missing until you backed out and re-entered. Now the one `nextWindow => 'refresh'` search row drives **both** outcomes because Material only honours `nextWindow` on an **empty** response (browse-functions.js:834): a **match** returns a picker sub-page (a "Tap an album to use it as this release's match" prompt + one **non-playable** `type=>'link'` row per candidate, real cover + `Album / Artist`); a **miss** returns an empty list → inline refresh, row flips to "…tap to retry" (no dead-end). Tapping a candidate **pins** it (`_bcMatchKey`; nothing pinned until chosen) and calls **`_releaseDetail($rel, …)` to re-render the album page as a fresh drill** — which shows the match inline AND arms Add. The pinned item is byte-for-byte the old persisted form (logo image; cover/page-URL/artist/year on the favurl), so inline render, replay and the Listen Later handshake are unchanged; **no cache bump**. `$rel` is threaded `_releaseDetail → _bandcampSearchRow → _searchBandcampOnly → the choose coderef`. Supersedes the abandoned **0.9.61** (choose-then-auto-pop-to-`parent`) and **0.9.62–0.9.63** (drill-in of *playable* rows — tapping played/opened the album instead of choosing) iterations. Verified live. **KEY Material fact for this family of bugs:** `refreshList` never re-arms `itemCustomActions`; only a fresh drill does — so any flow that must expose a custom action has to land the user on a freshly-drilled view, not an in-place refresh.
 - **0.9.60** — **code-review fix: manual Bandcamp watchdog re-entry.** `_searchBandcampOnly` runs its
   ordered queries (`_bandcampArtists` full/collab/album-only) sequentially under ONE overall watchdog.
   `$tryNext` had no `$done` check, so if a search hung past the watchdog (`min(STREAM_SVC_TIMEOUT*queries,
