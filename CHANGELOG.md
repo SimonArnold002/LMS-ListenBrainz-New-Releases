@@ -3,6 +3,54 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.75
+
+### Fixed
+- **"Play what's new" could queue its tracks twice, or open empty.** The row was a playable container nested inside the People-You-Follow list, so playing the whole list (from the tile) could enqueue the new tracks a second time. It's now a tap-to-open row that drills into a clean, play-all-able list of just the new tracks. It also no longer depends on a cache that may have expired between showing the count and tapping — so the number on the row and the tracks inside it always match.
+- **Deezer matching is more robust.** If the Deezer plugin ever returns search results in an unexpected shape, matching now falls back to "no result found" cleanly instead of risking an error that stalls the search.
+
+### Technical
+- `_followResult` "Play what's new" row changed from `type=>'playlist'` to a `type=>'link'` drill row, so the tile's Play-all can't re-expand it and double-queue; its resolved, service-filtered items are threaded through the passthrough (the follow level is live/`cachetime=>0`, always fresh) so `playFollowNew` no longer re-reads a possibly-evicted resolved cache. `playFollowNew` now returns a PURE track list (no dividers) so the drilled level is itself a proper Play-all container. `_searchDeezer`/`_searchDeezerTrack` tolerate a bare-arrayref OR hash-wrapped (`{data}`/`{albums}`/`{tracks}`) response and bail to a clean miss on any other shape, so a mismatch can't die inside the async search callback (outside `_findPlayable`'s eval) and leave the service un-settled until timeout.
+
+## 0.9.74
+
+### Fixed
+- **"Play what's new" showed a count but opened empty, and never marked your backlog as played.** Two bugs: the "seen" marker was kept in the cache store and didn't reliably persist (so it never stuck), and the row's count and its contents were derived from two different track sources that could disagree (hence "Play what's new (30)" opening to "Nothing new"). The marker now lives in a durable **pref**; both the count and the contents come from the **same resolved list**; and on first open your existing recs are baselined as already-played, so the card only appears for genuinely newer arrivals.
+
+### Technical
+- "Seen" marker moved from the follow store to a pref (`follow_last_seen`). `_followResult` baselines it to the newest matched `_created` on first render and counts `_created > lastSeen`; `playFollowNew` filters the resolved cache by the same predicate, advances the pref, and renders via `_followResult`. Store TTL 90d → 30d (very large TTLs weren't retained by the cache). LESSON: durable per-user state belongs in a pref, not `Slim::Utils::Cache`.
+
+## 0.9.73
+
+### Added
+- **"Play what's new" for People You Follow.** A **"Play what's new (N)"** row appears at the top of the list when recommendations have been added since you last caught up — tap to play (or open) just those new tracks. Doing so marks them as seen, so the row clears until more arrive. It baselines on first use, so it won't dump your whole existing list as "new".
+
+### Technical
+- Per-user `lastSeen` epoch in the follow store (baselined to the newest rec on first `_mergeFollow`; no play history needed — recs carry `created`). `_followResult` counts matched tracks with `_created > lastSeen` and unshifts a `type=>'playlist'` "Play what's new" row → `playFollowNew`, which resolves just the new recs (owned-excluded, day-divided) and advances `lastSeen` to the newest rec on open/play. Strings `PLUGIN_LBF_PLAY_NEW` / `PLUGIN_LBF_NO_NEW`.
+
+## 0.9.72
+
+### Changed
+- **"Recommended by People You Follow" is one day-divided list, not weekly.** The weekly rolling-4 layout from 0.9.70 was abandoned: with recommendations spread ~1 per week across many months, pruning to the newest 4 weeks hid most of them (a real feed of ~35 recs showed only ~4). Now it's a **single Play-all list of all captured recs**, newest-first, with **day dividers** so new additions stand out. Still **new-music-only** (owned tracks excluded). The day dividers now use the **same Material header style as the New Releases week dividers** (was plain dashed text — flagged as inconsistent). The *Unmatched tracks* tracker has a single "Recommended by People You Follow" entry (not per-week).
+
+### Technical
+- Replaced the per-week bucket store with a flat accumulating store `lbf:follow:accum:1:<user>` (`_mergeFollow`: dedup, newest-first by `created`, capped at `FOLLOW_KEEP_MAX`=500, 90-day TTL refreshed each merge). Single resolved cache `lbf:follow:resolved:3:<user>|<svc-order>` (retires the weekly `:2:`). `_followResult` groups by day and inserts `_dayDivider` header rows via `_headerType()`/`image`/per-day drill coderef — the same pattern as `_buildWeekly` — with `features` threaded through the passthrough for `_wantHeaders`. `_resolveTracks` tags each matched item with its source `created` so dividers survive the Storable resolved cache. Removed the weekly subs/tiles and the warm serialisation; `_warmFollow` resolves the whole list once on a sig change.
+
+## 0.9.70
+
+### Changed
+- **"Recommended by People You Follow" is now weekly, new-music-only.** Instead of one ever-growing list, the recs/pins from the people you follow are bucketed into **Monday-start weeks**. The tile now drills into a rolling window of the **most recent 4 weeks** (each labelled `W/C <date>`); a new week's list is created **lazily** on its first rec (Monday, or whenever the first one lands — no empty placeholders), the current week keeps **accumulating** new recs during the week, and the oldest week **rolls off** when a fifth begins (no archive).
+- **Only music you don't already own.** Every track is checked against your LMS library and any you **already have is excluded**, so each weekly list is purely new music to discover. Uses the same library matcher as the rest of the plugin (MusicBrainz ID, then artist/title), so it inherits its known edge cases — a track you own but the matcher narrowly misses can occasionally slip through as "new".
+- **Unmatched tracks (debug) now covers the follow weeks too.** The Settings → *Unmatched tracks* tracker lists the People-You-Follow weekly lists alongside the created-for playlists; each unmatched row shows the source list on its second line, so it's clear which list a gap came from.
+
+### Technical
+- `API::_parseFollowFeed` now captures each event's `created` epoch. `Browse.pm` accumulates recs into a small persisted per-week store (`lbf:follow:weeks:2:<user>`, dedup + prune to 4 weeks) so a busy week isn't truncated by the feed's 75-event window and history builds forward from first capture. New `'exclude'` library mode in `_findPlayableTrack` (probe → drop if owned, else stream, never falls back to library), with `_resolveTracks` reporting an owned count so the "new tracks" total excludes owned. Per-week resolved cache `lbf:follow:resolved:2:<user>|<svc-order>|<week>`, validated by the week's content signature; the daily warm resolves the active weeks **one at a time (serial, not fanned out)** so a cold/forced warm can't fire 4 weeks of streaming searches at once — current week re-resolves on new material, frozen weeks resolve once. Retires the single-list `lbf:follow:resolved:1:` cache. The *Unmatched tracks* diagnostic gains a `showUnmatchedFollow` level-2 view and a shared `_unmatchedRows` (source name on line2). `_resolveFollowWeekTracks` (the shared open/warm resolver) does **not** gate on `$client` — on the open path it always resolves-and-reports like `resolvePlaylist`, so a follow week opened with no active player renders instead of spinning; only `_warmFollow` gates on the player.
+
+## 0.9.69
+
+### Added
+- **Deezer streaming matches.** Deezer joins Qobuz / Tidal / Bandcamp as a service the plugin can match releases and playlist tracks against. If you have the Deezer plugin installed, its albums and tracks now resolve in the release detail pages, the Created-for-You / People-You-Follow playlists and the two Don't-Stop-The-Music mixers — with the same library-first, per-service search-order controls as the other services (Settings → Streaming Services shows Deezer with its own priority). Matched Deezer albums also carry through to the **Listen Later** plugin (0.1.60+) for one-tap saving.
+
 ## 0.9.68
 
 ### Fixed

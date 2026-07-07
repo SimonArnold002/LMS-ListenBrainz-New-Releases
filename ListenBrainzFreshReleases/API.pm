@@ -497,7 +497,7 @@ sub getFollowFeed {
 my %FOLLOW_TRACK_EVENT = ( recording_recommendation => 1, recording_pin => 1 );
 
 # Normalise a feed/events payload into a de-duplicated, newest-first arrayref of
-# { title, artist, album, recording_mbid, recommender }. The feed is returned
+# { title, artist, album, recording_mbid, recommender, created }. The feed is returned
 # reverse-chronological, so array order is preserved. The recording_mbid lives in
 # additional_info OR the mbid_mapping (and a pin wraps the recording one level
 # deeper), so several places are checked. Dedup by recording_mbid when present,
@@ -536,6 +536,9 @@ sub _parseFollowFeed {
             album          => $tm->{release_name} // '',
             recording_mbid => $rec,
             recommender    => $ev->{user_name} // '',
+            # Unix epoch of the feed event, so the follow feature can bucket recs
+            # into Monday-start weeks (the weekly-list view). 0 if absent.
+            created        => ($ev->{created} // 0) + 0,
         };
     }
     return \@out;

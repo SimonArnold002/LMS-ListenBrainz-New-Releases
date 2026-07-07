@@ -16,15 +16,15 @@ A plugin for Lyrion Music Server (LMS) that browses ListenBrainz Fresh Releases.
 - **New Releases for You** — personalised feed of fresh releases from artists in your ListenBrainz history (needs username + token). Newest-first, grouped by week, tap-through detail pages.
 - **All Releases** — the global ListenBrainz fresh-releases feed (no account). By-week landing page to jump to any week.
 - **Created-for-You Playlists** — your **Weekly Jams / Weekly Exploration / Daily Jams** as fully-streaming **Play-all** lists; every track matched **library-first**, then streaming.
-- **Recommended by People You Follow** — the tracks the people you follow **recommend/pin** on ListenBrainz, gathered from your social feed into one **Play-all** playlist (library-first, then streaming). Refreshes daily.
+- **Recommended by People You Follow** — the tracks the people you follow **recommend/pin** on ListenBrainz, gathered into **one Play-all list**, newest-first, with **day dividers** so new additions are easy to spot. **New-music-only:** anything already in your library is filtered out, so it's purely music you don't have yet. Accumulates so recs aren't lost as the feed rolls; refreshes daily.
 - **Don't Stop The Music — two auto-DJ mixers** — **ListenBrainz Radio** (seeds from what's playing and evolves through similar artists) + **Recommended for You** (personalised CF picks, shuffled). Owned copies first, no per-session repeats, varied artists.
 - **Rich release detail pages** — artist **photo + biography**, **tracklist** with durations, **genres**, tags, **View on MusicBrainz**, and inline **one-tap streaming matches**.
-- **Direct streaming playback** — matched albums/tracks play from **Qobuz / Tidal / Bandcamp**; you choose the per-service search order.
+- **Direct streaming playback** — matched albums/tracks play from **Qobuz / Tidal / Bandcamp / Deezer**; you choose the per-service search order.
 - **Block artists** — one tap hides an artist from every feed.
 - **Material home shelves** — optional New Releases for You / Playlists / All Releases home rows.
 - **Your taste** — filter by type / artwork-only / Various Artists; sort by date / artist / album / confidence; release-window, weekly dividers, group-by-artist. Cached & pre-warmed (instant), **no extra server software**.
 
-**Requirements:** LMS 9.0.0+ (Material Skin); ListenBrainz account + token for personalised features (All Releases needs nothing); optional Qobuz/Tidal/Bandcamp (playback), MAI plugin (artist photos+bios), free Last.fm key (genre/bio fallbacks). Every optional add-on degrades gracefully.
+**Requirements:** LMS 9.0.0+ (Material Skin); ListenBrainz account + token for personalised features (All Releases needs nothing); optional Qobuz/Tidal/Bandcamp/Deezer (playback), MAI plugin (artist photos+bios), free Last.fm key (genre/bio fallbacks). Every optional add-on degrades gracefully.
 
 **Install:** add `https://simonarnold002.github.io/LMS-ListenBrainz-New-Releases/repo.xml` in LMS → Settings → Plugins.
 
@@ -88,45 +88,105 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-0.9.68
+0.9.75
 
-## Recommended by People You Follow (0.9.65)
+## Recommended by People You Follow (0.9.65; **new-music-only + single day-divided list in 0.9.71–0.9.72**)
 
-A single playable playlist built from the ListenBrainz **social feed** — the
-`recording_recommendation` / `recording_pin` events from the users you follow.
-Tile in the **Created for You** section, gated on `username` AND `token` (the feed
-endpoint is private). One virtual playlist, so the tile drills straight into the
-resolved tracks (no list level → no natural spot for a per-feature Refresh row;
-covered by the daily warm and the Playlists "Refresh matches" action instead).
+**ONE** new-music list built from the ListenBrainz **social feed** — the
+`recording_recommendation` / `recording_pin` events from the users you follow. Playable
+container tile in the **Created for You** section, gated on `username` AND `token` (the
+feed endpoint is private). The tile drills into a single newest-first track list with
+**day-divider rows**; every track the user **already owns is excluded** (the point of the
+feature — pure discovery). **History note:** a weekly rolling-4 layout was tried in 0.9.70
+but abandoned — a real user had ~35 recs spread ~1/week across many months, so pruning to
+the newest 4 weeks hid ~31 of them. 0.9.71 keeps them all in one accumulating list.
 
 - **API** (`API.pm`): `getFollowFeed` → `GET /1/user/<user>/feed/events?count=75`
   (token required). `_parseFollowFeed` keeps only the track-bearing event types
-  (`%FOLLOW_TRACK_EVENT`) and normalises to `{ artist, title, album,
-  recording_mbid, recommender }`, **newest-first** (feed is reverse-chronological),
-  **deduped** by `m:<mbid>` else `t:<lc artist|title>`. `recording_mbid` pulled from
-  `additional_info` / `mbid_mapping` / the pin wrapper via `_firstRecMbid`
-  (~1 in 6 recommendations carry none — still usable, they match by artist/title).
-  Dual short/fallback cache `lbf:follow:feed[fb]:<user>` (`FEED_TTL` /
+  (`%FOLLOW_TRACK_EVENT`) and normalises to `{ artist, title, album, recording_mbid,
+  recommender, created }` (the **`created` epoch** drives the day dividers),
+  **newest-first**, **deduped** by `m:<mbid>` else `t:<lc artist|title>`.
+  `recording_mbid` pulled from `additional_info` / `mbid_mapping` / the pin wrapper via
+  `_firstRecMbid` (~1 in 6 recommendations carry none — still usable, they match by
+  artist/title). Dual short/fallback cache `lbf:follow:feed[fb]:<user>` (`FEED_TTL` /
   `FEED_FALLBACK_TTL`). `force => 1` skips the working-READ (the warm passes it).
-- **Browse.pm**: `_followTile` (playable container, `MENU_FOLLOW` cover, count from
-  the resolved cache like `_playlistTile`) → `resolveFollowFeed`. Resolved cache
-  `lbf:follow:resolved:1:<user>|<svc-order>` (`_followResolvedKey`), **content
-  validated by `_followSig`** (md5 of the ordered track set) — a cached resolve is
-  reused only while the feed is unchanged; new recommendations change the sig and
-  re-resolve. **`_followSig` MUST `utf8::encode` before `md5_hex`** — the feed is
-  full Unicode (Japanese/accents/curly quotes) and `md5_hex` dies on any code point
-  > 255 ("Wide character in subroutine entry"), which hung the whole open (0.9.66). Reuses `_resolveTracks` / `_playlistResult` / `_playlistTtl`, so it
-  inherits service-aware re-matching, the 1-day library TTL, inconclusive-outage
-  short TTL and the tracks-only Play-all layout.
-- **Daily cadence** (vs the weekly createdfor listing): this timeline updates
-  continuously, so a 24h cache + the existing **daily warm** is the right fit.
-  `_warmFollow` is chained after the playlist queue drains in `warmCache` (so the
-  two don't hammer the streaming APIs at once) and is a no-op without a token; it
-  skips the re-resolve when the sig is unchanged. Runs on the daily tick and on the
-  forced manual refresh.
+- **Accumulating source store (`Browse.pm`).** `_mergeFollow` merges each fetched track
+  into a persisted flat store `lbf:follow:accum:1:<user>` = `{ tracks => [newest-first] }`
+  (`FOLLOW_STORE_TTL` = 90d, refreshed every merge), **add-if-new** (dedup via
+  `_followTrackKey`) so a rec that later scrolls out of the 75-event feed window isn't
+  lost, sorted by `created` desc, **capped at `FOLLOW_KEEP_MAX` (500)**. So the list can
+  exceed the feed window — but it **builds forward from first capture** (can't backfill
+  pre-install recs beyond whatever's in the current 75-event window). NB: the 75-event
+  feed is mostly non-rec events, so the rec slice is small; a sparse follower set yields a
+  short list.
+- **Browse UI**: `_followTile` (playable `type=>'playlist'` container — Play/Add queues
+  the whole list — `MENU_FOLLOW` cover, match count on line2 from the resolved cache) →
+  `resolveFollowFeed` → `_resolveFollow` → `_followResult`. Single resolved cache
+  `lbf:follow:resolved:3:<user>|<svc-order>` (`_followResolvedKey`, no per-week key now),
+  **content-validated by `_followSig`** (md5 of the ordered track set). **`_followSig`
+  MUST `utf8::encode` before `md5_hex`** — the feed is full Unicode and `md5_hex` dies on
+  any code point > 255 ("Wide character in subroutine entry"), which hung the whole open
+  (0.9.66). **No-player invariant:** `_resolveFollow` is shared by the open path and the
+  warm but **must NOT** gate on `$client` — on a cache miss it always resolves-and-reports
+  (like createdfor `resolvePlaylist`), so the browse level renders even with no player;
+  only `_warmFollow` gates on `$client` before calling it. Retires the `:1:` (old single)
+  and `:2:` (weekly) resolved keys and the weekly subs.
+- **Day dividers (0.9.72).** `_followResult` groups the owned-excluded matched tracks by
+  day (`_dayOf($created)`, already newest-first) and inserts a **day-divider header** before
+  each day, styled **exactly like the New Releases week dividers** for consistency (the user
+  called out the earlier plain-text dashes as inconsistent): `_dayDivider` uses
+  `_headerType()` (→ `header-basic` on Material ≥6.4.3, a clean non-actionable full-width
+  divider; else `header`) with `image => ICON` (keeps the grid toggle enabled), plain text
+  on non-header skins. Header support is detected via `_wantHeaders($feat)` — the `features`
+  string is threaded from the tile's passthrough through `resolveFollowFeed` → `_resolveFollow`
+  → `_followResult` (XMLBrowser doesn't forward request params to coderef sub-feeds — the
+  0.6.15 gotcha). As in `_buildWeekly`, the older actionable `header` gets a per-day drill
+  coderef (returns that day's tracks) so its forced "More" isn't an empty page; `header-basic`
+  ignores it. **Play-all:** confirmed present in-view with these divider rows (the tile is
+  also a `type=>'playlist'` container, so Play/Add there queues the whole list regardless).
+  Each matched item carries its source `created` because `_resolveTracks` tags
+  `$item->{_created} = $tr->{created}` (only the follow feed sets `created`; harmless
+  elsewhere), which survives the Storable resolved cache.
+- **Exclude-owned resolution.** Resolves via `_resolveTracks(..., 'exclude')` — a
+  `_findPlayableTrack` libMode that **inverts `first`**: it probes the library (deferred
+  idle-tick) and, if the track is **owned**, **drops it** — signalled as a 3rd `owned`
+  callback arg (cached `{ owned => 1 }`, `LIBRARY_TTL`), NOT a stream miss; not-owned
+  tracks stream (never falls back to the library). `_resolveTracks` counts owned and
+  returns it as a 4th `$done` arg (older callers ignore it), so the page/tile **total =
+  new tracks** (`scalar(@tracks) − owned`). Same matcher as the rest of the plugin, so it
+  inherits the accent/punctuation/short-title edge cases (a narrowly-missed owned track
+  can slip through as "new").
+- **Daily cadence.** `_warmFollow` refreshes the store then resolves the whole list once
+  if its sig changed (no-op when unchanged). Chained after the playlist queue drains in
+  `warmCache`, no-op without a token, needs a player for the streaming API context.
+- **"Play what's new" (0.9.73; reworked 0.9.74; row-type + freshness fix 0.9.75).** The "seen"
+  marker (`lastSeen`, a newest-rec
+  epoch) lives in a **PREF** (`FOLLOW_SEEN_PREF` = `follow_last_seen`), NOT the cache store — the
+  0.9.73 version kept it in the store and it didn't reliably persist (the marker never stuck, so
+  the row always showed the whole list AND its count/content disagreed). No play history needed —
+  recs carry `created`, tagged onto matched items as `_created`. **Both the row's COUNT and its
+  CONTENTS derive "new" from the SAME resolved items** (`_created > lastSeen`) — the earlier
+  split (count from resolved `_created`, contents re-derived from the source store's `created`)
+  was the bug where the card said "(30)" but opened empty. `_followResult` **baselines the pref to
+  the newest matched `_created` on first render** (so the existing backlog is marked already-played
+  and the card doesn't flood), then counts `_created > lastSeen` and, when any, **unshifts a "Play
+  what's new (N)" row at the top** (per [[lbf-action-rows-placement]]) → `playFollowNew`.
+  **0.9.75 — the row is a `type=>'link'` DRILL row, NOT a `type=>'playlist'` container:** the follow
+  level is the tile's Play-all source, and a nested playable container there gets **re-expanded by
+  Play-all and queues the new tracks a SECOND time**. The row's already-resolved, service-filtered
+  items are **threaded through its passthrough** (`items => \@tracks`; the follow level is live/
+  `cachetime=>0`, rebuilt each open, so passthrough is always fresh) — so `playFollowNew` reads them
+  directly and the count↔content agreement no longer depends on a resolved cache that may have been
+  **evicted between render and tap** (the resolved-cache read is now only a fallback). `playFollowNew`
+  filters by `_created > lastSeen`, advances the pref to the newest matched `_created` (marks caught up
+  → row clears), and returns a **PURE track list (no dividers/action rows)** so the drilled level is
+  itself a proper Play-all container (the plugin's "a Play-all level must be tracks-only" rule).
+  Strings `PLUGIN_LBF_PLAY_NEW` / `PLUGIN_LBF_NO_NEW`. LESSON: durable per-user state (a "last seen"
+  marker) belongs in a **pref**, not `Slim::Utils::Cache` — the cache can evict and very large TTLs (the 90d
+  used here) weren't retained; store TTL cut to 30d to match the proven `FEED_FALLBACK_TTL`.
 - **Cover**: `menu-follow.png` ("People You Follow", `ROSE` gradient) via
-  `tools/make_covers.py`. **Debug tool**: `tools/fetch_feed.py` dumps the raw feed
-  as `match_check`-ready lines (needs the token: arg 2 or `LB_TOKEN`).
+  `tools/make_covers.py`. **Debug tool**: `tools/fetch_feed.py` dumps the raw feed as
+  `match_check`-ready lines (needs the token: arg 2 or `LB_TOKEN`).
 
 ## Created-for-You Playlists (0.8.0)
 
@@ -359,12 +419,16 @@ fully-streaming, Play-all-able playlist.
     drops every hand-curated Bandcamp-only match. 0.9.42 wrongly bumped it `:6:`→`:7:`; 0.9.47 reverted to `:6:`
     so existing matches survive an update (a fresh search bakes the favurl in; an older match plays without it
     until re-searched). **Rule: never bump `lbf:bcmatch:` for a change the auto path handles via `lbf:stream:`.**
-  - **"Unmatched tracks (debug)" view (0.9.38).** Settings → a browsable diagnostic
-    (`fetchUnmatchedPlaylists` → `showUnmatched`): lists each created-for playlist; opening one shows
-    the **source** tracks that resolved to nothing (not library, not any enabled service) as plain
-    `Artist — Title` rows, count in the title. `_resolveTracks` now also returns the unmatched source
-    tracks; the view resolves against the warm cache so it's usually instant and reflects exactly what
-    the playlist dropped. Read-only. (Used live to find the `L.U.C.K.Y` miss — see
+  - **"Unmatched tracks (debug)" view (0.9.38; extended to the follow list in 0.9.71).** Settings → a
+    browsable diagnostic (`fetchUnmatchedPlaylists` → `showUnmatched` / `showUnmatchedFollow`): level 1
+    lists **each created-for playlist AND the People-You-Follow list** (the follow entry is token-gated +
+    appended after the playlists); opening one shows the **source** tracks that resolved to nothing (not
+    library, not any enabled service) as plain `Artist — Title` rows via the shared `_unmatchedRows`,
+    **with the source list name on line2** (so it's clear which list a gap came from now the tracker
+    mixes both), count in the title. The follow path resolves in `'exclude'` mode, so owned tracks are
+    dropped (not shown as unmatched) and the count is unmatched / new-track total. `_resolveTracks`
+    returns the unmatched source tracks; the view resolves against the warm cache so it's usually instant
+    and reflects exactly what the list dropped. Read-only. (Used live to find the `L.U.C.K.Y` miss — see
     [[lbf-find-unmatched-tracks]] for the manual HTTP version of the same diff.)
 
 ## Don't Stop The Music propagators (0.9.0)
@@ -706,6 +770,19 @@ Detected in `_isVariousArtists()`:
 - Material Skin's grouped artist release page layout is NOT achievable from OPML feeds — only via native library `albums_loop` responses. Solved in earlier versions by using Browse by Type sub-menus, removed in v0.3.0 in favour of settings-driven filtering.
 
 ## Version History
+- **0.9.75** — **code-review fixes: follow "Play what's new" + Deezer robustness (no cache bump).**
+  (1) The "Play what's new" row was a `type=>'playlist'` container nested inside the People-You-Follow
+  list; the follow level is the tile's Play-all source, so Play-all re-expanded the container and
+  **queued the new tracks twice**. It's now a `type=>'link'` DRILL row that opens a **pure track list**
+  (no dividers) — itself a proper Play-all container. (2) Its resolved, service-filtered items are
+  **threaded through the passthrough** (the follow level is live/`cachetime=>0`, always fresh), so
+  `playFollowNew` no longer re-reads a resolved cache that may have been **evicted between render and
+  tap** (the cache read is now only a fallback) — count and contents can't disagree. (3) `_searchDeezer`/
+  `_searchDeezerTrack` now tolerate a bare-arrayref OR hash-wrapped (`{data}`/`{albums}`/`{tracks}`)
+  search response and bail to a clean miss on any other shape, so a shape mismatch degrades to a
+  no-match instead of dying inside the async callback (outside `_findPlayable`'s eval) and leaving the
+  service un-settled until its timeout. Matching/caching otherwise unchanged. See
+  [[lbf-action-rows-placement]].
 - **0.9.64** — **"Search Bandcamp" is a tap-to-choose picker; choosing pins the match and re-opens the album armed.** The manual Bandcamp search no longer refreshes the detail page in place — that showed the match but left it un-armed for Material's custom actions when Bandcamp was the **sole** source (Material sets `view.itemCustomActions` only on a fresh drill-in / `browseHandleListResponse`, **never** on the in-place `refreshList` — browse-page.js:1568), so "Add to Listen Later / Wish List" was missing until you backed out and re-entered. Now the one `nextWindow => 'refresh'` search row drives **both** outcomes because Material only honours `nextWindow` on an **empty** response (browse-functions.js:834): a **match** returns a picker sub-page (a "Tap an album to use it as this release's match" prompt + one **non-playable** `type=>'link'` row per candidate, real cover + `Album / Artist`); a **miss** returns an empty list → inline refresh, row flips to "…tap to retry" (no dead-end). Tapping a candidate **pins** it (`_bcMatchKey`; nothing pinned until chosen) and calls **`_releaseDetail($rel, …)` to re-render the album page as a fresh drill** — which shows the match inline AND arms Add. The pinned item is byte-for-byte the old persisted form (logo image; cover/page-URL/artist/year on the favurl), so inline render, replay and the Listen Later handshake are unchanged; **no cache bump**. `$rel` is threaded `_releaseDetail → _bandcampSearchRow → _searchBandcampOnly → the choose coderef`. Supersedes the abandoned **0.9.61** (choose-then-auto-pop-to-`parent`) and **0.9.62–0.9.63** (drill-in of *playable* rows — tapping played/opened the album instead of choosing) iterations. Verified live. **KEY Material fact for this family of bugs:** `refreshList` never re-arms `itemCustomActions`; only a fresh drill does — so any flow that must expose a custom action has to land the user on a freshly-drilled view, not an in-place refresh.
 - **0.9.60** — **code-review fix: manual Bandcamp watchdog re-entry.** `_searchBandcampOnly` runs its
   ordered queries (`_bandcampArtists` full/collab/album-only) sequentially under ONE overall watchdog.

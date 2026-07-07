@@ -92,6 +92,22 @@ use constant PLAYLIST_CONCURRENCY => 6;
 # the playlist page spinning forever.
 use constant PLAYLIST_TIMEOUT => 45;
 
+# "Recommended by People You Follow" is ONE new-music list (owned tracks excluded),
+# newest-first, with day dividers in the opened view. The source recs are accumulated
+# into a small persisted store so a rec isn't lost once it scrolls out of the feed's
+# 75-event window; history builds forward from first capture. Capped at a generous
+# number of recs (they're tiny metadata) so the store can't grow without bound.
+use constant FOLLOW_KEEP_MAX  => 500;
+# The source store is tiny metadata (artist/title/mbid/created), so keep it well
+# beyond a typical feed window — it only needs to survive quiet spells / restarts;
+# each merge refreshes the TTL. 30d (not longer) — proven to persist, matching
+# FEED_FALLBACK_TTL (very large TTLs weren't reliably retained by the cache).
+use constant FOLLOW_STORE_TTL => 30 * 86400;
+# The "seen" marker for "Play what's new" lives in a PREF, not the cache store, so it
+# survives cache eviction / restarts reliably. Newest rec epoch the user has caught
+# up to; 0 = never (baselined on first list render to the newest rec then).
+use constant FOLLOW_SEEN_PREF => 'follow_last_seen';
+
 use constant ICON => 'plugins/ListenBrainzFreshReleases/html/images/ListenBrainzFreshReleasesIcon_svg.png';
 
 # Branded cover-style images for the top-level menu rows (same look as the
@@ -661,27 +677,71 @@ sub resolvePlaylist {
 }
 
 # ===========================================================================
-# "Recommended by People You Follow" — a single playable playlist built from the
-# user's ListenBrainz social feed (recording_recommendation / recording_pin events
-# from followed users). Unlike the createdfor Playlists (a LIST of playlists), this
-# is one virtual playlist, so its tile drills straight into the resolved tracks.
-# The feed updates continuously and is cached a day; the resolved result is keyed
-# by user+service-order and validated by a signature of the feed's track set, so a
-# cached resolve is reused only while the feed is unchanged. Refreshed daily by the
-# background warm (and by the Playlists "Refresh matches" action, which warms all).
+# "Recommended by People You Follow" — ONE new-music list from the user's ListenBrainz
+# social feed (recording_recommendation / recording_pin events from followed users).
+# Every track the user ALREADY OWNS in their library is excluded ('exclude' libMode),
+# so the list is purely music they don't have yet. Recs are accumulated into a small
+# persisted store (_mergeFollow) so a rec isn't lost when it scrolls out of the feed's
+# 75-event window; history builds forward from first capture. The opened view is
+# newest-first with DAY DIVIDER rows so new additions are easy to spot, while the tile
+# itself is a playable container (Play/Add queues the whole list) — Material drops the
+# in-view Play-all once divider rows are present, so play-as-one-list comes from the
+# tile. Resolved once, cached under a service-order-scoped key validated by a content
+# signature; refreshed by the daily warm.
 # ===========================================================================
 
-# Resolved-follow cache key for the current user + streaming-service order. The
-# service order is part of the key (like the playlist/album caches) so changing
-# priorities re-resolves; the feed-content check is the payload's {sig}.
+# Persisted rec store for the current user: { updated, tracks => [ newest-first, each
+# with a `created` epoch ] }. Keyed by username; ':1:' namespaces this flat store.
+sub _followStoreKey { 'lbf:follow:accum:1:' . ($prefs->get('username') // '') }
+
+sub _loadFollowStore {
+    my $s = $cache->get(_followStoreKey());
+    return (ref $s eq 'HASH' && ref $s->{tracks} eq 'ARRAY') ? $s : { tracks => [] };
+}
+
+# Dedup key for a rec: recording MBID if present, else lc "artist|title".
+sub _followTrackKey {
+    my ($t) = @_;
+    return $t->{recording_mbid}
+        ? "m:$t->{recording_mbid}"
+        : 't:' . lc(($t->{artist} // '') . '|' . ($t->{title} // ''));
+}
+
+# Merge freshly-fetched feed tracks into the store (add-if-new, so a rec that later
+# scrolls out of the 75-event window isn't lost), keep newest-first by `created`, and
+# cap at FOLLOW_KEEP_MAX. Returns the updated store.
+sub _mergeFollow {
+    my ($tracks) = @_;
+    my $store = _loadFollowStore();
+    my @all   = @{ $store->{tracks} };
+    my %seen  = map { _followTrackKey($_) => 1 } @all;
+
+    for my $t (@$tracks) {
+        my $k = _followTrackKey($t);
+        next if $seen{$k}++;
+        push @all, $t;
+    }
+    @all = sort { ($b->{created} // 0) <=> ($a->{created} // 0) } @all;   # newest first
+    @all = @all[0 .. FOLLOW_KEEP_MAX - 1] if @all > FOLLOW_KEEP_MAX;
+
+    $store->{tracks}  = \@all;
+    $store->{updated} = time();
+    eval { $cache->set(_followStoreKey(), $store, FOLLOW_STORE_TTL); 1 }
+        or $log->warn("follow store cache set failed: $@");
+    return $store;
+}
+
+# Resolved-list cache key: user + streaming-service order (so a priority change
+# re-resolves). ':3:' namespaces it away from the retired single (:1:) / weekly (:2:)
+# resolved keys; content re-validated by {sig}.
 sub _followResolvedKey {
     my $user     = $prefs->get('username') // '';
     my $svcOrder = join(',', map { lc $_->{name} } _orderedAdapters());
-    return 'lbf:follow:resolved:1:' . join('|', $user, $svcOrder);
+    return 'lbf:follow:resolved:3:' . join('|', $user, $svcOrder);
 }
 
-# A stable, order-sensitive signature of a feed's track set, so a cached resolve is
-# reused only while the underlying feed is unchanged (it refreshes ~daily).
+# A stable, order-sensitive signature of a week's track set, so a cached resolve is
+# reused only while that week's recs are unchanged.
 sub _followSig {
     my ($tracks) = @_;
     my $s = join("\n",
@@ -693,9 +753,9 @@ sub _followSig {
     return Digest::MD5::md5_hex($s);
 }
 
-# The follow-feed tile: a playable container (Play-all + drill-in), like the
-# playlist tiles. The streaming-match count (read from the resolved cache the warm
-# populates) sits on line2 when known, filtered to services that are still usable.
+# The "People You Follow" tile: a playable container (Play/Add queues the whole list)
+# that also drills into the day-divided view. Match count (from the resolved cache the
+# warm populates) sits on line2, filtered to services still usable.
 sub _followTile {
     my ($client, $feat) = @_;
 
@@ -717,44 +777,16 @@ sub _followTile {
     };
 }
 
-# Open the follow feed → resolved, fully-streaming (or library) track list, cached
-# as a unit. If the feed is unchanged since the last resolve (same signature) the
-# cached result is served; otherwise it re-resolves and re-caches.
+# Open the follow list → the resolved, owned-excluded, day-divided track list. Serves
+# the cached resolve while the recs are unchanged (same sig); else re-resolves.
 sub resolveFollowFeed {
     my ($client, $callback, $args, $pass) = @_;
-
-    my $rkey  = _followResolvedKey();
-    my $title = cstring($client, 'PLUGIN_LBF_FOLLOW_FEED');
+    my $feat = (ref $pass eq 'HASH') ? $pass->{features} : undef;
 
     Plugins::ListenBrainzFreshReleases::API->getFollowFeed(
         onDone => sub {
-            my $tracks = shift // [];
-            unless (@$tracks) {
-                $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_NO_FOLLOW'), type => 'text' }], cachetime => 0 });
-                return;
-            }
-
-            my $sig = _followSig($tracks);
-            if (my $c = $cache->get($rkey)) {
-                if (($c->{sig} // '') eq $sig) {
-                    _dbg("follow feed cache hit ($c->{matched}/$c->{total})");
-                    $callback->(_playlistResult($client, $c, $title));
-                    return;
-                }
-            }
-
-            _resolveTracks($client, $tracks, sub {
-                my ($items, $inconclusive) = @_;
-                $items //= [];
-                my $payload = { items => $items, matched => scalar(@$items), total => scalar(@$tracks), sig => $sig };
-                my $ttl     = _playlistTtl($items, scalar @$tracks, $inconclusive);
-                eval { $cache->set($rkey, $payload, $ttl); 1 }
-                    or $log->warn("resolved follow cache set failed: $@");
-                my $lib = grep { ($_->{_svc} // '') eq 'Library' } @$items;
-                _dbg("resolved follow feed: $payload->{matched}/$payload->{total} matched ($lib library)"
-                    . ($inconclusive ? " ($inconclusive inconclusive — short TTL)" : ""));
-                $callback->(_playlistResult($client, $payload, $title));
-            });
+            my $store = _mergeFollow(shift // []);
+            _resolveFollow($client, $store, $callback, 0, $feat);
         },
         onError => sub {
             $log->error("Follow feed resolve error: " . (shift // ''));
@@ -763,43 +795,201 @@ sub resolveFollowFeed {
     );
 }
 
-# Warm the follow-feed resolve. Needs a token (private feed) and a player (the
-# streaming API context); keyed by user+service-order and validated by the feed
-# signature, so a daily tick only re-resolves when followed users have recommended
-# something new (or the service order changed). A forced warm always re-resolves.
+# Shared resolve (open path + warm). Excludes owned tracks; count is matched / NEW-track
+# total. $force re-resolves past both cache layers. $callback is undef on the warm path.
+# Each matched item is tagged with its source rec's `created` (in _resolveTracks) so the
+# day dividers can be built at render time (see _followResult).
+sub _resolveFollow {
+    my ($client, $store, $callback, $force, $feat) = @_;
+
+    my $tracks = $store->{tracks} || [];
+    unless (@$tracks) {
+        $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_NO_FOLLOW'), type => 'text' }], cachetime => 0 }) if $callback;
+        return;
+    }
+
+    my $rkey = _followResolvedKey();
+    my $sig  = _followSig($tracks);
+    if (!$force && (my $c = $cache->get($rkey))) {
+        if (($c->{sig} // '') eq $sig) {
+            _dbg("follow feed cache hit ($c->{matched}/$c->{total})");
+            $callback->(_followResult($client, $c, $feat)) if $callback;
+            return;
+        }
+    }
+
+    # On the open path with no player, still resolve-and-report (don't hang the browse
+    # level); the warm guards $client before calling here.
+
+    _resolveTracks($client, $tracks, sub {
+        my ($items, $inconclusive, $unmatched, $owned) = @_;
+        $items //= [];
+        $owned //= 0;
+        my $newTotal = scalar(@$tracks) - $owned;   # tracks the user doesn't already own
+        my $payload  = { items => $items, matched => scalar(@$items), total => $newTotal, sig => $sig };
+        my $ttl      = _playlistTtl($items, $newTotal, $inconclusive);
+        eval { $cache->set($rkey, $payload, $ttl); 1 }
+            or $log->warn("resolved follow cache set failed: $@");
+        my $lib = grep { ($_->{_svc} // '') eq 'Library' } @$items;
+        _dbg("resolved follow feed: $payload->{matched}/$payload->{total} new ($owned owned excluded, $lib library)"
+            . ($inconclusive ? " ($inconclusive inconclusive — short TTL)" : ""));
+        $callback->(_followResult($client, $payload, $feat)) if $callback;
+    }, 'exclude', $force);
+}
+
+# Build the follow browse level: the owned-excluded matched tracks, newest-first, with a
+# DAY DIVIDER header before each new day (from the source rec's `created`, tagged onto the
+# item in _resolveTracks). Dividers use the SAME Material header style as the New Releases
+# week dividers (_headerType()/`image`/per-group drill coderef via _buildWeekly's pattern)
+# for a consistent look; plain text on non-header skins.
+sub _followResult {
+    my ($client, $payload, $feat) = @_;
+
+    my $enabled = { map { lc($_->{name}) => 1 } _orderedAdapters() };
+    my @tracks  = grep { _cachedSvcUsable($_->{_svc}, $enabled) } @{ $payload->{items} || [] };
+    my $matched = scalar @tracks;
+    my $total   = $payload->{total} // $matched;
+
+    my $useH    = _wantHeaders($feat);
+    my $divType = $useH ? _headerType() : 'text';
+
+    # Group by day. Tracks are already newest-first (store sorts by `created` desc), so
+    # same-day rows are adjacent and day order is preserved.
+    my (@order, %bucket);
+    for my $it (@tracks) {
+        my $day = _dayOf($it->{_created});
+        push @order, $day unless exists $bucket{$day};
+        push @{ $bucket{$day} }, $it;
+    }
+
+    my @items;
+    for my $day (@order) {
+        my $rows = $bucket{$day};
+        push @items, _dayDivider($client, $day, $divType, $useH, $rows);
+        push @items, @$rows;
+    }
+    @items = ({ name => cstring($client, 'PLUGIN_LBF_NO_MATCH'), type => 'text' }) unless @items;
+
+    # "Play what's new (N)" action row at the TOP (per-feature action-row placement) —
+    # matched tracks newer than the user's durable "seen" marker (a PREF, so it survives
+    # cache eviction). Baseline the marker to the newest matched rec on first use, so the
+    # existing backlog counts as already played and only later arrivals surface. Count
+    # AND content (playFollowNew) both derive "new" from the SAME resolved items' _created,
+    # so the row's number and what's inside it can't disagree. It's a `type=>'link'`
+    # DRILL row (like the Refresh rows), NOT a playable `playlist` container: this level
+    # is the tile's Play-all source, and a nested playable container here would be
+    # re-expanded by Play-all and queue the new tracks a SECOND time. The resolved items
+    # are threaded through the passthrough (this level is live/cachetime=>0, rebuilt each
+    # open) so playFollowNew works off fresh data rather than re-reading a cache that may
+    # have been evicted between render and tap.
+    my $maxSeen = 0;
+    for (@tracks) { my $c = $_->{_created} // 0; $maxSeen = $c if $c > $maxSeen; }
+    my $lastSeen = $prefs->get(FOLLOW_SEEN_PREF) // 0;
+    if (!$lastSeen && $maxSeen) {
+        $lastSeen = $maxSeen;
+        $prefs->set(FOLLOW_SEEN_PREF, $lastSeen);
+    }
+    my $newCount = grep { ($_->{_created} // 0) > $lastSeen } @tracks;
+    if ($newCount) {
+        unshift @items, {
+            name        => sprintf(cstring($client, 'PLUGIN_LBF_PLAY_NEW'), $newCount),
+            type        => 'link',
+            image       => MENU_FOLLOW,
+            url         => \&playFollowNew,
+            passthrough => [{ features => $feat, items => \@tracks }],
+        };
+    }
+
+    my $heading = cstring($client, 'PLUGIN_LBF_FOLLOW_FEED') . " ($matched/$total)";
+    return { title => $heading, items => \@items, cachetime => 0 };
+}
+
+# "Play what's new" → the matched recs newer than the user's "seen" marker. The list
+# view threads its already-resolved, service-filtered items through the passthrough
+# (the follow level is live/cachetime=>0, so they're always fresh) — so the count on the
+# row and the tracks inside it always agree; the resolved cache is only a fallback for a
+# direct invocation. Reading/playing it advances the durable marker (a pref) to the
+# newest matched rec, so the row clears until more arrives. Returns a PURE track list
+# (no dividers/action rows) so this drilled level is itself a proper Play-all container.
+sub playFollowNew {
+    my ($client, $callback, $args, $pass) = @_;
+
+    my @items;
+    if (ref $pass eq 'HASH' && ref $pass->{items} eq 'ARRAY') {
+        @items = @{ $pass->{items} };   # threaded from the list view — fresh, no cache read
+    }
+    else {
+        # Fallback: re-read the resolved cache (may be absent if it was evicted).
+        my $enabled = { map { lc($_->{name}) => 1 } _orderedAdapters() };
+        my $c       = $cache->get(_followResolvedKey());
+        @items = grep { _cachedSvcUsable($_->{_svc}, $enabled) } @{ ($c && $c->{items}) || [] };
+    }
+
+    my $lastSeen = $prefs->get(FOLLOW_SEEN_PREF) // 0;
+    my @new      = grep { ($_->{_created} // 0) > $lastSeen } @items;
+
+    # Mark caught up: advance the marker to the newest matched rec.
+    my $maxSeen = $lastSeen;
+    for (@items) { my $t = $_->{_created} // 0; $maxSeen = $t if $t > $maxSeen; }
+    $prefs->set(FOLLOW_SEEN_PREF, $maxSeen);
+    _dbg("follow play-new: " . scalar(@new) . " new of " . scalar(@items) . " (lastSeen=$lastSeen -> $maxSeen)");
+
+    unless (@new) {
+        $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_NO_NEW'), type => 'text' }], cachetime => 0 });
+        return;
+    }
+    my $heading = sprintf(cstring($client, 'PLUGIN_LBF_PLAY_NEW'), scalar(@new));
+    $callback->({ title => $heading, items => \@new, cachetime => 0 });
+}
+
+# YYYY-MM-DD (local) of a rec epoch, '' if none.
+sub _dayOf {
+    my ($created) = @_;
+    return '' unless $created;
+    my @lt = localtime($created);
+    return sprintf('%04d-%02d-%02d', $lt[5] + 1900, $lt[4] + 1, $lt[3]);
+}
+
+# A day-divider header: "22 June 2026" (or "Undated"), styled exactly like the New
+# Releases week dividers — Material's header type via _headerType() with an `image` (so
+# the grid toggle stays enabled), plain text on non-header skins. Older Material forces a
+# drill action on 'header', so (as in _buildWeekly) point it at this day's tracks rather
+# than an empty page; 'header-basic' (Material 6.4.3+) strips the action and ignores it.
+sub _dayDivider {
+    my ($client, $day, $divType, $useH, $rows) = @_;
+    my $label = length $day ? _fmtDate($day) : cstring($client, 'PLUGIN_LBF_UNDATED');
+    my $hdr   = { name => $label, type => $divType, image => ICON };
+    if ($useH) {
+        my @kids = @$rows;
+        $hdr->{url}         = sub { $_[1]->({ items => \@kids }) };
+        $hdr->{passthrough} = [{}];
+    }
+    return $hdr;
+}
+
+# Warm the follow list. Needs a token (private feed) and a player (streaming API
+# context). Refreshes the store, then resolves the whole list if its sig changed. A
+# forced warm always re-resolves.
 sub _warmFollow {
-    my ($client, $force) = @_;   # key is (re)built from current prefs via _followResolvedKey()
+    my ($client, $force) = @_;
     return unless ($prefs->get('token') // '') ne '';
 
     Plugins::ListenBrainzFreshReleases::API->getFollowFeed(
         # force => 1: bypass the working-cache READ so a warm always re-pulls the
-        # feed and can discover newly-arrived recommendations (mirrors the playlist
-        # listing warm).
+        # feed and can discover newly-arrived recommendations.
         force  => 1,
         onDone => sub {
-            my $tracks = shift // [];
-            my $rkey   = _followResolvedKey();
+            my $store  = _mergeFollow(shift // []);
+            my $tracks = $store->{tracks} || [];
             unless (@$tracks) { _dbg("warm: follow feed empty"); return; }
+            return unless $client;   # no player → resolve on first open instead
 
-            my $sig    = _followSig($tracks);
-            my $cached = $cache->get($rkey);
-            if (!$force && $cached && ($cached->{sig} // '') eq $sig) {
+            my $c = $cache->get(_followResolvedKey());
+            if (!$force && $c && ($c->{sig} // '') eq _followSig($tracks)) {
                 _dbg("warm: follow feed unchanged — skip");
                 return;
             }
-            return unless $client;   # no player → resolve on first open instead
-
-            _resolveTracks($client, $tracks, sub {
-                my ($items, $inconclusive) = @_;
-                $items //= [];
-                my $payload = { items => $items, matched => scalar(@$items), total => scalar(@$tracks), sig => $sig };
-                my $ttl     = _playlistTtl($items, scalar @$tracks, $inconclusive);
-                eval { $cache->set($rkey, $payload, $ttl); 1 }
-                    or $log->warn("warm follow cache set failed: $@");
-                my $lib = grep { ($_->{_svc} // '') eq 'Library' } @$items;
-                _dbg("warm: resolved follow feed $payload->{matched}/$payload->{total} ($lib library)"
-                    . ($inconclusive ? " ($inconclusive inconclusive)" : ""));
-            }, undef, $force);
+            _resolveFollow($client, $store, undef, $force);
         },
         onError => sub { $log->info("warm: follow feed fetch failed: " . (shift // '')) },
     );
@@ -811,17 +1001,15 @@ sub _warmFollow {
 # title the service search can't find) is visible in the UI on or off-network.
 # ===========================================================================
 
-# Level 1: the created-for playlists, each drilling into its unmatched list.
+# Level 1: every list that resolves streaming tracks — the created-for playlists AND
+# the People-You-Follow list — each drilling into its own unmatched list, so a matcher
+# gap is visible whichever feature it came from.
 sub fetchUnmatchedPlaylists {
     my ($client, $callback, $args) = @_;
 
     Plugins::ListenBrainzFreshReleases::API->getCreatedForPlaylists(
         onDone => sub {
             my $playlists = shift // [];
-            unless (@$playlists) {
-                $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_NO_PLAYLISTS'), type => 'text' }], cachetime => 0 });
-                return;
-            }
             my %n;
             my @items = map {
                 my $pl = $_;
@@ -838,13 +1026,59 @@ sub fetchUnmatchedPlaylists {
                     }],
                 }
             } @$playlists;
-            $callback->({ items => \@items, cachetime => 0 });
+
+            my $finish = sub {
+                $callback->({
+                    items => @items ? \@items
+                                    : [{ name => cstring($client, 'PLUGIN_LBF_NO_PLAYLISTS'), type => 'text' }],
+                    cachetime => 0,
+                });
+            };
+
+            # Append the People-You-Follow list (token-gated — the feed is private),
+            # drilling into its unmatched view. A feed outage just falls back to the
+            # createdfor playlists (still a useful diagnostic).
+            if (($prefs->get('token') // '') ne '') {
+                Plugins::ListenBrainzFreshReleases::API->getFollowFeed(
+                    onDone => sub {
+                        my $store = _mergeFollow(shift // []);
+                        if (@{ $store->{tracks} || [] }) {
+                            push @items, {
+                                name  => cstring($client, 'PLUGIN_LBF_FOLLOW_FEED'),
+                                type  => 'link',
+                                image => MENU_FOLLOW,
+                                url   => \&showUnmatchedFollow,
+                            };
+                        }
+                        $finish->();
+                    },
+                    onError => sub { $finish->() },
+                );
+            }
+            else { $finish->(); }
         },
         onError => sub {
             $log->error("Unmatched: playlist list fetch failed: " . (shift // ''));
             $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_ERROR'), type => 'text' }], cachetime => 0 });
         },
     );
+}
+
+# Build the unmatched-track rows: plain "Artist — Title", with the source list name on
+# line2 (so "what list is it from" is clear now the tracker mixes playlists + follow
+# weeks). Falls back to an "all matched" note when nothing was dropped.
+sub _unmatchedRows {
+    my ($client, $unmatched, $srcName) = @_;
+    my @rows = map {
+        my $a = $_->{artist} // ''; my $t = $_->{title} // '';
+        {
+            name => (length $a ? "$a \x{2014} $t" : $t),
+            (defined $srcName && length $srcName ? (line2 => $srcName) : ()),
+            type => 'text',
+        }
+    } @$unmatched;
+    @rows = ({ name => cstring($client, 'PLUGIN_LBF_ALL_MATCHED'), type => 'text' }) unless @rows;
+    return @rows;
 }
 
 # Level 2: fetch one playlist's source tracks and resolve them (cache-warm after a
@@ -875,11 +1109,7 @@ sub showUnmatched {
             _resolveTracks($client, $tracks, sub {
                 my ($matched, $inconclusive, $unmatched) = @_;
                 $unmatched //= [];
-                my @rows = map {
-                    my $a = $_->{artist} // ''; my $t = $_->{title} // '';
-                    { name => (length $a ? "$a \x{2014} $t" : $t), type => 'text' }
-                } @$unmatched;
-                @rows = ({ name => cstring($client, 'PLUGIN_LBF_ALL_MATCHED'), type => 'text' }) unless @rows;
+                my @rows = _unmatchedRows($client, $unmatched, $title);
                 my $heading = (length $title ? $title : cstring($client, 'PLUGIN_LBF_UNMATCHED'))
                             . ' (' . scalar(@$unmatched) . '/' . scalar(@$tracks) . ')';
                 $callback->({ title => $heading, items => \@rows, cachetime => 0 });
@@ -887,6 +1117,38 @@ sub showUnmatched {
         },
         sub {
             $log->error("Unmatched: playlist tracks fetch failed: " . (shift // ''));
+            $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_ERROR'), type => 'text' }], cachetime => 0 });
+        },
+    );
+}
+
+# Level 2 for the follow list: resolve its recs in 'exclude' mode (owned tracks are
+# dropped, not counted as unmatched) and list the NEW tracks that matched no service.
+# The count is unmatched / new-track total (owned excluded), matching the list view.
+sub showUnmatchedFollow {
+    my ($client, $callback, $args, $pass) = @_;
+
+    my $srcName = cstring($client, 'PLUGIN_LBF_FOLLOW_FEED');
+
+    Plugins::ListenBrainzFreshReleases::API->getFollowFeed(
+        onDone => sub {
+            my $store  = _mergeFollow(shift // []);
+            my $tracks = $store->{tracks} || [];
+            unless (@$tracks) {
+                $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_NO_RESULTS'), type => 'text' }], cachetime => 0 });
+                return;
+            }
+            _resolveTracks($client, $tracks, sub {
+                my ($matched, $inconclusive, $unmatched, $owned) = @_;
+                $unmatched //= []; $owned //= 0;
+                my @rows     = _unmatchedRows($client, $unmatched, $srcName);
+                my $newTotal = scalar(@$tracks) - $owned;
+                my $heading  = $srcName . ' (' . scalar(@$unmatched) . '/' . $newTotal . ')';
+                $callback->({ title => $heading, items => \@rows, cachetime => 0 });
+            }, 'exclude');
+        },
+        onError => sub {
+            $log->error("Unmatched: follow fetch failed: " . (shift // ''));
             $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_ERROR'), type => 'text' }], cachetime => 0 });
         },
     );
@@ -942,12 +1204,13 @@ sub _resolveTracks {
     my ($client, $tracks, $done, $libMode, $force) = @_;
 
     my $total        = scalar @$tracks;
-    my @slots        = (undef) x $total;   # per-index: hashref (match) / 0 (miss) / undef (pending)
+    my @slots        = (undef) x $total;   # per-index: hashref (match) / 0 (miss) / 'owned' (excluded) / undef (pending)
     my $next         = 0;
     my $active       = 0;
     my $completed    = 0;
     my $finished     = 0;
     my $inconclusive = 0;   # tracks whose no-match was inconclusive (svc unavailable)
+    my $owned        = 0;   # tracks dropped as already-owned ('exclude' mode only)
 
     my $watchdog;
     my $finish = sub {
@@ -955,11 +1218,14 @@ sub _resolveTracks {
         $finished = 1;
         Slim::Utils::Timers::killSpecific($watchdog) if $watchdog;   # cancel the unused watchdog
         # Also hand back the SOURCE tracks that didn't resolve (slot still 0/undef),
-        # so the diagnostics view can list what couldn't be matched. Pass the
-        # inconclusive count too, so the caller can keep the resolved-playlist cache
-        # short when streaming was momentarily unavailable.
-        my @unmatched = map { $tracks->[$_] } grep { !ref $slots[$_] } 0 .. $#slots;
-        $done->([ grep { ref $_ } @slots ], $inconclusive, \@unmatched);   # matched items, in order
+        # so the diagnostics view can list what couldn't be matched — but NOT the
+        # ones dropped as already-owned ('owned' sentinel), which aren't a match gap.
+        # Pass the inconclusive count too (so the caller can keep the resolved cache
+        # short when streaming was momentarily unavailable) and the owned count (so
+        # the "new tracks" total can exclude what the user already has).
+        my @unmatched = map { $tracks->[$_] }
+                        grep { !ref $slots[$_] && ($slots[$_] // '') ne 'owned' } 0 .. $#slots;
+        $done->([ grep { ref $_ } @slots ], $inconclusive, \@unmatched, $owned);   # matched items, in order
     };
 
     $watchdog = Slim::Utils::Timers::setTimer(undef, time() + PLAYLIST_TIMEOUT, sub { $finish->() });
@@ -972,9 +1238,19 @@ sub _resolveTracks {
             my $tr = $tracks->[$i];
             $active++;
             _findPlayableTrack($client, sub {
-                my ($item, $inc) = @_;
-                $slots[$i] = (ref $item eq 'HASH') ? $item : 0;
+                my ($item, $inc, $own) = @_;
+                if (ref $item eq 'HASH') {
+                    # Tag the matched item with its source rec's timestamp (when the
+                    # source carries one — only the follow feed does), so the follow
+                    # view can group by day. Harmless elsewhere (undef → not set).
+                    $item->{_created} = $tr->{created} if defined $tr->{created};
+                    $slots[$i] = $item;
+                }
+                else {
+                    $slots[$i] = $own ? 'owned' : 0;
+                }
                 $inconclusive++ if $inc;
+                $owned++ if $own;
                 $active--;
                 $completed++;
                 ($completed >= $total) ? $finish->() : $pump->();
@@ -2150,6 +2426,17 @@ sub _streamingAdapters {
       && Plugins::TIDAL::Plugin->can('getAlbum')
       && Plugins::TIDAL::Plugin->can('_renderAlbum');
 
+    # Deezer — same modern Michael-Herger plugin family as Qobuz/Tidal
+    # (getAPIHandler → API::Async->search; _renderAlbum/_renderTrack emit a
+    # string deezer:// url). Fails safe: if any method is absent the service
+    # simply doesn't register. Confirmed against michaelherger/lms-deezer.
+    push @adapters, {
+        name => 'Deezer', icon => _pluginIcon('Plugins::Deezer::Plugin'),
+        run => \&_searchDeezer, runTrack => \&_searchDeezerTrack,
+    } if Plugins::Deezer::Plugin->can('getAPIHandler')
+      && Plugins::Deezer::Plugin->can('_renderAlbum')
+      && Plugins::Deezer::Plugin->can('_renderTrack');
+
     return @adapters;
 }
 
@@ -2189,6 +2476,7 @@ sub serviceStatus {
         [ 'qobuz',    'Qobuz'    ],
         [ 'bandcamp', 'Bandcamp' ],
         [ 'tidal',    'Tidal'    ],
+        [ 'deezer',   'Deezer'   ],
     );
     my %installed = map { lc($_->{name}) => 1 } _streamingAdapters();
     return [ map {
@@ -2856,6 +3144,55 @@ sub _searchTidal {
     }, { type => 'albums', search => $query, limit => 50 });   # artist-only search → fetch more so a prolific artist's target album isn't truncated
 }
 
+# Deezer album search — mirror of _searchTidal. getAPIHandler returns a
+# Plugins::Deezer::API::Async whose ->search(cb, {search,type,strict}) calls back
+# with a bare arrayref of raw result items (already typed by `type`); we filter by
+# title/artist locally and render each hit via the plugin's own _renderAlbum
+# (which sets play => deezer://album:<id>). Type is SINGULAR ('album') for Deezer.
+sub _searchDeezer {
+    my ($client, $query, $artistNorm, $albumNorm, $svc, $collect) = @_;
+
+    my $api = Plugins::Deezer::Plugin::getAPIHandler($client);
+    # undef (not []) → inconclusive (see _findPlayable / _searchTidal).
+    unless ($api) {
+        $collect->(undef);
+        return;
+    }
+
+    $api->search(sub {
+        my $albums = shift;   # expected: bare arrayref of raw album hashes
+        # No response at all → the search errored, not "no results" → inconclusive.
+        return $collect->(undef) unless defined $albums;
+        # Be tolerant of the response shape: lms-deezer is expected to hand back a bare
+        # arrayref (Tidal-style), but accept a hash-wrapped list too so a shape mismatch
+        # degrades to a clean miss instead of dying on a bad deref in this async callback
+        # (which runs OUTSIDE _findPlayable's eval → would leave the service un-settled).
+        $albums = $albums->{data} || $albums->{albums} || [] if ref $albums eq 'HASH';
+        return $collect->([]) unless ref $albums eq 'ARRAY';
+        my @out;
+        my $rendererFailed = 0;
+        for my $album (@$albums) {
+            next unless ref $album eq 'HASH';
+            my $artistRef  = $album->{artist} || ($album->{artists} && $album->{artists}[0]) || {};
+            my $candArtist = ref $artistRef eq 'HASH' ? $artistRef->{name} : '';
+            next unless _albumMatches($artistNorm, $albumNorm, $candArtist, $album->{title});
+            # Guard the foreign renderer (dies here run inside this async callback,
+            # not under _findPlayable's eval) — skip a bad item (mirrors _searchTidal).
+            my $item = eval { Plugins::Deezer::Plugin::_renderAlbum($album) };
+            if ($@ || ref $item ne 'HASH') {
+                $log->warn("Deezer _renderAlbum failed: $@") if $@;
+                $rendererFailed = 1;
+                next;
+            }
+            $item->{_albumid} = $album->{id};   # native id → ListenLater favurl (album:<id>)
+            push @out, $item;
+        }
+        # Matched but the renderer produced nothing usable → inconclusive (see _searchTidal).
+        return $collect->(undef) if !@out && $rendererFailed;
+        $collect->(\@out);
+    }, { search => $query, type => 'album', strict => 'off', limit => 50 });
+}
+
 # ===========================================================================
 # Track-level matching (for the Created-for-You playlists). The album path above
 # resolves to a playable ALBUM node; here each playlist track resolves to a single
@@ -2878,6 +3215,10 @@ sub _findPlayableTrack {
     #                (the DSTM radio/recommended default — favours discovery but
     #                still plays an owned-only track rather than dropping it).
     #   'never'    — streaming only; never consult the library.
+    #   'exclude'  — INVERSE of 'first': probe the library and, if the track is owned,
+    #                DROP it (signalled to the caller as owned, not a stream miss);
+    #                only tracks the user does NOT already have are streamed. Used by
+    #                the "People You Follow" weekly lists (new-music-only discovery).
     $libMode //= ($prefs->get('prefer_library') // 1) ? 'first' : 'never';
 
     my @adapters   = grep { $_->{runTrack} } _orderedAdapters();
@@ -2917,6 +3258,9 @@ sub _findPlayableTrack {
     $key .= ":$libMode" unless $libMode eq 'first';
     utf8::encode($key) if utf8::is_utf8($key);
     if (!$force && (my $c = $cache->get($key))) {
+        # 'exclude' mode caches an owned-track decision so the caller drops it
+        # without a re-probe. Owned → excluded (not a stream miss).
+        if ($c->{owned}) { $callback->(undef, 0, 1); return; }
         my $item = $c->{item};
         # The service set is in the key, so a cached entry already matches the
         # current config; _cachedSvcUsable stays as a belt-and-braces guard for an
@@ -3042,6 +3386,26 @@ sub _findPlayableTrack {
         $deferLocal->(sub {
             my $local = shift;
             if ($local) { $cacheItem->($local); $callback->($local); return; }
+            if (@adapters) { $runStreaming->(); }
+            else           { $cacheItem->(undef); $callback->(undef); }
+        });
+        return;
+    }
+
+    # 'exclude': new-music-only. Probe the library (deferred); if the user OWNS the
+    # track, drop it — signal owned (3rd callback arg) so the caller excludes it from
+    # the list AND from the "new tracks" total, rather than counting it as a stream
+    # miss. Not owned → stream it (never falls back to the library). The owned
+    # decision is cached (short LIBRARY_TTL, since a rescan can change ownership).
+    if ($libMode eq 'exclude') {
+        $deferLocal->(sub {
+            my $local = shift;
+            if ($local) {
+                eval { $cache->set($key, { owned => 1 }, LIBRARY_TTL); 1 }
+                    or $log->warn("track cache set failed: $@");
+                $callback->(undef, 0, 1);
+                return;
+            }
             if (@adapters) { $runStreaming->(); }
             else           { $cacheItem->(undef); $callback->(undef); }
         });
@@ -3288,6 +3652,48 @@ sub _searchTidalTrack {
         $log->info("Tidal track-match '$query': " . scalar(@{ $tracks || [] }) . " results, " . scalar(@out) . " matched");
         $collect->(\@out);
     }, { type => 'tracks', search => $query, limit => 20 });
+}
+
+# Deezer track search — mirror of _searchTidalTrack. ->search(cb,{type=>'track'})
+# calls back with a bare arrayref of raw track hashes; we adopt the plugin's own
+# _renderTrack item only if it carries a plain string url (deezer://<id>.<fmt>) —
+# the cache-stability rule. Deezer's renderer sets `play` (and usually `url`); we
+# normalise whichever string is present onto url/play and force type=>audio.
+sub _searchDeezerTrack {
+    my ($client, $query, $artistNorm, $titleNorm, $album, $collect) = @_;
+
+    my $api = Plugins::Deezer::Plugin::getAPIHandler($client);
+    unless ($api) { $log->info("Deezer track-match: no API handler"); $collect->(undef); return; }
+
+    $api->search(sub {
+        my $tracks = shift;
+        # No response at all → the search errored, not "no results" → inconclusive.
+        return $collect->(undef) unless defined $tracks;
+        # Tolerate the response shape (bare arrayref expected; accept a hash-wrapped
+        # list) so a mismatch is a clean miss, not a die in this async callback.
+        $tracks = $tracks->{data} || $tracks->{tracks} || [] if ref $tracks eq 'HASH';
+        return $collect->([]) unless ref $tracks eq 'ARRAY';
+        my @out;
+        for my $tr (@$tracks) {
+            next unless ref $tr eq 'HASH';
+            my $artistRef  = $tr->{artist} || ($tr->{artists} && $tr->{artists}[0]) || {};
+            my $candArtist = ref $artistRef eq 'HASH' ? $artistRef->{name} : '';
+            next unless _trackMatches($artistNorm, $titleNorm, $candArtist, $tr->{title});
+
+            my $item = eval { Plugins::Deezer::Plugin::_renderTrack($tr) };
+            next unless ref $item eq 'HASH';
+            my $u = (defined $item->{url}  && !ref $item->{url})  ? $item->{url}
+                  : (defined $item->{play} && !ref $item->{play}) ? $item->{play}
+                  : undef;
+            next unless defined $u && length $u;
+            $item->{url}  = $u;
+            $item->{play} = $u;
+            $item->{type} = 'audio';
+            push @out, $item;
+        }
+        $log->info("Deezer track-match '$query': " . scalar(@{ $tracks || [] }) . " results, " . scalar(@out) . " matched");
+        $collect->(\@out);
+    }, { search => $query, type => 'track', strict => 'off', limit => 20 });
 }
 
 # Bandcamp: its search is album/track-mixed and individual-track streaming isn't a

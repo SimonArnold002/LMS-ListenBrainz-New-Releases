@@ -116,7 +116,7 @@
   <h1>ListenBrainz Fresh Releases — LMS Plugin</h1>
   <p class="tagline">A plugin for <strong>Lyrion Music Server (LMS)</strong> built around <a href="https://listenbrainz.org">ListenBrainz</a>. It browses newly released albums (a personalised feed plus the global feed), turns your ListenBrainz playlists and recommendations into playable music, and adds rich release detail pages with artist bios and one-tap streaming.</p>
   <div class="badges">
-    <span class="badge accent">v0.9.64</span>
+    <span class="badge accent">v0.9.75</span>
     <span class="badge">LMS 9.0.0+</span>
     <span class="badge">Material Skin</span>
     <span class="badge">Powered by ListenBrainz</span>
@@ -136,7 +136,7 @@
 <div class="card"><h4>Release detail pages</h4><p>Streaming matches, artist photo + biography, tracklist, genres, MusicBrainz link</p></div>
 <div class="card"><h4>Created-for-You Playlists</h4><p>Your Weekly Jams / Exploration / Daily Jams as Play-all lists</p><span class="needs">Needs: ListenBrainz username</span></div>
 <div class="card"><h4>Don't Stop The Music</h4><p>Two auto-DJ mixers (Radio + Recommended)</p><span class="needs">Needs: ListenBrainz username</span></div>
-<div class="card"><h4>Streaming playback</h4><p>Play matched albums/tracks on your services</p><span class="needs">Needs: Qobuz / Tidal / Bandcamp plugin</span></div>
+<div class="card"><h4>Streaming playback</h4><p>Play matched albums/tracks on your services</p><span class="needs">Needs: Qobuz / Tidal / Bandcamp / Deezer plugin</span></div>
 <div class="card"><h4>Artist bios + photos</h4><p>On the detail page and behind "Read more"</p><span class="needs">Needs: MAI plugin, or a Last.fm key (bio only)</span></div>
 <div class="card"><h4>Block artists</h4><p>Hide an artist from every feed</p></div>
 <div class="card"><h4>Material home shelves</h4><p>Three home-screen rows</p><span class="needs">Needs: Material Skin</span></div>
@@ -151,7 +151,7 @@
 </li>
 <li><strong>Optional add-ons</strong> the plugin uses when present:
 <ul>
-<li><strong>Qobuz</strong>, <strong>Tidal</strong> and/or <strong>Bandcamp</strong> LMS plugins (installed + signed in) → streaming playback.
+<li><strong>Qobuz</strong>, <strong>Tidal</strong>, <strong>Bandcamp</strong> and/or <strong>Deezer</strong> LMS plugins (installed + signed in) → streaming playback.
 </li>
 <li><strong>Music &amp; Artist Information (MAI)</strong> plugin → artist biographies <em>and</em> photos.
 </li>
@@ -174,7 +174,7 @@
 </li>
 <li>Enter your <strong>ListenBrainz username</strong> and <strong>API token</strong> (needed for the personalised features).
 </li>
-<li><em>(Optional)</em> Paste a <strong>Last.fm API key</strong> and set <strong>Streaming Services</strong> priorities if you have Qobuz/Tidal/Bandcamp.
+<li><em>(Optional)</em> Paste a <strong>Last.fm API key</strong> and set <strong>Streaming Services</strong> priorities if you have Qobuz/Tidal/Bandcamp/Deezer.
 </li>
 <li>Save. The plugin appears in <strong>Apps → ListenBrainz Fresh Releases</strong>.
 </li></ol>
@@ -197,14 +197,14 @@
 <h3>Release detail pages</h3>
 <p>Tap any release for a page in three sections:</p>
 <ul>
-<li><strong>Streaming</strong> — playable matches on your services. Qobuz/Tidal are matched automatically; <strong>Bandcamp</strong> is a one-tap <strong>Search Bandcamp</strong> button (it's slower/heavier, so it runs only when you ask, and a found match is remembered). A <strong>Refresh</strong> re-searches.
+<li><strong>Streaming</strong> — playable matches on your services. Qobuz/Tidal/Deezer are matched automatically; <strong>Bandcamp</strong> is a one-tap <strong>Search Bandcamp</strong> button (it's slower/heavier, so it runs only when you ask, and a found match is remembered). A <strong>Refresh</strong> re-searches.
 </li>
 <li><strong>Artist Details</strong> — artist photo + a short biography preview with <strong>Read more</strong> for the full text, and <strong>Block this artist</strong>.
 </li>
 <li><strong>Album Details</strong> — tracklist (with durations), genres, tags, and <strong>View on MusicBrainz</strong>.
 </li></ul>
 <h3>Streaming playback</h3>
-<p>With <strong>Qobuz</strong>, <strong>Tidal</strong> and/or <strong>Bandcamp</strong> installed, releases and playlist tracks are matched and made playable. In <strong>Streaming Services</strong> settings, give each service a <strong>search priority</strong> (lower = tried first, <strong>0 = never use it</strong>); matching stops at the first service that has it. Qobuz/Tidal are searched automatically; <strong>Bandcamp</strong> is searched on demand from the detail page (a found Bandcamp match is remembered, so a Bandcamp-only release stays playable). Change a service's priority — or remove its plugin — and affected tracks <strong>re-match</strong> to your remaining services automatically.</p>
+<p>With <strong>Qobuz</strong>, <strong>Tidal</strong>, <strong>Bandcamp</strong> and/or <strong>Deezer</strong> installed, releases and playlist tracks are matched and made playable. In <strong>Streaming Services</strong> settings, give each service a <strong>search priority</strong> (lower = tried first, <strong>0 = never use it</strong>); matching stops at the first service that has it. Qobuz/Tidal/Deezer are searched automatically; <strong>Bandcamp</strong> is searched on demand from the detail page (a found Bandcamp match is remembered, so a Bandcamp-only release stays playable). Change a service's priority — or remove its plugin — and affected tracks <strong>re-match</strong> to your remaining services automatically.</p>
 <h3>Created-for-You Playlists</h3>
 <p>With a username set, the <strong>Playlists</strong> section turns your ListenBrainz <strong>Weekly Jams</strong>, <strong>Weekly Exploration</strong> and <strong>Daily Jams</strong> into Play-all lists. Each track is matched to your <strong>own library first</strong> (then streaming); unmatched tracks are dropped and the page title shows how many matched. A <strong>Refresh playlist matches</strong> row at the top of the Playlists view forces a fresh, library-first re-match of every playlist (handy if the matches were built before your library finished scanning). A <strong>Settings → Unmatched tracks (debug)</strong> view lists, per playlist, any tracks that couldn't be matched — handy for spotting a gap.</p>
 <h3>Don't Stop The Music</h3>
@@ -237,12 +237,12 @@
 <tr><td>Default sort</td><td><strong>Release Date</strong></td><td>Date (newest first), Artist, Album, or Confidence</td></tr>
 <tr><td>Group by Artist</td><td><strong>On</strong></td><td>Collapse an artist's multiple new releases into one entry</td></tr>
 <tr><td>Weekly Dividers</td><td><strong>On</strong></td><td>Per-week divider in the date-sorted view (wins over Group by Artist for that sort)</td></tr>
-<tr><td>Find on Streaming Services</td><td><strong>On</strong></td><td>Show playable Qobuz/Tidal/Bandcamp matches on detail pages</td></tr>
+<tr><td>Find on Streaming Services</td><td><strong>On</strong></td><td>Show playable Qobuz/Tidal/Bandcamp/Deezer matches on detail pages</td></tr>
 <tr><td>Prefer Tracks from My Library</td><td><strong>On</strong></td><td>Use your own copy (by MusicBrainz ID, then artist + title) before streaming — for Playlists and Don't Stop The Music</td></tr>
 <tr><td>Write a debug log</td><td><strong>Off</strong></td><td>Records the playlist warm/match activity to <code>lbf-debug.log</code> (next to the server log) — turn on only to troubleshoot a matching/caching issue</td></tr>
 </tbody></table>
 <h3>Streaming Services</h3>
-<p>A <strong>search priority</strong> per detected service (Qobuz / Tidal / Bandcamp): lower number = searched first, <strong>0 = never use it</strong>. Drives detail-page matches, Playlists and Don't Stop The Music.</p>
+<p>A <strong>search priority</strong> per detected service (Qobuz / Tidal / Bandcamp / Deezer): lower number = searched first, <strong>0 = never use it</strong>. Drives detail-page matches, Playlists and Don't Stop The Music.</p>
 <h3>Blocked Artists</h3>
 <p>Lists the artists you've blocked; tick <strong>Unblock</strong> and save to restore them. Various Artists can't be blocked (it would hide unrelated compilations).</p>
 <h3>New Releases for You / All Releases</h3>
@@ -276,7 +276,7 @@
 <ul>
 <li>Release data from <a href="https://listenbrainz.org">ListenBrainz</a> / <a href="https://musicbrainz.org">MusicBrainz</a>; cover art from the <a href="https://coverartarchive.org">Cover Art Archive</a>. All part of the <a href="https://metabrainz.org">MetaBrainz</a> project.
 </li>
-<li>Streaming via the community <strong>Qobuz</strong>, <strong>Tidal</strong> and <strong>Bandcamp</strong> LMS plugins.
+<li>Streaming via the community <strong>Qobuz</strong>, <strong>Tidal</strong>, <strong>Bandcamp</strong> and <strong>Deezer</strong> LMS plugins.
 </li>
 <li>Artist biographies and photos via the <strong>Music &amp; Artist Information (MAI)</strong> plugin, with <strong>Last.fm</strong> fallbacks.
 </li></ul>

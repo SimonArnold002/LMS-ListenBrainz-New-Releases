@@ -184,6 +184,15 @@ PLUGIN_LBF_FOLLOW_FEED
 PLUGIN_LBF_NO_FOLLOW
 	EN	No recommendations from people you follow yet
 
+PLUGIN_LBF_UNDATED
+	EN	Undated
+
+PLUGIN_LBF_PLAY_NEW
+	EN	Play what's new (%s)
+
+PLUGIN_LBF_NO_NEW
+	EN	Nothing new since last time
+
 PLUGIN_LBF_SETTINGS
 	EN	Plugin Settings
 
