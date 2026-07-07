@@ -2426,16 +2426,20 @@ sub _streamingAdapters {
       && Plugins::TIDAL::Plugin->can('getAlbum')
       && Plugins::TIDAL::Plugin->can('_renderAlbum');
 
-    # Deezer — same modern Michael-Herger plugin family as Qobuz/Tidal
-    # (getAPIHandler → API::Async->search; _renderAlbum/_renderTrack emit a
-    # string deezer:// url). Fails safe: if any method is absent the service
-    # simply doesn't register. Confirmed against michaelherger/lms-deezer.
+    # Deezer — same modern Michael-Herger plugin family as Qobuz/Tidal. Album nodes
+    # from `_renderAlbum` carry a COREF `url` (\&getAlbum, id in passthrough) exactly
+    # like Tidal — reattached in _rebuildStreamItems; the `deezer://album:<id>` string
+    # is the `play`/favourites value. Tracks (`_renderTrack`) carry a plain string url
+    # (deezer://<id>.<fmt>). getAlbum is required so a cached album match can be rebuilt
+    # (else it would drop on re-read). Fails safe: absent method → service doesn't
+    # register. Confirmed against michaelherger/lms-deezer.
     push @adapters, {
         name => 'Deezer', icon => _pluginIcon('Plugins::Deezer::Plugin'),
         run => \&_searchDeezer, runTrack => \&_searchDeezerTrack,
     } if Plugins::Deezer::Plugin->can('getAPIHandler')
       && Plugins::Deezer::Plugin->can('_renderAlbum')
-      && Plugins::Deezer::Plugin->can('_renderTrack');
+      && Plugins::Deezer::Plugin->can('_renderTrack')
+      && Plugins::Deezer::Plugin->can('getAlbum');
 
     return @adapters;
 }
@@ -2822,6 +2826,14 @@ sub _rebuildStreamItems {
         }
         elsif ($svc eq 'Tidal' && Plugins::TIDAL::Plugin->can('getAlbum')) {
             $item{url} = \&Plugins::TIDAL::Plugin::getAlbum;
+        }
+        elsif ($svc eq 'Deezer' && Plugins::Deezer::Plugin->can('getAlbum')) {
+            # Deezer album nodes are the same shape as Tidal's: `_renderAlbum` sets
+            # `url => \&getAlbum` (a COREF, stripped on cache) and keeps the album id
+            # in `passthrough` (plain data, survives the cache), so getAlbum resolves
+            # the tracklist on read. Without this branch a cached Deezer match hit the
+            # `else { next }` below and silently vanished on re-read (fixed 0.9.76).
+            $item{url} = \&Plugins::Deezer::Plugin::getAlbum;
         }
         else {
             next;

@@ -3,6 +3,22 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.77
+
+### Fixed
+- **ListenBrainz Radio (Don't Stop The Music) was playing random tracks from your library instead of a proper radio.** ListenBrainz has temporarily disabled the server-side "Popularity" data the radio uses to turn artists into songs, so the radio couldn't build a station and fell back to random. It now falls back to your personalised **Recommended** pool instead — real recommendations rather than random — until ListenBrainz turns that data back on.
+
+### Technical
+- Root cause diagnosed live: `getSimilarArtists` succeeds (100 artists) but every `getTopRecordingsForArtist` call returns `500 "Popularity API currently disabled due to high load on the server"`. All radio sub-paths (similar-artists, seed-only, Last.fm) funnel through that one endpoint, so the candidate pool comes back empty and `_resolveAndReturn` returned `[]` → core DSTM random. The Last.fm fallback can't help (same dead endpoint) and was only wired to the empty/error branches of `getSimilarArtists`. Fix: `_resolveAndReturn` now falls back once to `_recommendedFill` (the `/1/cf/recommendation` CF pool — a different endpoint, confirmed up) whenever a `radio` pool is empty; centralised so it covers all three radio sites; `recommended` is guarded from recursing. Follow-up left open: negative-cache the "Popularity disabled" 500 so `_collectArtistTracks` skips ~24 doomed calls per top-up during an extended outage. No cache-version bump.
+
+## 0.9.76
+
+### Fixed
+- **A Deezer streaming match on a release detail page disappeared when you re-opened the page.** The match showed the first time (from a live search) but was silently dropped from the cached copy on every later open, so the album looked like it had no Deezer match. Now it's kept and stays playable.
+
+### Technical
+- `_rebuildStreamItems` reattaches each service's browse coderef by `_svc` but only handled Qobuz/Bandcamp/Tidal — a Deezer item fell through `else { next }` and was dropped on cache read. Deezer's album node is the same shape as Tidal's (`_renderAlbum` → `url => \&getAlbum` coderef, id in `passthrough`), so a one-line Tidal-style reattach branch (`\&Plugins::Deezer::Plugin::getAlbum`) fixes it. Added `getAlbum` to the Deezer adapter-registration `->can` guard so the service only registers when the album round-trip is possible, and corrected the adapter comment (the `deezer://album:<id>` string is the `play`/favourites value, not the browse url). No cache-version bump — cached Deezer entries carry the id in passthrough and now rebuild correctly. Verified against michaelherger/lms-deezer.
+
 ## 0.9.75
 
 ### Fixed

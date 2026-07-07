@@ -88,7 +88,7 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-0.9.75
+0.9.77
 
 ## Recommended by People You Follow (0.9.65; **new-music-only + single day-divided list in 0.9.71–0.9.72**)
 
@@ -770,6 +770,38 @@ Detected in `_isVariousArtists()`:
 - Material Skin's grouped artist release page layout is NOT achievable from OPML feeds — only via native library `albums_loop` responses. Solved in earlier versions by using Browse by Type sub-menus, removed in v0.3.0 in favour of settings-driven filtering.
 
 ## Version History
+- **0.9.77** — **fix: DSTM Radio dropped to random library tracks during a ListenBrainz
+  Popularity-API outage.** Diagnosed live (player BackGardenSpeaker): the seed resolved and
+  `getSimilarArtists` returned 100 artists, but every `getTopRecordingsForArtist` fan-out call
+  returned `500 "Popularity API currently disabled due to high load on the server"` — a
+  ListenBrainz **server-side** shutdown of `/1/popularity/top-recordings-for-artist`, not our
+  bug. EVERY radio sub-path (similar-artists, seed-only, AND the Last.fm fallback) funnels
+  through that one endpoint to turn artists into tracks, so none could produce candidates; the
+  handler returned `[]` and core DSTM fell through to random library albums. The Last.fm fallback
+  couldn't help (it shares the dead endpoint) — the fallbacks were also only wired to the
+  *empty/error* branches of `getSimilarArtists`, not to a similar-succeeds-but-pool-empty
+  outcome. Fix: `_resolveAndReturn` now, when a **radio** pool is empty, falls back once to the
+  **Recommended CF pool** (`/1/cf/recommendation/...` — a DIFFERENT endpoint, confirmed up during
+  the outage), instead of returning `[]`. Centralised there so it covers all three radio sites
+  (similar-success, seed-only, Last.fm-success); `'recommended'` is guarded from recursing, so an
+  all-endpoints-down case still terminates cleanly. **Known follow-up (not done):** during an
+  extended outage each top-up still fires ~24 doomed 500s at the disabled endpoint — a short
+  negative-cache of the "Popularity disabled" state would let `_collectArtistTracks` skip the
+  fan-out and go straight to the CF fallback (be a better API citizen). No cache-version bump.
+- **0.9.76** — **fix: cached Deezer album matches silently vanished on re-read.**
+  `_rebuildStreamItems` reattaches each service's browse coderef by `_svc` but only had
+  Qobuz/Bandcamp/Tidal branches — a Deezer match hit the `else { next }` and was dropped
+  on every cache-hit re-open (it only rendered live on first search). Deezer's album node
+  is the SAME shape as Tidal's — `_renderAlbum` sets `url => \&getAlbum` (a coderef,
+  stripped by `_cacheStream`) with the album id in `passthrough` (plain data, survives the
+  cache), so the fix is a one-line Tidal-style branch: `$item{url} = \&…Deezer::…getAlbum`.
+  Also added `getAlbum` to the Deezer adapter-registration `->can` guard so Deezer only
+  registers when the full album round-trip is possible (mirrors Tidal), and corrected the
+  adapter comment that had loosely described the album url as a "string deezer:// url" (that
+  string is the `play`/favourites value; the browse url is the coderef). No cache-version
+  bump — existing cached Deezer entries (id in passthrough) now rebuild correctly instead of
+  dropping. Verified `_renderAlbum`/`getAlbum` against michaelherger/lms-deezer. (Surfaced
+  while porting this engine to the Album Reviews plugin, which had the same gap.)
 - **0.9.75** — **code-review fixes: follow "Play what's new" + Deezer robustness (no cache bump).**
   (1) The "Play what's new" row was a `type=>'playlist'` container nested inside the People-You-Follow
   list; the follow level is the tile's Play-all source, so Play-all re-expanded the container and
