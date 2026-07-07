@@ -20,8 +20,8 @@ sub page {
 
 sub prefs {
     return ($prefs, qw(
-        username token lastfm_api_key days sort group_by_artist week_dividers play_via prefer_library
-        svc_priority_qobuz svc_priority_bandcamp svc_priority_tidal
+        username token lastfm_api_key days sort group_by_artist week_dividers play_via prefer_library debug_log
+        svc_priority_qobuz svc_priority_bandcamp svc_priority_tidal svc_priority_deezer
         foryou_past foryou_future foryou_artwork_only foryou_various
         foryou_type_album foryou_type_single foryou_type_ep foryou_type_broadcast foryou_type_other
         foryou_type_compilation foryou_type_soundtrack foryou_type_live foryou_type_remix foryou_type_demo
@@ -49,7 +49,7 @@ sub handler {
         # If a field is absent from the POST (a partial / non-form submission)
         # keep the CURRENT saved value rather than forcing 0 — forcing 0 would
         # silently disable that service on any incomplete save.
-        for my $svc (qw(qobuz bandcamp tidal)) {
+        for my $svc (qw(qobuz bandcamp tidal deezer)) {
             my $p = $params->{"pref_svc_priority_$svc"};
             if (defined $p && $p =~ /^\d+$/) {
                 $p = 9 if $p > 9;

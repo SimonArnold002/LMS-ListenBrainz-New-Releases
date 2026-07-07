@@ -8,13 +8,22 @@ use Slim::Utils::Prefs;
 use Slim::Utils::PluginManager;
 use Slim::Utils::Strings qw(string cstring);
 use Slim::Utils::Timers;
+use Slim::Music::Import;
+use Slim::Utils::OSDetect;
+use File::Spec;
 
 # Background cache-warm timing: first run shortly after startup (so it doesn't
 # compete with boot), then once a day. Daily is cheap because the playlist
 # caches are keyed by last_modified — real work happens only when a new week's
 # playlist appears.
-use constant WARM_DELAY    => 60;          # seconds after startup
-use constant WARM_INTERVAL => 24 * 3600;   # daily
+use constant WARM_DELAY      => 60;          # seconds after startup
+use constant WARM_INTERVAL   => 24 * 3600;   # daily
+# While a library scan is running the local-library tier is incomplete, so a warm
+# that ran then would miss every owned track and cache that all-streaming result
+# for the resolved-playlist TTL (days) — and later warms skip an already-cached
+# playlist, so it would stay wrong until the weekly mbid change. So defer the warm
+# while scanning and re-check on this interval.
+use constant WARM_SCAN_RETRY => 120;         # seconds between scan re-checks
 
 my $log = Slim::Utils::Log->addLogCategory({
     'category'     => 'plugin.listenbrainzfreshreleases',
@@ -38,6 +47,9 @@ $prefs->init({
     week_dividers        => 1,
     play_via             => 1,
     prefer_library       => 1,
+    # Opt-in dedicated warm/resolve debug log (lbf-debug.log beside server.log).
+    # Off by default — turn on to track a match/caching issue, off again after.
+    debug_log            => 0,
 
     # Artists the user has blocked: an arrayref of { mbid => <artist MBID or ''>,
     # name => <display name> }. Releases by any of these are hidden from every
@@ -52,6 +64,7 @@ $prefs->init({
     svc_priority_qobuz    => 1,
     svc_priority_bandcamp => 2,
     svc_priority_tidal    => 3,
+    svc_priority_deezer   => 4,
 
     # Don't Stop The Music propagators (Similar / Raw / Top). dstm_count = how many
     # recommended recordings to pull from ListenBrainz into the pool; dstm_batch =
@@ -176,8 +189,16 @@ sub postinitPlugin {
     Slim::Utils::Timers::setTimer(undef, time() + WARM_DELAY, \&_warmTick);
 }
 
-# Run the warm, then re-arm for the next day.
+# Run the warm, then re-arm for the next day. Deferred while a library scan is in
+# progress (see WARM_SCAN_RETRY) so it never resolves against a half-scanned
+# library and caches an all-streaming result for owned tracks.
 sub _warmTick {
+    if ( Slim::Music::Import->stillScanning() ) {
+        dbg("warm: library scan in progress — deferring " . WARM_SCAN_RETRY . "s");
+        Slim::Utils::Timers::setTimer(undef, time() + WARM_SCAN_RETRY, \&_warmTick);
+        return;
+    }
+
     eval {
         require Plugins::ListenBrainzFreshReleases::Browse;
         Plugins::ListenBrainzFreshReleases::Browse::warmCache();
@@ -185,6 +206,40 @@ sub _warmTick {
     } or $log->error("Playlist warm failed: $@");
 
     Slim::Utils::Timers::setTimer(undef, time() + WARM_INTERVAL, \&_warmTick);
+}
+
+# ---------------------------------------------------------------------------
+# Dedicated, opt-in debug log for warm/resolve tracking. Always mirrors to
+# server.log at info; when the debug_log pref is on, ALSO appends a timestamped
+# line to lbf-debug.log (beside server.log) so the warm/match timeline is easy
+# to follow without wading through the rest of server.log. Size-capped (~1 MB,
+# one .old rotation) so it can't grow unbounded. Fully eval-guarded — a logging
+# failure never disrupts the caller.
+# ---------------------------------------------------------------------------
+my $DBG_FILE;   # memoised path
+
+sub _dbgFile {
+    return $DBG_FILE if defined $DBG_FILE;
+    my $dir = eval { scalar Slim::Utils::OSDetect::dirsFor('log') };
+    $dir = preferences('server')->get('cachedir') if !$dir || !-d $dir;
+    $DBG_FILE = File::Spec->catfile($dir // '.', 'lbf-debug.log');
+    return $DBG_FILE;
+}
+
+sub dbg {
+    my $msg = shift;
+    $log->info($msg);
+    return unless $prefs->get('debug_log');
+    eval {
+        my $file = _dbgFile();
+        rename($file, "$file.old") if (-s $file // 0) > 1_000_000;   # ~1 MB cap, keep one rotation
+        open(my $fh, '>>:encoding(UTF-8)', $file) or die "open $file: $!";
+        my @t = localtime(time);
+        printf $fh "%04d-%02d-%02d %02d:%02d:%02d  %s\n",
+            $t[5]+1900, $t[4]+1, $t[3], $t[2], $t[1], $t[0], $msg;
+        close $fh;
+        1;
+    } or $log->warn("debug-log write failed: $@");
 }
 
 sub getDisplayName { 'PLUGIN_LISTENBRAINZ_FRESH_RELEASES' }

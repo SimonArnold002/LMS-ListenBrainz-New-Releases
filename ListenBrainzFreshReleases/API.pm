@@ -401,7 +401,8 @@ sub getPlaylistTracks {
 }
 
 # Normalise playlist.track[] into an arrayref of
-# { title, artist, album, duration_ms, recording_mbid, caa_id, caa_release_mbid }.
+# { title, artist, album, recording_mbid }. (Only these drive track resolution;
+# duration / cover-art come from the matched streaming result, not the JSPF entry.)
 sub _parsePlaylistTracks {
     my ($data) = @_;
     my $p = (ref $data eq 'HASH') ? $data->{playlist} : undef;
@@ -411,11 +412,6 @@ sub _parsePlaylistTracks {
     for my $t (@{ $p->{track} }) {
         next unless ref $t eq 'HASH';
 
-        my $ext = $t->{extension}
-            && $t->{extension}{'https://musicbrainz.org/doc/jspf#track'};
-        $ext = {} unless ref $ext eq 'HASH';
-        my $meta = ref $ext->{additional_metadata} eq 'HASH' ? $ext->{additional_metadata} : {};
-
         my $recMbid = '';
         if (defined $t->{identifier}) {
             my $id = ref $t->{identifier} eq 'ARRAY' ? $t->{identifier}[0] : $t->{identifier};
@@ -423,16 +419,139 @@ sub _parsePlaylistTracks {
         }
 
         push @out, {
-            title            => $t->{title}   // '',
-            artist           => $t->{creator} // '',
-            album            => $t->{album}   // '',
-            duration_ms      => $t->{duration},
-            recording_mbid   => lc($recMbid // ''),
-            caa_id           => $meta->{caa_id},
-            caa_release_mbid => $meta->{caa_release_mbid},
+            title          => $t->{title}   // '',
+            artist         => $t->{creator} // '',
+            album          => $t->{album}   // '',
+            recording_mbid => lc($recMbid // ''),
         };
     }
     return \@out;
+}
+
+# ---------------------------------------------------------------------------
+# GET /1/user/<username>/feed/events — the user's SOCIAL FEED: the timeline of
+# events from the people they follow. We keep only the track-bearing events
+# (recording_recommendation + recording_pin) and turn them into a de-duplicated,
+# newest-first track list, so a "Recommended by People You Follow" playlist can be
+# resolved from it. The feed is PRIVATE — it needs the user's token (unlike the
+# public createdfor listing). Cadence: this timeline updates continuously, so —
+# unlike the weekly createdfor listing (Monday-boundary key) — it's cached for a
+# day (dual working/fallback, same shape as the fresh-releases feed) and refreshed
+# by the daily warm. $args{force} skips the working-cache READ (the warm passes it)
+# so a still-valid copy can't hide newly-arrived recommendations from a warm tick.
+# ---------------------------------------------------------------------------
+use constant FOLLOW_FEED_COUNT => 75;   # events fetched per call (feed is newest-first)
+
+sub getFollowFeed {
+    my ($class, %args) = @_;
+
+    my $username = $prefs->get('username') // '';
+    my $token    = $prefs->get('token')    // '';
+
+    unless ($username && $token) {
+        $args{onError}->("No ListenBrainz username/token configured") if ref $args{onError} eq 'CODE';
+        return;
+    }
+
+    my $cacheKey = 'lbf:follow:feed:'   . $username;
+    my $fbKey    = 'lbf:follow:feedfb:' . $username;
+    if (!$args{force} && (my $cached = $cache->get($cacheKey))) {
+        $log->info("Follow-feed cache hit ($cacheKey)");
+        $args{onDone}->($cached);
+        return;
+    }
+
+    (my $safe_user = $username) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
+    my $url = sprintf('%s/1/user/%s/feed/events?count=%d', BASE_URL, $safe_user, FOLLOW_FEED_COUNT);
+
+    $log->info("Fetching follow feed: $url");
+
+    my $http = Slim::Networking::SimpleAsyncHTTP->new(
+        sub {
+            my $resp = shift;
+            my $data = eval { from_json($resp->content) };
+            if ($@) {
+                $log->error("Follow-feed JSON parse error: $@");
+                _feedError($resp, $fbKey, $args{onDone}, $args{onError});
+                return;
+            }
+            my $tracks = _parseFollowFeed($data);
+            # Dual short/fallback cache (like the fresh-releases feed) so a later
+            # outage degrades to the last good copy rather than an empty tile.
+            eval { $cache->set($cacheKey, $tracks, FEED_TTL);          1 } or $log->warn("follow feed cache set failed: $@");
+            eval { $cache->set($fbKey,    $tracks, FEED_FALLBACK_TTL); 1 } or $log->warn("follow feed fallback set failed: $@");
+            $args{onDone}->($tracks);
+        },
+        sub { _feedError(shift, $fbKey, $args{onDone}, $args{onError}) },
+        { timeout => FEED_TIMEOUT }
+    );
+
+    $http->get($url,
+        'Authorization' => "Token $token",
+        'Accept'        => 'application/json',
+    );
+}
+
+# Track-bearing feed event types we turn into playlist tracks. Everything else in
+# the feed (listens, follows, notifications, reviews) carries no single recording.
+my %FOLLOW_TRACK_EVENT = ( recording_recommendation => 1, recording_pin => 1 );
+
+# Normalise a feed/events payload into a de-duplicated, newest-first arrayref of
+# { title, artist, album, recording_mbid, recommender, created }. The feed is returned
+# reverse-chronological, so array order is preserved. The recording_mbid lives in
+# additional_info OR the mbid_mapping (and a pin wraps the recording one level
+# deeper), so several places are checked. Dedup by recording_mbid when present,
+# else by lc "artist|title" — the same track is often recommended by several
+# followed users, or re-recommended over time.
+sub _parseFollowFeed {
+    my ($data) = @_;
+    my $payload = (ref $data eq 'HASH' && ref $data->{payload} eq 'HASH') ? $data->{payload} : $data;
+    my $events  = (ref $payload eq 'HASH' && ref $payload->{events} eq 'ARRAY') ? $payload->{events} : [];
+
+    my (@out, %seen);
+    for my $ev (@$events) {
+        next unless ref $ev eq 'HASH' && $FOLLOW_TRACK_EVENT{ $ev->{event_type} // '' };
+
+        my $meta = ref $ev->{metadata} eq 'HASH' ? $ev->{metadata} : {};
+        my $pin  = ref $meta->{pin} eq 'HASH' ? $meta->{pin} : {};
+        my $tm   = ref $meta->{track_metadata} eq 'HASH' ? $meta->{track_metadata}
+                 : ref $pin->{track_metadata}  eq 'HASH' ? $pin->{track_metadata}
+                 : {};
+        my $ai   = ref $tm->{additional_info} eq 'HASH' ? $tm->{additional_info} : {};
+        my $map  = ref $tm->{mbid_mapping}    eq 'HASH' ? $tm->{mbid_mapping}    : {};
+
+        my $artist = $tm->{artist_name} // '';
+        my $title  = $tm->{track_name}  // '';
+        next unless length $artist || length $title;
+
+        my $rec = _firstRecMbid($ai->{recording_mbid}, $map->{recording_mbid},
+                                $meta->{recording_mbid}, $pin->{recording_mbid});
+
+        my $key = $rec ? "m:$rec" : 't:' . lc("$artist|$title");
+        next if $seen{$key}++;
+
+        push @out, {
+            title          => $title,
+            artist         => $artist,
+            album          => $tm->{release_name} // '',
+            recording_mbid => $rec,
+            recommender    => $ev->{user_name} // '',
+            # Unix epoch of the feed event, so the follow feature can bucket recs
+            # into Monday-start weeks (the weekly-list view). 0 if absent.
+            created        => ($ev->{created} // 0) + 0,
+        };
+    }
+    return \@out;
+}
+
+# First argument that looks like a bare recording MBID (handles a scalar or the
+# first element of an arrayref), lower-cased; '' if none qualify.
+sub _firstRecMbid {
+    for my $c (@_) {
+        my $v = ref $c eq 'ARRAY' ? $c->[0] : $c;
+        return lc $v if defined $v && !ref $v && $v =~ /^[0-9a-f-]{36}$/i;
+    }
+    return '';
 }
 
 # ---------------------------------------------------------------------------
@@ -1068,7 +1187,11 @@ sub _parseLastfmTags {
     my $t = $data->{toptags}{tag};
     return [] unless $t;
     my @tags = ref $t eq 'ARRAY' ? @$t : ($t);
-    @tags = sort { ($b->{count} // 0) <=> ($a->{count} // 0) } @tags;
+    # A tag entry is normally a { name, count, url } hash, but Last.fm can also
+    # send a bare string; guard the count deref so a string entry can't trip a
+    # strict-refs die (the sort and the low-weight filter below both read count).
+    my $count = sub { ref $_[0] eq 'HASH' ? ($_[0]{count} // 0) : 0 };
+    @tags = sort { $count->($b) <=> $count->($a) } @tags;
 
     my @out;
     for my $tag (@tags) {
@@ -1076,7 +1199,7 @@ sub _parseLastfmTags {
         next unless defined $name;
         $name =~ s/^\s+//; $name =~ s/\s+$//;
         next if $name eq '' || length($name) > 30;
-        next if ($tag->{count} // 0) < 10 && @out >= 3;
+        next if $count->($tag) < 10 && @out >= 3;
         push @out, $name;
         last if @out >= 5;
     }

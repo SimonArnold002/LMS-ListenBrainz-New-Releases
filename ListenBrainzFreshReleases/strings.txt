@@ -10,6 +10,15 @@ PLUGIN_LBF_UNMATCHED
 PLUGIN_LBF_ALL_MATCHED
 	EN	All tracks matched — nothing unmatched
 
+PLUGIN_LBF_REFRESH_MATCHES
+	EN	Refresh playlist matches (re-match now)
+
+PLUGIN_LBF_REFRESH_STARTED
+	EN	Refreshing playlist matches — re-matching in the background. Check back in a minute.
+
+PLUGIN_LBF_REFRESH_NO_PLAYER
+	EN	Connect a player first, then try again (a player is needed to search the streaming services).
+
 PLUGIN_LBF_DSTM_RADIO
 	EN	ListenBrainz Radio (similar to what's playing)
 
@@ -169,6 +178,21 @@ PLUGIN_LBF_NO_PLAYLISTS
 PLUGIN_LBF_PL_MATCHED
 	EN	%s of %s tracks matched
 
+PLUGIN_LBF_FOLLOW_FEED
+	EN	Recommended by People You Follow
+
+PLUGIN_LBF_NO_FOLLOW
+	EN	No recommendations from people you follow yet
+
+PLUGIN_LBF_UNDATED
+	EN	Undated
+
+PLUGIN_LBF_PLAY_NEW
+	EN	Play what's new (%s)
+
+PLUGIN_LBF_NO_NEW
+	EN	Nothing new since last time
+
 PLUGIN_LBF_SETTINGS
 	EN	Plugin Settings
 
@@ -244,12 +268,6 @@ PLUGIN_LBF_WEEK_DIVIDERS
 PLUGIN_LBF_WEEK_DIVIDERS_DESC
 	EN	When sorted by release date, add a divider at the start of each week. Takes precedence over Group by Artist for the date sort.
 
-PLUGIN_LBF_PLAY_VIA
-	EN	Find on streaming services
-
-PLUGIN_LBF_NO_SERVICES
-	EN	No streaming services available
-
 PLUGIN_LBF_NO_MATCH
 	EN	No match found on your streaming services
 
@@ -268,6 +286,9 @@ PLUGIN_LBF_SEARCH_BANDCAMP_RETRY
 PLUGIN_LBF_RESEARCH_BANDCAMP
 	EN	Re-search Bandcamp
 
+PLUGIN_LBF_CHOOSE_BANDCAMP
+	EN	Tap an album to use it as this release's match
+
 PLUGIN_LBF_REFRESH
 	EN	Refresh streaming matches
 
@@ -279,6 +300,12 @@ PLUGIN_LBF_PREFER_LIBRARY
 
 PLUGIN_LBF_PREFER_LIBRARY_DESC
 	EN	When building a playlist, use a track from your own music library if you have it (matched by MusicBrainz ID, then artist + title), before searching streaming services.
+
+PLUGIN_LBF_DEBUG_LOG
+	EN	Write a debug log
+
+PLUGIN_LBF_DEBUG_LOG_DESC
+	EN	Record playlist warm/match activity to a dedicated lbf-debug.log file (next to the server log) for troubleshooting. Leave off for normal use; turn on when investigating a matching or caching problem, then off again.
 
 PLUGIN_LBF_SECTION_SERVICES
 	EN	Streaming Services
