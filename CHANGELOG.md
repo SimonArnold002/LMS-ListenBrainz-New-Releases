@@ -3,6 +3,16 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.81
+
+### Changed
+- **MuSpy settings moved into their own section.** The three MuSpy options (user ID, "MuSpy upcoming releases", "how far ahead") now live in a dedicated **MuSpy Settings** section at the bottom of the settings page, with its own heading like the other sections — so they're not mixed in with the ListenBrainz settings above.
+
+## 0.9.80
+
+### Added
+- **"MuSpy upcoming — how far ahead" setting.** The MuSpy upcoming side previously showed a fixed year ahead with no way to limit it. There's now a **months-ahead** setting (1-24, default 12) so you can rein it in — e.g. set it to 3 to only see the next quarter's releases. It applies to MuSpy only (the ListenBrainz feed still uses the "Days window"), and only when "MuSpy upcoming releases" is on.
+
 ## 0.9.79
 
 ### Changed

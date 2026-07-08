@@ -72,8 +72,11 @@ use constant TRACK_INCONCLUSIVE_TTL => 1 * 3600;
 # How far ahead to keep MuSpy upcoming releases in the For You merge. MuSpy is a
 # small, user-curated follow list whose whole point is upcoming releases, so its
 # future side has its own toggle (muspy_future, default ON) rather than riding the
-# LB feed's foryou_future — this just bounds it so it can't run away.
-use constant MUSPY_FUTURE_DAYS => 365;
+# LB feed's foryou_future — and its own limit (muspy_future_months, default 12) so
+# it can't run away. The cap is expressed in whole months; MUSPY_FUTURE_MONTHS_* are
+# the pref's default/clamp bounds (a stray/garbage pref can't push the window insane).
+use constant MUSPY_FUTURE_MONTHS_DEFAULT => 12;
+use constant MUSPY_FUTURE_MONTHS_MAX     => 24;
 # Resolved whole-playlist cache. The JSPF content is IMMUTABLE for a given
 # mbid|last_modified, so there's no correctness reason to expire early — a new
 # week brings a new mbid (a fresh key) which re-resolves once. The Weekly Jams/
@@ -1474,7 +1477,8 @@ sub _filterAll    { _filterSection(shift, 'all') }
 # list of artists the user explicitly follows, and its whole value is UPCOMING
 # releases. So its future side has its OWN toggle (muspy_future, default ON) rather
 # than riding foryou_future (off by default, tuned for the broad LB fresh-releases
-# feed) — bounded to MUSPY_FUTURE_DAYS so it can't run away. The past side still
+# feed) — bounded to its OWN limit (muspy_future_months, default 12) so it can't run
+# away, kept separate from the LB feed's narrow days window. The past side still
 # honours foryou_past + the days window, so recent MuSpy releases align with the
 # feed's freshness setting. (Consequence with the default: even when the LB "Include
 # upcoming" is off, the feed can show past-LB + future-MuSpy together — intended; the
@@ -1488,10 +1492,18 @@ sub _mergeMuSpy {
     my $future = $prefs->get('muspy_future')  // 1;
     my $days   = $prefs->get('days')          // 14;
 
+    # Whole-month cap on the future side, user-set via muspy_future_months. Guard a
+    # missing/garbage/out-of-range pref (it's multiplied out, so a bad value would
+    # otherwise blow the window wide open or negative).
+    my $months = $prefs->get('muspy_future_months');
+    $months = MUSPY_FUTURE_MONTHS_DEFAULT
+        unless defined $months && $months =~ /^\d+$/ && $months >= 1;
+    $months = MUSPY_FUTURE_MONTHS_MAX if $months > MUSPY_FUTURE_MONTHS_MAX;
+
     my @n = localtime(time);
     my $today = sprintf('%04d-%02d-%02d', $n[5] + 1900, $n[4] + 1, $n[3]);
     my $lo = _dateShift($today, -$days);
-    my $hi = _dateShift($today,  MUSPY_FUTURE_DAYS);
+    my $hi = _dateShift($today,  $months * 30);
 
     my @kept;
     for my $r (@$muspy) {
@@ -1499,7 +1511,7 @@ sub _mergeMuSpy {
         next unless $d =~ /^\d{4}-\d{2}-\d{2}$/;   # padded on ingest; skip the undatable
         # Dates are zero-padded, so a lexical compare is a chronological one. A
         # release out today counts as "past" (i.e. shown when foryou_past is on);
-        # anything ahead is kept when muspy_future is on, up to the MUSPY_FUTURE_DAYS cap.
+        # anything ahead is kept when muspy_future is on, up to the muspy_future_months cap.
         my $inWindow = ($d le $today) ? ($past   && $d ge $lo)
                                       : ($future && $d le $hi);
         push @kept, $r if $inWindow;

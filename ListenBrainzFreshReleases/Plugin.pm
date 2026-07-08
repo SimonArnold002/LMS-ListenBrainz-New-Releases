@@ -43,6 +43,7 @@ $prefs->init({
     lastfm_api_key       => '',
     muspy_userid         => '',
     muspy_future         => 1,
+    muspy_future_months  => 12,
     days                 => 14,
     sort                 => 'release_date',
     group_by_artist      => 1,

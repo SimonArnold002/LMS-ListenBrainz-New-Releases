@@ -19,14 +19,6 @@
 <div id="lbf_lastfm_status" style="margin-top:6px;font-weight:bold;"></div>
 [% END %]
 
-[% WRAPPER setting title="PLUGIN_LBF_MUSPY_USERID" desc="PLUGIN_LBF_MUSPY_USERID_HINT" %]
-<input type="text" name="pref_muspy_userid" value="[% prefs.muspy_userid %]" size="40" autocomplete="off">
-[% END %]
-
-[% WRAPPER setting title="PLUGIN_LBF_MUSPY_FUTURE" desc="PLUGIN_LBF_MUSPY_FUTURE_HINT" %]
-<input type="checkbox" name="pref_muspy_future" value="1" [% IF prefs.muspy_future %]checked="checked"[% END %]>
-[% END %]
-
 [% WRAPPER setting title="PLUGIN_LBF_DAYS" desc="PLUGIN_LBF_DAYS_HINT" %]
 <input type="number" name="pref_days" value="[% prefs.days %]" min="1" max="90" size="4">
 [% END %]
@@ -169,6 +161,23 @@
 
 [% WRAPPER setting title="PLUGIN_LBF_DISPLAY_VARIOUS" desc="PLUGIN_LBF_DISPLAY_VARIOUS_DESC" %]
 <input type="checkbox" name="pref_all_various" value="1" [% IF prefs.all_various %]checked="checked"[% END %]>
+[% END %]
+
+</div>
+
+<div class="prefHead collapsableSection" id="lbf_muspy_Header">[% 'PLUGIN_LBF_SECTION_MUSPY' | string %]</div>
+<div id="lbf_muspy">
+
+[% WRAPPER setting title="PLUGIN_LBF_MUSPY_USERID" desc="PLUGIN_LBF_MUSPY_USERID_HINT" %]
+<input type="text" name="pref_muspy_userid" value="[% prefs.muspy_userid %]" size="40" autocomplete="off">
+[% END %]
+
+[% WRAPPER setting title="PLUGIN_LBF_MUSPY_FUTURE" desc="PLUGIN_LBF_MUSPY_FUTURE_HINT" %]
+<input type="checkbox" name="pref_muspy_future" value="1" [% IF prefs.muspy_future %]checked="checked"[% END %]>
+[% END %]
+
+[% WRAPPER setting title="PLUGIN_LBF_MUSPY_FUTURE_MONTHS" desc="PLUGIN_LBF_MUSPY_FUTURE_MONTHS_HINT" %]
+<input type="number" name="pref_muspy_future_months" value="[% prefs.muspy_future_months %]" min="1" max="24" size="4">
 [% END %]
 
 </div>

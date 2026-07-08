@@ -34,6 +34,9 @@ PLUGIN_LBF_SECTION_FORYOU
 PLUGIN_LBF_SECTION_ALL
 	EN	All Releases Settings
 
+PLUGIN_LBF_SECTION_MUSPY
+	EN	MuSpy Settings
+
 PLUGIN_LBF_USERNAME
 	EN	ListenBrainz Username
 
@@ -105,6 +108,12 @@ PLUGIN_LBF_MUSPY_FUTURE
 
 PLUGIN_LBF_MUSPY_FUTURE_HINT
 	EN	MuSpy mostly lists UPCOMING releases from the artists you follow, so this is on by default — upcoming MuSpy releases show in your New Releases for You feed even when the general "Include upcoming releases" option is off (they're artists you chose, so they're always welcome). Turn this off if you only want MuSpy's already-released titles. This affects MuSpy only, not the ListenBrainz feed.
+
+PLUGIN_LBF_MUSPY_FUTURE_MONTHS
+	EN	MuSpy upcoming — how far ahead
+
+PLUGIN_LBF_MUSPY_FUTURE_MONTHS_HINT
+	EN	How many months of upcoming MuSpy releases to show (1-24, default 12). Only applies when "MuSpy upcoming releases" is on, and to MuSpy — the general "Days window" still governs the ListenBrainz feed.
 
 PLUGIN_LBF_DAYS
 	EN	Days window
