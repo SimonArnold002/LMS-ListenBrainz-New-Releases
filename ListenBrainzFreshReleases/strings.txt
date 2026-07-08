@@ -94,6 +94,12 @@ PLUGIN_LBF_LASTFM_KEY
 PLUGIN_LBF_LASTFM_KEY_HINT
 	EN	Used to fill in genres on the release detail page when MusicBrainz has none (common for brand-new releases). Get a free key at last.fm/api/account/create. Leave blank to disable.
 
+PLUGIN_LBF_MUSPY_USERID
+	EN	MuSpy user ID (optional)
+
+PLUGIN_LBF_MUSPY_USERID_HINT
+	EN	Add releases from the artists you follow on MuSpy (muspy.com) into your New Releases for You feed — more tailored, since you choose the artists. Enter your MuSpy user ID: sign in at muspy.com, open Settings, and copy the ID shown there (it also appears in your notification/RSS feed URL as id=...). Only the public user ID is stored — no password. Duplicates that also appear from ListenBrainz are shown once. MuSpy mostly lists UPCOMING releases, so to see them turn on "Include upcoming releases" in the For You settings — and raise the "Days window" if you want releases further ahead than a couple of weeks. Leave blank to disable.
+
 PLUGIN_LBF_DAYS
 	EN	Days window
 

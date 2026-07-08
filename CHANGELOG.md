@@ -3,6 +3,16 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.78
+
+### Added
+- **MuSpy releases in your New Releases for You feed.** Optionally add upcoming and recent releases from the artists you follow on [MuSpy](https://muspy.com) into your personalised feed — more tailored, since you pick the artists yourself. Enter your MuSpy **user ID** in Settings (General); only the public ID is stored, never a password. Albums that also appear from ListenBrainz are shown once, and MuSpy releases are tappable through to the same detail page (streaming matches, genres, artist bio) — MuSpy items don't carry a MusicBrainz tracklist, so only that section is absent.
+
+### Technical
+- New public source: `API::getMuSpyReleases` fetches `https://muspy.com/api/1/releases/<userid>` (the endpoint is public — no auth), dual working/fallback cache reusing `FEED_TTL`/`FEED_FALLBACK_TTL` via `_cacheFeed`. `_parseMuSpy` maps each release group into the internal release hash (`artist_credit_name`, `release_name`, `release_group_mbid`, `release_group_primary_type`, `artist_mbids`, `_source => 'muspy'`); `_padDate` pads partial `YYYY`/`YYYY-MM` dates. Best-effort by design — any failure resolves `onDone` with the last good copy or `[]`, so MuSpy can never blank the LB feed.
+- `Browse::_mergeMuSpy` windows MuSpy releases to the same `foryou_past`/`foryou_future`/`days` as the For You feed (MuSpy's API has no day window), then concatenates for `fetchForYou`/`homeForYou`; both feeds now fetch LB then MuSpy and merge, and the LB error path still renders MuSpy (only an empty both-sources result shows the error tile). `_dedupeReleases` gained a cross-source artist+album collapse (dates can differ slightly between MuSpy and LB for the same album) that only fires when one side is MuSpy, preferring the cover-art-bearing (LB) copy; same-source LB editions with different dates are untouched. `coverArtUrl` builds a release-**group** CAA URL (`/release-group/<mbid>/front-250`) from `caa_release_group_mbid` since MuSpy has no release-level MBID/caa_id; `_buildReleaseItem` links through on `release_group_mbid` too. New pref `muspy_userid` (default `''`).
+- Review fixes on the MuSpy path: (1) `_padDate` now defaults a **zero-filled** partial date component to `01`, not just an omitted one — MusicBrainz/MuSpy can send `2026-07-00`/`2026-00-00`, and the old `$2 || 1` left the truthy string `'00'` in place, producing an invalid date that corrupted the week-divider / window maths. (2) `clearFeedCache('user')` now also drops the MuSpy working key, so **"Refresh (force update now)"** re-pulls MuSpy too instead of serving a copy up to `FEED_TTL` (24h) old (fallback copy left intact). (3) The `muspy_userid` settings hint now tells the user MuSpy is mostly **upcoming** releases, so they should enable "Include upcoming releases" (and widen the Days window) to see them.
+
 ## 0.9.77
 
 ### Fixed

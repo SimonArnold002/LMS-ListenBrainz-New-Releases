@@ -331,24 +331,39 @@ sub fetchForYou {
     my $past   = $prefs->get('foryou_past')   // 1;
     my $future = $prefs->get('foryou_future') // 0;
 
+    # Once the LB releases are in hand, fetch the (opt-in) MuSpy releases, merge,
+    # and render. MuSpy is best-effort — getMuSpyReleases always resolves onDone
+    # (empty when unconfigured/unreachable), so this never blanks the feed. On an
+    # LB failure we still run this with an empty LB list ($lbFailed set), so a
+    # MuSpy-configured user keeps their releases through an LB outage; only when
+    # BOTH yield nothing do we surface the error tile.
+    my $render = sub {
+        my ($lbReleases, $lbFailed) = @_;
+        Plugins::ListenBrainzFreshReleases::API->getMuSpyReleases(
+            onDone => sub {
+                my $releases = _sortReleases(_filterForYou(_mergeMuSpy($lbReleases, shift)));
+                _stashSummary('user', $releases);
+                # cachetime => 0: don't let Material cache this dynamic feed per-player
+                # (proven for Playlists in 0.9.24 — forces a re-fetch on each open so the
+                # weekly rollover shows immediately rather than a stale cached copy).
+                if ($lbFailed && !@$releases) {
+                    $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_ERROR'), type => 'text' }], cachetime => 0 });
+                    return;
+                }
+                $callback->({ items => [ _refreshItem($client, 'user'), @{ _buildItems($releases, $client, $headers) } ], cachetime => 0 });
+            },
+        );
+    };
+
     Plugins::ListenBrainzFreshReleases::API->getFreshReleasesForUser(
         sort    => $sort,
         past    => $past,
         future  => $future,
         days    => $prefs->get('days') // 14,
-        onDone  => sub {
-            my $releases = _sortReleases(_filterForYou(shift));
-            _stashSummary('user', $releases);
-            # cachetime => 0: don't let Material cache this dynamic feed per-player
-            # (proven for Playlists in 0.9.24 — forces a re-fetch on each open so the
-            # weekly rollover shows immediately rather than a stale cached copy).
-            $callback->({ items => [ _refreshItem($client, 'user'), @{ _buildItems($releases, $client, $headers) } ], cachetime => 0 });
-        },
+        onDone  => sub { $render->(shift, 0) },
         onError => sub {
             $log->error("For You fetch error: " . (shift // ''));
-            # cachetime => 0 on the error path too, so a transient failure tile isn't
-            # cached per-player and left stuck after the backend recovers.
-            $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_ERROR'), type => 'text' }], cachetime => 0 });
+            $render->([], 1);
         },
     );
 }
@@ -369,19 +384,29 @@ sub homeForYou {
     # headered item_id:1 = a card, flat item_id:1 = a different card). It must
     # also not vary by request quantity for the same reason. So: always flat, for
     # every quantity. Week dividers live in the main For You / All Releases menus.
+    # Merge MuSpy releases in too, so the home carousel matches the main For You
+    # menu (same source set, dedupe and window). MuSpy is best-effort (empty when
+    # unconfigured/unreachable), so this never blanks the row.
+    my $render = sub {
+        my ($lbReleases) = @_;
+        Plugins::ListenBrainzFreshReleases::API->getMuSpyReleases(
+            onDone => sub {
+                my $releases = _sortReleases(_filterForYou(_mergeMuSpy($lbReleases, shift)));
+                _stashSummary('user', $releases);
+                $cb->({ items => [ map { _buildReleaseItem($_, $client) } @$releases ], cachetime => 0 });
+            },
+        );
+    };
+
     Plugins::ListenBrainzFreshReleases::API->getFreshReleasesForUser(
         sort    => $prefs->get('sort')          // 'release_date',
         past    => $prefs->get('foryou_past')   // 1,
         future  => $prefs->get('foryou_future') // 0,
         days    => $prefs->get('days')          // 14,
-        onDone  => sub {
-            my $releases = _sortReleases(_filterForYou(shift));
-            _stashSummary('user', $releases);
-            $cb->({ items => [ map { _buildReleaseItem($_, $client) } @$releases ], cachetime => 0 });
-        },
+        onDone  => sub { $render->(shift) },
         onError => sub {
             $log->error("Home For You fetch error: " . (shift // ''));
-            $cb->({ items => [], cachetime => 0 });
+            $render->([]);
         },
     );
 }
@@ -1431,6 +1456,54 @@ sub _filterForYou { _filterSection(shift, 'foryou') }
 sub _filterAll    { _filterSection(shift, 'all') }
 
 # ---------------------------------------------------------------------------
+# MuSpy merge (For You feed only)
+# ---------------------------------------------------------------------------
+# Merge the user's MuSpy followed-artist releases into the ListenBrainz For You
+# list. MuSpy returns release groups newest-first but NOT windowed to the
+# plugin's day range (its API takes limit/offset only), so window them here to the
+# same past/future/days the For You feed uses, then concatenate. Overlap dedupe is
+# left to _dedupeReleases (via _sortReleases), which prefers the copy that has
+# cover art — naturally keeping the richer ListenBrainz entry on a duplicate.
+sub _mergeMuSpy {
+    my ($lb, $muspy) = @_;
+    $lb = [] unless ref $lb eq 'ARRAY';
+    return $lb unless ref $muspy eq 'ARRAY' && @$muspy;
+
+    my $past   = $prefs->get('foryou_past')   // 1;
+    my $future = $prefs->get('foryou_future') // 0;
+    my $days   = $prefs->get('days')          // 14;
+
+    my @n = localtime(time);
+    my $today = sprintf('%04d-%02d-%02d', $n[5] + 1900, $n[4] + 1, $n[3]);
+    my $lo = _dateShift($today, -$days);
+    my $hi = _dateShift($today,  $days);
+
+    my @kept;
+    for my $r (@$muspy) {
+        my $d = $r->{release_date} // '';
+        next unless $d =~ /^\d{4}-\d{2}-\d{2}$/;   # padded on ingest; skip the undatable
+        # Dates are zero-padded, so a lexical compare is a chronological one. A
+        # release out today counts as "past" (i.e. shown when foryou_past is on).
+        my $inWindow = ($d le $today) ? ($past   && $d ge $lo)
+                                      : ($future && $d le $hi);
+        push @kept, $r if $inWindow;
+    }
+    $log->info("MuSpy merge: kept " . scalar(@kept) . " of " . scalar(@$muspy) . " within window [$lo .. $hi]")
+        if $log->is_info;
+    return [ @$lb, @kept ];
+}
+
+# Shift a 'YYYY-MM-DD' date by N days (local time), returning 'YYYY-MM-DD'.
+sub _dateShift {
+    my ($ymd, $delta) = @_;
+    return $ymd unless $ymd =~ /^(\d{4})-(\d{2})-(\d{2})$/;
+    my $epoch = eval { Time::Local::timelocal(0, 0, 12, $3, $2 - 1, $1) };
+    return $ymd unless $epoch;
+    my @t = localtime($epoch + $delta * 86400);
+    return sprintf('%04d-%02d-%02d', $t[5] + 1900, $t[4] + 1, $t[3]);
+}
+
+# ---------------------------------------------------------------------------
 # Sort releases by the configured order. Release date is newest-first and
 # confidence highest-first; artist/album are A–Z. (The API's own ordering is
 # unreliable — e.g. date comes back oldest-first — so we sort here.)
@@ -1443,13 +1516,14 @@ sub _dedupeReleases {
     my ($releases) = @_;
     return $releases unless ref $releases eq 'ARRAY';
 
-    my %idx;
+    my %idx;      # full key (artist|album|date) -> index in @out
+    my %aaSeen;   # dateless key (artist|album)  -> index in @out
     my @out;
     for my $rel (@$releases) {
-        my $key = join('|',
-            _norm(_pickValue($rel, 'artist_credit_name', 'artist_name', 'artist')),
-            _norm(_pickValue($rel, 'release_name', 'title', 'name')),
-            ($rel->{release_date} // ''));
+        my $artist = _norm(_pickValue($rel, 'artist_credit_name', 'artist_name', 'artist'));
+        my $album  = _norm(_pickValue($rel, 'release_name', 'title', 'name'));
+        my $key    = join('|', $artist, $album, ($rel->{release_date} // ''));
+        my $aaKey  = join('|', $artist, $album);
 
         if (defined(my $i = $idx{$key})) {
             $out[$i] = $rel
@@ -1457,7 +1531,26 @@ sub _dedupeReleases {
                 &&  Plugins::ListenBrainzFreshReleases::API->coverArtUrl($rel);
             next;
         }
+
+        # Cross-source overlap: MuSpy and ListenBrainz can carry the same album with
+        # a slightly different release date (MuSpy uses the release-group's first
+        # date; LB the fresh-release date), so an exact artist|album|date key would
+        # miss it. When THIS entry or the already-seen one is from MuSpy, collapse
+        # on artist+album alone so the album shows once — keeping the copy with cover
+        # art (usually the richer LB entry). Same-source LB editions that differ only
+        # by date are left as separate entries (neither is MuSpy), preserving the
+        # long-standing behaviour.
+        my $j = $aaSeen{$aaKey};
+        if (defined $j
+            && ( ($rel->{_source} // '') eq 'muspy' || ($out[$j]{_source} // '') eq 'muspy' )) {
+            $out[$j] = $rel
+                if !Plugins::ListenBrainzFreshReleases::API->coverArtUrl($out[$j])
+                &&  Plugins::ListenBrainzFreshReleases::API->coverArtUrl($rel);
+            next;
+        }
+
         $idx{$key} = scalar @out;
+        $aaSeen{$aaKey} = scalar @out unless defined $aaSeen{$aaKey};
         push @out, $rel;
     }
     return \@out;
@@ -1939,6 +2032,7 @@ sub _buildReleaseItem {
     my $date       = $rel->{release_date} // '';
     my $type       = _displayType($rel);   # includes the secondary type, e.g. "Album / Live"
     my $mbid       = $rel->{release_mbid} // '';
+    my $rgMbid     = $rel->{release_group_mbid} // '';
     my $conf       = $rel->{confidence};
 
     my $year = ($date =~ /^(\d{4})/) ? $1 : '';
@@ -1970,7 +2064,12 @@ sub _buildReleaseItem {
         image => $image,
     };
 
-    if ($mbid) {
+    # Tap-through to the detail page whenever we have EITHER a release MBID (LB) or
+    # just a release-group MBID (MuSpy). The detail page degrades gracefully: with
+    # only a release-group MBID it still shows streaming matches, genres and the
+    # artist bio — only the MusicBrainz tracklist (which needs a release MBID) is
+    # absent (see _releaseDetail's $wantTracks gate).
+    if ($mbid || $rgMbid) {
         $item->{type} = 'link';
         $item->{url}  = sub {
             my ($client, $callback) = @_;

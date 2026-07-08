@@ -19,6 +19,10 @@
 <div id="lbf_lastfm_status" style="margin-top:6px;font-weight:bold;"></div>
 [% END %]
 
+[% WRAPPER setting title="PLUGIN_LBF_MUSPY_USERID" desc="PLUGIN_LBF_MUSPY_USERID_HINT" %]
+<input type="text" name="pref_muspy_userid" value="[% prefs.muspy_userid %]" size="40" autocomplete="off">
+[% END %]
+
 [% WRAPPER setting title="PLUGIN_LBF_DAYS" desc="PLUGIN_LBF_DAYS_HINT" %]
 <input type="number" name="pref_days" value="[% prefs.days %]" min="1" max="90" size="4">
 [% END %]

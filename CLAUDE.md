@@ -13,7 +13,7 @@ A plugin for Lyrion Music Server (LMS) that browses ListenBrainz Fresh Releases.
 
 > **ListenBrainz Fresh Releases — for Lyrion Music Server.** Turn your ListenBrainz listening into a living, playable music feed inside LMS.
 
-- **New Releases for You** — personalised feed of fresh releases from artists in your ListenBrainz history (needs username + token). Newest-first, grouped by week, tap-through detail pages.
+- **New Releases for You** — personalised feed of fresh releases from artists in your ListenBrainz history (needs username + token). Newest-first, grouped by week, tap-through detail pages. **Optional MuSpy** — add a MuSpy user ID (public, no password) to fold in releases from the artists you follow there; more tailored since you pick the artists, and overlaps with ListenBrainz are shown once.
 - **All Releases** — the global ListenBrainz fresh-releases feed (no account). By-week landing page to jump to any week.
 - **Created-for-You Playlists** — your **Weekly Jams / Weekly Exploration / Daily Jams** as fully-streaming **Play-all** lists; every track matched **library-first**, then streaming.
 - **Recommended by People You Follow** — the tracks the people you follow **recommend/pin** on ListenBrainz, gathered into **one Play-all list**, newest-first, with **day dividers** so new additions are easy to spot. **New-music-only:** anything already in your library is filtered out, so it's purely music you don't have yet. Accumulates so recs aren't lost as the feed rolls; refreshes daily.

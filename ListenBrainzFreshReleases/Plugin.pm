@@ -41,6 +41,7 @@ $prefs->init({
     username             => '',
     token                => '',
     lastfm_api_key       => '',
+    muspy_userid         => '',
     days                 => 14,
     sort                 => 'release_date',
     group_by_artist      => 1,

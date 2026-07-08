@@ -75,8 +75,20 @@ sub _secsUntilNextWeeklyRefresh {
 use constant BASE_URL        => 'https://api.listenbrainz.org';
 use constant LABS_URL        => 'https://labs.api.listenbrainz.org';
 use constant CAA_BASE_URL    => 'https://coverartarchive.org/release/';
+# Cover Art Archive also serves art keyed by a release-GROUP MBID at a different
+# path. MuSpy only gives release-group MBIDs (no release-level MBID / caa_id), so
+# their cover art comes from here rather than CAA_BASE_URL.
+use constant CAA_RG_BASE_URL => 'https://coverartarchive.org/release-group/';
 use constant MB_BASE_URL     => 'https://musicbrainz.org/ws/2/';
 use constant LASTFM_BASE_URL => 'https://ws.audioscrobbler.com/2.0/';
+
+# MuSpy — an opt-in secondary source of "new releases" tailored to the artists a
+# user deliberately follows there. The releases/<userid> endpoint is PUBLIC (no
+# auth), so only the user's MuSpy user id is stored (muspy_userid pref) — never a
+# password. The list changes ~daily like the LB feed, so it reuses FEED_TTL /
+# FEED_FALLBACK_TTL via _cacheFeed.
+use constant MUSPY_BASE_URL => 'https://muspy.com/api/1';
+use constant MUSPY_TIMEOUT  => 10;
 
 # MusicBrainz requires a descriptive User-Agent identifying the application. The
 # version is read from the plugin manifest (install.xml) at runtime rather than
@@ -202,6 +214,127 @@ sub getFreshReleasesAll {
     $http->get($url, 'Accept' => 'application/json');
 }
 
+# ---------------------------------------------------------------------------
+# GET https://muspy.com/api/1/releases/<userid>  (public — no auth)
+# ---------------------------------------------------------------------------
+# The user's followed-artist release groups, newest-first, mapped into the
+# internal release-hash shape so they merge into the For You feed and dedupe
+# against the ListenBrainz releases. Best-effort: ANY failure (no userid,
+# transport error, unparseable body) resolves onDone with the last good copy or
+# an empty list — it must never blank the LB feed. No onError path by design.
+sub getMuSpyReleases {
+    my ($class, %args) = @_;
+
+    my $userid = $prefs->get('muspy_userid') // '';
+    $userid =~ s/^\s+|\s+$//g;
+    unless (length $userid) {
+        $args{onDone}->([]);
+        return;
+    }
+
+    my $cacheKey = 'lbf:muspy:'   . $userid;
+    my $fbKey    = 'lbf:muspyfb:' . $userid;
+    if (my $cached = $cache->get($cacheKey)) {
+        $log->info("MuSpy releases cache hit ($cacheKey)");
+        $args{onDone}->($cached);
+        return;
+    }
+
+    (my $safe = $userid) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
+    my $url = sprintf('%s/releases/%s?limit=100', MUSPY_BASE_URL, $safe);
+    $log->info("Fetching MuSpy releases: $url");
+
+    my $serveFallback = sub {
+        my $fb = $cache->get($fbKey);
+        $args{onDone}->(ref $fb eq 'ARRAY' ? $fb : []);
+    };
+
+    my $http = Slim::Networking::SimpleAsyncHTTP->new(
+        sub {
+            my $resp = shift;
+            my $rels = _parseMuSpy($resp);
+            if (defined $rels) {
+                _cacheFeed($cacheKey, $fbKey, $rels);
+                $args{onDone}->($rels);
+            }
+            else {
+                # A 200 with an unparseable body: fall back to the last good copy
+                # rather than caching an empty MuSpy list for FEED_TTL.
+                $serveFallback->();
+            }
+        },
+        sub {
+            my $resp = shift;
+            $log->warn("MuSpy fetch failed: " . ($resp->error // '?'));
+            $serveFallback->();
+        },
+        { timeout => MUSPY_TIMEOUT }
+    );
+
+    $http->get($url, 'Accept' => 'application/json');
+}
+
+# Parse a MuSpy releases response into the internal release-hash shape. Returns
+# an arrayref (possibly empty) on success, or undef if the body isn't the
+# expected JSON array (so the caller can fall back to the last good copy).
+# MuSpy release object: { artist => { name, mbid, sort_name, disambiguation },
+# mbid => <release-group-mbid>, name => <title>, type => <primary type>,
+# date => 'YYYY' | 'YYYY-MM' | 'YYYY-MM-DD' }.
+sub _parseMuSpy {
+    my ($resp) = @_;
+
+    my $data = eval { from_json($resp->content) };
+    if ($@) {
+        $log->error("MuSpy JSON parse error: $@");
+        return undef;
+    }
+    # Tolerate either a bare array or a { releases => [...] } wrapper.
+    $data = $data->{releases} if ref $data eq 'HASH' && ref $data->{releases} eq 'ARRAY';
+    return undef unless ref $data eq 'ARRAY';
+
+    my @out;
+    for my $r (@$data) {
+        next unless ref $r eq 'HASH';
+        my $artist = $r->{artist};
+        my $aname  = ref $artist eq 'HASH' ? ($artist->{name} // '') : (defined $artist ? $artist : '');
+        my $ambid  = ref $artist eq 'HASH' ? $artist->{mbid} : undef;
+        my $title  = $r->{name} // '';
+        my $rgMbid = $r->{mbid} // '';
+        next unless length $aname || length $title;
+        push @out, {
+            artist_credit_name         => $aname,
+            release_name               => $title,
+            release_group_mbid         => $rgMbid,
+            release_group_primary_type => $r->{type} // '',
+            release_date               => _padDate($r->{date} // ''),
+            artist_mbids               => ($ambid ? [ $ambid ] : []),
+            # coverArtUrl builds a release-GROUP art URL from this (MuSpy has no
+            # release-level MBID / caa_id, so this is the only art signal we have).
+            caa_release_group_mbid     => $rgMbid,
+            _source                    => 'muspy',
+        };
+    }
+    $log->info("Parsed " . scalar(@out) . " MuSpy releases");
+    return \@out;
+}
+
+# Pad a possibly-partial MuSpy date ('2026' / '2026-07') to a full 'YYYY-MM-DD',
+# so the plugin's date sort, week dividers and windowing (which substr/regex the
+# string) behave. Missing month/day default to 01. A non-date returns ''.
+sub _padDate {
+    my $d = shift // '';
+    return '' unless $d =~ /^(\d{4})(?:-(\d{1,2}))?(?:-(\d{1,2}))?/;
+    # Default a missing OR zero-filled component to 01. MusicBrainz (and so MuSpy)
+    # represents an unknown month/day as an omitted part ('2026', '2026-07') OR as
+    # a zero part ('2026-00-00', '2026-07-00'); a plain `$2 || 1` leaves '00' as-is
+    # (Perl treats the string '00' as true), yielding an invalid date that then
+    # corrupts the week-divider/window date maths downstream. Coerce numerically
+    # up front — this also copies the captures into lexicals before any downstream
+    # match can clobber $1/$2/$3.
+    my ($y, $mon, $day) = ($1, ($2 // 0) + 0, ($3 // 0) + 0);
+    return sprintf('%04d-%02d-%02d', $y, $mon || 1, $day || 1);
+}
+
 # Store a fetched feed under both the short-TTL working key and the long-TTL
 # fallback key (used when a later fetch fails). Guarded so a Storable hiccup
 # can't break the response.
@@ -232,6 +365,15 @@ sub clearFeedCache {
         my $past   = ($prefs->get('foryou_past')   // 1) ? 'true' : 'false';
         my $future = ($prefs->get('foryou_future') // 0) ? 'true' : 'false';
         $cache->remove('lbf:feed:user:' . join('|', $username, $sort, $past, $future, $days));
+
+        # The For You feed also folds in MuSpy releases, so a forced refresh must
+        # drop MuSpy's working cache too — otherwise "Refresh (force update now)"
+        # re-fetches LB fresh but keeps serving a MuSpy copy up to FEED_TTL (24h)
+        # old, hiding a just-added artist / newly-announced release. Only the
+        # working key; the fallback copy is left intact (as with the feed above).
+        my $userid = $prefs->get('muspy_userid') // '';
+        $userid =~ s/^\s+|\s+$//g;
+        $cache->remove('lbf:muspy:' . $userid) if length $userid;
     }
     $log->info("cleared $which feed cache (forced refresh)");
 }
@@ -1313,7 +1455,20 @@ sub coverArtUrl {
     # artwork-only filter). Require caa_release_mbid so absence == no artwork.
     # Accept either a release hashref or a bare caa_release_mbid string so
     # playlist tracks (which carry the mbid directly) can reuse this.
-    my $mbid = (ref $rel eq 'HASH') ? $rel->{caa_release_mbid} : $rel;
+    if (ref $rel eq 'HASH') {
+        return CAA_BASE_URL . $rel->{caa_release_mbid} . '/front-250'
+            if $rel->{caa_release_mbid};
+        # MuSpy items carry only a release-GROUP MBID — CAA serves group art at a
+        # different path. (No has-art signal exists for a group, so this may 404
+        # for the rare art-less release group; the image proxy degrades to a
+        # placeholder. Overlaps with an LB copy are resolved in _dedupeReleases,
+        # which prefers the entry that has cover art — i.e. the richer LB one.)
+        return CAA_RG_BASE_URL . $rel->{caa_release_group_mbid} . '/front-250'
+            if $rel->{caa_release_group_mbid};
+        return undef;
+    }
+
+    my $mbid = $rel;
     return undef unless $mbid;
     return CAA_BASE_URL . $mbid . '/front-250';
 }
