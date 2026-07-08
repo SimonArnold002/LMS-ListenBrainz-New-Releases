@@ -69,6 +69,11 @@ use constant TRACK_NOMATCH_TTL =>  7 * 86400;
 # match" for the full week. (This is what left a playlist stuck on local-only
 # when its warm resolve ran before the streaming plugins' auth was ready.)
 use constant TRACK_INCONCLUSIVE_TTL => 1 * 3600;
+# How far ahead to keep MuSpy upcoming releases in the For You merge. MuSpy is a
+# small, user-curated follow list whose whole point is upcoming releases, so its
+# future side has its own toggle (muspy_future, default ON) rather than riding the
+# LB feed's foryou_future — this just bounds it so it can't run away.
+use constant MUSPY_FUTURE_DAYS => 365;
 # Resolved whole-playlist cache. The JSPF content is IMMUTABLE for a given
 # mbid|last_modified, so there's no correctness reason to expire early — a new
 # week brings a new mbid (a fresh key) which re-resolves once. The Weekly Jams/
@@ -1459,31 +1464,42 @@ sub _filterAll    { _filterSection(shift, 'all') }
 # MuSpy merge (For You feed only)
 # ---------------------------------------------------------------------------
 # Merge the user's MuSpy followed-artist releases into the ListenBrainz For You
-# list. MuSpy returns release groups newest-first but NOT windowed to the
-# plugin's day range (its API takes limit/offset only), so window them here to the
-# same past/future/days the For You feed uses, then concatenate. Overlap dedupe is
-# left to _dedupeReleases (via _sortReleases), which prefers the copy that has
-# cover art — naturally keeping the richer ListenBrainz entry on a duplicate.
+# list. MuSpy returns release groups newest-first but NOT windowed to the plugin's
+# day range (its API takes limit/offset only), so window them here, then
+# concatenate. Overlap dedupe is left to _dedupeReleases (via _sortReleases), which
+# prefers the copy that has cover art — naturally keeping the richer ListenBrainz
+# entry on a duplicate.
+#
+# Windowing differs deliberately from the LB feed: MuSpy is a small, user-curated
+# list of artists the user explicitly follows, and its whole value is UPCOMING
+# releases. So its future side has its OWN toggle (muspy_future, default ON) rather
+# than riding foryou_future (off by default, tuned for the broad LB fresh-releases
+# feed) — bounded to MUSPY_FUTURE_DAYS so it can't run away. The past side still
+# honours foryou_past + the days window, so recent MuSpy releases align with the
+# feed's freshness setting. (Consequence with the default: even when the LB "Include
+# upcoming" is off, the feed can show past-LB + future-MuSpy together — intended; the
+# user picked those MuSpy artists. A user who doesn't want that turns muspy_future off.)
 sub _mergeMuSpy {
     my ($lb, $muspy) = @_;
     $lb = [] unless ref $lb eq 'ARRAY';
     return $lb unless ref $muspy eq 'ARRAY' && @$muspy;
 
     my $past   = $prefs->get('foryou_past')   // 1;
-    my $future = $prefs->get('foryou_future') // 0;
+    my $future = $prefs->get('muspy_future')  // 1;
     my $days   = $prefs->get('days')          // 14;
 
     my @n = localtime(time);
     my $today = sprintf('%04d-%02d-%02d', $n[5] + 1900, $n[4] + 1, $n[3]);
     my $lo = _dateShift($today, -$days);
-    my $hi = _dateShift($today,  $days);
+    my $hi = _dateShift($today,  MUSPY_FUTURE_DAYS);
 
     my @kept;
     for my $r (@$muspy) {
         my $d = $r->{release_date} // '';
         next unless $d =~ /^\d{4}-\d{2}-\d{2}$/;   # padded on ingest; skip the undatable
         # Dates are zero-padded, so a lexical compare is a chronological one. A
-        # release out today counts as "past" (i.e. shown when foryou_past is on).
+        # release out today counts as "past" (i.e. shown when foryou_past is on);
+        # anything ahead is kept when muspy_future is on, up to the MUSPY_FUTURE_DAYS cap.
         my $inWindow = ($d le $today) ? ($past   && $d ge $lo)
                                       : ($future && $d le $hi);
         push @kept, $r if $inWindow;

@@ -88,7 +88,7 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-0.9.77
+0.9.79
 
 ## Recommended by People You Follow (0.9.65; **new-music-only + single day-divided list in 0.9.71–0.9.72**)
 
@@ -630,6 +630,8 @@ divider, and it gives no accent bar). The panels also collapse/expand like nativ
 - `username` — ListenBrainz username
 - `token` — ListenBrainz API token
 - `lastfm_api_key` — optional Last.fm API key; enables three fallbacks: detail-page genres when MusicBrainz has none, the artist biography when MAI isn't installed (bio only, no photo), and similar artists for the DSTM radio when ListenBrainz has none (default empty = disabled)
+- `muspy_userid` — optional MuSpy (muspy.com) public user ID; folds that user's followed-artist releases into the For You feed (`API::getMuSpyReleases` → `Browse::_mergeMuSpy`). Public endpoint, no auth/password stored. Default empty = disabled
+- `muspy_future` — include MuSpy **upcoming** releases (default ON, 0.9.79). MuSpy is upcoming-heavy, so its future side has its own toggle instead of riding `foryou_future`; bounded to `MUSPY_FUTURE_DAYS` (365) in `_mergeMuSpy`. MuSpy's past side still honours `foryou_past` + `days`. Turn off for already-released MuSpy titles only
 - `days` — days window (1-90, default 14)
 - `sort` — default sort (release_date / artist_credit_name / release_name / confidence)
 - `group_by_artist` — collapse multi-release artists into one tappable entry (default ON)
@@ -646,7 +648,7 @@ divider, and it gives no accent bar). The panels also collapse/expand like nativ
 
 ### For You Settings
 - `foryou_past` — include past releases (default ON)
-- `foryou_future` — include upcoming releases (default OFF)
+- `foryou_future` — include upcoming releases (default ON since 0.9.79; was OFF — new installs only, existing prefs win)
 - `foryou_artwork_only` — hide releases without artwork (default ON)
 - `foryou_various` — include Various Artists releases (default ON)
 - Type checkboxes (`foryou_type_<name>`) — same set as All Releases; default ON: Album, Compilation. Default OFF: everything else. (Replaced the old single `foryou_albums` toggle in 0.6.15.)

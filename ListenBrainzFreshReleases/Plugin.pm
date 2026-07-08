@@ -42,6 +42,7 @@ $prefs->init({
     token                => '',
     lastfm_api_key       => '',
     muspy_userid         => '',
+    muspy_future         => 1,
     days                 => 14,
     sort                 => 'release_date',
     group_by_artist      => 1,
@@ -76,7 +77,7 @@ $prefs->init({
 
     # For You section
     foryou_past             => 1,
-    foryou_future           => 0,
+    foryou_future           => 1,   # upcoming releases on by default (0.9.79) — new installs only; existing prefs win
     foryou_artwork_only     => 1,
     foryou_various          => 1,
     foryou_type_album       => 1,

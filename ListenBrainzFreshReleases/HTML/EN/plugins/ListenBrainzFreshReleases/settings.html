@@ -23,6 +23,10 @@
 <input type="text" name="pref_muspy_userid" value="[% prefs.muspy_userid %]" size="40" autocomplete="off">
 [% END %]
 
+[% WRAPPER setting title="PLUGIN_LBF_MUSPY_FUTURE" desc="PLUGIN_LBF_MUSPY_FUTURE_HINT" %]
+<input type="checkbox" name="pref_muspy_future" value="1" [% IF prefs.muspy_future %]checked="checked"[% END %]>
+[% END %]
+
 [% WRAPPER setting title="PLUGIN_LBF_DAYS" desc="PLUGIN_LBF_DAYS_HINT" %]
 <input type="number" name="pref_days" value="[% prefs.days %]" min="1" max="90" size="4">
 [% END %]

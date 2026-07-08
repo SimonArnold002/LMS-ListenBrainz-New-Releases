@@ -98,7 +98,13 @@ PLUGIN_LBF_MUSPY_USERID
 	EN	MuSpy user ID (optional)
 
 PLUGIN_LBF_MUSPY_USERID_HINT
-	EN	Add releases from the artists you follow on MuSpy (muspy.com) into your New Releases for You feed — more tailored, since you choose the artists. Enter your MuSpy user ID: sign in at muspy.com, open Settings, and copy the ID shown there (it also appears in your notification/RSS feed URL as id=...). Only the public user ID is stored — no password. Duplicates that also appear from ListenBrainz are shown once. MuSpy mostly lists UPCOMING releases, so to see them turn on "Include upcoming releases" in the For You settings — and raise the "Days window" if you want releases further ahead than a couple of weeks. Leave blank to disable.
+	EN	Add releases from the artists you follow on MuSpy (muspy.com) into your New Releases for You feed — more tailored, since you choose the artists. Enter your MuSpy user ID: sign in at muspy.com, open Settings, and copy the ID shown there (it also appears in your notification/RSS feed URL as id=...). Only the public user ID is stored — no password. Duplicates that also appear from ListenBrainz are shown once. Leave blank to disable.
+
+PLUGIN_LBF_MUSPY_FUTURE
+	EN	MuSpy upcoming releases
+
+PLUGIN_LBF_MUSPY_FUTURE_HINT
+	EN	MuSpy mostly lists UPCOMING releases from the artists you follow, so this is on by default — upcoming MuSpy releases show in your New Releases for You feed even when the general "Include upcoming releases" option is off (they're artists you chose, so they're always welcome). Turn this off if you only want MuSpy's already-released titles. This affects MuSpy only, not the ListenBrainz feed.
 
 PLUGIN_LBF_DAYS
 	EN	Days window

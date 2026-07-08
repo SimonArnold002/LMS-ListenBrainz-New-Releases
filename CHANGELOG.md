@@ -3,6 +3,17 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.79
+
+### Changed
+- **New Releases for You now includes upcoming releases by default.** Most people want the "what's coming" side as much as recent releases, so the For You **Include upcoming releases** option now defaults ON for new installs (existing installs keep whatever you've set). The All Releases feed is unchanged.
+
+### Fixed
+- **MuSpy releases now show by default.** MuSpy's list is mostly *upcoming* releases, but they were being hidden unless you'd also turned on the general "Include upcoming releases" option — so for most people MuSpy looked like it did nothing. MuSpy now has its own **"MuSpy upcoming releases"** switch (**on by default**), so your followed artists' upcoming releases appear in New Releases for You straight away. It's independent of the ListenBrainz feed's upcoming setting; turn it off if you only want MuSpy's already-released titles.
+
+### Technical
+- Verified the MuSpy API against live data (public `https://muspy.com/api/1/releases/<userid>`, no auth, bare JSON array, `date` in full `YYYY-MM-DD`, `mbid` = release-group UUID) — parsing/endpoint were correct. Root cause of "MuSpy doesn't work" was `_mergeMuSpy` gating the future side on `foryou_future` (default OFF) and clipping to the `days` window, which dropped MuSpy's upcoming-heavy list. New pref `muspy_future` (default `1`) now gates MuSpy's future side instead; upcoming MuSpy releases are bounded to `MUSPY_FUTURE_DAYS` (365) rather than the narrow `days` window. The past side still honours `foryou_past` + `days`. LB feed behaviour is unchanged (its upcoming inclusion is still the `future =>` param on `getFreshReleasesForUser`). Settings checkbox + `PLUGIN_LBF_MUSPY_FUTURE` strings added; the `muspy_userid` hint dropped its now-obsolete "enable Include upcoming" advice.
+
 ## 0.9.78
 
 ### Added
