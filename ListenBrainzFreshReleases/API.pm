@@ -79,8 +79,94 @@ use constant CAA_BASE_URL    => 'https://coverartarchive.org/release/';
 # path. MuSpy only gives release-group MBIDs (no release-level MBID / caa_id), so
 # their cover art comes from here rather than CAA_BASE_URL.
 use constant CAA_RG_BASE_URL => 'https://coverartarchive.org/release-group/';
-use constant MB_BASE_URL     => 'https://musicbrainz.org/ws/2/';
+use constant MB_DEFAULT_BASE_URL => 'https://musicbrainz.org/ws/2/';
 use constant LASTFM_BASE_URL => 'https://ws.audioscrobbler.com/2.0/';
+
+# Auto-detect: when the user sets NO mb_base_url, a same-host musicbrainz-docker
+# mirror is probed once at startup (autodetectMirror) and its base cached under
+# this key so the SYNCHRONOUS _mbBase can pick it up. Value: a URL (mirror found),
+# '' (probed, none found), or absent (never probed). Re-probed daily.
+use constant MB_AUTO_KEY => 'lbf:mbmirror:v1';
+use constant MB_AUTO_TTL => 86400;
+
+# The MusicBrainz web-service base is a PREF (default = the public API) so the
+# plugin can be pointed at a local mirror — e.g. a musicbrainz-docker instance
+# at http://your-server:5000/ws/2/ — for fast, un-throttled lookups without touching
+# code. A mirror speaks the identical ws/2 API, so only the host changes. When
+# the pref is blank, a same-host mirror auto-detected at startup is used if one
+# was found; otherwise the public API. (Cover art still comes from the public
+# Cover Art Archive — musicbrainz-docker does not mirror it.)
+sub _mbBase {
+    my $u = $prefs->get('mb_base_url');
+    unless (defined $u && $u =~ /\S/) {
+        my $auto = $cache->get(MB_AUTO_KEY);
+        $u = (defined $auto && length $auto) ? $auto : MB_DEFAULT_BASE_URL;
+    }
+    $u =~ s/\s+//g;
+    $u .= '/' unless $u =~ m{/$};
+    return $u;
+}
+
+# True only when the configured base IS the public MusicBrainz host (incl.
+# beta./test. subdomains); any other host is a local mirror. Used to decide
+# whether an artist name-search may fall back to the public API (a mirror whose
+# Solr search index is unbuilt returns 0 for everything while browses work).
+sub _mbThrottled {
+    return _mbBase() =~ m{^https?://([^/]*\.)?musicbrainz\.org/}i ? 1 : 0;
+}
+
+# Auto-detect a LOCAL MusicBrainz mirror on the SAME host — the common
+# musicbrainz-docker-alongside-LMS setup — so it works with zero config. Only
+# runs when the user has set NO mb_base_url: probe a small FIXED same-host list
+# and, if one answers as a genuine ws/2 endpoint, cache its base for _mbBase.
+# Validation is the point: a known artist MBID must come back with the expected
+# name, which proves the responder is MusicBrainz and not some other service on
+# :5000 (macOS AirPlay, a Flask app, ...) — so a false positive is effectively
+# impossible. A manually-set base always wins and skips the probe; the LAN is
+# NEVER scanned (localhost only — a mirror on another host is typed in by hand).
+use constant MB_PROBE_MBID => 'a74b1b7f-06a0-4672-a641-eb3353aa608d';   # Radiohead
+use constant MB_PROBE_NAME => 'Radiohead';
+my @MB_AUTO_CANDIDATES = (
+    'http://localhost:5000/ws/2/',
+    'http://127.0.0.1:5000/ws/2/',
+);
+
+sub autodetectMirror {
+    my ($class, $cb) = @_;
+    $cb ||= sub {};
+
+    # Manual base set -> respect it, never probe.
+    my $u = $prefs->get('mb_base_url');
+    return $cb->() if defined $u && $u =~ /\S/;
+
+    # Already probed within MB_AUTO_TTL (found a URL or confirmed none) -> done.
+    return $cb->() if defined $cache->get(MB_AUTO_KEY);
+
+    my $i = 0;
+    my $try; $try = sub {
+        if ($i >= @MB_AUTO_CANDIDATES) {
+            eval { $cache->set(MB_AUTO_KEY, '', MB_AUTO_TTL); 1 };   # none; don't re-probe today
+            return $cb->();
+        }
+        my $base = $MB_AUTO_CANDIDATES[$i++];
+        Slim::Networking::SimpleAsyncHTTP->new(
+            sub {
+                my $data = eval { from_json(shift->content) };
+                if (!$@ && ref $data eq 'HASH' && ($data->{name} // '') eq MB_PROBE_NAME) {
+                    eval { $cache->set(MB_AUTO_KEY, $base, MB_AUTO_TTL); 1 };
+                    $log->info("Auto-detected local MusicBrainz mirror: $base");
+                    return $cb->();
+                }
+                $try->();   # answered but not MusicBrainz -> next candidate
+            },
+            sub { $try->() },   # unreachable / error -> next candidate
+            { timeout => 3 }
+        )->get($base . 'artist/' . MB_PROBE_MBID . '?fmt=json',
+               'Accept' => 'application/json', 'User-Agent' => USER_AGENT());
+    };
+    $try->();
+    return;
+}
 
 # MuSpy — an opt-in secondary source of "new releases" tailored to the artists a
 # user deliberately follows there. The releases/<userid> endpoint is PUBLIC (no
@@ -869,29 +955,65 @@ sub getArtistMbidByName {
     my $q = 'artist:"' . $name . '"';
     utf8::encode($q) if utf8::is_utf8($q);
     (my $safe = $q) =~ s/([^A-Za-z0-9])/sprintf("%%%02X",ord($1))/ge;
-    my $url = MB_BASE_URL . 'artist?query=' . $safe . '&fmt=json&limit=1';
+    my $query = 'artist?query=' . $safe . '&fmt=json&limit=1';
 
-    $log->info("Resolving artist name to MBID: $name");
+    # MIRROR SEARCH FALLBACK (ported from Discography 0.23.0): a musicbrainz-docker
+    # mirror serves entity BROWSES from Postgres, but ?query= SEARCH goes through
+    # Solr — and a mirror whose search index was never built returns count:0 for
+    # EVERY query while browses work. That would silently fail every name→MBID
+    # resolution (the DSTM radio seed, Last.fm similar-artist resolution). So when
+    # the configured base is a mirror and its search yields zero results (or is
+    # unreachable), retry the SAME query ONCE against the public API before caching
+    # a miss. The MBID is universal, so a public-resolved MBID still browses fine
+    # against the mirror. $mirror gates it; $isFb guards against a loop.
+    my $mirror = !_mbThrottled();
 
-    my $http = Slim::Networking::SimpleAsyncHTTP->new(
-        sub {
-            my $resp = shift;
-            my $data = eval { from_json($resp->content) };
-            my $mbid = '';
-            if (!$@ && ref $data eq 'HASH' && ref $data->{artists} eq 'ARRAY' && @{ $data->{artists} }) {
-                my $a = $data->{artists}[0];
-                $mbid = lc $a->{id} if $a->{id} && ($a->{score} // 0) >= 90;
-            }
-            eval { $cache->set($cacheKey, $mbid, $mbid ? MB_FOUND_TTL : MB_EMPTY_TTL); 1 }
-                or $log->warn("artist-mbid cache set failed: $@");
-            $log->info("Artist '$name' => " . ($mbid || 'no match'));
-            $onDone->($mbid || undef);
-        },
-        sub { _handleError(shift, $onError) },
-        { timeout => 12 }
-    );
+    # Pass the sub to itself ($self) rather than capturing $run lexically: a
+    # self-capturing closure is a reference cycle Perl never collects, and this
+    # resolver runs once per artist name (DSTM seeds, Last.fm similar-artist
+    # resolution) so each call would leak. $self keeps the CV alive across the
+    # async gap (the in-flight callbacks hold it), then frees when they do.
+    my $run = sub {
+        my ($self, $base, $isFb) = @_;
+        $log->info("Resolving artist name to MBID: $name" . ($isFb ? ' (public fallback)' : ''));
 
-    $http->get($url, 'Accept' => 'application/json', 'User-Agent' => USER_AGENT);
+        my $http = Slim::Networking::SimpleAsyncHTTP->new(
+            sub {
+                my $resp = shift;
+                my $data = eval { from_json($resp->content) };
+                my $arts = (!$@ && ref $data eq 'HASH' && ref $data->{artists} eq 'ARRAY')
+                           ? $data->{artists} : undef;
+
+                if ($arts && !@$arts && $mirror && !$isFb) {
+                    $log->info("Artist '$name' => 0 results on mirror; retrying public API");
+                    return $self->($self, MB_DEFAULT_BASE_URL, 1);
+                }
+
+                my $mbid = '';
+                if ($arts && @$arts) {
+                    my $a = $arts->[0];
+                    $mbid = lc $a->{id} if $a->{id} && ($a->{score} // 0) >= 90;
+                }
+                eval { $cache->set($cacheKey, $mbid, $mbid ? MB_FOUND_TTL : MB_EMPTY_TTL); 1 }
+                    or $log->warn("artist-mbid cache set failed: $@");
+                $log->info("Artist '$name' => " . ($mbid || 'no match') . ($isFb ? ' [public fallback]' : ''));
+                $onDone->($mbid || undef);
+            },
+            sub {
+                my $err = shift;
+                if ($mirror && !$isFb) {
+                    $log->info("Artist '$name' => mirror search error; retrying public API");
+                    return $self->($self, MB_DEFAULT_BASE_URL, 1);
+                }
+                _handleError($err, $onError);
+            },
+            { timeout => 12 }
+        );
+
+        $http->get($base . $query, 'Accept' => 'application/json', 'User-Agent' => USER_AGENT);
+    };
+
+    $run->($run, _mbBase(), 0);
 }
 
 # ---------------------------------------------------------------------------
@@ -1056,7 +1178,7 @@ sub getReleaseDetails {
     (my $safe = $mbid) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
     # recordings = tracklist. Genres come from the release-GROUP
     # (getReleaseGroupGenres) — release-level genres are almost always empty.
-    my $url = MB_BASE_URL . 'release/' . $safe . '?inc=recordings&fmt=json';
+    my $url = _mbBase() . 'release/' . $safe . '?inc=recordings&fmt=json';
 
     $log->info("Fetching MusicBrainz release details: $url");
 
@@ -1108,7 +1230,7 @@ sub getReleaseGroupGenres {
     }
 
     (my $safe = $rgMbid) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
-    my $url = MB_BASE_URL . 'release-group/' . $safe . '?inc=genres&fmt=json';
+    my $url = _mbBase() . 'release-group/' . $safe . '?inc=genres&fmt=json';
 
     $log->info("Fetching MusicBrainz release-group genres: $url");
 

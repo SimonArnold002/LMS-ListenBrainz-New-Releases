@@ -48,6 +48,10 @@
 <input type="checkbox" name="pref_prefer_library" value="1" [% IF prefs.prefer_library %]checked="checked"[% END %]>
 [% END %]
 
+[% WRAPPER setting title="PLUGIN_LBF_MB_BASE_URL" desc="PLUGIN_LBF_MB_BASE_URL_DESC" %]
+<input type="text" name="pref_mb_base_url" value="[% prefs.mb_base_url %]" size="48" placeholder="https://musicbrainz.org/ws/2/">
+[% END %]
+
 [% WRAPPER setting title="PLUGIN_LBF_DEBUG_LOG" desc="PLUGIN_LBF_DEBUG_LOG_DESC" %]
 <input type="checkbox" name="pref_debug_log" value="1" [% IF prefs.debug_log %]checked="checked"[% END %]>
 [% END %]

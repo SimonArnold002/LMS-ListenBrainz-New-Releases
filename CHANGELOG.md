@@ -3,6 +3,61 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.95
+
+### Fixed
+- **The zero-config MusicBrainz mirror auto-detect (0.9.94) now actually runs.** The setting shipped defaulting to the public MusicBrainz URL, and a blank field was reset back to that URL on save — so the setting was never blank, and the auto-detect (which only runs on a blank setting) never fired on any install. The setting now defaults to blank and a cleared field stays blank, so a same-host musicbrainz-docker mirror is discovered automatically as intended. The empty box still shows the public URL as placeholder text. (Existing installs that already saved the public URL should clear the field once to enable auto-detect.)
+- **Fixed a small memory leak in artist-name → MusicBrainz ID resolution.** The mirror-search fallback added in 0.9.93 used a self-referencing helper that Perl never reclaimed, leaking a little memory on every ListenBrainz Radio seed / Last.fm similar-artist lookup. Rewritten so it's freed once the lookup completes.
+
+## 0.9.94
+
+### Added
+- **Zero-config local MusicBrainz mirror.** If you leave the MusicBrainz server setting blank and you're running a musicbrainz-docker mirror on the *same machine* as your server, the plugin now finds it automatically (it checks port 5000 on this machine at startup and confirms it really is MusicBrainz before using it) and enjoys the fast, un-throttled lookups — no URL to type. If nothing is found it falls back to the public MusicBrainz API as before. A mirror on another host is still entered by hand; the plugin never scans your network.
+
+### Changed
+- **Clearer MusicBrainz server setting** — the help text now explains the auto-detect behaviour and no longer uses a specific example hostname.
+
+## 0.9.93
+
+### Fixed
+- **Artist lookups survive a MusicBrainz mirror whose search index isn't built.** If you point the plugin at a local MusicBrainz mirror, that mirror can answer direct lookups while its search returns nothing (a common state right after importing the data). Resolving an artist by name (used by the ListenBrainz Radio seed and the Last.fm similar-artist fallback) now automatically retries once against the public MusicBrainz API when the mirror's search comes back empty or unreachable — so a half-configured mirror degrades gracefully instead of silently failing. No effect when you use the public API or a fully-built mirror.
+
+## 0.9.92
+
+### Fixed
+- **A short EP no longer loses its streaming match to a like-named single.** The "don't let an album match a same-named single" filter no longer applies to **EP** releases — a genuine 2-track EP could be mistaken for a single (by track count) and dropped in favour of the wrong release. Albums still shed a same-named single as before.
+- **MusicBrainz server URL now tolerates a missing scheme.** Entering a mirror as a bare host (e.g. `plex:5000/ws/2`) previously broke every MusicBrainz lookup silently; it's now assumed to be `http://`. The settings page also shows the public default (`https://musicbrainz.org/ws/2/`) as a placeholder and spells it out in the help text, so it's recoverable if you ever clear the field.
+
+## 0.9.91
+
+### Changed
+- **People You Follow sort toggle now says what it's showing.** The inline sort row reads "Sorted by date (tap for recommender)" / "Sorted by recommender (tap for date)" — the current ordering plus a hint for what a tap changes (matching the Discography plugin's sort toggle), instead of the ambiguous "Sort by date" / "Sort by recommender".
+
+## 0.9.90
+
+### Fixed
+- **Self-titled albums no longer swallow the rest of the discography.** A release whose title is the artist's name ("The Beatles", "Weezer") now matches only that exact album, not "The Beatles 1962-1966", "…1967-1970" or "…Anthology 1". Decorated editions ("(White Album)", "(Remastered)") still match. (Shared matcher fix, kept in sync across the sibling plugins.)
+
+## 0.9.89
+
+### Fixed
+- **An album no longer matches a same-named single on a streaming service.** When you open an album, the streaming match now prefers an actual album over a like-named single (which title/year alone couldn't tell apart). Singles you view still match singles, and if a service only has the single it's still offered rather than showing nothing.
+
+## 0.9.88
+
+### Added
+- **Sort "Recommended by People You Follow" by date or by person.** A toggle at the top of the list switches between the usual **date** order (day dividers, newest first) and grouping **by recommender** — one section per person you follow ("Recommended by …"), most recent first. Your choice is remembered.
+
+## 0.9.87
+
+### Changed
+- **Removed "Show all" from All Releases.** It just repeated the same releases the dated week entries already cover, but as one long unpaged list. The dated weeks (This Week / Last Week / W/C …), each with the new "Show more", do the same job and stay manageable.
+
+## 0.9.86
+
+### Added
+- **"Show more" on busy All Releases weeks.** A single week of the global All Releases feed can list hundreds of releases. Opening a week now shows the first **30**, then a **"Show more"** row to reveal the next 30 (and another, and so on), with a **"Show less"** to collapse back. New Releases for You is unchanged — it keeps the full scrollable, searchable list.
+
 ## 0.9.81
 
 ### Changed

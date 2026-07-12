@@ -214,11 +214,29 @@ PLUGIN_LBF_PLAY_NEW
 PLUGIN_LBF_NO_NEW
 	EN	Nothing new since last time
 
+PLUGIN_LBF_FOLLOW_SORT_REC
+	EN	Sorted by recommender (tap for date)
+
+PLUGIN_LBF_FOLLOW_SORT_DATE
+	EN	Sorted by date (tap for recommender)
+
+PLUGIN_LBF_FOLLOW_BY
+	EN	Recommended by %s
+
+PLUGIN_LBF_FOLLOW_BY_UNKNOWN
+	EN	Recommended by someone you follow
+
 PLUGIN_LBF_SETTINGS
 	EN	Plugin Settings
 
 PLUGIN_LBF_VIEW_ALL
 	EN	Show all
+
+PLUGIN_LBF_SHOW_MORE
+	EN	Show more
+
+PLUGIN_LBF_SHOW_LESS
+	EN	Show less
 
 PLUGIN_LBF_WEEK_COMMENCING
 	EN	W/C
@@ -321,6 +339,12 @@ PLUGIN_LBF_PREFER_LIBRARY
 
 PLUGIN_LBF_PREFER_LIBRARY_DESC
 	EN	When building a playlist, use a track from your own music library if you have it (matched by MusicBrainz ID, then artist + title), before searching streaming services.
+
+PLUGIN_LBF_MB_BASE_URL
+	EN	MusicBrainz server
+
+PLUGIN_LBF_MB_BASE_URL_DESC
+	EN	The MusicBrainz web-service base URL. Leave this blank to auto-detect a musicbrainz-docker mirror running on this same machine (port 5000), falling back to the public API (https://musicbrainz.org/ws/2/) if none is found. Or point it at your own local mirror (e.g. http://your-server:5000/ws/2/) for fast, un-throttled lookups; a mirror speaks the identical API. Include the http:// or https:// scheme (a bare host is assumed to be http://). Cover art still comes from the public Cover Art Archive.
 
 PLUGIN_LBF_DEBUG_LOG
 	EN	Write a debug log

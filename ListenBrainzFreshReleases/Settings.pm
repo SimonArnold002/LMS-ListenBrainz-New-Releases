@@ -20,7 +20,7 @@ sub page {
 
 sub prefs {
     return ($prefs, qw(
-        username token lastfm_api_key muspy_userid muspy_future muspy_future_months days sort group_by_artist week_dividers play_via prefer_library debug_log
+        username token lastfm_api_key muspy_userid muspy_future muspy_future_months days sort group_by_artist week_dividers play_via prefer_library mb_base_url debug_log
         svc_priority_qobuz svc_priority_bandcamp svc_priority_tidal svc_priority_deezer
         foryou_past foryou_future foryou_artwork_only foryou_various
         foryou_type_album foryou_type_single foryou_type_ep foryou_type_broadcast foryou_type_other
@@ -58,6 +58,21 @@ sub handler {
             else {
                 $params->{"pref_svc_priority_$svc"} = $prefs->get("svc_priority_$svc") // 0;
             }
+        }
+
+        # MusicBrainz base URL: trim; a blank field STAYS blank so _mbBase can
+        # auto-detect a same-host mirror (and fall back to the public API when
+        # none is found). Storing the public URL on blank would defeat that — the
+        # settings.html placeholder communicates the default in the empty box.
+        # API::_mbBase normalises the trailing slash at read time.
+        # Guard: a scheme-less entry (e.g. a bare mirror host "your-server:5000/ws/2") is
+        # unfetchable and would fail EVERY MB lookup silently (tracklist, genres, DSTM
+        # artist resolve) with only log warnings. Prepend http:// (the usual local-mirror
+        # scheme; type https:// yourself for a TLS mirror) so a bare host still works.
+        if (exists $params->{pref_mb_base_url}) {
+            (my $u = $params->{pref_mb_base_url}) =~ s/^\s+|\s+$//g;
+            $u = "http://$u" if length $u && $u !~ m{^https?://}i;
+            $params->{pref_mb_base_url} = $u;
         }
 
         # Unblock any artists whose "remove" box was ticked. blocked_artists is
@@ -103,23 +118,37 @@ sub handler {
     return $class->_render($client, $params);
 }
 
-# Render the settings page: expose the detected streaming services to the
-# template, then hand off to the base handler (which persists the prefs and
+# Render the settings page via the base handler (which persists the prefs and
 # builds the page). Shared by the sync and async (token-validated) paths.
 sub _render {
     my ($class, $client, $params) = @_;
+    return $class->SUPER::handler($client, $params);
+}
+
+# Slim::Web::Settings::handler persists the POST, refreshes its own `prefs`
+# template var from the store, and THEN calls this — the last hook before the
+# template renders.
+#
+# ANY template variable derived from a pref MUST be built here, not before
+# SUPER::handler. `lbf_services` carries each service's CURRENT priority; built
+# in _render() it was read BEFORE the save, so saving a new priority re-rendered
+# the page with the old number still in the input (the save had actually applied
+# — a reload showed it). Fixed 0.9.85.
+sub beforeRender {
+    my ($class, $params, $client) = @_;
+
     require Plugins::ListenBrainzFreshReleases::Browse;
     $params->{lbf_services} = Plugins::ListenBrainzFreshReleases::Browse::serviceStatus();
 
     # The blocked-artists list (with each entry's index, for the unblock checkbox).
+    # handler() mutates blocked_artists directly (it's a structured arrayref, not
+    # in the prefs() list), so reading it here also picks up this save's unblocks.
     my $blocked = $prefs->get('blocked_artists');
     $blocked = [] unless ref $blocked eq 'ARRAY';
     $params->{lbf_blocked} = [
         map {{ idx => $_, name => ($blocked->[$_]{name} // ''), mbid => ($blocked->[$_]{mbid} // '') }}
         grep { ref $blocked->[$_] eq 'HASH' } 0 .. $#$blocked
     ];
-
-    return $class->SUPER::handler($client, $params);
 }
 
 # Turn a /1/validate-token response into a user-facing message. ListenBrainz

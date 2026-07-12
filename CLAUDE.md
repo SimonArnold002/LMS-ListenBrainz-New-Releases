@@ -88,7 +88,7 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-0.9.81
+0.9.95
 
 ## Recommended by People You Follow (0.9.65; **new-music-only + single day-divided list in 0.9.71–0.9.72**)
 
@@ -187,6 +187,14 @@ the newest 4 weeks hid ~31 of them. 0.9.71 keeps them all in one accumulating li
 - **Cover**: `menu-follow.png` ("People You Follow", `ROSE` gradient) via
   `tools/make_covers.py`. **Debug tool**: `tools/fetch_feed.py` dumps the raw feed as
   `match_check`-ready lines (needs the token: arg 2 or `LB_TOKEN`).
+- **Inline sort toggle (0.9.88): by date OR by recommender.** A top-of-list toggle row
+  (`_followSortToggle`, `MENU_SORT`) flips the durable `follow_sort` pref (default `date`) and refreshes
+  in place (`nextWindow=>'refresh'`, so the choice sticks across visits). `_followResult` branches on it:
+  `date` keeps the day dividers; `recommender` groups under a `_recommenderDivider` ("Recommended by
+  <user>") per follower, **most-recent-activity-first** (both modes bucket the already-newest-first list
+  in first-seen order). Matched items are tagged `_recommender` in `_resolveTracks` (like `_created`);
+  resolved-cache bumped `:3:`→`:4:` to bake it in. A track shows under ONE person (dedup keeps the most
+  recent recommender). Strings `PLUGIN_LBF_FOLLOW_SORT_REC`/`_SORT_DATE`/`_FOLLOW_BY`/`_FOLLOW_BY_UNKNOWN`.
 
 ## Created-for-You Playlists (0.8.0)
 
@@ -626,6 +634,14 @@ bare `<h2>` (Material doesn't theme it) or a standalone `<div class="prefHead">`
 per-setting *label* style, positioned right-aligned/narrow inside a `settingGroup` — not a section
 divider, and it gives no accent bar). The panels also collapse/expand like native LMS settings.
 
+**Settings template vars go in `beforeRender`, not `handler`/`_render` (0.9.85).**
+`Slim::Web::Settings::handler` persists each `prefs()` pref from `$paramRef->{pref_*}`, refreshes
+`$paramRef->{prefs}` from the store, and THEN calls `beforeRender($paramRef, $client)` right before
+`filltemplatefile`. Build a pref-derived template var (e.g. `lbf_services`, `lbf_blocked`) any earlier
+and it is read PRE-save, so a save re-renders the OLD values while the base's `prefs.*` rows on the same
+page show the new ones. Sanitising the incoming `$paramRef->{pref_*}` (the priority/enum guards) still
+belongs in `handler`, before `SUPER::handler`. Fleet-wide rule — LBF, PFR and Discography all had it.
+
 ### General Settings
 - `username` — ListenBrainz username
 - `token` — ListenBrainz API token
@@ -635,6 +651,7 @@ divider, and it gives no accent bar). The panels also collapse/expand like nativ
 - `group_by_artist` — collapse multi-release artists into one tappable entry (default ON)
 - `week_dividers` — when sorted by release date, insert a divider per week; takes precedence over group_by_artist for the date sort (default ON)
 - `play_via` — show inline playable streaming matches on the detail page (default ON)
+- `follow_sort` — People You Follow list ordering: `date` (day dividers, newest first) or `recommender` (grouped by the follower who recommended each track); default `date`. Flipped in place by the inline toggle at the top of that list, not shown on the settings page (0.9.88; toggle label made state+hint "Sorted by … (tap for …)" in 0.9.91)
 - `prefer_library` — when building a Created-for-You playlist, use a track from the user's own LMS library (matched by MusicBrainz ID, then artist + title) before searching streaming services (default ON; see "Prefer local library")
 - `debug_log` — opt-in dedicated warm/resolve debug log (default OFF, 0.9.54). When on, `Plugin::dbg` appends the playlist warm/match timeline — incl. the per-playlist **library-match count** and scan-defers — to `lbf-debug.log` in the LMS log dir (`Slim::Utils::OSDetect::dirsFor('log')`, cachedir fallback), size-capped ~1 MB with one `.old` rotation. The same lines always also go to `server.log` at INFO. Turn on to diagnose a match/caching problem, off after.
 
@@ -682,8 +699,7 @@ ListenBrainz Fresh Releases
 ├── ── All Releases ──                         ← Material section header
 │   └── <date span> · N releases               ← All Releases tile
 │       ├── Refresh (force update now)
-│       ├── Show all                            ← complete list (weekly/grouped view)
-│       ├── W/C <date>  [This/Last/Earlier badge]  ← that week's releases only
+│       ├── W/C <date>  [This/Last/Earlier badge]  ← that week's releases only (first 30, then "Show more")
 │       └── …                                  ← one entry per week-commencing
 └── ── Settings ──                             ← Material section header
     ├── Plugin Settings                         ← weblink to settings.html
@@ -692,7 +708,8 @@ ListenBrainz Fresh Releases
 
 All section filtering (artwork/type/VA) is still driven entirely by settings prefs. The All Releases
 by-week split (`_buildAllLanding`) groups the already-filtered+sorted list by `_weekStart` and offers
-a per-week drill-in plus a "Show all" entry; For You drops straight into its list (with the weekly
+one per-week drill-in per week-commencing (each paged 30-at-a-time; the "Show all" full-list entry was
+removed in 0.9.87); For You drops straight into its list (with the weekly
 dividers / group-by-artist per prefs). The Playlists section is gated on `username` being set. See
 "Top-level menu, tiles & home shelves" above for the tile-text and home-shelf details.
 
@@ -747,7 +764,7 @@ dividers / group-by-artist per prefs). The Playlists section is gated on `userna
 ### Display / New Music Tracker–inspired presentation
 - Release detail page shows base metadata, then genres and a per-disc tracklist (m:ss durations) pulled from MusicBrainz
 - `group_by_artist` (default ON): artists with one new release stay inline; artists with several collapse into an `Artist  (N)` entry that expands to their releases
-- Pagination: handled natively by LMS/Material — `_buildItems` returns the whole filtered+sorted list as one level and the client windows/scrolls it (no manual paging; see 0.4.7). Keeps Material's in-list filter working across the full list
+- Pagination: handled natively by LMS/Material — `_buildItems` returns the whole filtered+sorted list as one level and the client windows/scrolls it (no manual paging; see 0.4.7). Keeps Material's in-list filter working across the full list. **Exception (0.9.86): the All Releases per-week drill-ins page 30-at-a-time** via `_pageSection`/`_pageRow` (a global-feed week can be hundreds of releases). For You keeps the native full-list windowing; the All Releases "Show all" full-list view was removed in 0.9.87 (it duplicated the dated weeks unpaged)
 - Not ported from New Music Tracker (needs a web-app backend the OPML plugin doesn't have): OAuth login, artist following, wishlists, genre/style *filtering*, listener/popularity counts
 
 ### Release Type Filtering
@@ -775,7 +792,262 @@ Detected in `_isVariousArtists()`:
 - The zip must extract directly as `ListenBrainzFreshReleases/` with no extra `Plugins/` wrapper for manual installs
 - Material Skin's grouped artist release page layout is NOT achievable from OPML feeds — only via native library `albums_loop` responses. Solved in earlier versions by using Browse by Type sub-menus, removed in v0.3.0 in favour of settings-driven filtering.
 
+## Shared Matching Engine — FLEET SYNC RULE (2026-07-10)
+
+The artist/album/track matcher (`_norm`, `%FOLD`, `_artistMatch`, `_albumMatches`,
+fallback helpers `_stripFmt`/`_asciiNorm`/`_punctNorm`/`_stripArtistPrefix`; LBF also
+`_trackMatches`) is ONE engine with a copy in each of these four repos:
+
+- `LMS-ListenBrainz-New-Releases/ListenBrainzFreshReleases/Browse.pm` (origin, canonical)
+- `LMS-Pitchfork-Reviews/PitchforkReviews/Browse.pm`
+- `LMS-Discography/Discography/Sources.pm`
+- `LMS-Listen-to-Later/ListenLater/Sources.pm` (hash-pinned LENIENT variant — empty-artist
+  saved-item replay must still match; do NOT blindly align it)
+
+**THE RULE: a matching fix in ANY of these repos must be applied to ALL repos carrying the
+affected sub, in the SAME work session.** Enforcement — this must exit 0 before any matcher
+change is called done:
+
+    python3 LMS-ListenBrainz-New-Releases/tools/matcher_sync_check.py
+
+It diffs the comment-stripped CODE of every copy across all four repos. Deliberate variants
+are sha1-pinned inside the script with a reason, and FAIL the check if they change without a
+conscious re-pin (`--print-hashes` prints current hashes). After aligning: bump every touched
+repo's plugin version AND its match/decision cache versions (LBF: `lbf:stream` + `lbf:track` +
+`lbf:pl:resolved` — ALL layers; PFR: `pfr:stream`; DSC: `dsc:cand` only if the cached candidate
+shape changed — matching runs live there; LL: none — matching is live), rebuild zips + repo.xml
+sha. Never leave a matcher fix in one repo "to port later" — that is exactly how the 2026-07
+drift happened (LBF missed the P!nk/EP/ascii rules for months).
+
+**NOT part of this shared engine — do NOT sync (0.9.89):** the release-type consistency filter
+(`_candReleaseType` + the `_ctype` tags + the single-drop in `_findPlayable`) is a **deliberate
+LBF-only** layer that sits OUTSIDE `_norm`/`_albumMatches`. It must **not** be replicated to PFR/DSC/LL
+and it does **not** trigger `matcher_sync_check.py`. Discography already handles types its own way
+(per-type sections + the year/ownership rival rule) and has no candidate type-matching to align with;
+putting a type gate inside the shared matcher would risk breaking Discography's deliberate EP/single
+matching. `_candReleaseType` is a portable building block if we ever choose to fix Discography's
+same-year album/single gap — but that would be a separate, conscious port, not a sync obligation. See
+[[lbf-release-type-filter-not-synced]].
+
+## Streaming service search & debugging — CANONICAL REFERENCE (don't re-derive)
+
+The Qobuz/Tidal/Deezer search API is the SAME across the four streaming-resolver plugins (LBF, PFR,
+Discography, Listen-to-Later). **Full verified signatures live in `LMS-Discography/CLAUDE.md`
+("Service Plugin APIs — VERIFIED SIGNATURES") and the `[[service-search-and-debug]]` memory** — the
+authoritative table, kept from upstream source. Don't guess these; they break silently. Two gotchas
+that cause empty/junk pools:
+1. **Envelope: ONLY Qobuz hands back the whole result hash** (`{artists}{items}`/`{albums}{items}`);
+   Tidal & Deezer unwrap `{data}` themselves → plain ARRAY.
+2. **Query encoding differs** (`query_enc`): Qobuz + Tidal want a CHARACTER string, Deezer wants
+   BYTES. Feeding octets to Qobuz/Tidal double-encodes accents → junk/0 results (fixed 2026-07-10;
+   LBF carries `query_enc`/`qChars`/`qBytes` in `_findPlayable`/`_findPlayableTrack`).
+
+**HOW TO DEBUG A SEARCH (the canonical method — stop trying variants each session):**
+1. `["pref","plugin.listenbrainzfreshreleases:debug_log","1"]` (via jsonrpc).
+2. Fire the feed once (Material, or a jsonrpc menu query with a player MAC from `["players",0,20]`).
+3. **Read the log over HTTP:** `curl -s http://plex:9000/log.txt` and grep the plugin prefix — the
+   key line names each service's pool size + samples. Empty pool = service search returned nothing
+   (encoding/availability); healthy pool + no match = matcher gap (`tools/match_check.py`).
+4. Turn `debug_log` back off. Test the MB mirror directly with a `curl` to `plex:5000/ws/2/…`
+   ([[mb-mirror-search-index-gotcha]]); test the library with `["artists",…,"search:NAME"]`.
+
 ## Version History
+- **0.9.95** — **code-review fixes: make the 0.9.94 mirror auto-detect actually run + plug a resolver leak.**
+  From a pre-build review of 0.9.82–0.9.94. (1) **`mb_base_url` defaulted to the public URL, which made the
+  whole 0.9.94 auto-detect feature dead code.** `autodetectMirror` returns early on a non-blank base and
+  `_mbBase` only consults the auto-detected-mirror cache (`MB_AUTO_KEY`) when the pref is blank — but the
+  init default was `'https://musicbrainz.org/ws/2/'` AND `Settings::handler` reset a blank field back to
+  that URL, so the pref was **never** blank and the probe never fired on any install. Fixed: init default is
+  now `''` and a cleared field stays `''` (the settings.html placeholder communicates the default in the
+  empty box). Existing installs that already saved the public URL must clear the field once. (2) **Reference-
+  cycle leak in `getArtistMbidByName`.** The 0.9.93 mirror-search fallback used a self-capturing closure
+  (`my $run; $run = sub {…$run…}`) — a cycle Perl never collects — created once per artist-name resolution
+  (DSTM Radio seeds, Last.fm similar-artist resolution). Rewritten to pass the sub to itself (`$self`), so
+  it's freed when the async chain ends (portable — no `__SUB__`/`weaken`). Settings/lifecycle only —
+  **no matcher change, no cache-version bump**; `matcher_sync_check.py` still exits 0.
+- **0.9.94** — **auto-detect a same-host MusicBrainz mirror + de-personalise the settings text.** New
+  `API::autodetectMirror($cb)` runs from `postinitPlugin` ONLY when `mb_base_url` is blank: probes a
+  FIXED same-host list (`http://localhost:5000/ws/2/`, `http://127.0.0.1:5000/ws/2/`) and, for the first
+  that answers, validates it is really MusicBrainz by fetching a known MBID (Radiohead `a74b1b7f…`) and
+  checking `name eq 'Radiohead'` — so another `:5000` service can't be mistaken for a mirror. The
+  discovered base is cached under `lbf:mbmirror:v1` (URL=found, `''`=probed-none, TTL 1 day); `_mbBase`
+  consults it when the pref is blank (a manual URL still wins and skips the probe). `_mbThrottled` is
+  unchanged, so a discovered localhost mirror is treated as un-throttled + eligible for the empty-search
+  →public fallback, exactly like a manual mirror. **The LAN is never scanned** — localhost only. Covers
+  the common musicbrainz-docker-alongside-LMS case with no config. Also: the tooltip + all code comments
+  no longer reference a personal host (now `http://your-server:5000/ws/2/`) and the tooltip documents the
+  auto-detect. Ported identically to Discography 0.30.0 the same session. `perl -c` clean; no cache bump.
+- **0.9.93** — **mirror search fallback (ported from Discography 0.23.0).** `getArtistMbidByName` now
+  retries the public MusicBrainz API ONCE when the configured base is a **mirror** and its `?query=`
+  search returns zero results (or is unreachable). A musicbrainz-docker mirror serves entity BROWSES
+  from Postgres but SEARCH via Solr — a mirror whose search index was never built returns count:0 for
+  everything while browses work, which would silently fail every name→MBID resolution (the DSTM Radio
+  seed and the Last.fm similar-artist resolution). New `_mbThrottled` (public-host test) gates the
+  fallback; `$isFb` guards the single retry; the public-resolved MBID still browses fine against the
+  mirror. Public API and fully-built mirrors are unaffected. NOT a matcher change (sync N/A); no cache
+  bump (the fallback just fills the same `lbf:artistmbid:` cache correctly instead of caching a
+  spurious miss). See [[mb-mirror-search-index-gotcha]] and [[service-search-and-debug]]. `perl -c`
+  clean; `lbf:stream`/`lbf:track`/`lbf:pl:resolved` untouched.
+- **0.9.92** — **code-review fixes (release-type filter EP edge + mb_base_url scheme guard).** From the
+  0.9.82–0.9.90 pre-commit review. (1) **`_findPlayable` single-drop no longer applies to EP targets.**
+  `$dropSingles` was `$tnorm ne '' && $tnorm ne 'single'` — so an EP release dropped `single`-classified
+  candidates, but `_candReleaseType` classifies a real 2-track EP (no explicit service type field) as
+  `single` by track-count, so the correct EP could be discarded for a like-named rival. Now
+  `... && $tnorm ne 'ep'` — album/compilation targets still shed a same-named single (the 0.9.89 case),
+  EP targets don't. Filter output is cached, so **`lbf:stream:17→18`** (album path only — `_findPlayableTrack`
+  tags `_ctype` but never filters on it, so track/playlist caches unchanged). (2) **`mb_base_url` scheme
+  guard.** A scheme-less entry (bare mirror host like `plex:5000/ws/2`) was stored verbatim and made every
+  MB lookup fail silently (tracklist/genres/DSTM resolve); `Settings::handler` now prepends `http://` to a
+  scheme-less non-blank value (type `https://` yourself for a TLS mirror). (3) **Default URL made
+  discoverable** — settings.html placeholder `https://musicbrainz.org/ws/2/` + the desc string spells it
+  out and notes blank resets to it (so an accidental clear is recoverable). `perl -c` clean (Browse +
+  Settings). NOTE (verified in review, NOT bugs, left as-is): the `_streamId`/`lbf:bcmatch` "type/norm not
+  in the key" concerns only bite MBID-less releases, which the 0.4.4 invariant says never happens on the
+  feed path (release_mbid always present → album/single get distinct mbid keys); reuse/altitude cleanup
+  (`_recommenderDivider`≈`_dayDivider`, dual-encode ×4, `_norm` €/£/¥ outside `%FOLD`, `%pageState` never
+  clears, `lbf:pl:resolved:6:` key triplicated) deferred.
+- **0.9.91** — **People You Follow inline sort toggle: state+hint labels (Discography style).** The
+  toggle row now names the CURRENT ordering with a tap hint — `PLUGIN_LBF_FOLLOW_SORT_DATE` = "Sorted by
+  date (tap for recommender)", `PLUGIN_LBF_FOLLOW_SORT_REC` = "Sorted by recommender (tap for date)" — and
+  `_followSortToggle` picks the string by current state (`$byRec ? REC : DATE`, flipped from the old
+  action-named `$byRec ? DATE : REC`). Mirrors Discography's `_sortToggleItem`
+  ("Sorted newest first (tap for oldest)"). Strings-only + one ternary; no matcher, no cache bump.
+  (Also this session, diagnosed but NOT a code bug: a user reported the follow list "can't view as list /
+  shows as a grid of covers". Verified live over HTTP against the server's own 6.4.4 `material-deferred.min.js`
+  that the feed forces LIST — the sort `link` row + `header-basic` divider + `audio` rows make `types.size==3`,
+  so Material's `1==types.size` grid-enable never fires (`canUseGrid=false`). It was a STALE Material client
+  view cached from an older pure-audio build; a hard-refresh/incognito reopen restored the list AND the ⋮
+  List/Grid toggle. No plugin change — the current feed already can't be gridded.)
+- **0.9.90** — **matcher: self-titled-album rule (fleet sync from Discography 0.11.1).** When the album
+  title normalises to the ARTIST name ("The Beatles", "Weezer"), `_albumMatches` now matches on the
+  EXACT normalised title only — skipping the prefix/format/ascii/artist-prefix fallbacks that otherwise
+  read "<album> <extra>" as an edition of the same album. Without it, "The Beatles" swallowed "The
+  Beatles 1962-1966" (Red), "…1967-1970" (Blue), "…Anthology 1". `_norm` still strips brackets, so "The
+  Beatles (White Album)"/"(Remastered)" still match; a wrong artist on an exact title still fails.
+  **Fleet sync:** applied byte-identical to LBF + PFR + DSC (checker `_albumMatches` hash `7462b60e053d`
+  across all three) and, adapted, to LL's pinned lenient variant (empty-artist replay path untouched;
+  re-pinned `5d270440af5a→2bf38f346e0f`); `matcher_sync_check.py` exits 0. Album-path only, so **only
+  `lbf:stream:16→17`** bumps (track/playlist caches use `_trackMatches`, unchanged). Gates: `perl -c`
+  clean on all four; 14/14 assertions (Red/Blue/Anthology rejected, exact/White-Album/Remastered
+  accepted, wrong-artist rejected, normal albums unaffected, LL empty-artist leniency preserved);
+  checker exit 0. (Sibling bumps this session: PFR 0.7.5 `pfr:stream:5→6`, LL 0.1.70.)
+- **0.9.89** — **streaming match honours release type: an album no longer resolves to a like-named
+  single.** Field bug — a release (e.g. an Album) matched a same-named **single** on a service, which
+  title+year can't separate (a single usually shares the album's year). Fix is a type-consistency
+  filter in `_findPlayable`, **outside the shared matcher** (LBF-only — no fleet sync; Discography
+  untouched, and it has no candidate type-matching to copy anyway — it disambiguates by year+ownership,
+  which needs the whole discography). New `_candReleaseType($album)` classifies a candidate as
+  `album`/`single`/`ep`/`''` from the service's OWN data — explicit type field first (Qobuz
+  `release_type`, Deezer `record_type`, TIDAL `type`), else a conservative track-count rule (≤2 tracks →
+  single; a real album never has 1–2 tracks; 3+/unknown → `''` = keep). Each adapter tags matched items
+  `_ctype`; `_findPlayable` drops `single`-typed candidates **only when the opened release's type is
+  KNOWN and is not itself a single** (so a Single release still matches a single — LBF lets users
+  include singles — and an unknown/blank type is never filtered), and **keeps the whole set if the drop
+  would empty a service's matches** (a service that only lists the single, or a flaky type field, still
+  yields a match). Target type is `$rel->{release_group_primary_type}`, threaded as a new trailing
+  `_findPlayable` arg. Cache bump `lbf:stream:15→16` so cached albums re-resolve once and shed the
+  single. **KNOWN RESIDUAL:** a mistyped single with 3+ tracks and no type field slips through (rare;
+  the conservative rule errs toward keeping matches). Reusable/portable to Discography later (would fix
+  its same-year album/single gap). Gates: `perl -c` clean; 19/19 assertions on `_candReleaseType`
+  (all three services' field shapes, explicit-type precedence, track-count fallback, guards) + the
+  drop/fallback filter.
+- **0.9.88** — **People You Follow: inline sort toggle — by date OR by recommender.** The list can
+  now be grouped by the follower who recommended each track, not just by day. A top-of-list toggle row
+  (`_followSortToggle`, `MENU_SORT` icon) flips the durable `follow_sort` pref (default `date`) and
+  refreshes in place (`nextWindow=>'refresh'` → the re-walk re-reads the pref, so the choice sticks
+  across visits — like the feed Sort setting). `_followResult` branches: `date` = the existing day
+  dividers; `recommender` = a `_recommenderDivider` ("Recommended by <user>") per follower. Both
+  iterate the already-newest-first list and bucket in first-seen order, so **recommender groups come
+  out most-recent-activity-first**, tracks newest-first within each. Each matched item is tagged
+  `_recommender` in `_resolveTracks` (mirroring `_created`; harmless to the playlist/DSTM paths), and
+  the resolved-cache key bumped `lbf:follow:resolved:3→4` so existing resolves re-run once and bake it
+  in (the source store already carries it — free re-tag). Dedup means a track shows under a single
+  person (whoever recommended it most recently). New strings `PLUGIN_LBF_FOLLOW_SORT_REC` /
+  `_SORT_DATE` / `_FOLLOW_BY` / `_FOLLOW_BY_UNKNOWN`; new icon `lbf-sort_MTL_icon_sort.png`. New pref
+  `follow_sort`. No matcher change. Gates: `perl -c` clean; 10/10 behavioural assertions against the
+  real `_followResult`/`_followSortToggle` (toggle-first + correct label per mode, date order + single
+  day group, recommender order most-recent-first + one divider per person, pref flips both ways).
+- **0.9.87** — **removed the "Show all" entry from the All Releases landing.** It was the first row
+  of `_buildAllLanding` and dumped the entire weekly/grouped list unpaged (via `_buildItems`) —
+  duplicating the same releases the dated week rows already cover, and it was the path that still
+  flooded once the per-week lists were paged (0.9.86). The landing is now just the dated week
+  drill-ins, each capped 30-at-a-time with "Show more". `_buildAllLanding`'s `$headers` param and the
+  `PLUGIN_LBF_VIEW_ALL` string are now unused (left in place; harmless). No matcher change, no cache
+  bump. (New Releases for You is unchanged — full native windowing.) `perl -c` clean.
+- **0.9.86** — **"Show more" reveal on the All Releases per-week lists (30 at a time).** A single
+  week of the GLOBAL All Releases feed can list hundreds of releases; opening a week now renders
+  **PAGE_SIZE = 30** rows followed by a **"Show more (N)"** row that grows the week by another 30, and
+  — once grown — a **"Show less"** row that collapses back to 30. Ported from the Discography plugin's
+  `_pageSection`/`_pageRow`: the tap is a `nextWindow => 'refresh'` toggle that stores an **absolute**
+  target in a module-level `%pageState` (per player, per `arweek:<week>` key), which survives the
+  `cachetime => 0` re-walk the refresh triggers; collapsing deletes the key (no residue); a shrunk feed
+  clamps rather than slicing past the end. **Scoped to All Releases ONLY** — `_pageSection` is called
+  solely from the per-week drill-in coderefs in `_buildAllLanding`. **New Releases for You is untouched**
+  (its native full-list windowing — Material's in-list filter spanning every item — works well and is
+  the deliberate 0.4.7 behaviour); **"Show all"** likewise stays the full native list (it's the
+  everything/escape-hatch view), and the shared `_buildItems`/`_buildWeekly`/`_buildGrouped` are
+  unchanged, so nothing else moves. New strings `PLUGIN_LBF_SHOW_MORE` / `PLUGIN_LBF_SHOW_LESS`; two
+  placeholder icons `lbf-more_MTL_icon_unfold_more.png` / `lbf-less_MTL_icon_unfold_less.png` (Material
+  renders its own themed unfold_more/less font-icon from the filename). No matcher change, **no cache
+  bump** — pure view state. Gates: `perl -c` clean; 22/22 behavioural assertions against the real
+  `_pageSection`/`_pageRow` (cap/no-cap, remainder counts, more→more→less full cycle, absolute+clamped
+  targets, collapse-clears-residue, section independence, shrunk-feed clamp with no undef tiles).
+- **0.9.85** — **fix: the settings page rendered STALE service priorities after a save.**
+  `lbf_services` (which carries each service's CURRENT priority into the template) was built
+  in `_render()` **before** `SUPER::handler` persists the POST, so saving a new priority
+  re-rendered the page with the old number still in its input — the save HAD applied, but only
+  a reload showed it. Moved (with `lbf_blocked`) into **`beforeRender`**, the platform's
+  documented post-save hook: `Slim::Web::Settings::handler` persists each `prefs()` pref from
+  `$paramRef->{pref_*}`, refreshes its own `prefs` template var from the store, and only then
+  calls `beforeRender($paramRef, $client)` immediately before `filltemplatefile`. (`lbf_blocked`
+  was already correct — `handler` mutates `blocked_artists` directly before rendering — but it
+  belongs in the same hook.) **RULE (fleet-wide): any Settings template variable derived from a
+  pref MUST be built in `beforeRender`, never before `SUPER::handler`;** sanitising the incoming
+  `$paramRef->{pref_*}` still belongs in `handler`. Surfaced by a code review of the sibling
+  Discography plugin, which had inherited the same shape via PFR; fixed in all three the same
+  session (DSC 0.10.4, PFR 0.7.4). Settings-render only — no matcher, no cache, **no key bumps**.
+- **0.9.84** — **matcher aligned to the fleet-canonical engine** (see the Shared Matching
+  Engine section + `tools/matcher_sync_check.py`, both NEW in this version — the checker
+  cross-diffs all four repos' copies and hash-pins documented variants). LBF's copy had
+  quietly lagged: `_norm` was missing the stylised-punctuation substitutions ($->s, euro/
+  pound/yen, !->i, @->a) that PFR/Discography had — so the "P!nk"/"L.U.C.K.Y" class
+  (long-open gap 3) is NOW FIXED here, for albums AND tracks (`_trackMatches` shares
+  `_norm`); `_albumMatches` was missing the EP/LP-strip and ascii-glyph fallbacks
+  (+ their `_stripFmt`/`_asciiNorm` helpers, now added). `_norm` output feeds matching and
+  norm-keyed caches, so ALL layers bump: `lbf:stream:14→15`, `lbf:track:5→6`,
+  `lbf:pl:resolved:5→6`. Verified via the real module (P!nk, EP-strip, "( )", artist-prefix,
+  plus must-not-match controls).
+- **0.9.83** — **matcher: two fallbacks ported from the Discography plugin** (both were
+  deliberate divergences waiting to come upstream). (1) **All-punctuation / single-char
+  album titles** (Sigur Rós "( )", "X"): `_norm` erases them and the <2-char gate rejected
+  before comparing — new branch compares `_punctNorm` (lowercase, whitespace stripped,
+  punctuation KEPT: "( )" == "()") of the RAW titles, exact equality only + mandatory
+  artist gate. The raw album title is threaded to the matcher as a new trailing
+  `$albumRaw` arg through all four `run` adapter signatures (auto + manual-Bandcamp call
+  sites pass `$album`). (2) **Artist-name-PREFIXED titles** ("Belle and Sebastian Write
+  About Love" vs "Write About Love"): strip a leading "<artistNorm> " from both sides and
+  re-compare, >=3-char remainder gate. Album matcher only — `_trackMatches` untouched.
+  `lbf:stream:13→14` flushes cached album no-matches (track/playlist caches unaffected).
+  Verified via the real module: 8/8 incl. must-not-match controls (live edition, wrong
+  artist, x-vs-xx, Prism-of-Doom).
+- **0.9.82** — **fix: accented artists/titles got junk or empty Qobuz+Tidal search results
+  while Deezer worked** (found as the Sigur Rós failure in the Discography plugin, 2026-07-10,
+  and ported back here). Root cause: both the album (`_findPlayable`) and track
+  (`_findPlayableTrack`) resolvers octet-encoded the outgoing query for EVERY adapter, but the
+  service plugins' own URL layers differ — Qobuz escapes query params with `uri_escape_utf8`
+  and Tidal transliterates them with `Text::Unidecode`, both of which expect CHARACTER strings,
+  so octets double-encoded ("Sigur Rós" was searched as "Sigur RÃ³s"); Deezer's
+  `complex_to_query` (and Bandcamp) want octets, which is why they were unaffected. Fix:
+  adapters carry `query_enc => 'chars'|'bytes'` (Qobuz/Tidal chars, Deezer/Bandcamp bytes);
+  both resolvers build both spellings (`utf8::decode` fails safe on non-UTF-8 input) and pick
+  per adapter at the call site. Cache bumps — decisions resolved via mangled queries must
+  flush, and per the layered-cache rule the outer layer bumps with the inner:
+  `lbf:stream:12→13`, `lbf:track:4→5`, `lbf:pl:resolved:4→5`. Likely retro-fixes part of the
+  long-standing "accents" unmatched-tracks gap class (the STREAMING side of it; the local-side
+  `_norm` fold shipped in 0.9.57). NOTE (not done): service album searches are relevance-capped
+  (Qobuz 200, our Tidal/Deezer calls 50) — the Discography plugin moved to artist-first
+  fetching (resolve artist, pull their album list) for that reason; candidate here if deep
+  discography misses ever show up in LBF resolution.
 - **0.9.77** — **fix: DSTM Radio dropped to random library tracks during a ListenBrainz
   Popularity-API outage.** Diagnosed live (player BackGardenSpeaker): the seed resolved and
   `getSimilarArtists` returned 100 artists, but every `getTopRecordingsForArtist` fan-out call
