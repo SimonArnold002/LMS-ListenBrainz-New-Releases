@@ -435,6 +435,20 @@ sub _resolveAndReturn {
     $cands ||= [];
 
     unless (@$cands) {
+        # A 'radio' pool comes back empty when the artist→tracks step yields nothing —
+        # most importantly when ListenBrainz's Popularity API (top-recordings-for-artist)
+        # is disabled server-side ("500 … currently disabled due to high load"). EVERY
+        # radio sub-path (similar-artists, seed-only, AND the Last.fm fallback) funnels
+        # through that one endpoint, so none of them can rescue this; without a net the
+        # handler returns [] and core DSTM drops to random library tracks. Fall back ONCE
+        # to the Recommended CF pool, which is a DIFFERENT endpoint (/1/cf/recommendation)
+        # and stays up during a Popularity outage. 'recommended' never recurses here
+        # (guarded by $which), so an all-endpoints-down case still terminates cleanly.
+        if ($which eq 'radio') {
+            $log->info("DSTM radio: empty candidate pool (Popularity API may be down); falling back to Recommended pool");
+            _recommendedFill($client, $cb);
+            return;
+        }
         $log->info("DSTM $which: empty candidate pool");
         $cb->($client, []);
         return;

@@ -116,7 +116,7 @@
   <h1>ListenBrainz Fresh Releases — LMS Plugin</h1>
   <p class="tagline">A plugin for <strong>Lyrion Music Server (LMS)</strong> built around <a href="https://listenbrainz.org">ListenBrainz</a>. It browses newly released albums (a personalised feed plus the global feed), turns your ListenBrainz playlists and recommendations into playable music, and adds rich release detail pages with artist bios and one-tap streaming.</p>
   <div class="badges">
-    <span class="badge accent">v0.9.75</span>
+    <span class="badge accent">v0.9.98</span>
     <span class="badge">LMS 9.0.0+</span>
     <span class="badge">Material Skin</span>
     <span class="badge">Powered by ListenBrainz</span>
@@ -132,6 +132,7 @@
 <h2>Features at a glance</h2>
 <div class="feature-cards">
 <div class="card"><h4>New Releases for You</h4><p>Fresh releases from artists you listen to</p><span class="needs">Needs: ListenBrainz username + token</span></div>
+<div class="card"><h4>MuSpy artists <em>(optional)</em></h4><p>Fold releases — especially <strong>upcoming</strong> ones — from the artists you follow on MuSpy into New Releases for You</p><span class="needs">Needs: MuSpy user ID (public)</span></div>
 <div class="card"><h4>All Releases</h4><p>The global ListenBrainz fresh-releases feed</p><span class="needs">Needs: nothing</span></div>
 <div class="card"><h4>Release detail pages</h4><p>Streaming matches, artist photo + biography, tracklist, genres, MusicBrainz link</p></div>
 <div class="card"><h4>Created-for-You Playlists</h4><p>Your Weekly Jams / Exploration / Daily Jams as Play-all lists</p><span class="needs">Needs: ListenBrainz username</span></div>
@@ -176,6 +177,8 @@
 </li>
 <li><em>(Optional)</em> Paste a <strong>Last.fm API key</strong> and set <strong>Streaming Services</strong> priorities if you have Qobuz/Tidal/Bandcamp/Deezer.
 </li>
+<li><em>(Optional)</em> Add your <strong>MuSpy user ID</strong> (bottom of the settings page, in the <strong>MuSpy</strong> section) to fold your followed artists' releases into New Releases for You.
+</li>
 <li>Save. The plugin appears in <strong>Apps → ListenBrainz Fresh Releases</strong>.
 </li></ol>
 </section>
@@ -186,13 +189,23 @@
 <ul>
 <li><strong>New Releases for You</strong> drops straight into your personalised list.
 </li>
-<li><strong>All Releases</strong> opens a by-week landing: <strong>Show all</strong>, plus one entry per week (badged <em>This Week / Last Week / Earlier</em>, and <em>Next Week / Next Fortnight / Further</em> for upcoming weeks when you've enabled future releases).
+<li><strong>All Releases</strong> opens a by-week landing: one entry per week (badged <em>This Week / Last Week / Earlier</em>, and <em>Next Week / Next Fortnight / Further</em> for upcoming weeks when you've enabled future releases). A busy week shows 30 releases at a time with <strong>Show more</strong> / <strong>Show all</strong> rows (and <strong>Show less</strong> to collapse).
 </li>
-<li>When sorted by date, releases are grouped under a <strong>weekly divider</strong> (tap a week header to focus just that week). <strong>Group by Artist</strong> collapses an artist's multiple new releases into one expandable entry. Both are toggles in settings.
+<li><strong>New Releases for You</strong> is grouped under <strong>weekly dividers</strong> (W/C week headers). Each list has a <strong>Sorted by…</strong> row in its Options section that cycles <strong>Release Date / Artist / Album Title</strong> — For You sorts within each week (keeping the headers); All Releases uses one sort shared across every week, set once and remembered (including across restarts). The <strong>Artist</strong> sort orders by MusicBrainz sort-name, so "Jack White" files under <strong>W</strong> while a stage name like "Panda Bear" stays under <strong>P</strong>.
 </li>
 <li>What appears in each feed (date window, past/future, artwork-only, Various Artists, release types) is controlled in the <strong>New Releases for You</strong> and <strong>All Releases</strong> settings sections.
 </li>
 <li>Use <strong>Refresh (force update now)</strong> at the top of a feed to bypass the cache and reload.
+</li></ul>
+<h3>Following artists on MuSpy (optional)</h3>
+<p><a href="https://muspy.com">MuSpy</a> tracks new releases from artists <strong>you</strong> pick — so it's more tailored than your listening history, and it's mostly about <strong>upcoming</strong> releases. Add your <strong>MuSpy user ID</strong> in the <strong>MuSpy</strong> settings section (public ID only — no password; find it in your MuSpy Settings or your RSS/notification URL as <code>id=…</code>) and those releases fold into <strong>New Releases for You</strong>. Duplicates that also come from ListenBrainz are shown once.</p>
+<p>Because MuSpy is upcoming-heavy, it has its <strong>own</strong> controls, separate from the ListenBrainz feed:</p>
+<ul>
+<li><strong>MuSpy upcoming releases</strong> (<strong>on</strong> by default) — shows MuSpy's upcoming titles <em>even when</em> the ListenBrainz feed's own "Include Upcoming Releases" is off. They're artists you chose, so they're always welcome. Turn it off to see only MuSpy's already-released titles.
+</li>
+<li><strong>MuSpy upcoming — how far ahead</strong> (<strong>12 months</strong>, 1–24) — caps how far into the future MuSpy reaches, so it can't run away. Applies to MuSpy only.
+</li>
+<li>MuSpy's <strong>past</strong> side follows the shared <strong>Days window</strong> and the feed's <strong>Include Past Releases</strong> toggle, so recent MuSpy releases line up with everything else (it can't reach back further than the Days window, max 90 days).
 </li></ul>
 <h3>Release detail pages</h3>
 <p>Tap any release for a page in three sections:</p>
@@ -234,9 +247,6 @@
 <tr><td>User Token</td><td><em>(empty)</em></td><td>From listenbrainz.org/settings/</td></tr>
 <tr><td>Last.fm API Key</td><td><em>(empty)</em></td><td>Optional — enables genre + artist-bio + radio similar-artist fallbacks</td></tr>
 <tr><td>Days window</td><td><strong>14</strong></td><td>1–90 days of releases to show</td></tr>
-<tr><td>Default sort</td><td><strong>Release Date</strong></td><td>Date (newest first), Artist, Album, or Confidence</td></tr>
-<tr><td>Group by Artist</td><td><strong>On</strong></td><td>Collapse an artist's multiple new releases into one entry</td></tr>
-<tr><td>Weekly Dividers</td><td><strong>On</strong></td><td>Per-week divider in the date-sorted view (wins over Group by Artist for that sort)</td></tr>
 <tr><td>Find on Streaming Services</td><td><strong>On</strong></td><td>Show playable Qobuz/Tidal/Bandcamp/Deezer matches on detail pages</td></tr>
 <tr><td>Prefer Tracks from My Library</td><td><strong>On</strong></td><td>Use your own copy (by MusicBrainz ID, then artist + title) before streaming — for Playlists and Don't Stop The Music</td></tr>
 <tr><td>Write a debug log</td><td><strong>Off</strong></td><td>Records the playlist warm/match activity to <code>lbf-debug.log</code> (next to the server log) — turn on only to troubleshoot a matching/caching issue</td></tr>
@@ -254,10 +264,23 @@
 </tr></thead>
 <tbody>
 <tr><td>Include Past Releases</td><td><strong>On</strong></td></tr>
-<tr><td>Include Upcoming Releases</td><td><strong>Off</strong></td></tr>
+<tr><td>Include Upcoming Releases</td><td><strong>On</strong> for New Releases for You; <strong>Off</strong> for All Releases <em>(existing installs keep whatever you'd set)</em></td></tr>
 <tr><td>Only Releases with Artwork</td><td><strong>On</strong></td></tr>
 <tr><td>Include Various Artists</td><td><strong>On</strong></td></tr>
 <tr><td>Release types</td><td><strong>Album</strong> + <strong>Compilation</strong> on; Single, EP, Broadcast, Other, Soundtrack, Live, Remix, Demo off</td></tr>
+</tbody></table>
+<h3>MuSpy</h3>
+<p>Shown at the bottom of the settings page, kept separate from the ListenBrainz options so the two aren't confused.</p>
+<table>
+<thead><tr>
+<th>Setting</th>
+<th>Default</th>
+<th>Notes</th>
+</tr></thead>
+<tbody>
+<tr><td>MuSpy User ID</td><td><em>(empty)</em></td><td>Public ID from muspy.com — folds your followed artists' releases into New Releases for You. Empty = off</td></tr>
+<tr><td>MuSpy upcoming releases</td><td><strong>On</strong></td><td>Show MuSpy's upcoming titles even when the feed's "Include Upcoming Releases" is off. Off = MuSpy past titles only</td></tr>
+<tr><td>MuSpy upcoming — how far ahead</td><td><strong>12</strong></td><td>Months ahead to reach (1–24). MuSpy only; the feed's Days window still governs ListenBrainz</td></tr>
 </tbody></table>
 <blockquote><p>Don't Stop The Music uses sensible built-in defaults (no settings page of its own).</p></blockquote>
 </section>
@@ -267,6 +290,8 @@
 <li><strong>Genre coverage</strong> on brand-new releases is sparse (MusicBrainz often hasn't tagged them yet). Genres show <em>when available</em>. A <strong>Last.fm API key</strong> fills the gap using Last.fm's album/artist tags.
 </li>
 <li><strong>Streaming matches</strong> search each service by artist and confirm the album/track title locally, so something not on a service won't appear, and occasionally a close title may mismatch.
+</li>
+<li><strong>MuSpy artwork:</strong> MuSpy only tells us a release <em>group</em>, not a specific cover, so the <strong>Only Releases with Artwork</strong> filter can't screen its entries — and <em>upcoming</em> releases usually have no cover art yet, so some MuSpy rows may show a placeholder until artwork lands. This is expected.
 </li>
 <li>Optional integrations (streaming services, MAI, Last.fm) are auto-detected; missing ones just hide their UI.
 </li></ul>

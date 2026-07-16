@@ -18,6 +18,14 @@ my $log   = logger('plugin.listenbrainzfreshreleases');
 my $prefs = preferences('plugin.listenbrainzfreshreleases');
 my $cache = Slim::Utils::Cache->new();
 
+# Per-player section paging state for the All Releases per-week lists:
+# { <client-id> => { <section-key> => shown-count } }. Module-level so it
+# survives the cachetime=>0 re-walk a "Show more" tap triggers (the tap uses
+# nextWindow=>'refresh', which re-fetches the level from the top; the count the
+# tap stored here is what makes the rebuild render the grown page).
+my %pageState;
+sub _cid { my ($client) = @_; return $client ? $client->id : '_none' }
+
 # Route warm/resolve lifecycle events through the plugin's dedicated debug log
 # (server.log at info always; lbf-debug.log too when the debug_log pref is on).
 sub _dbg { Plugins::ListenBrainzFreshReleases::Plugin::dbg(@_) }
@@ -69,6 +77,14 @@ use constant TRACK_NOMATCH_TTL =>  7 * 86400;
 # match" for the full week. (This is what left a playlist stuck on local-only
 # when its warm resolve ran before the streaming plugins' auth was ready.)
 use constant TRACK_INCONCLUSIVE_TTL => 1 * 3600;
+# How far ahead to keep MuSpy upcoming releases in the For You merge. MuSpy is a
+# small, user-curated follow list whose whole point is upcoming releases, so its
+# future side has its own toggle (muspy_future, default ON) rather than riding the
+# LB feed's foryou_future — and its own limit (muspy_future_months, default 12) so
+# it can't run away. The cap is expressed in whole months; MUSPY_FUTURE_MONTHS_* are
+# the pref's default/clamp bounds (a stray/garbage pref can't push the window insane).
+use constant MUSPY_FUTURE_MONTHS_DEFAULT => 12;
+use constant MUSPY_FUTURE_MONTHS_MAX     => 24;
 # Resolved whole-playlist cache. The JSPF content is IMMUTABLE for a given
 # mbid|last_modified, so there's no correctness reason to expire early — a new
 # week brings a new mbid (a fresh key) which re-resolves once. The Weekly Jams/
@@ -121,6 +137,15 @@ use constant MENU_ALL      => IMG_BASE . 'menu-all-releases.png';
 use constant MENU_FOLLOW   => IMG_BASE . 'menu-follow.png';
 use constant MENU_COG      => IMG_BASE . 'lbf-cog_MTL_icon_settings.png';
 use constant MENU_REFRESH  => IMG_BASE . 'lbf-refresh_MTL_icon_refresh.png';
+use constant MENU_SORT     => IMG_BASE . 'lbf-sort_MTL_icon_sort.png';
+# "Show more"/"Show less" paging rows for the All Releases per-week lists — the
+# global feed can list hundreds of releases in a single week, so each week is
+# capped and grown a page at a time. The _MTL_icon_<name> filename makes Material
+# render its own themed unfold_more/less font-icon; the PNG is a fallback.
+use constant PAGE_MORE     => IMG_BASE . 'lbf-more_MTL_icon_unfold_more.png';
+use constant PAGE_LESS     => IMG_BASE . 'lbf-less_MTL_icon_unfold_less.png';
+# Rows shown per All Releases week before "Show more" (and the step it grows by).
+use constant PAGE_SIZE     => 30;
 # All Releases per-week covers — branded cover + a relative-week badge. Past weeks
 # (This Week / Last Week / Earlier) and, when "Include Upcoming" is on, future weeks
 # (Next Week / Next Fortnight / Further, on a "Future Releases" cover). Literal dates
@@ -327,28 +352,54 @@ sub fetchForYou {
     my ($client, $callback, $args, $passDict) = @_;
 
     my $headers = _wantHeaders(ref $passDict eq 'HASH' ? $passDict->{features} : undef);
-    my $sort   = $prefs->get('sort')          // 'release_date';
+    my $mode   = $prefs->get('foryou_sort')   || 'release_date';
     my $past   = $prefs->get('foryou_past')   // 1;
     my $future = $prefs->get('foryou_future') // 0;
 
+    # Once the LB releases are in hand, fetch the (opt-in) MuSpy releases, merge,
+    # and render. MuSpy is best-effort — getMuSpyReleases always resolves onDone
+    # (empty when unconfigured/unreachable), so this never blanks the feed. On an
+    # LB failure we still run this with an empty LB list ($lbFailed set), so a
+    # MuSpy-configured user keeps their releases through an LB outage; only when
+    # BOTH yield nothing do we surface the error tile.
+    my $render = sub {
+        my ($lbReleases, $lbFailed) = @_;
+        Plugins::ListenBrainzFreshReleases::API->getMuSpyReleases(
+            onDone => sub {
+                my $releases = _sortReleases(_filterForYou(_mergeMuSpy($lbReleases, shift)));
+                _stashSummary('user', $releases);
+                # cachetime => 0: don't let Material cache this dynamic feed per-player
+                # (proven for Playlists in 0.9.24 — forces a re-fetch on each open so the
+                # weekly rollover shows immediately rather than a stale cached copy).
+                if ($lbFailed && !@$releases) {
+                    $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_ERROR'), type => 'text' }], cachetime => 0 });
+                    return;
+                }
+                # Only when the Artist sort is active, fire a background MB warm of
+                # the artists' sort-names (second-load: cold artists key on the
+                # display credit this render, correct on re-entry). No MB traffic
+                # for users who never pick the Artist sort.
+                _warmArtistSorts($releases) if $mode eq 'artist';
+                # Options section (Material header + rows) at the top: the sort
+                # toggle then Refresh, like Discography/Pitchfork. The toggle sorts
+                # the releases inside each W/C week; Refresh re-fetches the feed.
+                my @opt   = ( _sortToggle($client, 'foryou_sort', $mode), _refreshItem($client, 'user') );
+                my @items = ( _sectionHeader($client, 'PLUGIN_LBF_SECTION_OPTIONS', $headers, \@opt),
+                              @opt, @{ _buildItems($releases, $client, $headers, $mode) } );
+                $callback->({ items => \@items, cachetime => 0 });
+            },
+        );
+    };
+
     Plugins::ListenBrainzFreshReleases::API->getFreshReleasesForUser(
-        sort    => $sort,
+        sort    => 'release_date',
         past    => $past,
         future  => $future,
         days    => $prefs->get('days') // 14,
-        onDone  => sub {
-            my $releases = _sortReleases(_filterForYou(shift));
-            _stashSummary('user', $releases);
-            # cachetime => 0: don't let Material cache this dynamic feed per-player
-            # (proven for Playlists in 0.9.24 — forces a re-fetch on each open so the
-            # weekly rollover shows immediately rather than a stale cached copy).
-            $callback->({ items => [ _refreshItem($client, 'user'), @{ _buildItems($releases, $client, $headers) } ], cachetime => 0 });
-        },
+        onDone  => sub { $render->(shift, 0) },
         onError => sub {
             $log->error("For You fetch error: " . (shift // ''));
-            # cachetime => 0 on the error path too, so a transient failure tile isn't
-            # cached per-player and left stuck after the backend recovers.
-            $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_ERROR'), type => 'text' }], cachetime => 0 });
+            $render->([], 1);
         },
     );
 }
@@ -369,19 +420,29 @@ sub homeForYou {
     # headered item_id:1 = a card, flat item_id:1 = a different card). It must
     # also not vary by request quantity for the same reason. So: always flat, for
     # every quantity. Week dividers live in the main For You / All Releases menus.
+    # Merge MuSpy releases in too, so the home carousel matches the main For You
+    # menu (same source set, dedupe and window). MuSpy is best-effort (empty when
+    # unconfigured/unreachable), so this never blanks the row.
+    my $render = sub {
+        my ($lbReleases) = @_;
+        Plugins::ListenBrainzFreshReleases::API->getMuSpyReleases(
+            onDone => sub {
+                my $releases = _sortReleases(_filterForYou(_mergeMuSpy($lbReleases, shift)));
+                _stashSummary('user', $releases);
+                $cb->({ items => [ map { _buildReleaseItem($_, $client) } @$releases ], cachetime => 0 });
+            },
+        );
+    };
+
     Plugins::ListenBrainzFreshReleases::API->getFreshReleasesForUser(
-        sort    => $prefs->get('sort')          // 'release_date',
+        sort    => 'release_date',
         past    => $prefs->get('foryou_past')   // 1,
         future  => $prefs->get('foryou_future') // 0,
         days    => $prefs->get('days')          // 14,
-        onDone  => sub {
-            my $releases = _sortReleases(_filterForYou(shift));
-            _stashSummary('user', $releases);
-            $cb->({ items => [ map { _buildReleaseItem($_, $client) } @$releases ], cachetime => 0 });
-        },
+        onDone  => sub { $render->(shift) },
         onError => sub {
             $log->error("Home For You fetch error: " . (shift // ''));
-            $cb->({ items => [], cachetime => 0 });
+            $render->([]);
         },
     );
 }
@@ -418,7 +479,7 @@ sub homeAllReleases {
     my ($client, $cb, $args) = @_;
 
     Plugins::ListenBrainzFreshReleases::API->getFreshReleasesAll(
-        sort    => $prefs->get('sort')     // 'release_date',
+        sort    => 'release_date',
         past    => $prefs->get('all_past')   // 1,
         future  => $prefs->get('all_future') // 0,
         days    => $prefs->get('days')       // 14,
@@ -441,12 +502,11 @@ sub fetchAll {
     my ($client, $callback, $args, $passDict) = @_;
 
     my $headers = _wantHeaders(ref $passDict eq 'HASH' ? $passDict->{features} : undef);
-    my $sort   = $prefs->get('sort')       // 'release_date';
     my $past   = $prefs->get('all_past')   // 1;
     my $future = $prefs->get('all_future') // 0;
 
     Plugins::ListenBrainzFreshReleases::API->getFreshReleasesAll(
-        sort    => $sort,
+        sort    => 'release_date',
         past    => $past,
         future  => $future,
         days    => $prefs->get('days') // 14,
@@ -568,7 +628,7 @@ sub _playlistTile {
     my $matched = '';
     my @adapters = _orderedAdapters();
     my $svcOrder = join(',', map { lc $_->{name} } @adapters);
-    my $rkey = 'lbf:pl:resolved:4:' . join('|', ($pl->{mbid} // ''), $lastMod, $svcOrder);
+    my $rkey = 'lbf:pl:resolved:6:' . join('|', ($pl->{mbid} // ''), $lastMod, $svcOrder);
     if (my $c = $cache->get($rkey)) {
         # Count only tracks whose service is still usable, so the tile agrees with
         # the count shown when the playlist is opened (_playlistResult applies the
@@ -636,7 +696,7 @@ sub resolvePlaylist {
 
     # Key includes the service order so changing priorities re-resolves.
     my $svcOrder = join(',', map { lc $_->{name} } _orderedAdapters());
-    my $rkey = 'lbf:pl:resolved:4:' . join('|', $mbid, ($lastMod // ''), $svcOrder);
+    my $rkey = 'lbf:pl:resolved:6:' . join('|', $mbid, ($lastMod // ''), $svcOrder);
 
     my $title = ref $pass eq 'HASH' ? $pass->{title} : undef;
 
@@ -732,12 +792,14 @@ sub _mergeFollow {
 }
 
 # Resolved-list cache key: user + streaming-service order (so a priority change
-# re-resolves). ':3:' namespaces it away from the retired single (:1:) / weekly (:2:)
-# resolved keys; content re-validated by {sig}.
+# re-resolves). ':4:' namespaces it away from the retired single (:1:) / weekly (:2:)
+# / day-only (:3:) resolved keys; content re-validated by {sig}. Bumped :3:→:4: so
+# existing resolves re-run once and bake in each item's `_recommender` (0.9.88, the
+# by-recommender sort) — the source store already carries it, so it's a free re-tag.
 sub _followResolvedKey {
     my $user     = $prefs->get('username') // '';
     my $svcOrder = join(',', map { lc $_->{name} } _orderedAdapters());
-    return 'lbf:follow:resolved:3:' . join('|', $user, $svcOrder);
+    return 'lbf:follow:resolved:4:' . join('|', $user, $svcOrder);
 }
 
 # A stable, order-sensitive signature of a week's track set, so a cached resolve is
@@ -852,20 +914,27 @@ sub _followResult {
 
     my $useH    = _wantHeaders($feat);
     my $divType = $useH ? _headerType() : 'text';
+    my $sort    = $prefs->get('follow_sort') || 'date';
 
-    # Group by day. Tracks are already newest-first (store sorts by `created` desc), so
-    # same-day rows are adjacent and day order is preserved.
+    # Group the (already newest-first) tracks either by DAY or by the follower who
+    # RECOMMENDED them. Iterating the newest-first list and bucketing in first-seen
+    # order gives the newest activity first in BOTH modes: a recommender's first
+    # appearance is their most-recent rec, so recommender groups come out
+    # most-recent-first, and within a group tracks stay newest-first. Same tree shape
+    # as the New Releases week/day dividers, so item_id walks stay consistent.
     my (@order, %bucket);
     for my $it (@tracks) {
-        my $day = _dayOf($it->{_created});
-        push @order, $day unless exists $bucket{$day};
-        push @{ $bucket{$day} }, $it;
+        my $k = $sort eq 'recommender' ? ($it->{_recommender} // '') : _dayOf($it->{_created});
+        push @order, $k unless exists $bucket{$k};
+        push @{ $bucket{$k} }, $it;
     }
 
     my @items;
-    for my $day (@order) {
-        my $rows = $bucket{$day};
-        push @items, _dayDivider($client, $day, $divType, $useH, $rows);
+    for my $k (@order) {
+        my $rows = $bucket{$k};
+        push @items, ($sort eq 'recommender'
+            ? _recommenderDivider($client, $k, $divType, $useH, $rows)
+            : _dayDivider($client, $k, $divType, $useH, $rows));
         push @items, @$rows;
     }
     @items = ({ name => cstring($client, 'PLUGIN_LBF_NO_MATCH'), type => 'text' }) unless @items;
@@ -900,8 +969,54 @@ sub _followResult {
         };
     }
 
+    # Inline sort toggle at the VERY top (above "Play what's new") — only when there's
+    # something to order. Flips between by-date and by-recommender in place.
+    unshift @items, _followSortToggle($client, $sort) if $matched;
+
     my $heading = cstring($client, 'PLUGIN_LBF_FOLLOW_FEED') . " ($matched/$total)";
     return { title => $heading, items => \@items, cachetime => 0 };
+}
+
+# Inline sort toggle for the People You Follow list. The label names the CURRENT ordering
+# with a "(tap for …)" hint (Discography's _sortToggleItem style, so it's clear what changes);
+# the tap flips the follow_sort PREF and refreshes the
+# list in place (nextWindow 'refresh' → the re-walk re-reads the pref). A pref, not
+# passthrough, so the choice survives the refresh re-walk AND future visits — like the
+# feed's own Sort setting. Sits with "Play what's new" per the top-of-view action-row rule.
+sub _followSortToggle {
+    my ($client, $sort) = @_;
+    my $byRec = $sort eq 'recommender';
+    return {
+        name        => cstring($client, $byRec ? 'PLUGIN_LBF_FOLLOW_SORT_REC'
+                                               : 'PLUGIN_LBF_FOLLOW_SORT_DATE'),
+        type        => 'link',
+        image       => MENU_SORT,
+        nextWindow  => 'refresh',
+        passthrough => [{}],
+        url         => sub {
+            my ($c, $cb) = @_;
+            $prefs->set('follow_sort', $byRec ? 'date' : 'recommender');
+            $cb->({ items => [] });
+        },
+    };
+}
+
+# A recommender-divider header: "Recommended by <user>" (or a generic label when the feed
+# didn't name them), styled exactly like the day dividers so the by-recommender view
+# matches the by-date one. Older Material forces a drill on 'header' → point it at this
+# person's tracks (like _dayDivider); 'header-basic' (Material 6.4.3+) ignores it.
+sub _recommenderDivider {
+    my ($client, $name, $divType, $useH, $rows) = @_;
+    my $label = length $name
+        ? sprintf(cstring($client, 'PLUGIN_LBF_FOLLOW_BY'), $name)
+        : cstring($client, 'PLUGIN_LBF_FOLLOW_BY_UNKNOWN');
+    my $hdr = { name => $label, type => $divType, image => ICON };
+    if ($useH) {
+        my @kids = @$rows;
+        $hdr->{url}         = sub { $_[1]->({ items => \@kids }) };
+        $hdr->{passthrough} = [{}];
+    }
+    return $hdr;
 }
 
 # "Play what's new" → the matched recs newer than the user's "seen" marker. The list
@@ -1240,10 +1355,12 @@ sub _resolveTracks {
             _findPlayableTrack($client, sub {
                 my ($item, $inc, $own) = @_;
                 if (ref $item eq 'HASH') {
-                    # Tag the matched item with its source rec's timestamp (when the
-                    # source carries one — only the follow feed does), so the follow
-                    # view can group by day. Harmless elsewhere (undef → not set).
-                    $item->{_created} = $tr->{created} if defined $tr->{created};
+                    # Tag the matched item with its source rec's timestamp AND the
+                    # follower who recommended it (both only present on the follow
+                    # feed), so the follow view can group by day OR by recommender.
+                    # Harmless elsewhere (undef/absent → not set).
+                    $item->{_created}     = $tr->{created}     if defined $tr->{created};
+                    $item->{_recommender} = $tr->{recommender} if defined $tr->{recommender};
                     $slots[$i] = $item;
                 }
                 else {
@@ -1310,7 +1427,7 @@ sub warmCache {
                     sub {
                         my $tracks = shift // [];
 
-                        my $rkey = 'lbf:pl:resolved:4:'
+                        my $rkey = 'lbf:pl:resolved:6:'
                             . join('|', $pl->{mbid}, ($pl->{last_modified} // ''), $svcOrder);
 
                         # Already resolved (same week) or no client → move on. A forced
@@ -1431,6 +1548,74 @@ sub _filterForYou { _filterSection(shift, 'foryou') }
 sub _filterAll    { _filterSection(shift, 'all') }
 
 # ---------------------------------------------------------------------------
+# MuSpy merge (For You feed only)
+# ---------------------------------------------------------------------------
+# Merge the user's MuSpy followed-artist releases into the ListenBrainz For You
+# list. MuSpy returns release groups newest-first but NOT windowed to the plugin's
+# day range (its API takes limit/offset only), so window them here, then
+# concatenate. Overlap dedupe is left to _dedupeReleases (via _sortReleases), which
+# prefers the copy that has cover art — naturally keeping the richer ListenBrainz
+# entry on a duplicate.
+#
+# Windowing differs deliberately from the LB feed: MuSpy is a small, user-curated
+# list of artists the user explicitly follows, and its whole value is UPCOMING
+# releases. So its future side has its OWN toggle (muspy_future, default ON) rather
+# than riding foryou_future (off by default, tuned for the broad LB fresh-releases
+# feed) — bounded to its OWN limit (muspy_future_months, default 12) so it can't run
+# away, kept separate from the LB feed's narrow days window. The past side still
+# honours foryou_past + the days window, so recent MuSpy releases align with the
+# feed's freshness setting. (Consequence with the default: even when the LB "Include
+# upcoming" is off, the feed can show past-LB + future-MuSpy together — intended; the
+# user picked those MuSpy artists. A user who doesn't want that turns muspy_future off.)
+sub _mergeMuSpy {
+    my ($lb, $muspy) = @_;
+    $lb = [] unless ref $lb eq 'ARRAY';
+    return $lb unless ref $muspy eq 'ARRAY' && @$muspy;
+
+    my $past   = $prefs->get('foryou_past')   // 1;
+    my $future = $prefs->get('muspy_future')  // 1;
+    my $days   = $prefs->get('days')          // 14;
+
+    # Whole-month cap on the future side, user-set via muspy_future_months. Guard a
+    # missing/garbage/out-of-range pref (it's multiplied out, so a bad value would
+    # otherwise blow the window wide open or negative).
+    my $months = $prefs->get('muspy_future_months');
+    $months = MUSPY_FUTURE_MONTHS_DEFAULT
+        unless defined $months && $months =~ /^\d+$/ && $months >= 1;
+    $months = MUSPY_FUTURE_MONTHS_MAX if $months > MUSPY_FUTURE_MONTHS_MAX;
+
+    my @n = localtime(time);
+    my $today = sprintf('%04d-%02d-%02d', $n[5] + 1900, $n[4] + 1, $n[3]);
+    my $lo = _dateShift($today, -$days);
+    my $hi = _dateShift($today,  $months * 30);
+
+    my @kept;
+    for my $r (@$muspy) {
+        my $d = $r->{release_date} // '';
+        next unless $d =~ /^\d{4}-\d{2}-\d{2}$/;   # padded on ingest; skip the undatable
+        # Dates are zero-padded, so a lexical compare is a chronological one. A
+        # release out today counts as "past" (i.e. shown when foryou_past is on);
+        # anything ahead is kept when muspy_future is on, up to the muspy_future_months cap.
+        my $inWindow = ($d le $today) ? ($past   && $d ge $lo)
+                                      : ($future && $d le $hi);
+        push @kept, $r if $inWindow;
+    }
+    $log->info("MuSpy merge: kept " . scalar(@kept) . " of " . scalar(@$muspy) . " within window [$lo .. $hi]")
+        if $log->is_info;
+    return [ @$lb, @kept ];
+}
+
+# Shift a 'YYYY-MM-DD' date by N days (local time), returning 'YYYY-MM-DD'.
+sub _dateShift {
+    my ($ymd, $delta) = @_;
+    return $ymd unless $ymd =~ /^(\d{4})-(\d{2})-(\d{2})$/;
+    my $epoch = eval { Time::Local::timelocal(0, 0, 12, $3, $2 - 1, $1) };
+    return $ymd unless $epoch;
+    my @t = localtime($epoch + $delta * 86400);
+    return sprintf('%04d-%02d-%02d', $t[5] + 1900, $t[4] + 1, $t[3]);
+}
+
+# ---------------------------------------------------------------------------
 # Sort releases by the configured order. Release date is newest-first and
 # confidence highest-first; artist/album are A–Z. (The API's own ordering is
 # unreliable — e.g. date comes back oldest-first — so we sort here.)
@@ -1443,13 +1628,14 @@ sub _dedupeReleases {
     my ($releases) = @_;
     return $releases unless ref $releases eq 'ARRAY';
 
-    my %idx;
+    my %idx;      # full key (artist|album|date) -> index in @out
+    my %aaSeen;   # dateless key (artist|album)  -> index in @out
     my @out;
     for my $rel (@$releases) {
-        my $key = join('|',
-            _norm(_pickValue($rel, 'artist_credit_name', 'artist_name', 'artist')),
-            _norm(_pickValue($rel, 'release_name', 'title', 'name')),
-            ($rel->{release_date} // ''));
+        my $artist = _norm(_pickValue($rel, 'artist_credit_name', 'artist_name', 'artist'));
+        my $album  = _norm(_pickValue($rel, 'release_name', 'title', 'name'));
+        my $key    = join('|', $artist, $album, ($rel->{release_date} // ''));
+        my $aaKey  = join('|', $artist, $album);
 
         if (defined(my $i = $idx{$key})) {
             $out[$i] = $rel
@@ -1457,7 +1643,26 @@ sub _dedupeReleases {
                 &&  Plugins::ListenBrainzFreshReleases::API->coverArtUrl($rel);
             next;
         }
+
+        # Cross-source overlap: MuSpy and ListenBrainz can carry the same album with
+        # a slightly different release date (MuSpy uses the release-group's first
+        # date; LB the fresh-release date), so an exact artist|album|date key would
+        # miss it. When THIS entry or the already-seen one is from MuSpy, collapse
+        # on artist+album alone so the album shows once — keeping the copy with cover
+        # art (usually the richer LB entry). Same-source LB editions that differ only
+        # by date are left as separate entries (neither is MuSpy), preserving the
+        # long-standing behaviour.
+        my $j = $aaSeen{$aaKey};
+        if (defined $j
+            && ( ($rel->{_source} // '') eq 'muspy' || ($out[$j]{_source} // '') eq 'muspy' )) {
+            $out[$j] = $rel
+                if !Plugins::ListenBrainzFreshReleases::API->coverArtUrl($out[$j])
+                &&  Plugins::ListenBrainzFreshReleases::API->coverArtUrl($rel);
+            next;
+        }
+
         $idx{$key} = scalar @out;
+        $aaSeen{$aaKey} = scalar @out unless defined $aaSeen{$aaKey};
         push @out, $rel;
     }
     return \@out;
@@ -1469,20 +1674,124 @@ sub _sortReleases {
 
     $releases = _dedupeReleases($releases);
 
-    my $sort = $prefs->get('sort') // 'release_date';
-
-    if ($sort eq 'artist_credit_name') {
-        return [ sort { lc($a->{artist_credit_name} // '') cmp lc($b->{artist_credit_name} // '') } @$releases ];
-    }
-    elsif ($sort eq 'release_name') {
-        return [ sort { lc($a->{release_name} // '') cmp lc($b->{release_name} // '') } @$releases ];
-    }
-    elsif ($sort eq 'confidence') {
-        return [ sort { ($b->{confidence} // 0) <=> ($a->{confidence} // 0) } @$releases ];
-    }
-
-    # default: release_date, newest first
+    # Always newest-first by release date. This is the order the week-bucketing
+    # relies on (same-week rows adjacent, weeks newest-first); the per-view Options
+    # sort (_sortWithin) reorders the releases WITHIN each week without disturbing
+    # the week grouping or its chronological order. The old global "Default sort
+    # order" pref was retired in 0.9.97 in favour of the in-view sort toggles.
     return [ sort { ($b->{release_date} // '') cmp ($a->{release_date} // '') } @$releases ];
+}
+
+# ---------------------------------------------------------------------------
+# Per-view content sort — the three modes offered by the in-view "Sorted by …"
+# toggle (Options section): 'release_date' (newest first, the default read),
+# 'artist' (A–Z) and 'album' (A–Z). Applied WITHIN a week bucket, so the W/C week
+# headers and their chronological order are preserved whichever mode is chosen.
+# ---------------------------------------------------------------------------
+my @SORT_MODES = qw(release_date artist album);
+
+# The mode after $mode in the fixed cycle (wraps back to the first).
+sub _nextSortMode {
+    my ($mode) = @_;
+    for my $i (0 .. $#SORT_MODES) {
+        return $SORT_MODES[($i + 1) % @SORT_MODES] if $SORT_MODES[$i] eq $mode;
+    }
+    return $SORT_MODES[0];
+}
+
+# Localised label for a sort mode (also reused as the toggle-row text).
+sub _sortLabel {
+    my ($client, $mode) = @_;
+    my $tok = $mode eq 'artist' ? 'PLUGIN_LBF_SORT_ARTIST'
+            : $mode eq 'album'  ? 'PLUGIN_LBF_SORT_ALBUM'
+            :                     'PLUGIN_LBF_SORT_DATE';
+    return cstring($client, $tok);
+}
+
+# Sort a bucket of releases by the chosen mode. Secondary key is release_date
+# (newest first) so ties within an artist/album sort still read chronologically.
+# The key the Artist sort orders on: the MusicBrainz sort-name ("White, Jack";
+# a stage name like "Panda Bear" keeps its natural order) when known, else the
+# display credit ("Jack White"). The sort-name rides on the release (MuSpy) or is
+# filled from a background MB warm keyed by the first artist MBID; until then a
+# cold artist falls back to the display credit (self-corrects on re-entry).
+sub _artistSortKey {
+    my ($rel) = @_;
+    my $s = $rel->{artist_sort_name};
+    if (!(defined $s && length $s)) {
+        my $mbids = $rel->{artist_mbids};
+        my $mbid  = (ref $mbids eq 'ARRAY' && @$mbids) ? $mbids->[0] : undef;
+        $s = $mbid ? Plugins::ListenBrainzFreshReleases::API->peekArtistSort($mbid) : undef;
+    }
+    $s = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist')
+        unless defined $s && length $s;
+    return lc $s;
+}
+
+# Kick off a background MB sort-name warm for a list's artists (the API dedupes,
+# skips cached, throttles + bounds the fetch). Called only from the Artist-sort
+# paths, so a user who never sorts by artist never triggers an MB lookup.
+sub _warmArtistSorts {
+    my ($releases) = @_;
+    return unless ref $releases eq 'ARRAY' && @$releases;
+    my @mbids;
+    for my $r (@$releases) {
+        my $m = $r->{artist_mbids};
+        push @mbids, $m->[0] if ref $m eq 'ARRAY' && @$m && $m->[0];
+    }
+    Plugins::ListenBrainzFreshReleases::API->warmArtistSorts(\@mbids) if @mbids;
+}
+
+sub _sortWithin {
+    my ($releases, $mode) = @_;
+    return $releases unless ref $releases eq 'ARRAY';
+    $mode ||= 'release_date';
+
+    if ($mode eq 'artist') {
+        # Schwartzian transform: compute each release's sort key ONCE, then sort
+        # on the precomputed pair. _artistSortKey does a cache read (peekArtistSort),
+        # and Perl's sort calls the comparator O(N log N) times — recomputing the
+        # key inside it would repeat those reads thousands of times per render on
+        # a big week, on the synchronous render path. Primary A-Z, secondary date
+        # newest-first (element [1] compared b-vs-a).
+        return [ map  { $_->[2] }
+                 sort { $a->[0] cmp $b->[0] || $b->[1] cmp $a->[1] }
+                 map  { [ _artistSortKey($_), $_->{release_date} // '', $_ ] } @$releases ];
+    }
+    elsif ($mode eq 'album') {
+        return [ map  { $_->[2] }
+                 sort { $a->[0] cmp $b->[0] || $b->[1] cmp $a->[1] }
+                 map  { [ lc(_pickValue($_, 'release_name', 'title', 'name')), $_->{release_date} // '', $_ ] } @$releases ];
+    }
+    # release_date, newest first
+    return [ sort { ($b->{release_date} // '') cmp ($a->{release_date} // '') } @$releases ];
+}
+
+# A cycling "Sorted by <mode> (tap to change)" row for the Options section. $pref
+# is the DURABLE pref the choice is stored in — 'foryou_sort' (New Releases for You)
+# or 'all_sort' (All Releases, shared across every week view). Tapping advances to
+# the next mode, persists it, and refreshes the view in place (nextWindow 'refresh'
+# → the re-walk re-reads the pref and re-sorts). Because it's a pref, the choice
+# sticks across visits AND server restarts — set once, it stays. Same in-place
+# mechanism as the paging rows and the follow-list toggle.
+sub _sortToggle {
+    my ($client, $pref, $mode) = @_;
+    return {
+        name        => sprintf(cstring($client, 'PLUGIN_LBF_SORTED_BY'), _sortLabel($client, $mode)),
+        type        => 'link',
+        image       => MENU_SORT,
+        nextWindow  => 'refresh',
+        passthrough => [{ pref => $pref }],
+        url         => sub {
+            my ($c, $cb, $a, $p) = @_;
+            # Advance from the LIVE pref, not a mode captured at render time — so
+            # a value another player changed in between can't make this tap land
+            # on the same mode and read as a no-op.
+            my $cur = $prefs->get($p->{pref}) || 'release_date';
+            $prefs->set($p->{pref}, _nextSortMode($cur));
+            $cb->({ items => [] });
+        },
+    };
 }
 
 # ---------------------------------------------------------------------------
@@ -1639,26 +1948,88 @@ sub _wantHeaders {
 }
 
 sub _buildItems {
-    my ($releases, $client, $headers) = @_;
+    my ($releases, $client, $headers, $mode) = @_;
 
     unless ($releases && scalar @$releases) {
         return [{ name => cstring($client, 'PLUGIN_LBF_NO_RESULTS'), type => 'text' }];
     }
 
-    my $sort = $prefs->get('sort') // 'release_date';
+    # For You is ALWAYS the weekly view now — W/C material headers, newest week
+    # first — as a single level Material windows natively (its in-list filter spans
+    # every item). The Options sort ($mode) reorders releases inside each week; the
+    # week grouping is unconditional (the old week_dividers/group_by_artist toggles
+    # were retired in 0.9.97).
+    return _buildWeekly($releases, $client, $headers, $mode);
+}
 
-    # Return the whole (already filtered + sorted) list as a single level and let
-    # LMS/Material window it natively — so Material's in-list filter spans every
-    # item, not just one page, and we get the native scroll/prev-next pager.
-    if ($prefs->get('week_dividers') && $sort eq 'release_date') {
-        # weekly view takes precedence for the date sort (it's the chronological read)
-        return _buildWeekly($releases, $client, $headers);
+# ---------------------------------------------------------------------------
+# Section paging for the All Releases per-week lists (the For You feed keeps its
+# native full-list windowing — it works well and Material's in-list filter spans
+# every item there). A single All Releases week can hold hundreds of releases, so
+# each week is capped at PAGE_SIZE rows followed by a "Show more (N)" row that
+# grows it a page at a time, and — once grown — a "Show less" row that collapses
+# back to the cap.
+#
+# Two properties this depends on:
+#   - The row carries its target as an ABSOLUTE count, never "+= PAGE_SIZE". Every
+#     deeper click re-executes the whole item_id path, so a relative bump could
+#     advance the page more than once. Absolute targets keep it idempotent.
+#   - The count lives in module-level %pageState (per player, per section key), so
+#     it survives the cachetime=>0 re-walk the "Show more" refresh triggers.
+# Returns (visible tiles, paging rows) — both go into the level in that order.
+# ---------------------------------------------------------------------------
+sub _pageSection {
+    my ($client, $key, $tiles) = @_;
+
+    my $total = scalar @$tiles;
+    return ($tiles, []) if $total <= PAGE_SIZE;
+
+    my $ctx   = $pageState{ _cid($client) } ||= {};
+    my $shown = $ctx->{$key} || PAGE_SIZE;
+    $shown = $total if $shown > $total;   # a shrunk feed must not slice past the end
+
+    my @rows;
+    if ($shown < $total) {
+        my $next = $shown + PAGE_SIZE;
+        $next = $total if $next > $total;
+        push @rows, _pageRow($client, $key, $next,
+            cstring($client, 'PLUGIN_LBF_SHOW_MORE') . ' (' . ($total - $shown) . ')',
+            PAGE_MORE);
+        # "Show all" jumps straight to the whole list (count = the full total) —
+        # only offered when it reveals MORE than the single-page "Show more"
+        # already would, so the two rows never do the same thing.
+        if ($total - $shown > PAGE_SIZE) {
+            push @rows, _pageRow($client, $key, $total,
+                cstring($client, 'PLUGIN_LBF_SHOW_ALL') . ' (' . $total . ')',
+                PAGE_MORE);
+        }
     }
-    elsif ($prefs->get('group_by_artist')) {
-        return _buildGrouped($releases, $client);
+    if ($shown > PAGE_SIZE) {
+        push @rows, _pageRow($client, $key, PAGE_SIZE,
+            cstring($client, 'PLUGIN_LBF_SHOW_LESS'), PAGE_LESS);
     }
 
-    return [ map { _buildReleaseItem($_, $client) } @$releases ];
+    return ([ @$tiles[ 0 .. $shown - 1 ] ], \@rows);
+}
+
+sub _pageRow {
+    my ($client, $key, $target, $name, $image) = @_;
+    return {
+        name        => $name,
+        type        => 'link',
+        image       => $image,
+        nextWindow  => 'refresh',
+        passthrough => [{ key => $key, target => $target }],
+        url         => sub {
+            my ($c, $cb, $a, $p) = @_;
+            my $ctx = $pageState{ _cid($c) } ||= {};
+            # Collapsing back to the cap clears the key rather than storing the
+            # default, so an unpaged section leaves no residue.
+            if ($p->{target} <= PAGE_SIZE) { delete $ctx->{ $p->{key} } }
+            else                           { $ctx->{ $p->{key} } = $p->{target} }
+            $cb->({ items => [] });
+        },
+    };
 }
 
 # ---------------------------------------------------------------------------
@@ -1675,17 +2046,12 @@ sub _buildAllLanding {
         return [{ name => cstring($client, 'PLUGIN_LBF_NO_RESULTS'), type => 'text' }];
     }
 
-    # "All releases" → the full list with the user's usual weekly/grouped view.
-    my @items = ({
-        name        => cstring($client, 'PLUGIN_LBF_VIEW_ALL'),
-        type        => 'link',
-        image       => MENU_ALL,
-        passthrough => [{}],
-        url         => sub {
-            my ($c, $cb) = @_;
-            $cb->({ items => _buildItems($releases, $c, $headers) });
-        },
-    });
+    # The landing is just the per-week sections — one drill-in per week-commencing,
+    # each paged 30-at-a-time. The old "Show all" entry was removed (0.9.87): it
+    # duplicated the same releases the dated weeks already cover, but as one
+    # unpaged full-list dump, so it was the path that still flooded. The dated
+    # weeks with "Show more" serve the same purpose and stay manageable.
+    my @items;
 
     # Group into weeks (input already date-sorted → same-week rows are adjacent
     # and week order is preserved).
@@ -1699,6 +2065,7 @@ sub _buildAllLanding {
 
     for my $ws (@order) {
         my $rels  = $bucket{$ws};
+        my $key   = "arweek:$ws";
         push @items, {
             name        => _weekLabel($client, $ws),
             type        => 'link',
@@ -1706,7 +2073,20 @@ sub _buildAllLanding {
             passthrough => [{}],
             url         => sub {
                 my ($c, $cb) = @_;
-                $cb->({ items => [ map { _buildReleaseItem($_, $c) } @$rels ] });
+                # Sort by the SHARED, durable All Releases sort (all_sort) — the
+                # same order in every week, and it sticks across visits/restarts —
+                # then cap at PAGE_SIZE with the "Show more"/"Show all" reveal (an
+                # All Releases week can list hundreds of releases). Paging is still
+                # per-week module state (keyed "arweek:<ws>"); re-sorting/paging
+                # re-walks this coderef, which re-reads the pref. Options header +
+                # sort toggle sit on top.
+                my $mode  = $prefs->get('all_sort') || 'release_date';
+                _warmArtistSorts($rels) if $mode eq 'artist';
+                my @tiles = map { _buildReleaseItem($_, $c) } @{ _sortWithin($rels, $mode) };
+                my ($vis, $pgRows) = _pageSection($c, $key, \@tiles);
+                my @opt = ( _sortToggle($c, 'all_sort', $mode) );
+                $cb->({ items => [ _sectionHeader($c, 'PLUGIN_LBF_SECTION_OPTIONS', $headers, \@opt),
+                                   @opt, @$vis, @$pgRows ] });
             },
         };
     }
@@ -1720,7 +2100,7 @@ sub _buildAllLanding {
 # newest-first; weeks run Monday–Sunday.
 # ---------------------------------------------------------------------------
 sub _buildWeekly {
-    my ($releases, $client, $headers) = @_;
+    my ($releases, $client, $headers, $mode) = @_;
 
     # Real header item for Material (bold, accent colour); plain text elsewhere.
     # _headerType() => 'header-basic' on Material 6.4.3+ (a non-actionable divider,
@@ -1739,7 +2119,9 @@ sub _buildWeekly {
 
     my @items;
     for my $ws (@order) {
-        my $rels = $bucket{$ws};
+        # Sort the releases WITHIN this week by the chosen Options mode; the week
+        # buckets themselves stay in date order (newest week first).
+        my $rels = _sortWithin($bucket{$ws}, $mode);
 
         # Give the header an image. Material's grid detection counts headers too
         # (older versions: image-less item → haveWithoutIcons → grid/list toggle
@@ -1750,7 +2132,7 @@ sub _buildWeekly {
         if ($headers) {
             # Material renders header items with a drill action that XMLBrowser
             # forces on (can't be suppressed); rather than lead nowhere, point it
-            # at this week's releases (same coderef pattern as _buildGrouped).
+            # at this week's releases (the same already-sorted $rels shown below).
             $hdr->{url} = sub {
                 my ($c, $cb) = @_;
                 $cb->({ items => [ map { _buildReleaseItem($_, $c) } @$rels ] });
@@ -1885,50 +2267,6 @@ sub _isoToLocalDate {
 }
 
 # ---------------------------------------------------------------------------
-# Group releases under their artist (New Music Tracker style). Artists with a
-# single release stay inline; artists with several collapse into one tappable
-# entry that lists their releases. Artist order follows the chosen sort (first
-# appearance), so e.g. a date sort keeps the freshest artists at the top.
-# ---------------------------------------------------------------------------
-sub _buildGrouped {
-    my ($releases, $client) = @_;
-
-    my @order;
-    my %bucket;
-    for my $rel (@$releases) {
-        my $key = lc(_pickValue($rel, 'artist_credit_name', 'artist_name', 'artist'));
-        push @order, $key unless exists $bucket{$key};
-        push @{ $bucket{$key} }, $rel;
-    }
-
-    my @items;
-    for my $key (@order) {
-        my $rels = $bucket{$key};
-
-        if (scalar @$rels == 1) {
-            push @items, _buildReleaseItem($rels->[0], $client);
-            next;
-        }
-
-        my $artist = _pickValue($rels->[0], 'artist_credit_name', 'artist_name', 'artist') || 'Unknown Artist';
-        my $image  = Plugins::ListenBrainzFreshReleases::API->coverArtUrl($rels->[0]) // ICON;
-        my $count  = scalar @$rels;
-
-        push @items, {
-            name  => "$artist  ($count)",
-            type  => 'link',
-            image => $image,
-            url   => sub {
-                my ($client, $callback) = @_;
-                $callback->({ items => [ map { _buildReleaseItem($_, $client) } @$rels ] });
-            },
-        };
-    }
-
-    return \@items;
-}
-
-# ---------------------------------------------------------------------------
 # Build a single OPML item from one release
 # ---------------------------------------------------------------------------
 sub _buildReleaseItem {
@@ -1939,6 +2277,7 @@ sub _buildReleaseItem {
     my $date       = $rel->{release_date} // '';
     my $type       = _displayType($rel);   # includes the secondary type, e.g. "Album / Live"
     my $mbid       = $rel->{release_mbid} // '';
+    my $rgMbid     = $rel->{release_group_mbid} // '';
     my $conf       = $rel->{confidence};
 
     my $year = ($date =~ /^(\d{4})/) ? $1 : '';
@@ -1970,7 +2309,12 @@ sub _buildReleaseItem {
         image => $image,
     };
 
-    if ($mbid) {
+    # Tap-through to the detail page whenever we have EITHER a release MBID (LB) or
+    # just a release-group MBID (MuSpy). The detail page degrades gracefully: with
+    # only a release-group MBID it still shows streaming matches, genres and the
+    # artist bio — only the MusicBrainz tracklist (which needs a release MBID) is
+    # absent (see _releaseDetail's $wantTracks gate).
+    if ($mbid || $rgMbid) {
         $item->{type} = 'link';
         $item->{url}  = sub {
             my ($client, $callback) = @_;
@@ -2123,7 +2467,7 @@ sub _releaseDetail {
             } if $mbid;
             $pending--;
             $finish->();
-        }, $artist, $album, $mbid, undef, $year);
+        }, $artist, $album, $mbid, undef, $year, $rel->{release_group_primary_type});
     }
 
     # Genres — from the release-group (release-level genres are nearly always empty)
@@ -2410,32 +2754,36 @@ sub _streamingAdapters {
 
     push @adapters, {
         name => 'Qobuz', icon => _pluginIcon('Plugins::Qobuz::Plugin'),
-        run => \&_searchQobuz, runTrack => \&_searchQobuzTrack,
+        run => \&_searchQobuz, runTrack => \&_searchQobuzTrack, query_enc => 'chars',
     } if Plugins::Qobuz::Plugin->can('getAPIHandler')
       && Plugins::Qobuz::Plugin->can('_albumItem');
 
     push @adapters, {
         name => 'Bandcamp', icon => _pluginIcon('Plugins::Bandcamp::Plugin'),
-        run => \&_searchBandcamp, runTrack => \&_searchBandcampTrack,
+        run => \&_searchBandcamp, runTrack => \&_searchBandcampTrack, query_enc => 'bytes',
     } if Plugins::Bandcamp::Plugin->can('album_list');
 
     push @adapters, {
         name => 'Tidal', icon => _pluginIcon('Plugins::TIDAL::Plugin'),
-        run => \&_searchTidal, runTrack => \&_searchTidalTrack,
+        run => \&_searchTidal, runTrack => \&_searchTidalTrack, query_enc => 'chars',
     } if Plugins::TIDAL::Plugin->can('getAPIHandler')
       && Plugins::TIDAL::Plugin->can('getAlbum')
       && Plugins::TIDAL::Plugin->can('_renderAlbum');
 
-    # Deezer — same modern Michael-Herger plugin family as Qobuz/Tidal
-    # (getAPIHandler → API::Async->search; _renderAlbum/_renderTrack emit a
-    # string deezer:// url). Fails safe: if any method is absent the service
-    # simply doesn't register. Confirmed against michaelherger/lms-deezer.
+    # Deezer — same modern Michael-Herger plugin family as Qobuz/Tidal. Album nodes
+    # from `_renderAlbum` carry a COREF `url` (\&getAlbum, id in passthrough) exactly
+    # like Tidal — reattached in _rebuildStreamItems; the `deezer://album:<id>` string
+    # is the `play`/favourites value. Tracks (`_renderTrack`) carry a plain string url
+    # (deezer://<id>.<fmt>). getAlbum is required so a cached album match can be rebuilt
+    # (else it would drop on re-read). Fails safe: absent method → service doesn't
+    # register. Confirmed against michaelherger/lms-deezer.
     push @adapters, {
         name => 'Deezer', icon => _pluginIcon('Plugins::Deezer::Plugin'),
-        run => \&_searchDeezer, runTrack => \&_searchDeezerTrack,
+        run => \&_searchDeezer, runTrack => \&_searchDeezerTrack, query_enc => 'bytes',
     } if Plugins::Deezer::Plugin->can('getAPIHandler')
       && Plugins::Deezer::Plugin->can('_renderAlbum')
-      && Plugins::Deezer::Plugin->can('_renderTrack');
+      && Plugins::Deezer::Plugin->can('_renderTrack')
+      && Plugins::Deezer::Plugin->can('getAlbum');
 
     return @adapters;
 }
@@ -2508,7 +2856,7 @@ sub _pluginIcon {
 sub _streamKey {
     my ($idPart) = @_;
     my $svcOrder = join(',', map { lc $_->{name} } _orderedAdapters());
-    my $key = 'lbf:stream:12:' . $svcOrder . ':' . ($idPart // '');
+    my $key = 'lbf:stream:18:' . $svcOrder . ':' . ($idPart // '');
     utf8::encode($key) if utf8::is_utf8($key);   # octet key — non-Latin fallback can't crash md5
     return $key;
 }
@@ -2557,10 +2905,33 @@ sub _bcMatchKey {
 # matching album as a directly-playable node (one tap to play / add), using
 # each plugin's own search API rather than a generic search drill-down.
 sub _findPlayable {
-    my ($client, $callback, $artist, $album, $mbid, $force, $year) = @_;
+    my ($client, $callback, $artist, $album, $mbid, $force, $year, $type) = @_;
 
     my $albumNorm  = _norm($album);
     my $artistNorm = _norm($artist);
+
+    # Type consistency (0.9.89): when the release being resolved is NOT itself a single,
+    # a same-named SINGLE on the service must not stand in for the album (field bug —
+    # an album resolved to a like-named single of the same year, which year/title alone
+    # can't separate). Each candidate is classified by the service's own data
+    # (_candReleaseType → album/single/ep), and single-typed candidates are dropped, per
+    # service, KEEPING ALL if that would empty a service's matches (a service that only
+    # lists the single, or an unreliable type field, still yields a match). This lives
+    # OUTSIDE the shared matcher (_albumMatches/_norm), so it's LBF-only — no fleet sync,
+    # and Discography's own EP/single handling is untouched (Discography has no candidate
+    # type-matching at all — it disambiguates by year+ownership; this classifier is a new,
+    # portable building block). Applied before caching, so a cache hit reflects it too.
+    #
+    # Fires ONLY when the release's own type is KNOWN and is not itself a single: a single
+    # release (LBF lets users include singles) still matches a single, and an unknown/blank
+    # type is left unfiltered (never risk dropping the only match on missing metadata).
+    my $tnorm       = lc($type // '');
+    # EP targets are EXCLUDED from the single-drop: a legitimate 2-track EP can be
+    # track-count-classified as a "single" by _candReleaseType (no explicit type field),
+    # so dropping singles for an EP target risks discarding the correct match in favour of
+    # a like-named rival. Album/compilation targets (primary type 'album') still shed a
+    # same-named single — the 0.9.89 case. Unknown/blank type is never filtered.
+    my $dropSingles = $tnorm ne '' && $tnorm ne 'single' && $tnorm ne 'ep';
 
     # Search the ARTIST only, then filter the results by album title locally
     # (_albumMatches). Searching "artist album" as one string made the services'
@@ -2574,10 +2945,17 @@ sub _findPlayable {
     # normaliser turns punctuation into spaces, which mangles stylised artist names
     # ("P!nk" -> "p nk", "will.i.am" -> "will i am") so the service's own search
     # can't find them — the same bug that lost the L.U.C.K.Y track. Normalisation
-    # stays for our _albumMatches validation only. (Octet-encode for the URI layer:
-    # a wide-char query warns/breaks; artistNorm/albumNorm stay characters.)
-    my $queryEnc   = $artist;
-    utf8::encode($queryEnc) if utf8::is_utf8($queryEnc);
+    # stays for our _albumMatches validation only. Built in BOTH spellings: the
+    # service plugins' URL layers differ — Qobuz escapes with uri_escape_utf8 and
+    # Tidal transliterates with Text::Unidecode, both needing CHARACTER strings
+    # (octets double-encode: "Sigur Rós" searched as "Sigur RÃ³s" -> junk/empty
+    # results; found + fixed in the Discography plugin 2026-07-10), while
+    # Deezer's complex_to_query and Bandcamp want OCTETS. Each adapter's
+    # query_enc picks its spelling at the call site.
+    my $qChars     = $artist;
+    utf8::decode($qChars) unless utf8::is_utf8($qChars);   # no-op if not valid UTF-8
+    my $qBytes     = $artist;
+    utf8::encode($qBytes) if utf8::is_utf8($qBytes);
 
     # Bandcamp is deliberately NOT auto-searched: its plugin search is
     # cookie-dependent / often broken AND does heavy SYNCHRONOUS response-parsing
@@ -2663,6 +3041,16 @@ sub _findPlayable {
                 return;
             }
             my @matched = (ref $_[0] eq 'ARRAY') ? @{ $_[0] } : ();
+            # Type consistency (see the $dropSingles note above): for a non-single
+            # release, drop candidates this service classified as a single, but keep the
+            # whole set if that would leave nothing (fall back rather than lose the match).
+            if ($dropSingles && @matched) {
+                my @keep = grep { ($_->{_ctype} // '') ne 'single' } @matched;
+                if (@keep && @keep != @matched) {
+                    $log->info("play-via $svc: dropped " . (@matched - @keep) . " single(s) for non-single release");
+                    @matched = @keep;
+                }
+            }
             for my $it (@matched) {
                 my $art = $it->{image};          # native album cover, before the logo override
                 $it->{image} = $icon if $icon;   # service logo as thumbnail (LBF detail view)
@@ -2681,7 +3069,8 @@ sub _findPlayable {
             $settle->(undef);
         });
 
-        eval { $a->{run}->($client, $queryEnc, $artistNorm, $albumNorm, $svc, $settle); 1 } or do {
+        my $queryEnc = ($a->{query_enc} || 'bytes') eq 'chars' ? $qChars : $qBytes;
+        eval { $a->{run}->($client, $queryEnc, $artistNorm, $albumNorm, $svc, $settle, $album); 1 } or do {
             $log->warn("play-via $svc failed: $@");
             $settle->(undef);
         };
@@ -2823,6 +3212,14 @@ sub _rebuildStreamItems {
         elsif ($svc eq 'Tidal' && Plugins::TIDAL::Plugin->can('getAlbum')) {
             $item{url} = \&Plugins::TIDAL::Plugin::getAlbum;
         }
+        elsif ($svc eq 'Deezer' && Plugins::Deezer::Plugin->can('getAlbum')) {
+            # Deezer album nodes are the same shape as Tidal's: `_renderAlbum` sets
+            # `url => \&getAlbum` (a COREF, stripped on cache) and keeps the album id
+            # in `passthrough` (plain data, survives the cache), so getAlbum resolves
+            # the tracklist on read. Without this branch a cached Deezer match hit the
+            # `else { next }` below and silently vanished on re-read (fixed 0.9.76).
+            $item{url} = \&Plugins::Deezer::Plugin::getAlbum;
+        }
         else {
             next;
         }
@@ -2846,8 +3243,35 @@ sub _bcMatchItems {
 
 # Qobuz: search albums via the plugin's own API, keep title matches, and reuse
 # the plugin's _albumItem so each result is a native, playable album node.
+# Classify a streaming candidate's release type (album / single / ep / '') from the
+# service's OWN album data, so a non-single release isn't resolved to a like-named single
+# (0.9.89 — the type filter in _findPlayable uses this). Deliberately CONSERVATIVE: it
+# only commits to 'single'/'ep' when the service is clear, else '' (unknown = keep). An
+# explicit trusted type field wins (Qobuz release_type, Deezer record_type, TIDAL type);
+# otherwise the track count decides — a real ALBUM never has 1-2 tracks, so a low count is
+# a safe single signal, while a many-track album (even if mistyped) stays unflagged. Field
+# names verified per plugin: Qobuz tracks_count, Deezer nb_tracks, TIDAL numberOfTracks.
+sub _candReleaseType {
+    my ($album) = @_;
+    return '' unless ref $album eq 'HASH';
+
+    for my $f (qw(release_type record_type type)) {
+        my $t = lc($album->{$f} // '');
+        next unless $t;
+        return 'single' if $t eq 'single';
+        return 'ep'     if $t eq 'ep' || $t eq 'epmini';
+        return 'album'  if $t eq 'album' || $t eq 'compile' || $t eq 'compilation';
+        # unrecognised value → fall through to the track-count heuristic
+    }
+
+    my $tc = $album->{tracks_count} // $album->{nb_tracks} // $album->{numberOfTracks};
+    return '' unless defined $tc && "$tc" =~ /^\d+$/;
+    return 'single' if $tc <= 2;
+    return '';   # 3+ tracks: don't presume EP-vs-album — only the single case matters here
+}
+
 sub _searchQobuz {
-    my ($client, $query, $artistNorm, $albumNorm, $svc, $collect) = @_;
+    my ($client, $query, $artistNorm, $albumNorm, $svc, $collect, $albumRaw) = @_;
 
     my $api = Plugins::Qobuz::Plugin::getAPIHandler($client);
     # undef (not []) → "couldn't query" → inconclusive, so a transient missing
@@ -2865,7 +3289,7 @@ sub _searchQobuz {
         my $rendererFailed = 0;
         for my $album (@{ ($res && $res->{albums} && $res->{albums}{items}) || [] }) {
             my $candArtist = ref $album->{artist} eq 'HASH' ? $album->{artist}{name} : '';
-            next unless _albumMatches($artistNorm, $albumNorm, $candArtist, $album->{title});
+            next unless _albumMatches($artistNorm, $albumNorm, $candArtist, $album->{title}, $albumRaw);
             # Qobuz's catalogue sometimes carries a bogus partial/orphaned duplicate of a
             # release that isn't actually playable (e.g. Beth Orton – The Ground Above lists
             # two, only one playable). The duplicate is flagged NON-STREAMABLE, so dropping a
@@ -2885,6 +3309,7 @@ sub _searchQobuz {
                 next;
             }
             $item->{_albumid} = $album->{id};   # native id → ListenLater favurl (album:<id>)
+            $item->{_ctype}   = _candReleaseType($album);   # album/single/ep — for the type filter
             push @out, $item;
         }
         # Matched the album but the renderer produced nothing usable → inconclusive
@@ -2898,7 +3323,7 @@ sub _searchQobuz {
 # Bandcamp: run the plugin's combined search, keep the album results (identified
 # by an album_id in their passthrough — they're already playable album nodes).
 sub _searchBandcamp {
-    my ($client, $query, $artistNorm, $albumNorm, $svc, $collect) = @_;
+    my ($client, $query, $artistNorm, $albumNorm, $svc, $collect, $albumRaw) = @_;
 
     eval { require Plugins::Bandcamp::Search; 1 } or do {
         $collect->([]);
@@ -2912,7 +3337,7 @@ sub _searchBandcamp {
             next unless ref $it eq 'HASH';
             my $pt = ref $it->{passthrough} eq 'ARRAY' ? $it->{passthrough}[0] : undef;
             next unless $pt && $pt->{album_id};
-            next unless _albumMatches($artistNorm, $albumNorm, $pt->{artist}, $pt->{title});
+            next unless _albumMatches($artistNorm, $albumNorm, $pt->{artist}, $pt->{title}, $albumRaw);
             $it->{_albumid}  = $pt->{album_id};               # native id → ListenLater favurl (album:<id>)
             $it->{_albumurl} = $pt->{album_url} || $pt->{url}; # album PAGE url → packed into the favurl ?b= blob (exact Bandcamp replay key)
             push @out, $it;
@@ -3085,7 +3510,7 @@ sub _searchBandcampOnly {
             $bc->{run}->($client, $queryEnc, $artistNorm, $albumNorm, 'Bandcamp', sub {
                 my @m = (ref $_[0] eq 'ARRAY') ? @{ $_[0] } : ();
                 @m ? $finish->(\@m) : $tryNext->();
-            });
+            }, $album);
             1;
         } or do { $log->warn("manual bandcamp search failed: $@"); $tryNext->(); };
     };
@@ -3104,7 +3529,7 @@ sub _searchBandcampOnly {
 # and reuse the plugin's _renderAlbum so each result is a native, playable album
 # node (url => getAlbum, plus play/add/insert itemActions keyed by album id).
 sub _searchTidal {
-    my ($client, $query, $artistNorm, $albumNorm, $svc, $collect) = @_;
+    my ($client, $query, $artistNorm, $albumNorm, $svc, $collect, $albumRaw) = @_;
 
     my $api = Plugins::TIDAL::Plugin::getAPIHandler($client);
     # undef (not []) → inconclusive (see _findPlayable / _searchQobuz).
@@ -3123,7 +3548,7 @@ sub _searchTidal {
             next unless ref $album eq 'HASH';
             my $artistRef  = $album->{artist} || ($album->{artists} && $album->{artists}[0]) || {};
             my $candArtist = ref $artistRef eq 'HASH' ? $artistRef->{name} : '';
-            next unless _albumMatches($artistNorm, $albumNorm, $candArtist, $album->{title});
+            next unless _albumMatches($artistNorm, $albumNorm, $candArtist, $album->{title}, $albumRaw);
             # Guard the foreign renderer: a die here runs INSIDE this async search
             # callback (not under _findPlayable's invocation-time eval), so an
             # unguarded throw would leave the service un-settled until its 8s
@@ -3135,6 +3560,7 @@ sub _searchTidal {
                 next;
             }
             $item->{_albumid} = $album->{id};   # native id → ListenLater favurl (album:<id>)
+            $item->{_ctype}   = _candReleaseType($album);   # album/single/ep — for the type filter
             push @out, $item;
         }
         # Matched the album but the renderer produced nothing usable → inconclusive
@@ -3150,7 +3576,7 @@ sub _searchTidal {
 # title/artist locally and render each hit via the plugin's own _renderAlbum
 # (which sets play => deezer://album:<id>). Type is SINGULAR ('album') for Deezer.
 sub _searchDeezer {
-    my ($client, $query, $artistNorm, $albumNorm, $svc, $collect) = @_;
+    my ($client, $query, $artistNorm, $albumNorm, $svc, $collect, $albumRaw) = @_;
 
     my $api = Plugins::Deezer::Plugin::getAPIHandler($client);
     # undef (not []) → inconclusive (see _findPlayable / _searchTidal).
@@ -3175,7 +3601,7 @@ sub _searchDeezer {
             next unless ref $album eq 'HASH';
             my $artistRef  = $album->{artist} || ($album->{artists} && $album->{artists}[0]) || {};
             my $candArtist = ref $artistRef eq 'HASH' ? $artistRef->{name} : '';
-            next unless _albumMatches($artistNorm, $albumNorm, $candArtist, $album->{title});
+            next unless _albumMatches($artistNorm, $albumNorm, $candArtist, $album->{title}, $albumRaw);
             # Guard the foreign renderer (dies here run inside this async callback,
             # not under _findPlayable's eval) — skip a bad item (mirrors _searchTidal).
             my $item = eval { Plugins::Deezer::Plugin::_renderAlbum($album) };
@@ -3185,6 +3611,7 @@ sub _searchDeezer {
                 next;
             }
             $item->{_albumid} = $album->{id};   # native id → ListenLater favurl (album:<id>)
+            $item->{_ctype}   = _candReleaseType($album);   # album/single/ep — for the type filter
             push @out, $item;
         }
         # Matched but the renderer produced nothing usable → inconclusive (see _searchTidal).
@@ -3231,8 +3658,13 @@ sub _findPlayableTrack {
     # confirmed against Tidal: it returns "L.U.C.K.Y" for the raw query but not for
     # the spaced one. Normalisation is only for OUR match validation (_trackMatches);
     # the outgoing query must stay faithful to what the service indexed.
-    my $queryEnc   = join(' ', grep { length } $artist, $title);
-    utf8::encode($queryEnc) if utf8::is_utf8($queryEnc);
+    # Both spellings, per-adapter query_enc — see the album-search site's note
+    # (Qobuz/Tidal need characters, Deezer/Bandcamp octets).
+    my $qRaw       = join(' ', grep { length } $artist, $title);
+    my $qChars     = $qRaw;
+    utf8::decode($qChars) unless utf8::is_utf8($qChars);   # no-op if not valid UTF-8
+    my $qBytes     = $qRaw;
+    utf8::encode($qBytes) if utf8::is_utf8($qBytes);
 
     # A title is the one thing we always need; missing streaming adapters is NOT
     # fatal — the library may still satisfy the track (handled below), so don't
@@ -3254,7 +3686,7 @@ sub _findPlayableTrack {
     # The non-default library modes get their own key suffix so a streaming-first
     # result can't collide with the playlist feature's library-preferring cache.
     my $svcOrder = join(',', map { lc $_->{name} } @adapters);
-    my $key = 'lbf:track:4:' . $svcOrder . ':' . ($recMbid || _norm($query));
+    my $key = 'lbf:track:6:' . $svcOrder . ':' . ($recMbid || _norm($query));
     $key .= ":$libMode" unless $libMode eq 'first';
     utf8::encode($key) if utf8::is_utf8($key);
     if (!$force && (my $c = $cache->get($key))) {
@@ -3372,6 +3804,7 @@ sub _findPlayableTrack {
                 $settle->(undef);   # inconclusive, not a confirmed miss
             });
 
+            my $queryEnc = ($a->{query_enc} || 'bytes') eq 'chars' ? $qChars : $qBytes;
             eval { $a->{runTrack}->($client, $queryEnc, $artistNorm, $titleNorm, $album, $settle); 1 } or do {
                 $log->warn("track-match $svc failed: $@");
                 $settle->(undef);   # inconclusive, not a confirmed miss
@@ -3714,17 +4147,106 @@ sub _searchBandcampTrack {
 # wrongly matching "Friendship 7 to Apollo 11…". The trailing space is a word
 # boundary so "Apollo" doesn't match "Apollonia".
 sub _albumMatches {
-    my ($artistNorm, $albumNorm, $candArtist, $candTitle) = @_;
+    my ($artistNorm, $albumNorm, $candArtist, $candTitle, $albumRaw) = @_;
 
-    return 0 if length $albumNorm < 2;
+    # All-punctuation / single-char titles ("( )", "X") normalise to (near)
+    # nothing, so the standard path can't see them. Compare a punctuation-
+    # PRESERVING form instead - lowercase, whitespace stripped: "( )" == "()"
+    # but != "( ) (live)". Exact equality ONLY (a prefix rule would let "x"
+    # swallow "xx") and the artist gate is mandatory. (Ported from the
+    # Discography plugin 0.10.3, 2026-07-10.)
+    if (length $albumNorm < 2) {
+        my $ap = _punctNorm($albumRaw);
+        return 0 unless length $ap;
+        return 0 unless _punctNorm($candTitle) eq $ap;
+        return 0 if $artistNorm eq '';
+        return _artistMatch($artistNorm, _norm($candArtist));
+    }
+
     my $t = _norm($candTitle);
     return 0 if $t eq '';
-    return 0 unless $t eq $albumNorm || index($t, "$albumNorm ") == 0;
 
-    # No artist to disambiguate with → only an EXACT title match counts; otherwise
+    # SELF-TITLED releases ("The Beatles", "Weezer") match on the EXACT title only:
+    # every fallback below reads "<album> <extra>" as an edition of the same album,
+    # which is catastrophic when the album title IS the artist name — it swallows
+    # "The Beatles 1962-1966" (Red), "…1967-1970" (Blue), "…Anthology 1". _norm
+    # already strips brackets, so "The Beatles (White Album)"/"(Remastered)" still
+    # match. (Ported from the Discography plugin 0.11.1 — fleet matcher sync.)
+    if (length($artistNorm) && $albumNorm eq $artistNorm) {
+        return 0 unless $t eq $albumNorm;
+        return _artistMatch($artistNorm, _norm($candArtist));
+    }
+
+    my $ok = ($t eq $albumNorm || index($t, "$albumNorm ") == 0);
+
+    # Trailing format descriptor ("... EP"/"... LP") present on one side only.
+    if (!$ok) {
+        my $ab = _stripFmt($albumNorm);
+        my $tb = _stripFmt($t);
+        $ok = 1 if length($ab) >= 3 && length($tb) >= 3
+                && ($tb eq $ab || index($tb, "$ab ") == 0);
+    }
+
+    # Decorative non-ASCII glyphs spelled differently between sources.
+    if (!$ok) {
+        my $aa = _asciiNorm($albumNorm);
+        my $ta = _asciiNorm($t);
+        $ok = 1 if length($aa) >= 2 && length($ta) >= 2
+                && ($ta eq $aa || index($ta, "$aa ") == 0);
+    }
+
+    # Titles carrying the ARTIST NAME as a prefix on ONE side only - e.g. the
+    # release "Belle and Sebastian Write About Love" vs the source title
+    # "Write About Love". Strip a leading "<artist> " from both sides and
+    # re-compare, gated on a >=3 char remainder; the artist check below still
+    # applies. (Ported from the Discography plugin 0.9.1.)
+    if (!$ok && length $artistNorm) {
+        my $ab = _stripArtistPrefix($albumNorm, $artistNorm);
+        my $tb = _stripArtistPrefix($t, $artistNorm);
+        if (($ab ne $albumNorm || $tb ne $t) && length($ab) >= 3 && length($tb) >= 3) {
+            $ok = 1 if $tb eq $ab || index($tb, "$ab ") == 0;
+        }
+    }
+    return 0 unless $ok;
+
+    # No artist to disambiguate with -> only an EXACT title match counts; otherwise
     # a generic one-word title ("Prism") prefix-matches dozens of unrelated albums.
-    return $t eq $albumNorm ? 1 : 0 if $artistNorm eq '';
+    return ($t eq $albumNorm) ? 1 : 0 if $artistNorm eq '';
     return _artistMatch($artistNorm, _norm($candArtist));
+}
+
+sub _stripFmt {
+    my $s = shift // '';
+    $s =~ s/\s+(?:ep|lp)$//;
+    return $s;
+}
+
+sub _asciiNorm {
+    my $s = shift // '';
+    $s =~ s/[^\x00-\x7f]+/ /g;
+    $s =~ s/[^a-z0-9]+/ /g;
+    $s =~ s/^\s+//; $s =~ s/\s+$//;
+    $s =~ s/\s+/ /g;
+    return $s;
+}
+
+# Lowercased, whitespace-stripped, punctuation KEPT - only for titles _norm
+# erases (see the short-title branch in _albumMatches).
+sub _punctNorm {
+    my $s = shift // '';
+    if (!utf8::is_utf8($s) && $s =~ /[^\x00-\x7f]/) {
+        my $d = $s;
+        $s = $d if utf8::decode($d);
+    }
+    $s = lc($s);
+    $s =~ s/\s+//g;
+    return $s;
+}
+
+sub _stripArtistPrefix {
+    my ($t, $a) = @_;
+    return substr($t, length($a) + 1) if index($t, "$a ") == 0;
+    return $t;
 }
 
 # Artist match tolerant of word order, connectors and partial credits: every
@@ -3797,9 +4319,15 @@ sub _norm {
              Unicode::Normalize::NFD($s) =~ s/[\x{0300}-\x{036F}]+//gr );
         $s =~ s/([^\x00-\x7f])/exists $FOLD{$1} ? $FOLD{$1} : $1/ge;
     }
+    $s =~ s/\$/s/g;
+    $s =~ s/\x{20ac}/e/g;   # euro sign
+    $s =~ s/\x{a3}/l/g;     # pound sign
+    $s =~ s/\x{a5}/y/g;     # yen sign
+    $s =~ s/!/i/g;
+    $s =~ s/\@/a/g;
     $s =~ s/[\(\[].*?[\)\]]//g;
     $s =~ s/[^\p{Alnum}]+/ /g;
-    $s =~ s/^\s+|\s+$//g;
+    $s =~ s/^\s+//; $s =~ s/\s+$//;
     $s =~ s/\s+/ /g;
     return $s;
 }

@@ -3,6 +3,133 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.98
+
+### Fixed
+- **The Artist sort renders faster on low-power servers.** Sorting a list by Artist now looks up each release's sort-name once instead of repeatedly while ordering the list — on a big All Releases week that turns thousands of cache reads per view into one per release, so the view opens without stuttering audio on a Raspberry Pi.
+- **The background sort-name lookup no longer double-fetches from MusicBrainz.** Opening the Artist-sorted view, leaving, and reopening it before the first background pass finished could start a second pass that re-requested the same artists in parallel, briefly exceeding MusicBrainz's courtesy rate. Each pass now reserves its whole batch up front, so overlapping passes never fetch the same artist twice.
+- **The "Sorted by …" toggle always advances.** It now reads the current saved sort at the moment you tap it, so a change made on another player in between can't make the tap appear to do nothing.
+
+## 0.9.97
+
+### Changed
+- **Sort is now chosen on each list, not in a global setting.** The old "Default sort order" setting (and the "Group by Artist" / "Weekly Dividers" toggles) have been removed. Each list now has a **"Sorted by …" row in an Options section** that cycles **Release Date → Artist → Album Title** in place:
+  - **New Releases for You** is now always grouped by week (the W/C material headers), and the toggle re-orders the releases *within* each week while keeping those headers. Your choice is remembered.
+  - **All Releases** — a single sort shared across every week's view. Set it once and it sticks, on every week and across restarts.
+- **All Releases per-week views gain a "Show all" row.** Alongside "Show more" (reveals the next 30), a **"Show all (N)"** row jumps straight to the whole week; "Show less" collapses back. (Shown only when it would reveal more than "Show more" already does.)
+- **The Artist sort uses the MusicBrainz sort-name.** "Jack White" now sorts under **W** ("White, Jack"), while a stage name like "Panda Bear" correctly stays under **P**. The ListenBrainz feed only sends the display name, so the sort-name is looked up from MusicBrainz by the artist's MBID (cached; MuSpy already supplies one directly). The lookup runs in the background only when you actually use the Artist sort, so a just-seen artist may sort by display name on the first view and correct itself on the next; when MusicBrainz has no sort-name the display name is used.
+- The "Confidence" sort option was dropped.
+
+### Removed
+- **Group by Artist** setting. It collapsed an artist's multiple new releases into one expandable row, but it was only ever reachable with Weekly Dividers turned off or a non-date sort — under the defaults the weekly view always took precedence, so it did nothing on a normal install. The new **Artist** sort covers lining an artist's releases up together.
+
+## 0.9.96
+
+### Fixed
+- **Artist names that are MusicBrainz aliases now resolve.** Looking an artist up by name (used by the ListenBrainz Radio seed and the Last.fm similar-artist fallback) only searched the artist's actual name — a name that exists solely as a MusicBrainz *alias* ("The Oh Sees" → Osees) found nothing. The lookup now retries the alias field when the name search comes up empty, so era names and alternate spellings resolve to the right artist. Ported from Discography 0.32.0.
+
+## 0.9.95
+
+### Fixed
+- **The zero-config MusicBrainz mirror auto-detect (0.9.94) now actually runs.** The setting shipped defaulting to the public MusicBrainz URL, and a blank field was reset back to that URL on save — so the setting was never blank, and the auto-detect (which only runs on a blank setting) never fired on any install. The setting now defaults to blank and a cleared field stays blank, so a same-host musicbrainz-docker mirror is discovered automatically as intended. The empty box still shows the public URL as placeholder text. (Existing installs that already saved the public URL should clear the field once to enable auto-detect.)
+- **Fixed a small memory leak in artist-name → MusicBrainz ID resolution.** The mirror-search fallback added in 0.9.93 used a self-referencing helper that Perl never reclaimed, leaking a little memory on every ListenBrainz Radio seed / Last.fm similar-artist lookup. Rewritten so it's freed once the lookup completes.
+
+## 0.9.94
+
+### Added
+- **Zero-config local MusicBrainz mirror.** If you leave the MusicBrainz server setting blank and you're running a musicbrainz-docker mirror on the *same machine* as your server, the plugin now finds it automatically (it checks port 5000 on this machine at startup and confirms it really is MusicBrainz before using it) and enjoys the fast, un-throttled lookups — no URL to type. If nothing is found it falls back to the public MusicBrainz API as before. A mirror on another host is still entered by hand; the plugin never scans your network.
+
+### Changed
+- **Clearer MusicBrainz server setting** — the help text now explains the auto-detect behaviour and no longer uses a specific example hostname.
+
+## 0.9.93
+
+### Fixed
+- **Artist lookups survive a MusicBrainz mirror whose search index isn't built.** If you point the plugin at a local MusicBrainz mirror, that mirror can answer direct lookups while its search returns nothing (a common state right after importing the data). Resolving an artist by name (used by the ListenBrainz Radio seed and the Last.fm similar-artist fallback) now automatically retries once against the public MusicBrainz API when the mirror's search comes back empty or unreachable — so a half-configured mirror degrades gracefully instead of silently failing. No effect when you use the public API or a fully-built mirror.
+
+## 0.9.92
+
+### Fixed
+- **A short EP no longer loses its streaming match to a like-named single.** The "don't let an album match a same-named single" filter no longer applies to **EP** releases — a genuine 2-track EP could be mistaken for a single (by track count) and dropped in favour of the wrong release. Albums still shed a same-named single as before.
+- **MusicBrainz server URL now tolerates a missing scheme.** Entering a mirror as a bare host (e.g. `plex:5000/ws/2`) previously broke every MusicBrainz lookup silently; it's now assumed to be `http://`. The settings page also shows the public default (`https://musicbrainz.org/ws/2/`) as a placeholder and spells it out in the help text, so it's recoverable if you ever clear the field.
+
+## 0.9.91
+
+### Changed
+- **People You Follow sort toggle now says what it's showing.** The inline sort row reads "Sorted by date (tap for recommender)" / "Sorted by recommender (tap for date)" — the current ordering plus a hint for what a tap changes (matching the Discography plugin's sort toggle), instead of the ambiguous "Sort by date" / "Sort by recommender".
+
+## 0.9.90
+
+### Fixed
+- **Self-titled albums no longer swallow the rest of the discography.** A release whose title is the artist's name ("The Beatles", "Weezer") now matches only that exact album, not "The Beatles 1962-1966", "…1967-1970" or "…Anthology 1". Decorated editions ("(White Album)", "(Remastered)") still match. (Shared matcher fix, kept in sync across the sibling plugins.)
+
+## 0.9.89
+
+### Fixed
+- **An album no longer matches a same-named single on a streaming service.** When you open an album, the streaming match now prefers an actual album over a like-named single (which title/year alone couldn't tell apart). Singles you view still match singles, and if a service only has the single it's still offered rather than showing nothing.
+
+## 0.9.88
+
+### Added
+- **Sort "Recommended by People You Follow" by date or by person.** A toggle at the top of the list switches between the usual **date** order (day dividers, newest first) and grouping **by recommender** — one section per person you follow ("Recommended by …"), most recent first. Your choice is remembered.
+
+## 0.9.87
+
+### Changed
+- **Removed "Show all" from All Releases.** It just repeated the same releases the dated week entries already cover, but as one long unpaged list. The dated weeks (This Week / Last Week / W/C …), each with the new "Show more", do the same job and stay manageable.
+
+## 0.9.86
+
+### Added
+- **"Show more" on busy All Releases weeks.** A single week of the global All Releases feed can list hundreds of releases. Opening a week now shows the first **30**, then a **"Show more"** row to reveal the next 30 (and another, and so on), with a **"Show less"** to collapse back. New Releases for You is unchanged — it keeps the full scrollable, searchable list.
+
+## 0.9.81
+
+### Changed
+- **MuSpy settings moved into their own section.** The three MuSpy options (user ID, "MuSpy upcoming releases", "how far ahead") now live in a dedicated **MuSpy Settings** section at the bottom of the settings page, with its own heading like the other sections — so they're not mixed in with the ListenBrainz settings above.
+
+## 0.9.80
+
+### Added
+- **"MuSpy upcoming — how far ahead" setting.** The MuSpy upcoming side previously showed a fixed year ahead with no way to limit it. There's now a **months-ahead** setting (1-24, default 12) so you can rein it in — e.g. set it to 3 to only see the next quarter's releases. It applies to MuSpy only (the ListenBrainz feed still uses the "Days window"), and only when "MuSpy upcoming releases" is on.
+
+## 0.9.79
+
+### Changed
+- **New Releases for You now includes upcoming releases by default.** Most people want the "what's coming" side as much as recent releases, so the For You **Include upcoming releases** option now defaults ON for new installs (existing installs keep whatever you've set). The All Releases feed is unchanged.
+
+### Fixed
+- **MuSpy releases now show by default.** MuSpy's list is mostly *upcoming* releases, but they were being hidden unless you'd also turned on the general "Include upcoming releases" option — so for most people MuSpy looked like it did nothing. MuSpy now has its own **"MuSpy upcoming releases"** switch (**on by default**), so your followed artists' upcoming releases appear in New Releases for You straight away. It's independent of the ListenBrainz feed's upcoming setting; turn it off if you only want MuSpy's already-released titles.
+
+### Technical
+- Verified the MuSpy API against live data (public `https://muspy.com/api/1/releases/<userid>`, no auth, bare JSON array, `date` in full `YYYY-MM-DD`, `mbid` = release-group UUID) — parsing/endpoint were correct. Root cause of "MuSpy doesn't work" was `_mergeMuSpy` gating the future side on `foryou_future` (default OFF) and clipping to the `days` window, which dropped MuSpy's upcoming-heavy list. New pref `muspy_future` (default `1`) now gates MuSpy's future side instead; upcoming MuSpy releases are bounded to `MUSPY_FUTURE_DAYS` (365) rather than the narrow `days` window. The past side still honours `foryou_past` + `days`. LB feed behaviour is unchanged (its upcoming inclusion is still the `future =>` param on `getFreshReleasesForUser`). Settings checkbox + `PLUGIN_LBF_MUSPY_FUTURE` strings added; the `muspy_userid` hint dropped its now-obsolete "enable Include upcoming" advice.
+
+## 0.9.78
+
+### Added
+- **MuSpy releases in your New Releases for You feed.** Optionally add upcoming and recent releases from the artists you follow on [MuSpy](https://muspy.com) into your personalised feed — more tailored, since you pick the artists yourself. Enter your MuSpy **user ID** in Settings (General); only the public ID is stored, never a password. Albums that also appear from ListenBrainz are shown once, and MuSpy releases are tappable through to the same detail page (streaming matches, genres, artist bio) — MuSpy items don't carry a MusicBrainz tracklist, so only that section is absent.
+
+### Technical
+- New public source: `API::getMuSpyReleases` fetches `https://muspy.com/api/1/releases/<userid>` (the endpoint is public — no auth), dual working/fallback cache reusing `FEED_TTL`/`FEED_FALLBACK_TTL` via `_cacheFeed`. `_parseMuSpy` maps each release group into the internal release hash (`artist_credit_name`, `release_name`, `release_group_mbid`, `release_group_primary_type`, `artist_mbids`, `_source => 'muspy'`); `_padDate` pads partial `YYYY`/`YYYY-MM` dates. Best-effort by design — any failure resolves `onDone` with the last good copy or `[]`, so MuSpy can never blank the LB feed.
+- `Browse::_mergeMuSpy` windows MuSpy releases to the same `foryou_past`/`foryou_future`/`days` as the For You feed (MuSpy's API has no day window), then concatenates for `fetchForYou`/`homeForYou`; both feeds now fetch LB then MuSpy and merge, and the LB error path still renders MuSpy (only an empty both-sources result shows the error tile). `_dedupeReleases` gained a cross-source artist+album collapse (dates can differ slightly between MuSpy and LB for the same album) that only fires when one side is MuSpy, preferring the cover-art-bearing (LB) copy; same-source LB editions with different dates are untouched. `coverArtUrl` builds a release-**group** CAA URL (`/release-group/<mbid>/front-250`) from `caa_release_group_mbid` since MuSpy has no release-level MBID/caa_id; `_buildReleaseItem` links through on `release_group_mbid` too. New pref `muspy_userid` (default `''`).
+- Review fixes on the MuSpy path: (1) `_padDate` now defaults a **zero-filled** partial date component to `01`, not just an omitted one — MusicBrainz/MuSpy can send `2026-07-00`/`2026-00-00`, and the old `$2 || 1` left the truthy string `'00'` in place, producing an invalid date that corrupted the week-divider / window maths. (2) `clearFeedCache('user')` now also drops the MuSpy working key, so **"Refresh (force update now)"** re-pulls MuSpy too instead of serving a copy up to `FEED_TTL` (24h) old (fallback copy left intact). (3) The `muspy_userid` settings hint now tells the user MuSpy is mostly **upcoming** releases, so they should enable "Include upcoming releases" (and widen the Days window) to see them.
+
+## 0.9.77
+
+### Fixed
+- **ListenBrainz Radio (Don't Stop The Music) was playing random tracks from your library instead of a proper radio.** ListenBrainz has temporarily disabled the server-side "Popularity" data the radio uses to turn artists into songs, so the radio couldn't build a station and fell back to random. It now falls back to your personalised **Recommended** pool instead — real recommendations rather than random — until ListenBrainz turns that data back on.
+
+### Technical
+- Root cause diagnosed live: `getSimilarArtists` succeeds (100 artists) but every `getTopRecordingsForArtist` call returns `500 "Popularity API currently disabled due to high load on the server"`. All radio sub-paths (similar-artists, seed-only, Last.fm) funnel through that one endpoint, so the candidate pool comes back empty and `_resolveAndReturn` returned `[]` → core DSTM random. The Last.fm fallback can't help (same dead endpoint) and was only wired to the empty/error branches of `getSimilarArtists`. Fix: `_resolveAndReturn` now falls back once to `_recommendedFill` (the `/1/cf/recommendation` CF pool — a different endpoint, confirmed up) whenever a `radio` pool is empty; centralised so it covers all three radio sites; `recommended` is guarded from recursing. Follow-up left open: negative-cache the "Popularity disabled" 500 so `_collectArtistTracks` skips ~24 doomed calls per top-up during an extended outage. No cache-version bump.
+
+## 0.9.76
+
+### Fixed
+- **A Deezer streaming match on a release detail page disappeared when you re-opened the page.** The match showed the first time (from a live search) but was silently dropped from the cached copy on every later open, so the album looked like it had no Deezer match. Now it's kept and stays playable.
+
+### Technical
+- `_rebuildStreamItems` reattaches each service's browse coderef by `_svc` but only handled Qobuz/Bandcamp/Tidal — a Deezer item fell through `else { next }` and was dropped on cache read. Deezer's album node is the same shape as Tidal's (`_renderAlbum` → `url => \&getAlbum` coderef, id in `passthrough`), so a one-line Tidal-style reattach branch (`\&Plugins::Deezer::Plugin::getAlbum`) fixes it. Added `getAlbum` to the Deezer adapter-registration `->can` guard so the service only registers when the album round-trip is possible, and corrected the adapter comment (the `deezer://album:<id>` string is the `play`/favourites value, not the browse url). No cache-version bump — cached Deezer entries carry the id in passthrough and now rebuild correctly. Verified against michaelherger/lms-deezer.
+
 ## 0.9.75
 
 ### Fixed

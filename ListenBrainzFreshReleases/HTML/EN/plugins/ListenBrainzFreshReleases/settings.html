@@ -23,29 +23,16 @@
 <input type="number" name="pref_days" value="[% prefs.days %]" min="1" max="90" size="4">
 [% END %]
 
-[% WRAPPER setting title="PLUGIN_LBF_DEFAULT_SORT" %]
-<div>
-  <label><input type="radio" name="pref_sort" value="release_date" [% IF prefs.sort == 'release_date' %]checked="checked"[% END %]> [% 'PLUGIN_LBF_SORT_DATE' | string %]</label><br>
-  <label><input type="radio" name="pref_sort" value="artist_credit_name" [% IF prefs.sort == 'artist_credit_name' %]checked="checked"[% END %]> [% 'PLUGIN_LBF_SORT_ARTIST' | string %]</label><br>
-  <label><input type="radio" name="pref_sort" value="release_name" [% IF prefs.sort == 'release_name' %]checked="checked"[% END %]> [% 'PLUGIN_LBF_SORT_ALBUM' | string %]</label><br>
-  <label><input type="radio" name="pref_sort" value="confidence" [% IF prefs.sort == 'confidence' %]checked="checked"[% END %]> [% 'PLUGIN_LBF_SORT_CONFIDENCE' | string %]</label>
-</div>
-[% END %]
-
-[% WRAPPER setting title="PLUGIN_LBF_GROUP_ARTIST" desc="PLUGIN_LBF_GROUP_ARTIST_DESC" %]
-<input type="checkbox" name="pref_group_by_artist" value="1" [% IF prefs.group_by_artist %]checked="checked"[% END %]>
-[% END %]
-
-[% WRAPPER setting title="PLUGIN_LBF_WEEK_DIVIDERS" desc="PLUGIN_LBF_WEEK_DIVIDERS_DESC" %]
-<input type="checkbox" name="pref_week_dividers" value="1" [% IF prefs.week_dividers %]checked="checked"[% END %]>
-[% END %]
-
 [% WRAPPER setting title="PLUGIN_LBF_PLAY_VIA_SETTING" desc="PLUGIN_LBF_PLAY_VIA_SETTING_DESC" %]
 <input type="checkbox" name="pref_play_via" value="1" [% IF prefs.play_via %]checked="checked"[% END %]>
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LBF_PREFER_LIBRARY" desc="PLUGIN_LBF_PREFER_LIBRARY_DESC" %]
 <input type="checkbox" name="pref_prefer_library" value="1" [% IF prefs.prefer_library %]checked="checked"[% END %]>
+[% END %]
+
+[% WRAPPER setting title="PLUGIN_LBF_MB_BASE_URL" desc="PLUGIN_LBF_MB_BASE_URL_DESC" %]
+<input type="text" name="pref_mb_base_url" value="[% prefs.mb_base_url %]" size="48" placeholder="https://musicbrainz.org/ws/2/">
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LBF_DEBUG_LOG" desc="PLUGIN_LBF_DEBUG_LOG_DESC" %]
@@ -161,6 +148,23 @@
 
 [% WRAPPER setting title="PLUGIN_LBF_DISPLAY_VARIOUS" desc="PLUGIN_LBF_DISPLAY_VARIOUS_DESC" %]
 <input type="checkbox" name="pref_all_various" value="1" [% IF prefs.all_various %]checked="checked"[% END %]>
+[% END %]
+
+</div>
+
+<div class="prefHead collapsableSection" id="lbf_muspy_Header">[% 'PLUGIN_LBF_SECTION_MUSPY' | string %]</div>
+<div id="lbf_muspy">
+
+[% WRAPPER setting title="PLUGIN_LBF_MUSPY_USERID" desc="PLUGIN_LBF_MUSPY_USERID_HINT" %]
+<input type="text" name="pref_muspy_userid" value="[% prefs.muspy_userid %]" size="40" autocomplete="off">
+[% END %]
+
+[% WRAPPER setting title="PLUGIN_LBF_MUSPY_FUTURE" desc="PLUGIN_LBF_MUSPY_FUTURE_HINT" %]
+<input type="checkbox" name="pref_muspy_future" value="1" [% IF prefs.muspy_future %]checked="checked"[% END %]>
+[% END %]
+
+[% WRAPPER setting title="PLUGIN_LBF_MUSPY_FUTURE_MONTHS" desc="PLUGIN_LBF_MUSPY_FUTURE_MONTHS_HINT" %]
+<input type="number" name="pref_muspy_future_months" value="[% prefs.muspy_future_months %]" min="1" max="24" size="4">
 [% END %]
 
 </div>

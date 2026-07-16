@@ -41,12 +41,32 @@ $prefs->init({
     username             => '',
     token                => '',
     lastfm_api_key       => '',
+    muspy_userid         => '',
+    muspy_future         => 1,
+    muspy_future_months  => 12,
     days                 => 14,
-    sort                 => 'release_date',
-    group_by_artist      => 1,
-    week_dividers        => 1,
+    # Per-view content sort (release_date / artist / album), flipped in place by
+    # the "Sorted by …" toggle in each view's Options section — not on the settings
+    # page. Both are DURABLE, so the choice sticks across visits and restarts.
+    # `foryou_sort` = New Releases for You; `all_sort` = All Releases (shared across
+    # every week view). Replaced the old global `sort` pref in 0.9.97.
+    foryou_sort          => 'release_date',
+    all_sort             => 'release_date',
     play_via             => 1,
+    # People You Follow list ordering: 'date' (day dividers, newest first) or
+    # 'recommender' (grouped by the follower who recommended each track). Flipped
+    # in place by the inline toggle at the top of that list.
+    follow_sort          => 'date',
     prefer_library       => 1,
+    # MusicBrainz web-service base. Default is BLANK on purpose: blank lets
+    # postinitPlugin auto-detect a same-host musicbrainz-docker mirror (and
+    # _mbBase falls back to the public API when none is found). A non-blank
+    # default would suppress both — autodetectMirror skips a configured base and
+    # _mbBase never consults the auto-detected mirror. Point it at a local mirror
+    # (e.g. http://your-server:5000/ws/2/) for fast, un-throttled lookups; a
+    # mirror speaks the identical ws/2 API, so it's a pure host swap. (Cover art
+    # still comes from the public Cover Art Archive.)
+    mb_base_url          => '',
     # Opt-in dedicated warm/resolve debug log (lbf-debug.log beside server.log).
     # Off by default — turn on to track a match/caching issue, off again after.
     debug_log            => 0,
@@ -75,7 +95,7 @@ $prefs->init({
 
     # For You section
     foryou_past             => 1,
-    foryou_future           => 0,
+    foryou_future           => 1,   # upcoming releases on by default (0.9.79) — new installs only; existing prefs win
     foryou_artwork_only     => 1,
     foryou_various          => 1,
     foryou_type_album       => 1,
@@ -187,6 +207,12 @@ sub postinitPlugin {
     # is cheap (caches keyed by last_modified; real work only when a new week's
     # playlist lands). First run is delayed so it doesn't compete with boot.
     Slim::Utils::Timers::setTimer(undef, time() + WARM_DELAY, \&_warmTick);
+
+    # If no MusicBrainz base is configured, probe for a same-host mirror once so a
+    # musicbrainz-docker instance on this machine is used with zero config. Async,
+    # no-op when a base is set or a recent probe result is cached (see API).
+    eval { Plugins::ListenBrainzFreshReleases::API->autodetectMirror(); 1 }
+        or $log->error("Failed to auto-detect MusicBrainz mirror: $@");
 }
 
 # Run the warm, then re-arm for the next day. Deferred while a library scan is in

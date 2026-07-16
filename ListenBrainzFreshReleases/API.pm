@@ -8,11 +8,16 @@ use Slim::Utils::Log;
 use Slim::Utils::Prefs;
 use Slim::Utils::Cache;
 use Slim::Utils::PluginManager;
+use Slim::Utils::Timers;
+use Time::HiRes ();
 use JSON::XS::VersionOneAndTwo;
 
 my $log   = logger('plugin.listenbrainzfreshreleases');
 my $prefs = preferences('plugin.listenbrainzfreshreleases');
 my $cache = Slim::Utils::Cache->new();
+
+# Various Artists MBID — skip the (pointless) sort-name lookup for VA credits.
+use constant VA_MBID => '89ad4ac3-39f7-470e-963a-56509c546377';
 
 # A MusicBrainz tracklist never changes, so cache a found result for a long time;
 # genres can be sparse on fresh releases, so recheck an empty result daily.
@@ -75,8 +80,106 @@ sub _secsUntilNextWeeklyRefresh {
 use constant BASE_URL        => 'https://api.listenbrainz.org';
 use constant LABS_URL        => 'https://labs.api.listenbrainz.org';
 use constant CAA_BASE_URL    => 'https://coverartarchive.org/release/';
-use constant MB_BASE_URL     => 'https://musicbrainz.org/ws/2/';
+# Cover Art Archive also serves art keyed by a release-GROUP MBID at a different
+# path. MuSpy only gives release-group MBIDs (no release-level MBID / caa_id), so
+# their cover art comes from here rather than CAA_BASE_URL.
+use constant CAA_RG_BASE_URL => 'https://coverartarchive.org/release-group/';
+use constant MB_DEFAULT_BASE_URL => 'https://musicbrainz.org/ws/2/';
 use constant LASTFM_BASE_URL => 'https://ws.audioscrobbler.com/2.0/';
+
+# Auto-detect: when the user sets NO mb_base_url, a same-host musicbrainz-docker
+# mirror is probed once at startup (autodetectMirror) and its base cached under
+# this key so the SYNCHRONOUS _mbBase can pick it up. Value: a URL (mirror found),
+# '' (probed, none found), or absent (never probed). Re-probed daily.
+use constant MB_AUTO_KEY => 'lbf:mbmirror:v1';
+use constant MB_AUTO_TTL => 86400;
+
+# The MusicBrainz web-service base is a PREF (default = the public API) so the
+# plugin can be pointed at a local mirror — e.g. a musicbrainz-docker instance
+# at http://your-server:5000/ws/2/ — for fast, un-throttled lookups without touching
+# code. A mirror speaks the identical ws/2 API, so only the host changes. When
+# the pref is blank, a same-host mirror auto-detected at startup is used if one
+# was found; otherwise the public API. (Cover art still comes from the public
+# Cover Art Archive — musicbrainz-docker does not mirror it.)
+sub _mbBase {
+    my $u = $prefs->get('mb_base_url');
+    unless (defined $u && $u =~ /\S/) {
+        my $auto = $cache->get(MB_AUTO_KEY);
+        $u = (defined $auto && length $auto) ? $auto : MB_DEFAULT_BASE_URL;
+    }
+    $u =~ s/\s+//g;
+    $u .= '/' unless $u =~ m{/$};
+    return $u;
+}
+
+# True only when the configured base IS the public MusicBrainz host (incl.
+# beta./test. subdomains); any other host is a local mirror. Used to decide
+# whether an artist name-search may fall back to the public API (a mirror whose
+# Solr search index is unbuilt returns 0 for everything while browses work).
+sub _mbThrottled {
+    return _mbBase() =~ m{^https?://([^/]*\.)?musicbrainz\.org/}i ? 1 : 0;
+}
+
+# Auto-detect a LOCAL MusicBrainz mirror on the SAME host — the common
+# musicbrainz-docker-alongside-LMS setup — so it works with zero config. Only
+# runs when the user has set NO mb_base_url: probe a small FIXED same-host list
+# and, if one answers as a genuine ws/2 endpoint, cache its base for _mbBase.
+# Validation is the point: a known artist MBID must come back with the expected
+# name, which proves the responder is MusicBrainz and not some other service on
+# :5000 (macOS AirPlay, a Flask app, ...) — so a false positive is effectively
+# impossible. A manually-set base always wins and skips the probe; the LAN is
+# NEVER scanned (localhost only — a mirror on another host is typed in by hand).
+use constant MB_PROBE_MBID => 'a74b1b7f-06a0-4672-a641-eb3353aa608d';   # Radiohead
+use constant MB_PROBE_NAME => 'Radiohead';
+my @MB_AUTO_CANDIDATES = (
+    'http://localhost:5000/ws/2/',
+    'http://127.0.0.1:5000/ws/2/',
+);
+
+sub autodetectMirror {
+    my ($class, $cb) = @_;
+    $cb ||= sub {};
+
+    # Manual base set -> respect it, never probe.
+    my $u = $prefs->get('mb_base_url');
+    return $cb->() if defined $u && $u =~ /\S/;
+
+    # Already probed within MB_AUTO_TTL (found a URL or confirmed none) -> done.
+    return $cb->() if defined $cache->get(MB_AUTO_KEY);
+
+    my $i = 0;
+    my $try; $try = sub {
+        if ($i >= @MB_AUTO_CANDIDATES) {
+            eval { $cache->set(MB_AUTO_KEY, '', MB_AUTO_TTL); 1 };   # none; don't re-probe today
+            return $cb->();
+        }
+        my $base = $MB_AUTO_CANDIDATES[$i++];
+        Slim::Networking::SimpleAsyncHTTP->new(
+            sub {
+                my $data = eval { from_json(shift->content) };
+                if (!$@ && ref $data eq 'HASH' && ($data->{name} // '') eq MB_PROBE_NAME) {
+                    eval { $cache->set(MB_AUTO_KEY, $base, MB_AUTO_TTL); 1 };
+                    $log->info("Auto-detected local MusicBrainz mirror: $base");
+                    return $cb->();
+                }
+                $try->();   # answered but not MusicBrainz -> next candidate
+            },
+            sub { $try->() },   # unreachable / error -> next candidate
+            { timeout => 3 }
+        )->get($base . 'artist/' . MB_PROBE_MBID . '?fmt=json',
+               'Accept' => 'application/json', 'User-Agent' => USER_AGENT());
+    };
+    $try->();
+    return;
+}
+
+# MuSpy — an opt-in secondary source of "new releases" tailored to the artists a
+# user deliberately follows there. The releases/<userid> endpoint is PUBLIC (no
+# auth), so only the user's MuSpy user id is stored (muspy_userid pref) — never a
+# password. The list changes ~daily like the LB feed, so it reuses FEED_TTL /
+# FEED_FALLBACK_TTL via _cacheFeed.
+use constant MUSPY_BASE_URL => 'https://muspy.com/api/1';
+use constant MUSPY_TIMEOUT  => 10;
 
 # MusicBrainz requires a descriptive User-Agent identifying the application. The
 # version is read from the plugin manifest (install.xml) at runtime rather than
@@ -202,6 +305,131 @@ sub getFreshReleasesAll {
     $http->get($url, 'Accept' => 'application/json');
 }
 
+# ---------------------------------------------------------------------------
+# GET https://muspy.com/api/1/releases/<userid>  (public — no auth)
+# ---------------------------------------------------------------------------
+# The user's followed-artist release groups, newest-first, mapped into the
+# internal release-hash shape so they merge into the For You feed and dedupe
+# against the ListenBrainz releases. Best-effort: ANY failure (no userid,
+# transport error, unparseable body) resolves onDone with the last good copy or
+# an empty list — it must never blank the LB feed. No onError path by design.
+sub getMuSpyReleases {
+    my ($class, %args) = @_;
+
+    my $userid = $prefs->get('muspy_userid') // '';
+    $userid =~ s/^\s+|\s+$//g;
+    unless (length $userid) {
+        $args{onDone}->([]);
+        return;
+    }
+
+    my $cacheKey = 'lbf:muspy:'   . $userid;
+    my $fbKey    = 'lbf:muspyfb:' . $userid;
+    if (my $cached = $cache->get($cacheKey)) {
+        $log->info("MuSpy releases cache hit ($cacheKey)");
+        $args{onDone}->($cached);
+        return;
+    }
+
+    (my $safe = $userid) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
+    my $url = sprintf('%s/releases/%s?limit=100', MUSPY_BASE_URL, $safe);
+    $log->info("Fetching MuSpy releases: $url");
+
+    my $serveFallback = sub {
+        my $fb = $cache->get($fbKey);
+        $args{onDone}->(ref $fb eq 'ARRAY' ? $fb : []);
+    };
+
+    my $http = Slim::Networking::SimpleAsyncHTTP->new(
+        sub {
+            my $resp = shift;
+            my $rels = _parseMuSpy($resp);
+            if (defined $rels) {
+                _cacheFeed($cacheKey, $fbKey, $rels);
+                $args{onDone}->($rels);
+            }
+            else {
+                # A 200 with an unparseable body: fall back to the last good copy
+                # rather than caching an empty MuSpy list for FEED_TTL.
+                $serveFallback->();
+            }
+        },
+        sub {
+            my $resp = shift;
+            $log->warn("MuSpy fetch failed: " . ($resp->error // '?'));
+            $serveFallback->();
+        },
+        { timeout => MUSPY_TIMEOUT }
+    );
+
+    $http->get($url, 'Accept' => 'application/json');
+}
+
+# Parse a MuSpy releases response into the internal release-hash shape. Returns
+# an arrayref (possibly empty) on success, or undef if the body isn't the
+# expected JSON array (so the caller can fall back to the last good copy).
+# MuSpy release object: { artist => { name, mbid, sort_name, disambiguation },
+# mbid => <release-group-mbid>, name => <title>, type => <primary type>,
+# date => 'YYYY' | 'YYYY-MM' | 'YYYY-MM-DD' }.
+sub _parseMuSpy {
+    my ($resp) = @_;
+
+    my $data = eval { from_json($resp->content) };
+    if ($@) {
+        $log->error("MuSpy JSON parse error: $@");
+        return undef;
+    }
+    # Tolerate either a bare array or a { releases => [...] } wrapper.
+    $data = $data->{releases} if ref $data eq 'HASH' && ref $data->{releases} eq 'ARRAY';
+    return undef unless ref $data eq 'ARRAY';
+
+    my @out;
+    for my $r (@$data) {
+        next unless ref $r eq 'HASH';
+        my $artist = $r->{artist};
+        my $aname  = ref $artist eq 'HASH' ? ($artist->{name} // '') : (defined $artist ? $artist : '');
+        my $asort  = ref $artist eq 'HASH' ? ($artist->{sort_name} // '') : '';
+        my $ambid  = ref $artist eq 'HASH' ? $artist->{mbid} : undef;
+        my $title  = $r->{name} // '';
+        my $rgMbid = $r->{mbid} // '';
+        next unless length $aname || length $title;
+        push @out, {
+            artist_credit_name         => $aname,
+            # MusicBrainz sort-name ("White, Jack"; "Panda Bear" stays as-is for a
+            # stage name). MuSpy supplies it; the LB feed does not (warmed from MB).
+            artist_sort_name           => $asort,
+            release_name               => $title,
+            release_group_mbid         => $rgMbid,
+            release_group_primary_type => $r->{type} // '',
+            release_date               => _padDate($r->{date} // ''),
+            artist_mbids               => ($ambid ? [ $ambid ] : []),
+            # coverArtUrl builds a release-GROUP art URL from this (MuSpy has no
+            # release-level MBID / caa_id, so this is the only art signal we have).
+            caa_release_group_mbid     => $rgMbid,
+            _source                    => 'muspy',
+        };
+    }
+    $log->info("Parsed " . scalar(@out) . " MuSpy releases");
+    return \@out;
+}
+
+# Pad a possibly-partial MuSpy date ('2026' / '2026-07') to a full 'YYYY-MM-DD',
+# so the plugin's date sort, week dividers and windowing (which substr/regex the
+# string) behave. Missing month/day default to 01. A non-date returns ''.
+sub _padDate {
+    my $d = shift // '';
+    return '' unless $d =~ /^(\d{4})(?:-(\d{1,2}))?(?:-(\d{1,2}))?/;
+    # Default a missing OR zero-filled component to 01. MusicBrainz (and so MuSpy)
+    # represents an unknown month/day as an omitted part ('2026', '2026-07') OR as
+    # a zero part ('2026-00-00', '2026-07-00'); a plain `$2 || 1` leaves '00' as-is
+    # (Perl treats the string '00' as true), yielding an invalid date that then
+    # corrupts the week-divider/window date maths downstream. Coerce numerically
+    # up front — this also copies the captures into lexicals before any downstream
+    # match can clobber $1/$2/$3.
+    my ($y, $mon, $day) = ($1, ($2 // 0) + 0, ($3 // 0) + 0);
+    return sprintf('%04d-%02d-%02d', $y, $mon || 1, $day || 1);
+}
+
 # Store a fetched feed under both the short-TTL working key and the long-TTL
 # fallback key (used when a later fetch fails). Guarded so a Storable hiccup
 # can't break the response.
@@ -217,7 +445,9 @@ sub _cacheFeed {
 # long-lived fallback copy is left intact — it's only consulted on a fetch error.
 sub clearFeedCache {
     my ($class, $which) = @_;
-    my $sort = $prefs->get('sort') // 'release_date';
+    # The feeds are always fetched with sort=release_date now (client-side view
+    # sorts replaced the global sort pref in 0.9.97), so the cache key is fixed.
+    my $sort = 'release_date';
     my $days = $prefs->get('days') // 14;
 
     if ($which eq 'all') {
@@ -232,6 +462,15 @@ sub clearFeedCache {
         my $past   = ($prefs->get('foryou_past')   // 1) ? 'true' : 'false';
         my $future = ($prefs->get('foryou_future') // 0) ? 'true' : 'false';
         $cache->remove('lbf:feed:user:' . join('|', $username, $sort, $past, $future, $days));
+
+        # The For You feed also folds in MuSpy releases, so a forced refresh must
+        # drop MuSpy's working cache too — otherwise "Refresh (force update now)"
+        # re-fetches LB fresh but keeps serving a MuSpy copy up to FEED_TTL (24h)
+        # old, hiding a just-added artist / newly-announced release. Only the
+        # working key; the fallback copy is left intact (as with the feed above).
+        my $userid = $prefs->get('muspy_userid') // '';
+        $userid =~ s/^\s+|\s+$//g;
+        $cache->remove('lbf:muspy:' . $userid) if length $userid;
     }
     $log->info("cleared $which feed cache (forced refresh)");
 }
@@ -724,32 +963,186 @@ sub getArtistMbidByName {
         return;
     }
 
-    my $q = 'artist:"' . $name . '"';
-    utf8::encode($q) if utf8::is_utf8($q);
-    (my $safe = $q) =~ s/([^A-Za-z0-9])/sprintf("%%%02X",ord($1))/ge;
-    my $url = MB_BASE_URL . 'artist?query=' . $safe . '&fmt=json&limit=1';
+    # Fielded exact-phrase query. The 'artist' field searches the NAME only —
+    # an artist reachable solely through an MB ALIAS ("The Oh Sees" -> Osees)
+    # returns 0 results there, so a second stage retries the 'alias' field
+    # (verified live: artist:"The Oh Sees" = 0, alias:"The Oh Sees" = score
+    # 100). Alias runs ONLY when the name field found nothing acceptable, so
+    # it can never change a resolution that works today. Matters here for the
+    # DSTM radio's Last.fm similar-artist names, which are full of alias-era
+    # spellings. (Ported from Discography 0.32.0.)
+    my $mkQuery = sub {
+        my ($field) = @_;
+        my $q = $field . ':"' . $name . '"';
+        utf8::encode($q) if utf8::is_utf8($q);
+        (my $safe = $q) =~ s/([^A-Za-z0-9])/sprintf("%%%02X",ord($1))/ge;
+        return 'artist?query=' . $safe . '&fmt=json&limit=1';
+    };
 
-    $log->info("Resolving artist name to MBID: $name");
+    # MIRROR SEARCH FALLBACK (ported from Discography 0.23.0): a musicbrainz-docker
+    # mirror serves entity BROWSES from Postgres, but ?query= SEARCH goes through
+    # Solr — and a mirror whose search index was never built returns count:0 for
+    # EVERY query while browses work. That would silently fail every name→MBID
+    # resolution (the DSTM radio seed, Last.fm similar-artist resolution). So when
+    # the configured base is a mirror and its search yields zero results (or is
+    # unreachable), retry the SAME query ONCE against the public API before caching
+    # a miss. The MBID is universal, so a public-resolved MBID still browses fine
+    # against the mirror. $mirror gates it; $isFb guards against a loop.
+    my $mirror = !_mbThrottled();
 
-    my $http = Slim::Networking::SimpleAsyncHTTP->new(
-        sub {
-            my $resp = shift;
-            my $data = eval { from_json($resp->content) };
-            my $mbid = '';
-            if (!$@ && ref $data eq 'HASH' && ref $data->{artists} eq 'ARRAY' && @{ $data->{artists} }) {
-                my $a = $data->{artists}[0];
-                $mbid = lc $a->{id} if $a->{id} && ($a->{score} // 0) >= 90;
-            }
-            eval { $cache->set($cacheKey, $mbid, $mbid ? MB_FOUND_TTL : MB_EMPTY_TTL); 1 }
-                or $log->warn("artist-mbid cache set failed: $@");
-            $log->info("Artist '$name' => " . ($mbid || 'no match'));
-            $onDone->($mbid || undef);
-        },
-        sub { _handleError(shift, $onError) },
-        { timeout => 12 }
-    );
+    # Pass the sub to itself ($self) rather than capturing $run lexically: a
+    # self-capturing closure is a reference cycle Perl never collects, and this
+    # resolver runs once per artist name (DSTM seeds, Last.fm similar-artist
+    # resolution) so each call would leak. $self keeps the CV alive across the
+    # async gap (the in-flight callbacks hold it), then frees when they do.
+    my $run = sub {
+        my ($self, $base, $isFb, $field) = @_;
+        $log->info("Resolving artist name to MBID: $name ($field field"
+            . ($isFb ? ', public fallback' : '') . ')');
 
-    $http->get($url, 'Accept' => 'application/json', 'User-Agent' => USER_AGENT);
+        my $http = Slim::Networking::SimpleAsyncHTTP->new(
+            sub {
+                my $resp = shift;
+                my $data = eval { from_json($resp->content) };
+                my $arts = (!$@ && ref $data eq 'HASH' && ref $data->{artists} eq 'ARRAY')
+                           ? $data->{artists} : undef;
+
+                if ($arts && !@$arts && $mirror && !$isFb) {
+                    $log->info("Artist '$name' ($field) => 0 results on mirror; retrying public API");
+                    return $self->($self, MB_DEFAULT_BASE_URL, 1, $field);
+                }
+
+                my $mbid = '';
+                if ($arts && @$arts) {
+                    my $a = $arts->[0];
+                    $mbid = lc $a->{id} if $a->{id} && ($a->{score} // 0) >= 90;
+                }
+
+                # Name field found nothing acceptable -> ONE alias-field pass
+                # (same base/fallback state; the mirror-0-results branch above
+                # still gives the alias pass its own public retry).
+                if (!$mbid && $field eq 'artist') {
+                    $log->info("Artist '$name' => no name-field match; retrying alias field");
+                    return $self->($self, $base, $isFb, 'alias');
+                }
+                eval { $cache->set($cacheKey, $mbid, $mbid ? MB_FOUND_TTL : MB_EMPTY_TTL); 1 }
+                    or $log->warn("artist-mbid cache set failed: $@");
+                $log->info("Artist '$name' ($field) => " . ($mbid || 'no match') . ($isFb ? ' [public fallback]' : ''));
+                $onDone->($mbid || undef);
+            },
+            sub {
+                my $err = shift;
+                if ($mirror && !$isFb) {
+                    $log->info("Artist '$name' ($field) => mirror search error; retrying public API");
+                    return $self->($self, MB_DEFAULT_BASE_URL, 1, $field);
+                }
+                _handleError($err, $onError);
+            },
+            { timeout => 12 }
+        );
+
+        $http->get($base . $mkQuery->($field), 'Accept' => 'application/json', 'User-Agent' => USER_AGENT);
+    };
+
+    $run->($run, _mbBase(), 0, 'artist');
+}
+
+# ---------------------------------------------------------------------------
+# Artist sort-name (for the Artist sort). The ListenBrainz feed only carries the
+# display credit ("Jack White"); the sort-name ("White, Jack"; a stage name like
+# "Panda Bear" stays as-is) lives in MusicBrainz. We look it up by the artist
+# MBID the feed DOES give us (artist/<mbid> → sort-name), cache it long, and warm
+# it in the background so the Artist sort keys on it. A cold artist falls back to
+# the display credit and self-corrects on re-entry (the plugin's second-load
+# contract). Fast on an MB mirror; a courtesy-throttled background trickle on the
+# public API (bounded per pass, so each open fills a little more of the cache).
+# ---------------------------------------------------------------------------
+use constant SORT_CACHE_PFX => 'lbf:artistsort:1:';
+use constant SORT_WARM_MAX  => 100;   # artists fetched per warm pass (rest self-heal on later opens)
+my %sortInFlight;
+
+# Sync cache read used by the sorter — the sort-name string, or undef when it's
+# not cached yet OR MB had none (both fall back to the display credit). One local
+# cache read, no network; still, sorters must precompute the key ONCE per release
+# (a Schwartzian transform) rather than call this inside a comparator, or the
+# read repeats O(N log N) times on the render path.
+sub peekArtistSort {
+    my ($class, $mbid) = @_;
+    return undef unless $mbid;
+    my $v = $cache->get(SORT_CACHE_PFX . lc $mbid);
+    return (defined $v && length $v) ? $v : undef;
+}
+
+# Background-fill sort-names for a list of artist MBIDs. Dedupes, skips anything
+# already cached (found OR a cached "none") and anything in flight, then fetches
+# the remainder ONE AT A TIME with the MB courtesy gap (0 on a mirror), capped at
+# SORT_WARM_MAX per pass. Fire-and-forget — no client needed, never blocks a feed.
+sub warmArtistSorts {
+    my ($class, $mbids) = @_;
+    return unless ref $mbids eq 'ARRAY' && @$mbids;
+
+    my (%seen, @todo);
+    for my $m (@$mbids) {
+        next unless $m;
+        my $lc = lc $m;
+        next if $seen{$lc}++;
+        next if $lc eq lc VA_MBID;
+        next if defined $cache->get(SORT_CACHE_PFX . $lc);   # found or cached-none
+        next if $sortInFlight{$lc};
+        push @todo, $lc;
+        last if @todo >= SORT_WARM_MAX;
+    }
+    return unless @todo;
+
+    # Reserve the WHOLE batch as in-flight up front, not one MBID at a time as
+    # each fetch starts. The pump processes @todo serially over many seconds; if
+    # a second warm pass ran in that window and only the single currently-fetching
+    # MBID were marked, every queued-but-not-yet-fetched MBID would pass this
+    # pass's in-flight guard and be fetched AGAIN in parallel — doubling MB traffic
+    # past the 1 req/s courtesy gap. Each is cleared as the pump completes it
+    # (success OR error/timeout, both via $next), so the batch never leaks.
+    $sortInFlight{$_} = 1 for @todo;
+
+    my $gap = _mbThrottled() ? 1.1 : 0;   # 1 req/s courtesy on public MB; a mirror is our own box
+
+    my $pump;
+    $pump = sub {
+        my ($self) = @_;
+        my $mbid = shift @todo;
+        unless ($mbid) { return }
+        # already reserved in %sortInFlight above; $next clears it when this one done
+
+        (my $safe = $mbid) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
+        my $url = _mbBase() . 'artist/' . $safe . '?fmt=json';
+
+        my $next = sub {
+            delete $sortInFlight{$mbid};
+            return unless @todo;
+            if ($gap) { Slim::Utils::Timers::setTimer(undef, Time::HiRes::time() + $gap, sub { $self->($self) }) }
+            else      { $self->($self) }
+        };
+
+        my $http = Slim::Networking::SimpleAsyncHTTP->new(
+            sub {
+                my $data = eval { from_json($_[0]->content) };
+                my $sort = (ref $data eq 'HASH') ? ($data->{'sort-name'} // '') : '';
+                # Cache the sort-name (30d) or a "none" sentinel (1d, so a transient
+                # miss retries within a day rather than pinning credit-name sort).
+                eval { $cache->set(SORT_CACHE_PFX . $mbid, $sort, length $sort ? MB_FOUND_TTL : MB_EMPTY_TTL); 1 }
+                    or $log->warn("artist-sort cache set failed: $@");
+                $next->();
+            },
+            sub {
+                # HTTP error: don't cache (retry next pass); just move on.
+                $log->info("artist-sort fetch error for $mbid: " . ($_[1] // '?')) if $log->is_info;
+                $next->();
+            },
+            { timeout => 12 }
+        );
+        $http->get($url, 'Accept' => 'application/json', 'User-Agent' => USER_AGENT);
+    };
+
+    $pump->($pump);
 }
 
 # ---------------------------------------------------------------------------
@@ -914,7 +1307,7 @@ sub getReleaseDetails {
     (my $safe = $mbid) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
     # recordings = tracklist. Genres come from the release-GROUP
     # (getReleaseGroupGenres) — release-level genres are almost always empty.
-    my $url = MB_BASE_URL . 'release/' . $safe . '?inc=recordings&fmt=json';
+    my $url = _mbBase() . 'release/' . $safe . '?inc=recordings&fmt=json';
 
     $log->info("Fetching MusicBrainz release details: $url");
 
@@ -966,7 +1359,7 @@ sub getReleaseGroupGenres {
     }
 
     (my $safe = $rgMbid) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
-    my $url = MB_BASE_URL . 'release-group/' . $safe . '?inc=genres&fmt=json';
+    my $url = _mbBase() . 'release-group/' . $safe . '?inc=genres&fmt=json';
 
     $log->info("Fetching MusicBrainz release-group genres: $url");
 
@@ -1313,7 +1706,20 @@ sub coverArtUrl {
     # artwork-only filter). Require caa_release_mbid so absence == no artwork.
     # Accept either a release hashref or a bare caa_release_mbid string so
     # playlist tracks (which carry the mbid directly) can reuse this.
-    my $mbid = (ref $rel eq 'HASH') ? $rel->{caa_release_mbid} : $rel;
+    if (ref $rel eq 'HASH') {
+        return CAA_BASE_URL . $rel->{caa_release_mbid} . '/front-250'
+            if $rel->{caa_release_mbid};
+        # MuSpy items carry only a release-GROUP MBID — CAA serves group art at a
+        # different path. (No has-art signal exists for a group, so this may 404
+        # for the rare art-less release group; the image proxy degrades to a
+        # placeholder. Overlaps with an LB copy are resolved in _dedupeReleases,
+        # which prefers the entry that has cover art — i.e. the richer LB one.)
+        return CAA_RG_BASE_URL . $rel->{caa_release_group_mbid} . '/front-250'
+            if $rel->{caa_release_group_mbid};
+        return undef;
+    }
+
+    my $mbid = $rel;
     return undef unless $mbid;
     return CAA_BASE_URL . $mbid . '/front-250';
 }
