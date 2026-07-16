@@ -45,9 +45,13 @@ $prefs->init({
     muspy_future         => 1,
     muspy_future_months  => 12,
     days                 => 14,
-    sort                 => 'release_date',
-    group_by_artist      => 1,
-    week_dividers        => 1,
+    # Per-view content sort (release_date / artist / album), flipped in place by
+    # the "Sorted by …" toggle in each view's Options section — not on the settings
+    # page. Both are DURABLE, so the choice sticks across visits and restarts.
+    # `foryou_sort` = New Releases for You; `all_sort` = All Releases (shared across
+    # every week view). Replaced the old global `sort` pref in 0.9.97.
+    foryou_sort          => 'release_date',
+    all_sort             => 'release_date',
     play_via             => 1,
     # People You Follow list ordering: 'date' (day dividers, newest first) or
     # 'recommender' (grouped by the follower who recommended each track). Flipped

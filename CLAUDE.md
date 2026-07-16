@@ -22,7 +22,7 @@ A plugin for Lyrion Music Server (LMS) that browses ListenBrainz Fresh Releases.
 - **Direct streaming playback** — matched albums/tracks play from **Qobuz / Tidal / Bandcamp / Deezer**; you choose the per-service search order.
 - **Block artists** — one tap hides an artist from every feed.
 - **Material home shelves** — optional New Releases for You / Playlists / All Releases home rows.
-- **Your taste** — filter by type / artwork-only / Various Artists; sort by date / artist / album / confidence; release-window, weekly dividers, group-by-artist. Cached & pre-warmed (instant), **no extra server software**.
+- **Your taste** — filter by type / artwork-only / Various Artists; **per-view sort** (a "Sorted by…" toggle in each list's Options section — Release Date / Artist / Album Title, kept within the weekly W/C headers); release-window; cached & pre-warmed (instant), **no extra server software**.
 
 **Requirements:** LMS 9.0.0+ (Material Skin); ListenBrainz account + token for personalised features (All Releases needs nothing); optional Qobuz/Tidal/Bandcamp/Deezer (playback), MAI plugin (artist photos+bios), free Last.fm key (genre/bio fallbacks). Every optional add-on degrades gracefully.
 
@@ -88,7 +88,7 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-0.9.95
+0.9.98
 
 ## Recommended by People You Follow (0.9.65; **new-music-only + single day-divided list in 0.9.71–0.9.72**)
 
@@ -647,9 +647,11 @@ belongs in `handler`, before `SUPER::handler`. Fleet-wide rule — LBF, PFR and 
 - `token` — ListenBrainz API token
 - `lastfm_api_key` — optional Last.fm API key; enables three fallbacks: detail-page genres when MusicBrainz has none, the artist biography when MAI isn't installed (bio only, no photo), and similar artists for the DSTM radio when ListenBrainz has none (default empty = disabled)
 - `days` — days window (1-90, default 14)
-- `sort` — default sort (release_date / artist_credit_name / release_name / confidence)
-- `group_by_artist` — collapse multi-release artists into one tappable entry (default ON)
-- `week_dividers` — when sorted by release date, insert a divider per week; takes precedence over group_by_artist for the date sort (default ON)
+- **Sort is per-view, not a global setting (0.9.97).** The old global `sort` radio (and the `group_by_artist` / `week_dividers` toggles) were removed. Each list has a **"Sorted by …" toggle in an Options section** cycling Release Date / Artist / Album Title:
+  - **For You** is now ALWAYS weekly (W/C material headers, newest week first); the toggle sorts the releases *inside* each week and persists to the durable `foryou_sort` pref (default `release_date`; set only via the in-view toggle, not on the settings page — like `follow_sort`).
+  - **All Releases** per-week views each carry the toggle, backed by a **single durable `all_sort` pref shared across every week** — set it once and every week honours it, and it survives restarts. (0.9.97 first shipped this as per-week module state; that was changed because opening a *different* week always started at the default, which read as "the sort keeps resetting".) Paging stays per-week module state (`%pageState`); only the sort is a pref now.
+  - Feeds are always fetched with `sort=release_date` (stable cache key); all ordering is client-side (`_sortReleases` pre-sorts by date for week-bucketing, `_sortWithin` applies the per-view mode within each week). `group_by_artist`'s collapse was effectively dead anyway (the weekly branch always outranked it) — see the 0.9.97 changelog.
+  - **Artist sort keys on the MusicBrainz sort-name** ("White, Jack"; a stage name like "Panda Bear" keeps its natural order), not the display credit. The LB feed sends only the display credit, so the sort-name comes from MB by artist MBID: `API::warmArtistSorts(\@mbids)` fetches `artist/<mbid>` → `sort-name` serially (MB courtesy gap on public, none on a mirror; capped `SORT_WARM_MAX`=100/pass, in-flight-guarded), cached `lbf:artistsort:1:<mbid>` (30d found / 1d none); `API::peekArtistSort($mbid)` is the sync render-path read. `Browse::_artistSortKey` = `artist_sort_name` (MuSpy supplies it inline) → `peekArtistSort` → display credit. The warm fires **only from the Artist-sort code paths** (`_warmArtistSorts`, gated on `$mode eq 'artist'` in `fetchForYou` and the All-Releases week coderef), so a user who never picks Artist sort triggers no MB traffic; a cold artist sorts by display credit on the first Artist-sorted render and corrects on re-entry (second-load, like bios/emblems).
 - `play_via` — show inline playable streaming matches on the detail page (default ON)
 - `follow_sort` — People You Follow list ordering: `date` (day dividers, newest first) or `recommender` (grouped by the follower who recommended each track); default `date`. Flipped in place by the inline toggle at the top of that list, not shown on the settings page (0.9.88; toggle label made state+hint "Sorted by … (tap for …)" in 0.9.91)
 - `prefer_library` — when building a Created-for-You playlist, use a track from the user's own LMS library (matched by MusicBrainz ID, then artist + title) before searching streaming services (default ON; see "Prefer local library")
@@ -688,8 +690,10 @@ Grouped separately from the ListenBrainz prefs so the two aren't confused. All t
 ListenBrainz Fresh Releases
 ├── ── Created for You ──                      ← Material section header
 │   ├── <date span> · N releases               ← New Releases for You tile (title is on the cover)
-│   │   ├── Refresh (force update now)          ← clears the feed cache, reloads in place
-│   │   └── … For You feed (weekly dividers / grouping per prefs)
+│   │   ├── ── Options ──                        ← Material section header
+│   │   │   ├── Sorted by <mode> (tap to change) ← cycles Release Date / Artist / Album Title (foryou_sort pref)
+│   │   │   └── Refresh (force update now)       ← clears the feed cache, reloads in place
+│   │   └── … For You feed (ALWAYS weekly W/C headers; releases sorted within each week per the toggle)
 │   └── <date span>                            ← Playlists tile (covered span; title on cover)
 │       ├── Refresh playlist matches            ← forces a library-first re-resolve of every playlist (0.9.54; background, username-gated)
 │       ├── W/C <date> / <day>                  ← one playlist per category (Weekly Jams / Exploration / Daily Jams)
@@ -699,7 +703,7 @@ ListenBrainz Fresh Releases
 ├── ── All Releases ──                         ← Material section header
 │   └── <date span> · N releases               ← All Releases tile
 │       ├── Refresh (force update now)
-│       ├── W/C <date>  [This/Last/Earlier badge]  ← that week's releases only (first 30, then "Show more")
+│       ├── W/C <date>  [This/Last/Earlier badge]  ← that week's releases (Options: Sorted-by toggle, shared+durable all_sort; first 30, then "Show more" / "Show all")
 │       └── …                                  ← one entry per week-commencing
 └── ── Settings ──                             ← Material section header
     ├── Plugin Settings                         ← weblink to settings.html
@@ -708,9 +712,10 @@ ListenBrainz Fresh Releases
 
 All section filtering (artwork/type/VA) is still driven entirely by settings prefs. The All Releases
 by-week split (`_buildAllLanding`) groups the already-filtered+sorted list by `_weekStart` and offers
-one per-week drill-in per week-commencing (each paged 30-at-a-time; the "Show all" full-list entry was
-removed in 0.9.87); For You drops straight into its list (with the weekly
-dividers / group-by-artist per prefs). The Playlists section is gated on `username` being set. See
+one per-week drill-in per week-commencing (each paged 30-at-a-time, each with a
+Sorted-by toggle backed by the shared durable `all_sort` pref; the standalone "Show all" landing entry was
+removed in 0.9.87); For You drops straight into its always-weekly list (Options sort toggle + Refresh
+on top). The Playlists section is gated on `username` being set. See
 "Top-level menu, tiles & home shelves" above for the tile-text and home-shelf details.
 
 ## Key Technical Decisions
@@ -763,8 +768,8 @@ dividers / group-by-artist per prefs). The Playlists section is gated on `userna
 
 ### Display / New Music Tracker–inspired presentation
 - Release detail page shows base metadata, then genres and a per-disc tracklist (m:ss durations) pulled from MusicBrainz
-- `group_by_artist` (default ON): artists with one new release stay inline; artists with several collapse into an `Artist  (N)` entry that expands to their releases
-- Pagination: handled natively by LMS/Material — `_buildItems` returns the whole filtered+sorted list as one level and the client windows/scrolls it (no manual paging; see 0.4.7). Keeps Material's in-list filter working across the full list. **Exception (0.9.86): the All Releases per-week drill-ins page 30-at-a-time** via `_pageSection`/`_pageRow` (a global-feed week can be hundreds of releases). For You keeps the native full-list windowing; the All Releases "Show all" full-list view was removed in 0.9.87 (it duplicated the dated weeks unpaged)
+- ~~`group_by_artist`~~ **removed in 0.9.97.** It collapsed an artist's multiple releases into one `Artist (N)` row, but was reachable only when week dividers were off or the sort wasn't Release Date — under the default (weekly + date sort) the weekly branch always outranked it, so it was effectively dead. For You is now unconditionally weekly; the per-view **Artist** sort covers the "see an artist's releases together" use-case.
+- Pagination: handled natively by LMS/Material — `_buildItems` returns the whole filtered+sorted list as one level and the client windows/scrolls it (no manual paging; see 0.4.7). Keeps Material's in-list filter working across the full list. **Exception (0.9.86): the All Releases per-week drill-ins page 30-at-a-time** via `_pageSection`/`_pageRow` (a global-feed week can be hundreds of releases) — with a **"Show more (30)"** row plus a **"Show all (total)"** row (0.9.97; jumps straight to the whole week, offered only when it reveals more than "Show more" would) and a "Show less" once expanded. For You keeps the native full-list windowing; the standalone All Releases "Show all" landing entry was removed in 0.9.87 (it duplicated the dated weeks unpaged — this new "Show all" is a per-week reveal, not that)
 - Not ported from New Music Tracker (needs a web-app backend the OPML plugin doesn't have): OAuth login, artist following, wishlists, genre/style *filtering*, listener/popularity counts
 
 ### Release Type Filtering
@@ -852,6 +857,17 @@ that cause empty/junk pools:
    ([[mb-mirror-search-index-gotcha]]); test the library with `["artists",…,"search:NAME"]`.
 
 ## Version History
+- **0.9.96** — **alias-field fallback in `getArtistMbidByName` (ported from Discography 0.32.0).** The
+  fielded query `artist:"<name>"` searches the artist NAME only, so a name existing solely as an MB
+  **alias** ("The Oh Sees" → Osees `194272cc-…`) returned 0 results and cached a miss — verified live on
+  public MB AND a mirror (`alias:"The Oh Sees"` scores 100 on both). `$run` gained a `$field` arg
+  (query built per-field by `$mkQuery`); when the `artist` field yields nothing acceptable (0 results
+  after the mirror→public fallback, or top score <90), it retries ONCE with `alias:"name"` — same
+  escaping, same ≥90 gate, same mirror-0-results→public retry within the stage. Runs only where a miss
+  would have been cached, so no working resolution changes. Matters for the DSTM radio's Last.fm
+  similar-artist names (alias-era spellings are common there). NOT a matcher change (resolver is outside
+  the fleet-sync set; `matcher_sync_check.py` N/A); no cache bump (`lbf:artistmbid:` now fills correctly;
+  existing misses self-heal on their TTL). `perl -c` clean.
 - **0.9.95** — **code-review fixes: make the 0.9.94 mirror auto-detect actually run + plug a resolver leak.**
   From a pre-build review of 0.9.82–0.9.94. (1) **`mb_base_url` defaulted to the public URL, which made the
   whole 0.9.94 auto-detect feature dead code.** `autodetectMirror` returns early on a non-blank base and

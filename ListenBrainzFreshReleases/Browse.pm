@@ -352,7 +352,7 @@ sub fetchForYou {
     my ($client, $callback, $args, $passDict) = @_;
 
     my $headers = _wantHeaders(ref $passDict eq 'HASH' ? $passDict->{features} : undef);
-    my $sort   = $prefs->get('sort')          // 'release_date';
+    my $mode   = $prefs->get('foryou_sort')   || 'release_date';
     my $past   = $prefs->get('foryou_past')   // 1;
     my $future = $prefs->get('foryou_future') // 0;
 
@@ -375,13 +375,24 @@ sub fetchForYou {
                     $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_ERROR'), type => 'text' }], cachetime => 0 });
                     return;
                 }
-                $callback->({ items => [ _refreshItem($client, 'user'), @{ _buildItems($releases, $client, $headers) } ], cachetime => 0 });
+                # Only when the Artist sort is active, fire a background MB warm of
+                # the artists' sort-names (second-load: cold artists key on the
+                # display credit this render, correct on re-entry). No MB traffic
+                # for users who never pick the Artist sort.
+                _warmArtistSorts($releases) if $mode eq 'artist';
+                # Options section (Material header + rows) at the top: the sort
+                # toggle then Refresh, like Discography/Pitchfork. The toggle sorts
+                # the releases inside each W/C week; Refresh re-fetches the feed.
+                my @opt   = ( _sortToggle($client, 'foryou_sort', $mode), _refreshItem($client, 'user') );
+                my @items = ( _sectionHeader($client, 'PLUGIN_LBF_SECTION_OPTIONS', $headers, \@opt),
+                              @opt, @{ _buildItems($releases, $client, $headers, $mode) } );
+                $callback->({ items => \@items, cachetime => 0 });
             },
         );
     };
 
     Plugins::ListenBrainzFreshReleases::API->getFreshReleasesForUser(
-        sort    => $sort,
+        sort    => 'release_date',
         past    => $past,
         future  => $future,
         days    => $prefs->get('days') // 14,
@@ -424,7 +435,7 @@ sub homeForYou {
     };
 
     Plugins::ListenBrainzFreshReleases::API->getFreshReleasesForUser(
-        sort    => $prefs->get('sort')          // 'release_date',
+        sort    => 'release_date',
         past    => $prefs->get('foryou_past')   // 1,
         future  => $prefs->get('foryou_future') // 0,
         days    => $prefs->get('days')          // 14,
@@ -468,7 +479,7 @@ sub homeAllReleases {
     my ($client, $cb, $args) = @_;
 
     Plugins::ListenBrainzFreshReleases::API->getFreshReleasesAll(
-        sort    => $prefs->get('sort')     // 'release_date',
+        sort    => 'release_date',
         past    => $prefs->get('all_past')   // 1,
         future  => $prefs->get('all_future') // 0,
         days    => $prefs->get('days')       // 14,
@@ -491,12 +502,11 @@ sub fetchAll {
     my ($client, $callback, $args, $passDict) = @_;
 
     my $headers = _wantHeaders(ref $passDict eq 'HASH' ? $passDict->{features} : undef);
-    my $sort   = $prefs->get('sort')       // 'release_date';
     my $past   = $prefs->get('all_past')   // 1;
     my $future = $prefs->get('all_future') // 0;
 
     Plugins::ListenBrainzFreshReleases::API->getFreshReleasesAll(
-        sort    => $sort,
+        sort    => 'release_date',
         past    => $past,
         future  => $future,
         days    => $prefs->get('days') // 14,
@@ -1664,20 +1674,124 @@ sub _sortReleases {
 
     $releases = _dedupeReleases($releases);
 
-    my $sort = $prefs->get('sort') // 'release_date';
-
-    if ($sort eq 'artist_credit_name') {
-        return [ sort { lc($a->{artist_credit_name} // '') cmp lc($b->{artist_credit_name} // '') } @$releases ];
-    }
-    elsif ($sort eq 'release_name') {
-        return [ sort { lc($a->{release_name} // '') cmp lc($b->{release_name} // '') } @$releases ];
-    }
-    elsif ($sort eq 'confidence') {
-        return [ sort { ($b->{confidence} // 0) <=> ($a->{confidence} // 0) } @$releases ];
-    }
-
-    # default: release_date, newest first
+    # Always newest-first by release date. This is the order the week-bucketing
+    # relies on (same-week rows adjacent, weeks newest-first); the per-view Options
+    # sort (_sortWithin) reorders the releases WITHIN each week without disturbing
+    # the week grouping or its chronological order. The old global "Default sort
+    # order" pref was retired in 0.9.97 in favour of the in-view sort toggles.
     return [ sort { ($b->{release_date} // '') cmp ($a->{release_date} // '') } @$releases ];
+}
+
+# ---------------------------------------------------------------------------
+# Per-view content sort — the three modes offered by the in-view "Sorted by …"
+# toggle (Options section): 'release_date' (newest first, the default read),
+# 'artist' (A–Z) and 'album' (A–Z). Applied WITHIN a week bucket, so the W/C week
+# headers and their chronological order are preserved whichever mode is chosen.
+# ---------------------------------------------------------------------------
+my @SORT_MODES = qw(release_date artist album);
+
+# The mode after $mode in the fixed cycle (wraps back to the first).
+sub _nextSortMode {
+    my ($mode) = @_;
+    for my $i (0 .. $#SORT_MODES) {
+        return $SORT_MODES[($i + 1) % @SORT_MODES] if $SORT_MODES[$i] eq $mode;
+    }
+    return $SORT_MODES[0];
+}
+
+# Localised label for a sort mode (also reused as the toggle-row text).
+sub _sortLabel {
+    my ($client, $mode) = @_;
+    my $tok = $mode eq 'artist' ? 'PLUGIN_LBF_SORT_ARTIST'
+            : $mode eq 'album'  ? 'PLUGIN_LBF_SORT_ALBUM'
+            :                     'PLUGIN_LBF_SORT_DATE';
+    return cstring($client, $tok);
+}
+
+# Sort a bucket of releases by the chosen mode. Secondary key is release_date
+# (newest first) so ties within an artist/album sort still read chronologically.
+# The key the Artist sort orders on: the MusicBrainz sort-name ("White, Jack";
+# a stage name like "Panda Bear" keeps its natural order) when known, else the
+# display credit ("Jack White"). The sort-name rides on the release (MuSpy) or is
+# filled from a background MB warm keyed by the first artist MBID; until then a
+# cold artist falls back to the display credit (self-corrects on re-entry).
+sub _artistSortKey {
+    my ($rel) = @_;
+    my $s = $rel->{artist_sort_name};
+    if (!(defined $s && length $s)) {
+        my $mbids = $rel->{artist_mbids};
+        my $mbid  = (ref $mbids eq 'ARRAY' && @$mbids) ? $mbids->[0] : undef;
+        $s = $mbid ? Plugins::ListenBrainzFreshReleases::API->peekArtistSort($mbid) : undef;
+    }
+    $s = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist')
+        unless defined $s && length $s;
+    return lc $s;
+}
+
+# Kick off a background MB sort-name warm for a list's artists (the API dedupes,
+# skips cached, throttles + bounds the fetch). Called only from the Artist-sort
+# paths, so a user who never sorts by artist never triggers an MB lookup.
+sub _warmArtistSorts {
+    my ($releases) = @_;
+    return unless ref $releases eq 'ARRAY' && @$releases;
+    my @mbids;
+    for my $r (@$releases) {
+        my $m = $r->{artist_mbids};
+        push @mbids, $m->[0] if ref $m eq 'ARRAY' && @$m && $m->[0];
+    }
+    Plugins::ListenBrainzFreshReleases::API->warmArtistSorts(\@mbids) if @mbids;
+}
+
+sub _sortWithin {
+    my ($releases, $mode) = @_;
+    return $releases unless ref $releases eq 'ARRAY';
+    $mode ||= 'release_date';
+
+    if ($mode eq 'artist') {
+        # Schwartzian transform: compute each release's sort key ONCE, then sort
+        # on the precomputed pair. _artistSortKey does a cache read (peekArtistSort),
+        # and Perl's sort calls the comparator O(N log N) times — recomputing the
+        # key inside it would repeat those reads thousands of times per render on
+        # a big week, on the synchronous render path. Primary A-Z, secondary date
+        # newest-first (element [1] compared b-vs-a).
+        return [ map  { $_->[2] }
+                 sort { $a->[0] cmp $b->[0] || $b->[1] cmp $a->[1] }
+                 map  { [ _artistSortKey($_), $_->{release_date} // '', $_ ] } @$releases ];
+    }
+    elsif ($mode eq 'album') {
+        return [ map  { $_->[2] }
+                 sort { $a->[0] cmp $b->[0] || $b->[1] cmp $a->[1] }
+                 map  { [ lc(_pickValue($_, 'release_name', 'title', 'name')), $_->{release_date} // '', $_ ] } @$releases ];
+    }
+    # release_date, newest first
+    return [ sort { ($b->{release_date} // '') cmp ($a->{release_date} // '') } @$releases ];
+}
+
+# A cycling "Sorted by <mode> (tap to change)" row for the Options section. $pref
+# is the DURABLE pref the choice is stored in — 'foryou_sort' (New Releases for You)
+# or 'all_sort' (All Releases, shared across every week view). Tapping advances to
+# the next mode, persists it, and refreshes the view in place (nextWindow 'refresh'
+# → the re-walk re-reads the pref and re-sorts). Because it's a pref, the choice
+# sticks across visits AND server restarts — set once, it stays. Same in-place
+# mechanism as the paging rows and the follow-list toggle.
+sub _sortToggle {
+    my ($client, $pref, $mode) = @_;
+    return {
+        name        => sprintf(cstring($client, 'PLUGIN_LBF_SORTED_BY'), _sortLabel($client, $mode)),
+        type        => 'link',
+        image       => MENU_SORT,
+        nextWindow  => 'refresh',
+        passthrough => [{ pref => $pref }],
+        url         => sub {
+            my ($c, $cb, $a, $p) = @_;
+            # Advance from the LIVE pref, not a mode captured at render time — so
+            # a value another player changed in between can't make this tap land
+            # on the same mode and read as a no-op.
+            my $cur = $prefs->get($p->{pref}) || 'release_date';
+            $prefs->set($p->{pref}, _nextSortMode($cur));
+            $cb->({ items => [] });
+        },
+    };
 }
 
 # ---------------------------------------------------------------------------
@@ -1834,26 +1948,18 @@ sub _wantHeaders {
 }
 
 sub _buildItems {
-    my ($releases, $client, $headers) = @_;
+    my ($releases, $client, $headers, $mode) = @_;
 
     unless ($releases && scalar @$releases) {
         return [{ name => cstring($client, 'PLUGIN_LBF_NO_RESULTS'), type => 'text' }];
     }
 
-    my $sort = $prefs->get('sort') // 'release_date';
-
-    # Return the whole (already filtered + sorted) list as a single level and let
-    # LMS/Material window it natively — so Material's in-list filter spans every
-    # item, not just one page, and we get the native scroll/prev-next pager.
-    if ($prefs->get('week_dividers') && $sort eq 'release_date') {
-        # weekly view takes precedence for the date sort (it's the chronological read)
-        return _buildWeekly($releases, $client, $headers);
-    }
-    elsif ($prefs->get('group_by_artist')) {
-        return _buildGrouped($releases, $client);
-    }
-
-    return [ map { _buildReleaseItem($_, $client) } @$releases ];
+    # For You is ALWAYS the weekly view now — W/C material headers, newest week
+    # first — as a single level Material windows natively (its in-list filter spans
+    # every item). The Options sort ($mode) reorders releases inside each week; the
+    # week grouping is unconditional (the old week_dividers/group_by_artist toggles
+    # were retired in 0.9.97).
+    return _buildWeekly($releases, $client, $headers, $mode);
 }
 
 # ---------------------------------------------------------------------------
@@ -1889,6 +1995,14 @@ sub _pageSection {
         push @rows, _pageRow($client, $key, $next,
             cstring($client, 'PLUGIN_LBF_SHOW_MORE') . ' (' . ($total - $shown) . ')',
             PAGE_MORE);
+        # "Show all" jumps straight to the whole list (count = the full total) —
+        # only offered when it reveals MORE than the single-page "Show more"
+        # already would, so the two rows never do the same thing.
+        if ($total - $shown > PAGE_SIZE) {
+            push @rows, _pageRow($client, $key, $total,
+                cstring($client, 'PLUGIN_LBF_SHOW_ALL') . ' (' . $total . ')',
+                PAGE_MORE);
+        }
     }
     if ($shown > PAGE_SIZE) {
         push @rows, _pageRow($client, $key, PAGE_SIZE,
@@ -1951,6 +2065,7 @@ sub _buildAllLanding {
 
     for my $ws (@order) {
         my $rels  = $bucket{$ws};
+        my $key   = "arweek:$ws";
         push @items, {
             name        => _weekLabel($client, $ws),
             type        => 'link',
@@ -1958,13 +2073,20 @@ sub _buildAllLanding {
             passthrough => [{}],
             url         => sub {
                 my ($c, $cb) = @_;
-                # Cap the week at PAGE_SIZE with a "Show more" reveal — an All
-                # Releases week can list hundreds of releases. Keyed per week so
-                # each week's reveal is independent; the input order is fixed
-                # (already date-sorted), so the item_id walk stays stable.
-                my @tiles = map { _buildReleaseItem($_, $c) } @$rels;
-                my ($vis, $pgRows) = _pageSection($c, "arweek:$ws", \@tiles);
-                $cb->({ items => [ @$vis, @$pgRows ] });
+                # Sort by the SHARED, durable All Releases sort (all_sort) — the
+                # same order in every week, and it sticks across visits/restarts —
+                # then cap at PAGE_SIZE with the "Show more"/"Show all" reveal (an
+                # All Releases week can list hundreds of releases). Paging is still
+                # per-week module state (keyed "arweek:<ws>"); re-sorting/paging
+                # re-walks this coderef, which re-reads the pref. Options header +
+                # sort toggle sit on top.
+                my $mode  = $prefs->get('all_sort') || 'release_date';
+                _warmArtistSorts($rels) if $mode eq 'artist';
+                my @tiles = map { _buildReleaseItem($_, $c) } @{ _sortWithin($rels, $mode) };
+                my ($vis, $pgRows) = _pageSection($c, $key, \@tiles);
+                my @opt = ( _sortToggle($c, 'all_sort', $mode) );
+                $cb->({ items => [ _sectionHeader($c, 'PLUGIN_LBF_SECTION_OPTIONS', $headers, \@opt),
+                                   @opt, @$vis, @$pgRows ] });
             },
         };
     }
@@ -1978,7 +2100,7 @@ sub _buildAllLanding {
 # newest-first; weeks run Monday–Sunday.
 # ---------------------------------------------------------------------------
 sub _buildWeekly {
-    my ($releases, $client, $headers) = @_;
+    my ($releases, $client, $headers, $mode) = @_;
 
     # Real header item for Material (bold, accent colour); plain text elsewhere.
     # _headerType() => 'header-basic' on Material 6.4.3+ (a non-actionable divider,
@@ -1997,7 +2119,9 @@ sub _buildWeekly {
 
     my @items;
     for my $ws (@order) {
-        my $rels = $bucket{$ws};
+        # Sort the releases WITHIN this week by the chosen Options mode; the week
+        # buckets themselves stay in date order (newest week first).
+        my $rels = _sortWithin($bucket{$ws}, $mode);
 
         # Give the header an image. Material's grid detection counts headers too
         # (older versions: image-less item → haveWithoutIcons → grid/list toggle
@@ -2008,7 +2132,7 @@ sub _buildWeekly {
         if ($headers) {
             # Material renders header items with a drill action that XMLBrowser
             # forces on (can't be suppressed); rather than lead nowhere, point it
-            # at this week's releases (same coderef pattern as _buildGrouped).
+            # at this week's releases (the same already-sorted $rels shown below).
             $hdr->{url} = sub {
                 my ($c, $cb) = @_;
                 $cb->({ items => [ map { _buildReleaseItem($_, $c) } @$rels ] });
@@ -2140,50 +2264,6 @@ sub _isoToLocalDate {
         return _ymd($epoch) if defined $epoch;
     }
     return ($iso =~ /^(\d{4}-\d{2}-\d{2})/) ? $1 : '';
-}
-
-# ---------------------------------------------------------------------------
-# Group releases under their artist (New Music Tracker style). Artists with a
-# single release stay inline; artists with several collapse into one tappable
-# entry that lists their releases. Artist order follows the chosen sort (first
-# appearance), so e.g. a date sort keeps the freshest artists at the top.
-# ---------------------------------------------------------------------------
-sub _buildGrouped {
-    my ($releases, $client) = @_;
-
-    my @order;
-    my %bucket;
-    for my $rel (@$releases) {
-        my $key = lc(_pickValue($rel, 'artist_credit_name', 'artist_name', 'artist'));
-        push @order, $key unless exists $bucket{$key};
-        push @{ $bucket{$key} }, $rel;
-    }
-
-    my @items;
-    for my $key (@order) {
-        my $rels = $bucket{$key};
-
-        if (scalar @$rels == 1) {
-            push @items, _buildReleaseItem($rels->[0], $client);
-            next;
-        }
-
-        my $artist = _pickValue($rels->[0], 'artist_credit_name', 'artist_name', 'artist') || 'Unknown Artist';
-        my $image  = Plugins::ListenBrainzFreshReleases::API->coverArtUrl($rels->[0]) // ICON;
-        my $count  = scalar @$rels;
-
-        push @items, {
-            name  => "$artist  ($count)",
-            type  => 'link',
-            image => $image,
-            url   => sub {
-                my ($client, $callback) = @_;
-                $callback->({ items => [ map { _buildReleaseItem($_, $client) } @$rels ] });
-            },
-        };
-    }
-
-    return \@items;
 }
 
 # ---------------------------------------------------------------------------

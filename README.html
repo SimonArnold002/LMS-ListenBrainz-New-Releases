@@ -116,7 +116,7 @@
   <h1>ListenBrainz Fresh Releases — LMS Plugin</h1>
   <p class="tagline">A plugin for <strong>Lyrion Music Server (LMS)</strong> built around <a href="https://listenbrainz.org">ListenBrainz</a>. It browses newly released albums (a personalised feed plus the global feed), turns your ListenBrainz playlists and recommendations into playable music, and adds rich release detail pages with artist bios and one-tap streaming.</p>
   <div class="badges">
-    <span class="badge accent">v0.9.95</span>
+    <span class="badge accent">v0.9.98</span>
     <span class="badge">LMS 9.0.0+</span>
     <span class="badge">Material Skin</span>
     <span class="badge">Powered by ListenBrainz</span>
@@ -189,9 +189,9 @@
 <ul>
 <li><strong>New Releases for You</strong> drops straight into your personalised list.
 </li>
-<li><strong>All Releases</strong> opens a by-week landing: <strong>Show all</strong>, plus one entry per week (badged <em>This Week / Last Week / Earlier</em>, and <em>Next Week / Next Fortnight / Further</em> for upcoming weeks when you've enabled future releases).
+<li><strong>All Releases</strong> opens a by-week landing: one entry per week (badged <em>This Week / Last Week / Earlier</em>, and <em>Next Week / Next Fortnight / Further</em> for upcoming weeks when you've enabled future releases). A busy week shows 30 releases at a time with <strong>Show more</strong> / <strong>Show all</strong> rows (and <strong>Show less</strong> to collapse).
 </li>
-<li>When sorted by date, releases are grouped under a <strong>weekly divider</strong> (tap a week header to focus just that week). <strong>Group by Artist</strong> collapses an artist's multiple new releases into one expandable entry. Both are toggles in settings.
+<li><strong>New Releases for You</strong> is grouped under <strong>weekly dividers</strong> (W/C week headers). Each list has a <strong>Sorted by…</strong> row in its Options section that cycles <strong>Release Date / Artist / Album Title</strong> — For You sorts within each week (keeping the headers); All Releases uses one sort shared across every week, set once and remembered (including across restarts). The <strong>Artist</strong> sort orders by MusicBrainz sort-name, so "Jack White" files under <strong>W</strong> while a stage name like "Panda Bear" stays under <strong>P</strong>.
 </li>
 <li>What appears in each feed (date window, past/future, artwork-only, Various Artists, release types) is controlled in the <strong>New Releases for You</strong> and <strong>All Releases</strong> settings sections.
 </li>
@@ -247,9 +247,6 @@
 <tr><td>User Token</td><td><em>(empty)</em></td><td>From listenbrainz.org/settings/</td></tr>
 <tr><td>Last.fm API Key</td><td><em>(empty)</em></td><td>Optional — enables genre + artist-bio + radio similar-artist fallbacks</td></tr>
 <tr><td>Days window</td><td><strong>14</strong></td><td>1–90 days of releases to show</td></tr>
-<tr><td>Default sort</td><td><strong>Release Date</strong></td><td>Date (newest first), Artist, Album, or Confidence</td></tr>
-<tr><td>Group by Artist</td><td><strong>On</strong></td><td>Collapse an artist's multiple new releases into one entry</td></tr>
-<tr><td>Weekly Dividers</td><td><strong>On</strong></td><td>Per-week divider in the date-sorted view (wins over Group by Artist for that sort)</td></tr>
 <tr><td>Find on Streaming Services</td><td><strong>On</strong></td><td>Show playable Qobuz/Tidal/Bandcamp/Deezer matches on detail pages</td></tr>
 <tr><td>Prefer Tracks from My Library</td><td><strong>On</strong></td><td>Use your own copy (by MusicBrainz ID, then artist + title) before streaming — for Playlists and Don't Stop The Music</td></tr>
 <tr><td>Write a debug log</td><td><strong>Off</strong></td><td>Records the playlist warm/match activity to <code>lbf-debug.log</code> (next to the server log) — turn on only to troubleshoot a matching/caching issue</td></tr>

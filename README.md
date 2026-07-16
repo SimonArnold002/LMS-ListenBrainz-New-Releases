@@ -66,8 +66,8 @@ Then install **ListenBrainz Fresh Releases** from the plugin list and restart.
 Open the plugin and you'll see **New Releases for You** and **All Releases** tiles (each tile's subtitle shows the date span and release count).
 
 - **New Releases for You** drops straight into your personalised list.
-- **All Releases** opens a by-week landing: **Show all**, plus one entry per week (badged *This Week / Last Week / Earlier*, and *Next Week / Next Fortnight / Further* for upcoming weeks when you've enabled future releases).
-- When sorted by date, releases are grouped under a **weekly divider** (tap a week header to focus just that week). **Group by Artist** collapses an artist's multiple new releases into one expandable entry. Both are toggles in settings.
+- **All Releases** opens a by-week landing: one entry per week (badged *This Week / Last Week / Earlier*, and *Next Week / Next Fortnight / Further* for upcoming weeks when you've enabled future releases). A busy week shows 30 releases at a time with **Show more** / **Show all** rows (and **Show less** to collapse).
+- **New Releases for You** is grouped under **weekly dividers** (W/C week headers). Each list has a **Sorted by…** row in its Options section that cycles **Release Date / Artist / Album Title** — For You sorts within each week (keeping the headers); All Releases uses one sort shared across every week, set once and remembered (including across restarts). The **Artist** sort orders by MusicBrainz sort-name, so "Jack White" files under **W** while a stage name like "Panda Bear" stays under **P**.
 - What appears in each feed (date window, past/future, artwork-only, Various Artists, release types) is controlled in the **New Releases for You** and **All Releases** settings sections.
 - Use **Refresh (force update now)** at the top of a feed to bypass the cache and reload.
 
@@ -118,9 +118,6 @@ The plugin adds **New Releases for You**, **Playlists** and **All Releases** row
 | User Token | *(empty)* | From listenbrainz.org/settings/ |
 | Last.fm API Key | *(empty)* | Optional — enables genre + artist-bio + radio similar-artist fallbacks |
 | Days window | **14** | 1–90 days of releases to show |
-| Default sort | **Release Date** | Date (newest first), Artist, Album, or Confidence |
-| Group by Artist | **On** | Collapse an artist's multiple new releases into one entry |
-| Weekly Dividers | **On** | Per-week divider in the date-sorted view (wins over Group by Artist for that sort) |
 | Find on Streaming Services | **On** | Show playable Qobuz/Tidal/Bandcamp/Deezer matches on detail pages |
 | Prefer Tracks from My Library | **On** | Use your own copy (by MusicBrainz ID, then artist + title) before streaming — for Playlists and Don't Stop The Music |
 | Write a debug log | **Off** | Records the playlist warm/match activity to `lbf-debug.log` (next to the server log) — turn on only to troubleshoot a matching/caching issue |

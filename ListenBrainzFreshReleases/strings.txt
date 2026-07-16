@@ -121,8 +121,11 @@ PLUGIN_LBF_DAYS
 PLUGIN_LBF_DAYS_HINT
 	EN	Number of days of releases to show (1-90, default 14)
 
-PLUGIN_LBF_DEFAULT_SORT
-	EN	Default sort order
+PLUGIN_LBF_SECTION_OPTIONS
+	EN	Options
+
+PLUGIN_LBF_SORTED_BY
+	EN	Sorted by %s (tap to change)
 
 PLUGIN_LBF_FORYOU_PAST
 	EN	Include Past Releases
@@ -173,10 +176,7 @@ PLUGIN_LBF_SORT_ARTIST
 	EN	Artist
 
 PLUGIN_LBF_SORT_ALBUM
-	EN	Album Name
-
-PLUGIN_LBF_SORT_CONFIDENCE
-	EN	Confidence (For You)
+	EN	Album Title
 
 PLUGIN_LBF_FOR_YOU
 	EN	New Releases for You
@@ -234,6 +234,9 @@ PLUGIN_LBF_VIEW_ALL
 
 PLUGIN_LBF_SHOW_MORE
 	EN	Show more
+
+PLUGIN_LBF_SHOW_ALL
+	EN	Show all
 
 PLUGIN_LBF_SHOW_LESS
 	EN	Show less
@@ -294,18 +297,6 @@ PLUGIN_LBF_TRACKLIST
 
 PLUGIN_LBF_DISC
 	EN	Disc
-
-PLUGIN_LBF_GROUP_ARTIST
-	EN	Group by Artist
-
-PLUGIN_LBF_GROUP_ARTIST_DESC
-	EN	Collapse artists with several new releases into a single entry you can tap to expand
-
-PLUGIN_LBF_WEEK_DIVIDERS
-	EN	Weekly Dividers
-
-PLUGIN_LBF_WEEK_DIVIDERS_DESC
-	EN	When sorted by release date, add a divider at the start of each week. Takes precedence over Group by Artist for the date sort.
 
 PLUGIN_LBF_NO_MATCH
 	EN	No match found on your streaming services

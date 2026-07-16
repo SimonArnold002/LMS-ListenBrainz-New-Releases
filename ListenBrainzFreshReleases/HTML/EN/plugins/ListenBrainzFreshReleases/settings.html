@@ -23,23 +23,6 @@
 <input type="number" name="pref_days" value="[% prefs.days %]" min="1" max="90" size="4">
 [% END %]
 
-[% WRAPPER setting title="PLUGIN_LBF_DEFAULT_SORT" %]
-<div>
-  <label><input type="radio" name="pref_sort" value="release_date" [% IF prefs.sort == 'release_date' %]checked="checked"[% END %]> [% 'PLUGIN_LBF_SORT_DATE' | string %]</label><br>
-  <label><input type="radio" name="pref_sort" value="artist_credit_name" [% IF prefs.sort == 'artist_credit_name' %]checked="checked"[% END %]> [% 'PLUGIN_LBF_SORT_ARTIST' | string %]</label><br>
-  <label><input type="radio" name="pref_sort" value="release_name" [% IF prefs.sort == 'release_name' %]checked="checked"[% END %]> [% 'PLUGIN_LBF_SORT_ALBUM' | string %]</label><br>
-  <label><input type="radio" name="pref_sort" value="confidence" [% IF prefs.sort == 'confidence' %]checked="checked"[% END %]> [% 'PLUGIN_LBF_SORT_CONFIDENCE' | string %]</label>
-</div>
-[% END %]
-
-[% WRAPPER setting title="PLUGIN_LBF_GROUP_ARTIST" desc="PLUGIN_LBF_GROUP_ARTIST_DESC" %]
-<input type="checkbox" name="pref_group_by_artist" value="1" [% IF prefs.group_by_artist %]checked="checked"[% END %]>
-[% END %]
-
-[% WRAPPER setting title="PLUGIN_LBF_WEEK_DIVIDERS" desc="PLUGIN_LBF_WEEK_DIVIDERS_DESC" %]
-<input type="checkbox" name="pref_week_dividers" value="1" [% IF prefs.week_dividers %]checked="checked"[% END %]>
-[% END %]
-
 [% WRAPPER setting title="PLUGIN_LBF_PLAY_VIA_SETTING" desc="PLUGIN_LBF_PLAY_VIA_SETTING_DESC" %]
 <input type="checkbox" name="pref_play_via" value="1" [% IF prefs.play_via %]checked="checked"[% END %]>
 [% END %]

@@ -8,11 +8,16 @@ use Slim::Utils::Log;
 use Slim::Utils::Prefs;
 use Slim::Utils::Cache;
 use Slim::Utils::PluginManager;
+use Slim::Utils::Timers;
+use Time::HiRes ();
 use JSON::XS::VersionOneAndTwo;
 
 my $log   = logger('plugin.listenbrainzfreshreleases');
 my $prefs = preferences('plugin.listenbrainzfreshreleases');
 my $cache = Slim::Utils::Cache->new();
+
+# Various Artists MBID — skip the (pointless) sort-name lookup for VA credits.
+use constant VA_MBID => '89ad4ac3-39f7-470e-963a-56509c546377';
 
 # A MusicBrainz tracklist never changes, so cache a found result for a long time;
 # genres can be sparse on fresh releases, so recheck an empty result daily.
@@ -383,12 +388,16 @@ sub _parseMuSpy {
         next unless ref $r eq 'HASH';
         my $artist = $r->{artist};
         my $aname  = ref $artist eq 'HASH' ? ($artist->{name} // '') : (defined $artist ? $artist : '');
+        my $asort  = ref $artist eq 'HASH' ? ($artist->{sort_name} // '') : '';
         my $ambid  = ref $artist eq 'HASH' ? $artist->{mbid} : undef;
         my $title  = $r->{name} // '';
         my $rgMbid = $r->{mbid} // '';
         next unless length $aname || length $title;
         push @out, {
             artist_credit_name         => $aname,
+            # MusicBrainz sort-name ("White, Jack"; "Panda Bear" stays as-is for a
+            # stage name). MuSpy supplies it; the LB feed does not (warmed from MB).
+            artist_sort_name           => $asort,
             release_name               => $title,
             release_group_mbid         => $rgMbid,
             release_group_primary_type => $r->{type} // '',
@@ -436,7 +445,9 @@ sub _cacheFeed {
 # long-lived fallback copy is left intact — it's only consulted on a fetch error.
 sub clearFeedCache {
     my ($class, $which) = @_;
-    my $sort = $prefs->get('sort') // 'release_date';
+    # The feeds are always fetched with sort=release_date now (client-side view
+    # sorts replaced the global sort pref in 0.9.97), so the cache key is fixed.
+    my $sort = 'release_date';
     my $days = $prefs->get('days') // 14;
 
     if ($which eq 'all') {
@@ -952,10 +963,21 @@ sub getArtistMbidByName {
         return;
     }
 
-    my $q = 'artist:"' . $name . '"';
-    utf8::encode($q) if utf8::is_utf8($q);
-    (my $safe = $q) =~ s/([^A-Za-z0-9])/sprintf("%%%02X",ord($1))/ge;
-    my $query = 'artist?query=' . $safe . '&fmt=json&limit=1';
+    # Fielded exact-phrase query. The 'artist' field searches the NAME only —
+    # an artist reachable solely through an MB ALIAS ("The Oh Sees" -> Osees)
+    # returns 0 results there, so a second stage retries the 'alias' field
+    # (verified live: artist:"The Oh Sees" = 0, alias:"The Oh Sees" = score
+    # 100). Alias runs ONLY when the name field found nothing acceptable, so
+    # it can never change a resolution that works today. Matters here for the
+    # DSTM radio's Last.fm similar-artist names, which are full of alias-era
+    # spellings. (Ported from Discography 0.32.0.)
+    my $mkQuery = sub {
+        my ($field) = @_;
+        my $q = $field . ':"' . $name . '"';
+        utf8::encode($q) if utf8::is_utf8($q);
+        (my $safe = $q) =~ s/([^A-Za-z0-9])/sprintf("%%%02X",ord($1))/ge;
+        return 'artist?query=' . $safe . '&fmt=json&limit=1';
+    };
 
     # MIRROR SEARCH FALLBACK (ported from Discography 0.23.0): a musicbrainz-docker
     # mirror serves entity BROWSES from Postgres, but ?query= SEARCH goes through
@@ -974,8 +996,9 @@ sub getArtistMbidByName {
     # resolution) so each call would leak. $self keeps the CV alive across the
     # async gap (the in-flight callbacks hold it), then frees when they do.
     my $run = sub {
-        my ($self, $base, $isFb) = @_;
-        $log->info("Resolving artist name to MBID: $name" . ($isFb ? ' (public fallback)' : ''));
+        my ($self, $base, $isFb, $field) = @_;
+        $log->info("Resolving artist name to MBID: $name ($field field"
+            . ($isFb ? ', public fallback' : '') . ')');
 
         my $http = Slim::Networking::SimpleAsyncHTTP->new(
             sub {
@@ -985,8 +1008,8 @@ sub getArtistMbidByName {
                            ? $data->{artists} : undef;
 
                 if ($arts && !@$arts && $mirror && !$isFb) {
-                    $log->info("Artist '$name' => 0 results on mirror; retrying public API");
-                    return $self->($self, MB_DEFAULT_BASE_URL, 1);
+                    $log->info("Artist '$name' ($field) => 0 results on mirror; retrying public API");
+                    return $self->($self, MB_DEFAULT_BASE_URL, 1, $field);
                 }
 
                 my $mbid = '';
@@ -994,26 +1017,132 @@ sub getArtistMbidByName {
                     my $a = $arts->[0];
                     $mbid = lc $a->{id} if $a->{id} && ($a->{score} // 0) >= 90;
                 }
+
+                # Name field found nothing acceptable -> ONE alias-field pass
+                # (same base/fallback state; the mirror-0-results branch above
+                # still gives the alias pass its own public retry).
+                if (!$mbid && $field eq 'artist') {
+                    $log->info("Artist '$name' => no name-field match; retrying alias field");
+                    return $self->($self, $base, $isFb, 'alias');
+                }
                 eval { $cache->set($cacheKey, $mbid, $mbid ? MB_FOUND_TTL : MB_EMPTY_TTL); 1 }
                     or $log->warn("artist-mbid cache set failed: $@");
-                $log->info("Artist '$name' => " . ($mbid || 'no match') . ($isFb ? ' [public fallback]' : ''));
+                $log->info("Artist '$name' ($field) => " . ($mbid || 'no match') . ($isFb ? ' [public fallback]' : ''));
                 $onDone->($mbid || undef);
             },
             sub {
                 my $err = shift;
                 if ($mirror && !$isFb) {
-                    $log->info("Artist '$name' => mirror search error; retrying public API");
-                    return $self->($self, MB_DEFAULT_BASE_URL, 1);
+                    $log->info("Artist '$name' ($field) => mirror search error; retrying public API");
+                    return $self->($self, MB_DEFAULT_BASE_URL, 1, $field);
                 }
                 _handleError($err, $onError);
             },
             { timeout => 12 }
         );
 
-        $http->get($base . $query, 'Accept' => 'application/json', 'User-Agent' => USER_AGENT);
+        $http->get($base . $mkQuery->($field), 'Accept' => 'application/json', 'User-Agent' => USER_AGENT);
     };
 
-    $run->($run, _mbBase(), 0);
+    $run->($run, _mbBase(), 0, 'artist');
+}
+
+# ---------------------------------------------------------------------------
+# Artist sort-name (for the Artist sort). The ListenBrainz feed only carries the
+# display credit ("Jack White"); the sort-name ("White, Jack"; a stage name like
+# "Panda Bear" stays as-is) lives in MusicBrainz. We look it up by the artist
+# MBID the feed DOES give us (artist/<mbid> → sort-name), cache it long, and warm
+# it in the background so the Artist sort keys on it. A cold artist falls back to
+# the display credit and self-corrects on re-entry (the plugin's second-load
+# contract). Fast on an MB mirror; a courtesy-throttled background trickle on the
+# public API (bounded per pass, so each open fills a little more of the cache).
+# ---------------------------------------------------------------------------
+use constant SORT_CACHE_PFX => 'lbf:artistsort:1:';
+use constant SORT_WARM_MAX  => 100;   # artists fetched per warm pass (rest self-heal on later opens)
+my %sortInFlight;
+
+# Sync cache read used by the sorter — the sort-name string, or undef when it's
+# not cached yet OR MB had none (both fall back to the display credit). One local
+# cache read, no network; still, sorters must precompute the key ONCE per release
+# (a Schwartzian transform) rather than call this inside a comparator, or the
+# read repeats O(N log N) times on the render path.
+sub peekArtistSort {
+    my ($class, $mbid) = @_;
+    return undef unless $mbid;
+    my $v = $cache->get(SORT_CACHE_PFX . lc $mbid);
+    return (defined $v && length $v) ? $v : undef;
+}
+
+# Background-fill sort-names for a list of artist MBIDs. Dedupes, skips anything
+# already cached (found OR a cached "none") and anything in flight, then fetches
+# the remainder ONE AT A TIME with the MB courtesy gap (0 on a mirror), capped at
+# SORT_WARM_MAX per pass. Fire-and-forget — no client needed, never blocks a feed.
+sub warmArtistSorts {
+    my ($class, $mbids) = @_;
+    return unless ref $mbids eq 'ARRAY' && @$mbids;
+
+    my (%seen, @todo);
+    for my $m (@$mbids) {
+        next unless $m;
+        my $lc = lc $m;
+        next if $seen{$lc}++;
+        next if $lc eq lc VA_MBID;
+        next if defined $cache->get(SORT_CACHE_PFX . $lc);   # found or cached-none
+        next if $sortInFlight{$lc};
+        push @todo, $lc;
+        last if @todo >= SORT_WARM_MAX;
+    }
+    return unless @todo;
+
+    # Reserve the WHOLE batch as in-flight up front, not one MBID at a time as
+    # each fetch starts. The pump processes @todo serially over many seconds; if
+    # a second warm pass ran in that window and only the single currently-fetching
+    # MBID were marked, every queued-but-not-yet-fetched MBID would pass this
+    # pass's in-flight guard and be fetched AGAIN in parallel — doubling MB traffic
+    # past the 1 req/s courtesy gap. Each is cleared as the pump completes it
+    # (success OR error/timeout, both via $next), so the batch never leaks.
+    $sortInFlight{$_} = 1 for @todo;
+
+    my $gap = _mbThrottled() ? 1.1 : 0;   # 1 req/s courtesy on public MB; a mirror is our own box
+
+    my $pump;
+    $pump = sub {
+        my ($self) = @_;
+        my $mbid = shift @todo;
+        unless ($mbid) { return }
+        # already reserved in %sortInFlight above; $next clears it when this one done
+
+        (my $safe = $mbid) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
+        my $url = _mbBase() . 'artist/' . $safe . '?fmt=json';
+
+        my $next = sub {
+            delete $sortInFlight{$mbid};
+            return unless @todo;
+            if ($gap) { Slim::Utils::Timers::setTimer(undef, Time::HiRes::time() + $gap, sub { $self->($self) }) }
+            else      { $self->($self) }
+        };
+
+        my $http = Slim::Networking::SimpleAsyncHTTP->new(
+            sub {
+                my $data = eval { from_json($_[0]->content) };
+                my $sort = (ref $data eq 'HASH') ? ($data->{'sort-name'} // '') : '';
+                # Cache the sort-name (30d) or a "none" sentinel (1d, so a transient
+                # miss retries within a day rather than pinning credit-name sort).
+                eval { $cache->set(SORT_CACHE_PFX . $mbid, $sort, length $sort ? MB_FOUND_TTL : MB_EMPTY_TTL); 1 }
+                    or $log->warn("artist-sort cache set failed: $@");
+                $next->();
+            },
+            sub {
+                # HTTP error: don't cache (retry next pass); just move on.
+                $log->info("artist-sort fetch error for $mbid: " . ($_[1] // '?')) if $log->is_info;
+                $next->();
+            },
+            { timeout => 12 }
+        );
+        $http->get($url, 'Accept' => 'application/json', 'User-Agent' => USER_AGENT);
+    };
+
+    $pump->($pump);
 }
 
 # ---------------------------------------------------------------------------

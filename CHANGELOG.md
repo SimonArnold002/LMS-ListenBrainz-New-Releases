@@ -3,6 +3,31 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.98
+
+### Fixed
+- **The Artist sort renders faster on low-power servers.** Sorting a list by Artist now looks up each release's sort-name once instead of repeatedly while ordering the list — on a big All Releases week that turns thousands of cache reads per view into one per release, so the view opens without stuttering audio on a Raspberry Pi.
+- **The background sort-name lookup no longer double-fetches from MusicBrainz.** Opening the Artist-sorted view, leaving, and reopening it before the first background pass finished could start a second pass that re-requested the same artists in parallel, briefly exceeding MusicBrainz's courtesy rate. Each pass now reserves its whole batch up front, so overlapping passes never fetch the same artist twice.
+- **The "Sorted by …" toggle always advances.** It now reads the current saved sort at the moment you tap it, so a change made on another player in between can't make the tap appear to do nothing.
+
+## 0.9.97
+
+### Changed
+- **Sort is now chosen on each list, not in a global setting.** The old "Default sort order" setting (and the "Group by Artist" / "Weekly Dividers" toggles) have been removed. Each list now has a **"Sorted by …" row in an Options section** that cycles **Release Date → Artist → Album Title** in place:
+  - **New Releases for You** is now always grouped by week (the W/C material headers), and the toggle re-orders the releases *within* each week while keeping those headers. Your choice is remembered.
+  - **All Releases** — a single sort shared across every week's view. Set it once and it sticks, on every week and across restarts.
+- **All Releases per-week views gain a "Show all" row.** Alongside "Show more" (reveals the next 30), a **"Show all (N)"** row jumps straight to the whole week; "Show less" collapses back. (Shown only when it would reveal more than "Show more" already does.)
+- **The Artist sort uses the MusicBrainz sort-name.** "Jack White" now sorts under **W** ("White, Jack"), while a stage name like "Panda Bear" correctly stays under **P**. The ListenBrainz feed only sends the display name, so the sort-name is looked up from MusicBrainz by the artist's MBID (cached; MuSpy already supplies one directly). The lookup runs in the background only when you actually use the Artist sort, so a just-seen artist may sort by display name on the first view and correct itself on the next; when MusicBrainz has no sort-name the display name is used.
+- The "Confidence" sort option was dropped.
+
+### Removed
+- **Group by Artist** setting. It collapsed an artist's multiple new releases into one expandable row, but it was only ever reachable with Weekly Dividers turned off or a non-date sort — under the defaults the weekly view always took precedence, so it did nothing on a normal install. The new **Artist** sort covers lining an artist's releases up together.
+
+## 0.9.96
+
+### Fixed
+- **Artist names that are MusicBrainz aliases now resolve.** Looking an artist up by name (used by the ListenBrainz Radio seed and the Last.fm similar-artist fallback) only searched the artist's actual name — a name that exists solely as a MusicBrainz *alias* ("The Oh Sees" → Osees) found nothing. The lookup now retries the alias field when the name search comes up empty, so era names and alternate spellings resolve to the right artist. Ported from Discography 0.32.0.
+
 ## 0.9.95
 
 ### Fixed
