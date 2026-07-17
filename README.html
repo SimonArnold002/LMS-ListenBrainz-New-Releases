@@ -116,7 +116,7 @@
   <h1>ListenBrainz Fresh Releases — LMS Plugin</h1>
   <p class="tagline">A plugin for <strong>Lyrion Music Server (LMS)</strong> built around <a href="https://listenbrainz.org">ListenBrainz</a>. It browses newly released albums (a personalised feed plus the global feed), turns your ListenBrainz playlists and recommendations into playable music, and adds rich release detail pages with artist bios and one-tap streaming.</p>
   <div class="badges">
-    <span class="badge accent">v0.9.98</span>
+    <span class="badge accent">v0.9.119</span>
     <span class="badge">LMS 9.0.0+</span>
     <span class="badge">Material Skin</span>
     <span class="badge">Powered by ListenBrainz</span>
@@ -136,6 +136,7 @@
 <div class="card"><h4>All Releases</h4><p>The global ListenBrainz fresh-releases feed</p><span class="needs">Needs: nothing</span></div>
 <div class="card"><h4>Release detail pages</h4><p>Streaming matches, artist photo + biography, tracklist, genres, MusicBrainz link</p></div>
 <div class="card"><h4>Created-for-You Playlists</h4><p>Your Weekly Jams / Exploration / Daily Jams as Play-all lists</p><span class="needs">Needs: ListenBrainz username</span></div>
+<div class="card"><h4>People You Follow <em>(optional)</em></h4><p>What the people you follow are playing — trending tracks &amp; albums — plus their recommendations</p><span class="needs">Needs: ListenBrainz username</span></div>
 <div class="card"><h4>Don't Stop The Music</h4><p>Two auto-DJ mixers (Radio + Recommended)</p><span class="needs">Needs: ListenBrainz username</span></div>
 <div class="card"><h4>Streaming playback</h4><p>Play matched albums/tracks on your services</p><span class="needs">Needs: Qobuz / Tidal / Bandcamp / Deezer plugin</span></div>
 <div class="card"><h4>Artist bios + photos</h4><p>On the detail page and behind "Read more"</p><span class="needs">Needs: MAI plugin, or a Last.fm key (bio only)</span></div>
@@ -220,6 +221,16 @@
 <p>With <strong>Qobuz</strong>, <strong>Tidal</strong>, <strong>Bandcamp</strong> and/or <strong>Deezer</strong> installed, releases and playlist tracks are matched and made playable. In <strong>Streaming Services</strong> settings, give each service a <strong>search priority</strong> (lower = tried first, <strong>0 = never use it</strong>); matching stops at the first service that has it. Qobuz/Tidal/Deezer are searched automatically; <strong>Bandcamp</strong> is searched on demand from the detail page (a found Bandcamp match is remembered, so a Bandcamp-only release stays playable). Change a service's priority — or remove its plugin — and affected tracks <strong>re-match</strong> to your remaining services automatically.</p>
 <h3>Created-for-You Playlists</h3>
 <p>With a username set, the <strong>Playlists</strong> section turns your ListenBrainz <strong>Weekly Jams</strong>, <strong>Weekly Exploration</strong> and <strong>Daily Jams</strong> into Play-all lists. Each track is matched to your <strong>own library first</strong> (then streaming); unmatched tracks are dropped and the page title shows how many matched. A <strong>Refresh playlist matches</strong> row at the top of the Playlists view forces a fresh, library-first re-match of every playlist (handy if the matches were built before your library finished scanning). A <strong>Settings → Unmatched tracks (debug)</strong> view lists, per playlist, any tracks that couldn't be matched — handy for spotting a gap.</p>
+<h3>People You Follow</h3>
+<p>Built from what the people you follow on ListenBrainz <strong>actually play</strong> (public listening stats — a <strong>username</strong> is enough; only the Recommended list needs your token). Ranking is <strong>one vote per follower</strong>, so it reflects what they're <em>all</em> into rather than whatever one heavy listener is hammering.</p>
+<ul>
+<li><strong>Trending Tracks</strong> — the tracks the people you follow are playing <strong>this week</strong>, as a Play-all list. It trends at the album level (a full-album play doesn't flood the list with its tracks) and <strong>hides anything already in your library</strong>, so it's pure discovery.
+</li>
+<li><strong>Trending Albums · This Month</strong> and <strong>· This Year</strong> — the albums the most of your followers are playing over each window, as tap-through album pages with cover art, year and type (just like New Releases). Shown as-is — owned albums included, since it's about popularity.
+</li>
+<li><strong>Recommended</strong> — the tracks the people you follow <strong>recommend or pin</strong> on ListenBrainz, gathered into one newest-first list with <strong>day dividers</strong>, and <strong>new-music-only</strong> (anything you already own is filtered out). It accumulates, so a rec isn't lost as the feed rolls. <em>(Needs your token — this feed is private.)</em>
+</li></ul>
+<p>Not interested? Turn the whole section off with <strong>Show "People You Follow" section</strong> in Settings → General — when it's off, none of it is fetched, cached or pre-warmed, so it costs you nothing.</p>
 <h3>Don't Stop The Music</h3>
 <p>Two auto-DJ mixers keep the queue going when it runs low. Pick one as your player's <strong>Don't Stop The Music</strong> source (LMS/Material player settings):</p>
 <ul>
@@ -248,6 +259,7 @@
 <tr><td>Last.fm API Key</td><td><em>(empty)</em></td><td>Optional — enables genre + artist-bio + radio similar-artist fallbacks</td></tr>
 <tr><td>Days window</td><td><strong>14</strong></td><td>1–90 days of releases to show</td></tr>
 <tr><td>Find on Streaming Services</td><td><strong>On</strong></td><td>Show playable Qobuz/Tidal/Bandcamp/Deezer matches on detail pages</td></tr>
+<tr><td>Show "People You Follow" section</td><td><strong>On</strong></td><td>Turn the whole People You Follow section (trending tracks &amp; albums, recommendations) off to skip all its calls, caching and warming</td></tr>
 <tr><td>Prefer Tracks from My Library</td><td><strong>On</strong></td><td>Use your own copy (by MusicBrainz ID, then artist + title) before streaming — for Playlists and Don't Stop The Music</td></tr>
 <tr><td>Write a debug log</td><td><strong>Off</strong></td><td>Records the playlist warm/match activity to <code>lbf-debug.log</code> (next to the server log) — turn on only to troubleshoot a matching/caching issue</td></tr>
 </tbody></table>

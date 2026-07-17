@@ -860,25 +860,64 @@ sub getRecommendations {
 }
 
 # ---------------------------------------------------------------------------
-# GET /1/metadata/recording/?recording_mbids=<csv>&inc=artist — bulk-resolve a
-# list of recording MBIDs to { artist, title } in one (or a few) call(s),
-# avoiding MusicBrainz's 1 req/sec throttle. Calls $onDone with a hashref keyed
-# by lower-case recording MBID: { mbid => { artist, title } }. Chunks to
-# METADATA_CHUNK MBIDs per request and merges.
+# GET /1/metadata/recording/?recording_mbids=<csv>&inc=artist release — bulk-
+# resolve a list of recording MBIDs in one (or a few) call(s), avoiding
+# MusicBrainz's 1 req/sec throttle. Calls $onDone with a hashref keyed by
+# lower-case recording MBID: { mbid => { artist, title, release_group_mbid,
+# album } }. inc=release adds the recording's canonical release block, whose
+# `release_group_mbid` maps the track back to its ALBUM (collapsing deluxe/
+# remaster editions) — the join the People-You-Follow trending list needs to
+# group per-track listens into per-album trends. Chunks to METADATA_CHUNK MBIDs
+# per request and merges. (Older callers reading only { artist, title } are
+# unaffected — the extra keys are additive.)
 # ---------------------------------------------------------------------------
 use constant METADATA_CHUNK => 50;
 
+# recording→{artist,title,release_group_mbid,album,year} is IMMUTABLE, so each
+# resolved mbid is cached long-term (per-mbid). Repeat builds (and the daily warm)
+# then only HTTP the mbids they haven't seen — a big cut to the trending cold cost,
+# which otherwise re-mapped every distinct recording across all followers each time.
+use constant RECMETA_TTL => 90 * 86400;
+# A metadata entry WITHOUT a year is not immutable — LB backfills
+# first_release_date (and MB release-group dates land after release) — so
+# yearless entries cache SHORT and refetch, instead of pinning '' for 90 days
+# (the poisoned-cache class that kept dated tracks dateless through every
+# fallback). Applies to both the recording and release-group metadata caches.
+use constant RECMETA_YEARLESS_TTL => 1 * 86400;
+use constant RECMETA_PFX => 'lbf:recmeta:2:';   # :1:->:2: — year now also from recording.first_release_date
+
 sub getRecordingMetadata {
-    my ($class, $mbids, $onDone, $onError) = @_;
-    $onDone  ||= sub {};
-    $onError ||= sub { $onDone->({}) };
+    my ($class, $mbids, $onDone) = @_;
+    $onDone ||= sub {};
+    # Best-effort enrichment: onDone-ALWAYS. A failed/partial fetch resolves onDone with
+    # whatever was gathered (cached soft-hit fallbacks included) rather than an error path —
+    # a metadata gap must degrade to "no year yet", never stall the async chain. (No onError.)
 
     my @all = grep { $_ } @{ $mbids || [] };
     unless (@all) { $onDone->({}); return; }
 
+    # Serve cached mbids from the file cache; only fetch the misses. A cached
+    # entry with NO year is only a SOFT hit: "no first_release_date yet" is NOT
+    # immutable — ListenBrainz backfills dates over time (especially for freshly
+    # mapped recordings), and pinning a yearless entry for the full 90d TTL was
+    # exactly how tracks stayed dateless through every fallback (the Stephen
+    # Rennicks case: LB had the year, our cache had a poisoned '' from an earlier
+    # lag window). Keep the stale entry as a fallback, but refetch the mbid; the
+    # write side caches yearless results SHORT so they can't re-pin.
     my %meta;
+    my @need;
+    for my $m (@all) {
+        my $c = $cache->get(RECMETA_PFX . lc($m));
+        if (ref $c eq 'HASH' && length($c->{year} // '')) { $meta{ lc $m } = $c; }
+        else {
+            $meta{ lc $m } = $c if ref $c eq 'HASH';   # fallback if the refetch fails
+            push @need, $m;
+        }
+    }
+    unless (@need) { $onDone->(\%meta); return; }
+
     my @chunks;
-    push @chunks, [ splice(@all, 0, METADATA_CHUNK) ] while @all;
+    push @chunks, [ splice(@need, 0, METADATA_CHUNK) ] while @need;
 
     my $next;
     $next = sub {
@@ -887,7 +926,9 @@ sub getRecordingMetadata {
 
         my $csv = join(',', @$chunk);
         (my $safe = $csv) =~ s/([^A-Za-z0-9\-_.~,])/sprintf("%%%02X",ord($1))/ge;
-        my $url = BASE_URL . '/1/metadata/recording/?inc=artist&recording_mbids=' . $safe;
+        # inc=artist release: artist credit + the canonical release (for its
+        # release_group_mbid). Space is %20-encoded in the query string.
+        my $url = BASE_URL . '/1/metadata/recording/?inc=artist%20release&recording_mbids=' . $safe;
 
         my $http = Slim::Networking::SimpleAsyncHTTP->new(
             sub {
@@ -896,7 +937,15 @@ sub getRecordingMetadata {
                 if ($@) {
                     $log->error("Recording metadata JSON parse error: $@");
                 } else {
-                    _mergeRecordingMetadata(\%meta, $data);
+                    my %fresh;
+                    _mergeRecordingMetadata(\%fresh, $data);
+                    for my $mk (keys %fresh) {
+                        $meta{$mk} = $fresh{$mk};
+                        # Yearless → SHORT TTL (LB may still backfill the date);
+                        # dated → the long immutable TTL as before.
+                        my $ttl = length($fresh{$mk}{year} // '') ? RECMETA_TTL : RECMETA_YEARLESS_TTL;
+                        eval { $cache->set(RECMETA_PFX . $mk, $fresh{$mk}, $ttl); 1 };
+                    }
                 }
                 $next->();
             },
@@ -915,8 +964,11 @@ sub getRecordingMetadata {
 }
 
 # Merge a /metadata/recording response (object keyed by recording MBID) into
-# %$meta as { mbid => { artist, title } }. Tolerates the two artist shapes:
-# a flat artist.name credit string, or an artist.artists[] credit array.
+# %$meta as { mbid => { artist, title, release_group_mbid, album } }. Tolerates
+# the two artist shapes: a flat artist.name credit string, or an
+# artist.artists[] credit array. The release block (from inc=release) yields the
+# recording's album (release_group_mbid + name); absent on a recording with no
+# known release, in which case those keys are empty strings.
 sub _mergeRecordingMetadata {
     my ($meta, $data) = @_;
     return unless ref $data eq 'HASH';
@@ -925,6 +977,7 @@ sub _mergeRecordingMetadata {
         next unless ref $entry eq 'HASH';
         my $rec    = ref $entry->{recording} eq 'HASH' ? $entry->{recording} : {};
         my $artObj = ref $entry->{artist}    eq 'HASH' ? $entry->{artist}    : {};
+        my $rel    = ref $entry->{release}   eq 'HASH' ? $entry->{release}   : {};
 
         my $title = $rec->{name} // '';
         my $artist = $artObj->{name} // '';
@@ -934,9 +987,495 @@ sub _mergeRecordingMetadata {
             } @{ $artObj->{artists} });
         }
 
-        $meta->{ lc $mbid } = { artist => $artist, title => $title }
-            if length $title;
+        # Year source, in the order the data is actually reliable (verified live):
+        # the `release` object is very often EMPTY in this payload (so $rel->{year}
+        # and $rel->{release_group_mbid} are blank), but the RECORDING always carries
+        # `first_release_date` — the same authoritative date NRFY reads from the feed's
+        # release_date. Read that first; fall back to the release year if present. This
+        # is what fixes fresh tracks showing no year (their release-group first-release-
+        # date lags/None, so the RG-date fallback alone couldn't fill them).
+        my $recDate = $rec->{first_release_date} // '';
+        my $year    = ($rel->{year} && $rel->{year} =~ /^(\d{4})/) ? $1
+                    : ($recDate =~ /^(\d{4})/)                     ? $1
+                    :                                                '';
+        $meta->{ lc $mbid } = {
+            artist             => $artist,
+            title              => $title,
+            release_group_mbid => lc($rel->{release_group_mbid} // ''),
+            album              => $rel->{name} // '',
+            year               => $year,
+        } if length $title;
     }
+}
+
+# Bulk-resolve release-group MBIDs to { year, name } via
+# GET /1/metadata/release_group/?release_group_mbids=<csv>&inc=release_group —
+# the album's first-release date (whose year the Trending Albums rows show, like
+# the New Releases rows). Same chunked/merge shape as getRecordingMetadata; a
+# failed chunk is logged and skipped. $onDone gets { rg_mbid => { year, name } }.
+use constant RGMETA_PFX => 'lbf:rgmeta:1:';
+
+sub getReleaseGroupMetadata {
+    my ($class, $mbids, $onDone) = @_;
+    $onDone ||= sub {};
+    # Best-effort enrichment: onDone-ALWAYS (see getRecordingMetadata). No onError.
+
+    my @all = grep { $_ } @{ $mbids || [] };
+    unless (@all) { $onDone->({}); return; }
+
+    # Served from the file cache; only the misses are fetched. Dated entries are
+    # immutable; a DATELESS entry is only a SOFT hit (MB release-group dates land
+    # after release — same poisoned-cache class as the recording metadata): keep
+    # it as a fallback but refetch, and the write side caches it short.
+    my %meta;
+    my @need;
+    for my $m (@all) {
+        my $c = $cache->get(RGMETA_PFX . lc($m));
+        if (ref $c eq 'HASH' && length($c->{year} // '')) { $meta{ lc $m } = $c; }
+        else {
+            $meta{ lc $m } = $c if ref $c eq 'HASH';   # fallback if the refetch fails
+            push @need, $m;
+        }
+    }
+    unless (@need) { $onDone->(\%meta); return; }
+
+    my @chunks;
+    push @chunks, [ splice(@need, 0, METADATA_CHUNK) ] while @need;
+
+    my $next;
+    $next = sub {
+        my $chunk = shift @chunks;
+        unless ($chunk) { $onDone->(\%meta); return; }
+
+        my $csv = join(',', @$chunk);
+        (my $safe = $csv) =~ s/([^A-Za-z0-9\-_.~,])/sprintf("%%%02X",ord($1))/ge;
+        my $url = BASE_URL . '/1/metadata/release_group/?inc=release_group&release_group_mbids=' . $safe;
+
+        my $http = Slim::Networking::SimpleAsyncHTTP->new(
+            sub {
+                my $resp = shift;
+                my $data = eval { from_json($resp->content) };
+                if ($@) { $log->error("RG metadata JSON parse error: $@"); }
+                else {
+                    my %fresh;
+                    _mergeReleaseGroupMetadata(\%fresh, $data);
+                    for my $mk (keys %fresh) {
+                        $meta{$mk} = $fresh{$mk};
+                        # Dateless RG → short TTL (the date usually lands on MB later).
+                        my $ttl = length($fresh{$mk}{year} // '') ? RECMETA_TTL : RECMETA_YEARLESS_TTL;
+                        eval { $cache->set(RGMETA_PFX . $mk, $fresh{$mk}, $ttl); 1 };
+                    }
+                }
+                $next->();
+            },
+            sub {
+                my $resp = shift;
+                $log->warn("RG metadata chunk failed: " . ($resp->error // '?'));
+                $next->();
+            },
+            { timeout => 15 }
+        );
+        $http->get($url, 'Accept' => 'application/json', 'User-Agent' => USER_AGENT);
+    };
+    $next->();
+}
+
+sub _mergeReleaseGroupMetadata {
+    my ($meta, $data) = @_;
+    return unless ref $data eq 'HASH';
+    while (my ($mbid, $entry) = each %$data) {
+        next unless ref $entry eq 'HASH';
+        my $rg   = ref $entry->{release_group} eq 'HASH' ? $entry->{release_group} : {};
+        my $date = $rg->{date} // '';
+        $meta->{ lc $mbid } = {
+            year => ($date =~ /^(\d{4})/) ? $1 : '',
+            date => $date,                    # full first-release date (for release_date)
+            type => ($rg->{type} // ''),      # primary type (Album/EP/…) — for the type filter
+            name => ($rg->{name} // ''),
+        };
+    }
+}
+
+# ---------------------------------------------------------------------------
+# THE shared collab-credit splitter. A joined artist credit ("Julianna Barwick
+# & Mary Lattimore", "Panda Bear & Sonic Boom") defeats exact-artist searches on
+# MusicBrainz AND service search recall — the fix is always the same ladder: try
+# the FULL credit first (some collabs are entered as one unique artist), then
+# each collaborator. Returns that ordered, deduped list. Separators: '&', '+',
+# ',', ';' (metadata's usual multi-artist separator), x/vs/feat/ft/featuring/
+# with as words — deliberately NOT bare "and", which would split real band names
+# ("Belle and Sebastian", "Iron and Wine"). One splitter — Browse's Bandcamp
+# search (_bandcampArtists, the original 0.9.56 fix) and getReleaseGroupByName
+# both delegate here; don't grow private copies.
+# ---------------------------------------------------------------------------
+sub splitArtistCredits {
+    my ($artist) = @_;
+    $artist //= '';
+    my @parts = ($artist,
+        split m{\s*(?:&|\+|,|;|\bfeat\b\.?|\bft\b\.?|\bfeaturing\b|\bwith\b|\bx\b|\bvs\b\.?)\s*}i, $artist);
+    my (%seen, @out);
+    for my $a (@parts) {
+        $a =~ s/^\s+|\s+$//g;
+        next unless length $a;
+        next if $seen{ lc $a }++;
+        push @out, $a;
+    }
+    return @out;
+}
+
+# ---------------------------------------------------------------------------
+# Resolve an artist + album NAME to its MusicBrainz release-group. Needed for
+# the People You Follow trending lists: ListenBrainz listen-stats rows are only
+# as good as each follower's LISTEN MAPPING, and unmapped listens come back with
+# release_group_mbid/caa_id = null (verified live — the same album can appear
+# BOTH mapped and unmapped across different followers). NRFY never sees this
+# because the fresh-releases feed is MusicBrainz-derived. Without the MBID a row
+# has no cover, no date and no type — this fills the gap the same way the DSTM
+# radio resolves artist names (fielded ws/2 search, mirror-aware base, score>=90
+# gate, mirror-0-results→public retry, per-name cache). $onDone gets
+# { mbid, date, year, type } or undef. One lookup per artist|title (cached
+# 30d found / 1d miss, so a brand-new album that lands in MB soon retries daily).
+# ---------------------------------------------------------------------------
+sub getReleaseGroupByName {
+    my ($class, $artist, $title, $onDone) = @_;
+    $onDone ||= sub {};
+
+    for ($artist, $title) { $_ = defined $_ ? $_ : ''; s/^\s+|\s+$//g; }
+    unless (length $artist && length $title) { $onDone->(undef); return; }
+
+    my $cacheKey = 'lbf:rgbyname:1:' . lc($artist) . '|' . lc($title);
+    utf8::encode($cacheKey) if utf8::is_utf8($cacheKey);
+    if (defined(my $c = $cache->get($cacheKey))) {
+        $onDone->(ref $c eq 'HASH' ? $c : undef);   # '' is the cached "not found" sentinel
+        return;
+    }
+
+    # Artist terms to try, in order. MB's fielded search misses a JOINED collab
+    # credit — verified live: releasegroup:"Tragic Magic" AND artist:"Julianna
+    # Barwick & Mary Lattimore" = 0 results, either collaborator alone = score
+    # 100 — so on a full-credit miss each collaborator is retried individually
+    # (same separators as the manual Bandcamp collab split). Capped at 3 terms.
+    # (Full credit is tried FIRST because some collabs are entered in MB as one
+    # unique artist; the split terms then cover the joined-credit case — the
+    # same class as the NRFY "Panda Bear & Sonic Boom" Bandcamp gap (0.9.56),
+    # now served by ONE shared splitter.)
+    my @artistTerms = grep { length($_) >= 2 || $_ eq $artist } splitArtistCredits($artist);
+    splice(@artistTerms, 3) if @artistTerms > 3;
+
+    # Fielded exact-phrase query (embedded double quotes stripped — they'd break
+    # the Lucene phrase). Same escaping as getArtistMbidByName's $mkQuery.
+    my $mkQ = sub {
+        my ($aTerm) = @_;
+        (my $t = $title) =~ s/"//g;
+        (my $a = $aTerm) =~ s/"//g;
+        my $s = 'releasegroup:"' . $t . '" AND artist:"' . $a . '"';
+        utf8::encode($s) if utf8::is_utf8($s);
+        $s =~ s/([^A-Za-z0-9])/sprintf("%%%02X",ord($1))/ge;
+        return 'release-group?query=' . $s . '&fmt=json&limit=1';
+    };
+
+    my $mirror = !_mbThrottled();
+
+    # Self-passing sub (not a self-capturing closure) — same leak-avoidance as
+    # getArtistMbidByName (0.9.95). $ti indexes @artistTerms.
+    my $run = sub {
+        my ($self, $base, $isFb, $ti) = @_;
+        my $http = Slim::Networking::SimpleAsyncHTTP->new(
+            sub {
+                my $resp = shift;
+                my $data = eval { from_json($resp->content) };
+                my $rgs  = (!$@ && ref $data eq 'HASH' && ref $data->{'release-groups'} eq 'ARRAY')
+                           ? $data->{'release-groups'} : undef;
+
+                # Unbuilt-Solr mirror → one public retry (see getArtistMbidByName).
+                if ($rgs && !@$rgs && $mirror && !$isFb) {
+                    $log->info("RG '$artist - $title' => 0 results on mirror; retrying public API");
+                    return $self->($self, MB_DEFAULT_BASE_URL, 1, $ti);
+                }
+
+                my $out;
+                if ($rgs && @$rgs) {
+                    my $rg = $rgs->[0];
+                    if ($rg->{id} && ($rg->{score} // 0) >= 90) {
+                        my $date = $rg->{'first-release-date'} // '';
+                        $out = {
+                            mbid => lc $rg->{id},
+                            date => $date,
+                            year => ($date =~ /^(\d{4})/) ? $1 : '',
+                            type => ($rg->{'primary-type'} // ''),
+                        };
+                    }
+                }
+
+                # This term found nothing acceptable → try the next collaborator.
+                if (!$out && $ti < $#artistTerms) {
+                    return $self->($self, _mbBase(), 0, $ti + 1);
+                }
+                eval { $cache->set($cacheKey, ($out // ''), $out ? MB_FOUND_TTL : MB_EMPTY_TTL); 1 }
+                    or $log->warn("rg-by-name cache set failed: $@");
+                $log->info("RG '$artist - $title' => " . ($out ? $out->{mbid} : 'no match')
+                    . ($ti ? " [term: $artistTerms[$ti]]" : '') . ($isFb ? ' [public fallback]' : ''));
+                $onDone->($out);
+            },
+            sub {
+                if ($mirror && !$isFb) {
+                    $log->info("RG '$artist - $title' => mirror search error; retrying public API");
+                    return $self->($self, MB_DEFAULT_BASE_URL, 1, $ti);
+                }
+                $log->warn("RG '$artist - $title' search failed: " . ($_[0] && $_[0]->can('error') ? ($_[0]->error // '?') : '?'));
+                $onDone->(undef);   # never cache a network failure as a miss
+            },
+            { timeout => 12 }
+        );
+        $http->get($base . $mkQ->($artistTerms[$ti]), 'Accept' => 'application/json', 'User-Agent' => USER_AGENT);
+    };
+    $run->($run, _mbBase(), 0, 0);
+}
+
+# ===========================================================================
+# People You Follow — trending (top PLAYED tracks/albums of the users you
+# follow). Three PUBLIC endpoints (no token required): the following list and
+# the per-user listen-stats. Stats return 204 No Content when a user's stats
+# aren't computed yet or their listens are private — treated as "no data", never
+# an error, so one private/quiet follower can't sink the whole fan-out. Ranking
+# and album-grouping happen in Browse::_buildTrending; these just fetch+normalise
+# and cache per-user (LB recomputes stats ~daily). See tools/fetch_trending.py.
+# ===========================================================================
+use constant FOLLOWING_TTL => 12 * 3600;
+use constant STATS_TTL     => 24 * 3600;   # LB recomputes user stats ~daily
+use constant STATS_TIMEOUT => 15;
+
+# GET /1/user/<user>/following → the users <user> follows, as a plain arrayref of
+# username strings (bare strings on the live API). Public; token sent if present
+# but not required. Cached FOLLOWING_TTL.
+sub getFollowing {
+    my ($class, %args) = @_;
+    my $onDone  = $args{onDone}  || sub {};
+    my $onError = $args{onError} || sub { $onDone->([]) };
+
+    my $username = $args{user} // $prefs->get('username') // '';
+    unless (length $username) { $onError->("No ListenBrainz username configured"); return; }
+
+    my $cacheKey = 'lbf:following:' . $username;
+    if (!$args{force} && (my $cached = $cache->get($cacheKey))) {
+        $log->info("Following cache hit ($cacheKey)");
+        $onDone->($cached);
+        return;
+    }
+
+    (my $safe_user = $username) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
+    my $url = sprintf('%s/1/user/%s/following', BASE_URL, $safe_user);
+    $log->info("Fetching following: $url");
+
+    my @headers = ('Accept' => 'application/json', 'User-Agent' => USER_AGENT);
+    my $token   = $prefs->get('token') // '';
+    push @headers, ('Authorization' => "Token $token") if $token;
+
+    my $http = Slim::Networking::SimpleAsyncHTTP->new(
+        sub {
+            my $resp = shift;
+            my $data = eval { from_json($resp->content) };
+            if ($@) { $log->error("Following JSON parse error: $@"); $onError->("JSON error: $@"); return; }
+            my $users = _parseFollowing($data);
+            eval { $cache->set($cacheKey, $users, FOLLOWING_TTL); 1 } or $log->warn("following cache set failed: $@");
+            $log->info("Following: " . scalar(@$users) . " user(s)");
+            $onDone->($users);
+        },
+        sub { _handleError(shift, $onError) },
+        { timeout => STATS_TIMEOUT }
+    );
+    $http->get($url, @headers);
+}
+
+# GET /1/user/<u>/listens?count=1 → the user's LATEST listen timestamp (epoch,
+# `payload.latest_listen_ts` — verified live), 0 when none/unknown. Drives the
+# trending features' stale-follower filter: a followed user who stopped
+# listening months ago shouldn't keep seeding This Year with their old plays.
+# Cheap (one tiny request), cached per user for a day — activity state doesn't
+# need to be fresher than the stats it gates (LB recomputes those ~daily too).
+use constant LASTLISTEN_PFX => 'lbf:lastlisten:1:';
+use constant LASTLISTEN_TTL => 24 * 3600;
+sub getLatestListenTs {
+    my ($class, $user, $onDone, %args) = @_;
+    $onDone ||= sub {};
+    unless (defined $user && length $user) { $onDone->(0); return; }
+
+    my $cacheKey = LASTLISTEN_PFX . $user;
+    if (!$args{force} && defined(my $c = $cache->get($cacheKey))) {
+        $onDone->($c + 0);
+        return;
+    }
+
+    (my $safe_user = $user) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
+    my $url = sprintf('%s/1/user/%s/listens?count=1', BASE_URL, $safe_user);
+
+    my @headers = ('Accept' => 'application/json', 'User-Agent' => USER_AGENT);
+    my $token   = $prefs->get('token') // '';
+    push @headers, ('Authorization' => "Token $token") if $token;
+
+    my $http = Slim::Networking::SimpleAsyncHTTP->new(
+        sub {
+            my $resp = shift;
+            my $data = eval { from_json($resp->content) };
+            my $ts   = 0;
+            my $got  = 0;
+            if (!$@ && ref $data eq 'HASH' && ref $data->{payload} eq 'HASH') {
+                $ts  = ($data->{payload}{latest_listen_ts} // 0) + 0;
+                $got = 1;
+            }
+            # Cache ONLY a genuine answer (a valid payload — $ts may legitimately be 0).
+            # A 204 No Content / empty / odd-shape 2xx reaches THIS success handler (as
+            # _getUserStats' 204 handling proves), leaves $got=0, and is treated exactly
+            # like the error path below: "unknown", NOT cached — so a private/transient
+            # state can't pin a follower as unknown for a day.
+            eval { $cache->set($cacheKey, $ts, LASTLISTEN_TTL); 1 } if $got;
+            $onDone->($ts);
+        },
+        # Error → 0 = "unknown", NOT cached (a transient failure shouldn't pin a
+        # follower as unknown for a day; the caller treats unknown as active).
+        sub { $onDone->(0) },
+        { timeout => STATS_TIMEOUT }
+    );
+    $http->get($url, @headers);
+}
+
+# Normalise a /following payload to an arrayref of username strings. The live API
+# nests them under top-level `following` as bare strings; tolerate a payload wrap
+# and {musicbrainz_id}/{user_name} object elements defensively.
+sub _parseFollowing {
+    my ($data) = @_;
+    my $list = (ref $data eq 'HASH' && ref $data->{following} eq 'ARRAY') ? $data->{following}
+             : (ref $data eq 'HASH' && ref $data->{payload} eq 'HASH'
+                    && ref $data->{payload}{following} eq 'ARRAY')        ? $data->{payload}{following}
+             : [];
+    my @out;
+    for my $u (@$list) {
+        my $name = !ref $u        ? $u
+                 : ref $u eq 'HASH' ? ($u->{musicbrainz_id} // $u->{user_name} // $u->{name})
+                 : undef;
+        push @out, $name if defined $name && length $name;
+    }
+    return \@out;
+}
+
+# GET /1/stats/user/<user>/<path>?range=<range>&count=<count>, shared by the two
+# public stat fetchers. $path is 'recordings' or 'release-groups' — the latter is
+# a HYPHEN with NO trailing slash (the underscore form 308-redirects to a URL
+# that 404s). 204 (stats not computed / private listens) → an empty list, cached
+# so a fan-out over many followers doesn't re-hit the same empties each warm. Any
+# HTTP error for one follower → empty, not an error (don't sink the batch).
+sub _getUserStats {
+    my ($path, $pkey, $parser, $user, %args) = @_;
+    my $onDone = $args{onDone} || sub {};
+    my $range  = $args{range}  || 'week';
+    my $count  = $args{count}  || 100;
+
+    unless (defined $user && length $user) { $onDone->([]); return; }
+
+    my $cacheKey = "lbf:userstats:$pkey:$range:$user";
+    if (!$args{force} && (my $cached = $cache->get($cacheKey))) {
+        $onDone->($cached);
+        return;
+    }
+
+    (my $safe_user = $user) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
+    my $url = sprintf('%s/1/stats/user/%s/%s?range=%s&count=%d',
+        BASE_URL, $safe_user, $path, $range, $count);
+
+    my $http = Slim::Networking::SimpleAsyncHTTP->new(
+        sub {
+            my $resp = shift;
+            my $body = $resp->content;
+            my $rows;
+            if (!defined $body || !length $body) {   # 204 No Content
+                $rows = [];
+            } else {
+                my $data = eval { from_json($body) };
+                if ($@) { $log->warn("stats/$path JSON parse error for $user: $@"); $onDone->([]); return; }
+                $rows = $parser->($data);
+            }
+            eval { $cache->set($cacheKey, $rows, STATS_TTL); 1 } or $log->warn("stats cache set failed: $@");
+            $onDone->($rows);
+        },
+        sub {
+            my $resp = shift;
+            $log->info("stats/$path fetch failed for $user: " . ($resp->error // '?'));
+            $onDone->([]);
+        },
+        { timeout => STATS_TIMEOUT }
+    );
+    $http->get($url, 'Accept' => 'application/json', 'User-Agent' => USER_AGENT);
+}
+
+# Public per-user top recordings (tracks). $onDone gets an arrayref of normalised
+# rows: { recording_mbid, title, artist, artist_mbid, release_mbid, release_name,
+# caa_id, caa_release_mbid, listen_count }.
+sub getUserTopRecordings {
+    my ($class, $user, %args) = @_;
+    _getUserStats('recordings', 'rec', \&_parseTopRecordings, $user, %args);
+}
+
+# Public per-user top release groups (albums). $onDone gets: { release_group_mbid,
+# title, artist, artist_mbid, caa_id, caa_release_mbid, listen_count }.
+sub getUserTopReleaseGroups {
+    my ($class, $user, %args) = @_;
+    _getUserStats('release-groups', 'rg', \&_parseTopReleaseGroups, $user, %args);
+}
+
+# The true PRIMARY artist MBID for a stats row: first credit of the artists[]
+# array (handles "feat." credits cleanly), falling back to artist_mbids[0].
+sub _primaryArtistMbid {
+    my ($row) = @_;
+    return $row->{artists}[0]{artist_mbid}
+        if ref $row->{artists} eq 'ARRAY' && ref $row->{artists}[0] eq 'HASH' && $row->{artists}[0]{artist_mbid};
+    return (ref $row->{artist_mbids} eq 'ARRAY' ? $row->{artist_mbids}[0] : undef);
+}
+
+sub _parseTopRecordings {
+    my ($data) = @_;
+    my $payload = (ref $data eq 'HASH' && ref $data->{payload} eq 'HASH') ? $data->{payload} : {};
+    my $rows    = ref $payload->{recordings} eq 'ARRAY' ? $payload->{recordings} : [];
+    my @out;
+    for my $r (@$rows) {
+        next unless ref $r eq 'HASH';
+        my $title  = $r->{track_name}  // '';
+        my $artist = $r->{artist_name} // '';
+        next unless length $title || length $artist;
+        push @out, {
+            recording_mbid   => lc($r->{recording_mbid} // ''),
+            title            => $title,
+            artist           => $artist,
+            artist_mbid      => lc(_primaryArtistMbid($r) // ''),
+            release_mbid     => $r->{release_mbid} // '',
+            release_name     => $r->{release_name} // '',
+            caa_id           => $r->{caa_id},
+            caa_release_mbid => $r->{caa_release_mbid} // '',
+            listen_count     => ($r->{listen_count} // 0) + 0,
+        };
+    }
+    return \@out;
+}
+
+sub _parseTopReleaseGroups {
+    my ($data) = @_;
+    my $payload = (ref $data eq 'HASH' && ref $data->{payload} eq 'HASH') ? $data->{payload} : {};
+    my $rows    = ref $payload->{release_groups} eq 'ARRAY' ? $payload->{release_groups} : [];
+    my @out;
+    for my $r (@$rows) {
+        next unless ref $r eq 'HASH';
+        my $title = $r->{release_group_name} // '';
+        next unless length $title;
+        push @out, {
+            release_group_mbid => lc($r->{release_group_mbid} // ''),
+            title              => $title,
+            artist             => $r->{artist_name} // '',
+            artist_mbid        => lc(_primaryArtistMbid($r) // ''),
+            caa_id             => $r->{caa_id},
+            caa_release_mbid   => $r->{caa_release_mbid} // '',
+            listen_count       => ($r->{listen_count} // 0) + 0,
+        };
+    }
+    return \@out;
 }
 
 # ---------------------------------------------------------------------------

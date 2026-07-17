@@ -178,6 +178,9 @@ PLUGIN_LBF_SORT_ARTIST
 PLUGIN_LBF_SORT_ALBUM
 	EN	Album Title
 
+PLUGIN_LBF_SORT_TRENDING
+	EN	Trending
+
 PLUGIN_LBF_FOR_YOU
 	EN	New Releases for You
 
@@ -202,8 +205,41 @@ PLUGIN_LBF_PL_MATCHED
 PLUGIN_LBF_FOLLOW_FEED
 	EN	Recommended by People You Follow
 
+PLUGIN_LBF_FOLLOW_TILE
+	EN	Your Followers
+
 PLUGIN_LBF_NO_FOLLOW
 	EN	No recommendations from people you follow yet
+
+PLUGIN_LBF_SECTION_PEOPLE
+	EN	People You Follow
+
+PLUGIN_LBF_TRENDING
+	EN	Trending Tracks
+
+PLUGIN_LBF_TRENDING_ALBUMS_MONTH
+	EN	Trending Albums · This Month
+
+PLUGIN_LBF_TRENDING_ALBUMS_YEAR
+	EN	Trending Albums · This Year
+
+PLUGIN_LBF_WEEKLY_TRACKS
+	EN	Weekly
+
+PLUGIN_LBF_PERIOD_MONTH
+	EN	This Month
+
+PLUGIN_LBF_PERIOD_YEAR
+	EN	This Year
+
+PLUGIN_LBF_N_TRACKS
+	EN	%d tracks
+
+PLUGIN_LBF_TREND_BREADTH
+	EN	Played by %d of the people you follow
+
+PLUGIN_LBF_NO_TRENDING
+	EN	No trending data yet — check back once the people you follow have listened
 
 PLUGIN_LBF_UNDATED
 	EN	Undated
@@ -306,6 +342,12 @@ PLUGIN_LBF_PLAY_VIA_SETTING
 
 PLUGIN_LBF_PLAY_VIA_SETTING_DESC
 	EN	On the album detail page, offer to search and play the release on your installed streaming services (Qobuz, Bandcamp, etc.)
+
+PLUGIN_LBF_PEOPLE_FOLLOW_SETTING
+	EN	Show "People You Follow" section
+
+PLUGIN_LBF_PEOPLE_FOLLOW_SETTING_DESC
+	EN	Show the People You Follow section (What's Trending, Trending Albums and Recommended) in the menu. When off, none of it is fetched, cached or pre-warmed — no extra ListenBrainz calls.
 
 PLUGIN_LBF_SEARCH_BANDCAMP
 	EN	Search Bandcamp

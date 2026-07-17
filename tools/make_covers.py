@@ -55,6 +55,9 @@ TEAL   = ((37, 149, 167), (20, 80, 108))    # Weekly Exploration
 PURPLE = ((121, 85, 167), (64, 44, 104))    # Daily Jams
 INDIGO = ((69, 63, 127),  (40, 36, 80))     # default playlist
 ROSE   = ((198, 74, 96),  (128, 40, 58))    # Recommended by People You Follow
+FIRE   = ((224, 96, 72),  (150, 46, 40))    # What's Trending (tracks)
+MAGENTA= ((176, 76, 148), (104, 38, 90))    # Trending Albums — This Month
+OCEAN  = ((44, 140, 158), (22, 78, 100))    # Trending Albums — This Year (distinct colour)
 
 # name -> (title, gradient, pill text or None)
 COVERS = {
@@ -62,7 +65,10 @@ COVERS = {
     "menu-new-releases":                ("New Releases for You", GREEN,  None),
     "menu-playlists":                   ("Playlists",            BLUE,   None),
     "menu-all-releases":                ("All Releases",         AMBER,  None),
-    "menu-follow":                      ("People You Follow",    ROSE,   None),
+    "menu-follow":                      ("Recommended Tracks",   ROSE,   None),
+    "menu-trending":                    ("Trending Tracks",      FIRE,   None),
+    "menu-trending-albums":             ("Trending Albums",      MAGENTA, None),
+    "menu-trending-albums-year":        ("Trending Albums",      OCEAN,  None),
     # Created-for-You playlist tiles
     "playlist-weekly-jams":             ("Weekly Jams",          ORANGE, "THIS WEEK"),
     "playlist-weekly-jams-prev":        ("Weekly Jams",          ORANGE, "LAST WEEK"),

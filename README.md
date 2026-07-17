@@ -15,6 +15,7 @@ Tested on LMS 9.x with the **Material Skin**.
 | **All Releases** | The global ListenBrainz fresh-releases feed | Nothing |
 | **Release detail pages** | Streaming matches, artist photo + biography, tracklist, genres, MusicBrainz link | — |
 | **Created-for-You Playlists** | Your Weekly Jams / Exploration / Daily Jams as Play-all lists | ListenBrainz username |
+| **People You Follow** *(optional)* | What the people you follow are playing — trending tracks & albums — plus their recommendations | ListenBrainz username |
 | **Don't Stop The Music** | Two auto-DJ mixers (Radio + Recommended) | ListenBrainz username |
 | **Streaming playback** | Play matched albums/tracks on your services | Qobuz / Tidal / Bandcamp / Deezer plugin |
 | **Artist bios + photos** | On the detail page and behind "Read more" | MAI plugin, or a Last.fm key (bio only) |
@@ -93,6 +94,15 @@ With **Qobuz**, **Tidal**, **Bandcamp** and/or **Deezer** installed, releases an
 ### Created-for-You Playlists
 With a username set, the **Playlists** section turns your ListenBrainz **Weekly Jams**, **Weekly Exploration** and **Daily Jams** into Play-all lists. Each track is matched to your **own library first** (then streaming); unmatched tracks are dropped and the page title shows how many matched. A **Refresh playlist matches** row at the top of the Playlists view forces a fresh, library-first re-match of every playlist (handy if the matches were built before your library finished scanning). A **Settings → Unmatched tracks (debug)** view lists, per playlist, any tracks that couldn't be matched — handy for spotting a gap.
 
+### People You Follow
+Built from what the people you follow on ListenBrainz **actually play** (public listening stats — a **username** is enough; only the Recommended list needs your token). Ranking is **one vote per follower**, so it reflects what they're *all* into rather than whatever one heavy listener is hammering.
+
+- **Trending Tracks** — the tracks the people you follow are playing **this week**, as a Play-all list. It trends at the album level (a full-album play doesn't flood the list with its tracks) and **hides anything already in your library**, so it's pure discovery.
+- **Trending Albums · This Month** and **· This Year** — the albums the most of your followers are playing over each window, as tap-through album pages with cover art, year and type (just like New Releases). Shown as-is — owned albums included, since it's about popularity.
+- **Recommended** — the tracks the people you follow **recommend or pin** on ListenBrainz, gathered into one newest-first list with **day dividers**, and **new-music-only** (anything you already own is filtered out). It accumulates, so a rec isn't lost as the feed rolls. *(Needs your token — this feed is private.)*
+
+Not interested? Turn the whole section off with **Show "People You Follow" section** in Settings → General — when it's off, none of it is fetched, cached or pre-warmed, so it costs you nothing.
+
 ### Don't Stop The Music
 Two auto-DJ mixers keep the queue going when it runs low. Pick one as your player's **Don't Stop The Music** source (LMS/Material player settings):
 
@@ -119,6 +129,7 @@ The plugin adds **New Releases for You**, **Playlists** and **All Releases** row
 | Last.fm API Key | *(empty)* | Optional — enables genre + artist-bio + radio similar-artist fallbacks |
 | Days window | **14** | 1–90 days of releases to show |
 | Find on Streaming Services | **On** | Show playable Qobuz/Tidal/Bandcamp/Deezer matches on detail pages |
+| Show "People You Follow" section | **On** | Turn the whole People You Follow section (trending tracks & albums, recommendations) off to skip all its calls, caching and warming |
 | Prefer Tracks from My Library | **On** | Use your own copy (by MusicBrainz ID, then artist + title) before streaming — for Playlists and Don't Stop The Music |
 | Write a debug log | **Off** | Records the playlist warm/match activity to `lbf-debug.log` (next to the server log) — turn on only to troubleshoot a matching/caching issue |
 

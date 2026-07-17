@@ -7,7 +7,27 @@ A plugin for Lyrion Music Server (LMS) that browses ListenBrainz Fresh Releases.
 
 **Maintain this section.** Two living artefacts for announcing the plugin:
 1. **Overall feature summary** (below) — the social-media / GitHub Pages "drop page" copy. **Update it whenever a key feature is added, changed or removed** (not for bug fixes). Keep it key-features-only, user-facing, no internals.
-2. **Per-release post** — when cutting a release, generate a short social post from the new **CHANGELOG.md** entries since the last main release: lead with new **features**, then a short "Fixes & polish" line for the notable bug fixes. Install line is the Pages repo URL. Hashtags: `#LyrionMusicServer #ListenBrainz #Squeezebox #SelfHosted`.
+2. **Per-release "What's new" post** — when cutting a release, generate a social post in the fleet **house layout** — the *same structure* as the launch/"Introducing" post, just scoped to what changed since the last main release (NOT a blockquote, NOT a "Fixes & polish" list). Build the bullet list from the new **CHANGELOG.md** entries. Reproduce this structure:
+
+   ```
+   🎵 What's new in <Plugin Name> — for Lyrion Music Server (LMS)
+
+   <Paragraph 1: conversational hook leading with the headline new feature.>
+
+   <Paragraph 2: second angle covering the rest of the changes, in prose.>
+
+   ✨ What's new
+   • <Short label> — <plain-English description of a new/changed feature>
+   • … (one bullet per notable feature; a single "smarter/tougher matching" bullet may fold in the notable bug fixes)
+
+   Works on LMS 9.x, best with the Material Skin. <optional playback line.> Free and open source.
+
+   👉 Full details & install: https://simonarnold002.github.io/<Repo>/
+
+   #LyrionMusicServer lms squeezebox <space-separated plain service/keyword tags>
+   ```
+
+   Key elements: the `🎵 What's new in … (LMS)` header (NOT "Introducing", NO version number in it), TWO prose paragraphs (not bullets), the `✨ What's new` header with `•` bullets scoped to this release, the "Free and open source" line, the `👉 Full details & install:` link to the **bare Pages root** (NOT repo.xml), and the final tag line where ONLY `#LyrionMusicServer` is a hashtag and the rest are plain words.
 
 ### Overall feature summary (keep current)
 
@@ -16,7 +36,7 @@ A plugin for Lyrion Music Server (LMS) that browses ListenBrainz Fresh Releases.
 - **New Releases for You** — personalised feed of fresh releases from artists in your ListenBrainz history (needs username + token). Newest-first, grouped by week, tap-through detail pages. **Optional MuSpy** — add a MuSpy user ID (public, no password) to fold in releases from the artists you follow there; more tailored since you pick the artists, and overlaps with ListenBrainz are shown once. MuSpy is upcoming-heavy, so it has its own **upcoming** switch (on by default, independent of the feed's Include-Upcoming) and a **how-far-ahead** limit (default 12 months).
 - **All Releases** — the global ListenBrainz fresh-releases feed (no account). By-week landing page to jump to any week.
 - **Created-for-You Playlists** — your **Weekly Jams / Weekly Exploration / Daily Jams** as fully-streaming **Play-all** lists; every track matched **library-first**, then streaming.
-- **Recommended by People You Follow** — the tracks the people you follow **recommend/pin** on ListenBrainz, gathered into **one Play-all list**, newest-first, with **day dividers** so new additions are easy to spot. **New-music-only:** anything already in your library is filtered out, so it's purely music you don't have yet. Accumulates so recs aren't lost as the feed rolls; refreshes daily.
+- **People You Follow** *(optional; toggle in Settings → General, default on)* — a whole section built from what the people you follow **actually play** (public listen-stats — username only; **one-vote-per-follower** breadth ranking). **Trending Tracks** (weekly, Play-all, owned-excluded, album-level so a full-album play can't flood it) + **Trending Albums · This Month / · This Year** (tap-through album pages with art/date/type). Plus **Recommended** — the tracks they **recommend/pin** (needs a token; the feed is private), one newest-first **new-music-only** Play-all list with **day dividers**, accumulating so recs aren't lost as the feed rolls. Off = nothing here is fetched, cached or warmed.
 - **Don't Stop The Music — two auto-DJ mixers** — **ListenBrainz Radio** (seeds from what's playing and evolves through similar artists) + **Recommended for You** (personalised CF picks, shuffled). Owned copies first, no per-session repeats, varied artists.
 - **Rich release detail pages** — artist **photo + biography**, **tracklist** with durations, **genres**, tags, **View on MusicBrainz**, and inline **one-tap streaming matches**.
 - **Direct streaming playback** — matched albums/tracks play from **Qobuz / Tidal / Bandcamp / Deezer**; you choose the per-service search order.
@@ -88,7 +108,220 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-0.9.98
+0.9.119
+
+- **Code-review fixes: two transient-failure cache-poison paths (0.9.119) — no cache-version bump.**
+  Pre-commit review of the People You Follow / DSTM work. Both are the "never cache a network
+  failure" class; logic-only, `perl -c` clean (Browse + API + DSTM via scratchpad stublib), matcher
+  untouched (`matcher_sync_check.py` N/A). Verified in-process against the REAL subs with a driveable
+  HTTP/cache/prefs harness (all cases pass).
+  - **`DSTM::_recommendedFill` no longer caches an EMPTY recommended pool.** `getRecordingMetadata`
+    is onDone-ALWAYS (0.9.113/0.9.117), so a transient metadata outage resolves onDone with `{}` →
+    empty `@pool`. That empty pool was cached at `RECS_TTL` (1d), pinning the Recommended DSTM mixer
+    empty for a day. Now `$cache->set` is guarded on `@pool`; an empty result is still SERVED (so the
+    mixer falls through / retries next top-up) but not persisted. **This completes the 0.9.117
+    "dropped the dead `$onError` call-site args" refactor** — that pass claimed "no behaviour change"
+    but MISSED this DSTM call site (it still passed a 4th arg, which the new onDone-always signature
+    silently ignored, routing failures through onDone → the poisoned cache). The dead 4th arg is now
+    removed too.
+  - **`API::getLatestListenTs` caches ONLY a genuine answer.** The success handler unconditionally
+    cached `$ts` (24h) even on a 204 No Content / empty / odd-shape 2xx — which reaches the SUCCESS
+    callback (as `_getUserStats`' explicit 204 handling proves), pinning a follower as `ts=0`/unknown
+    for a day. A `$got` flag now gates the `$cache->set` on a valid `payload`; a real `0` is still
+    cached, but 204/empty/parse-error/network-error are treated as transient-unknown and not cached
+    (unknown keeps the follower active — the stale-filter's safe default). Error-callback comment
+    corrected (204 lands in the success path, not the error path).
+  - **Stale-comment fix in `_findPlayableTrack`** (comment-only): the note claimed the outer
+    `lbf:pl:resolved` key is "deliberately NOT bumped" and "playlists don't render years", but since
+    0.9.114 playlists ARE year-enriched and that key WAS bumped to `:7:`. Rewritten to match reality.
+
+- **"People You Follow" section is now optional (0.9.118).** New boolean pref `people_follow`
+  (default **1** — the pref is new, so ON applies to every install on update; no behaviour change
+  unless switched off). ONE master switch gating THREE places, so a disabled section does zero
+  work: (1) `topLevel` — the `@people` block is built only `if ($username && $prefs->get('people_follow'))`,
+  so the section header + all four tiles are absent and their resolve coderefs (`resolveTrending`/
+  `resolveTrendingAlbums`/`resolveFollowFeed`) are unreachable; (2) `warmCache` — `_warmFollow` +
+  `_warmTrending` are skipped, so no following/stats/feed calls, resolves or cache writes on the
+  startup/daily/forced warm; (3) `fetchUnmatchedPlaylists` — the token-gated follow-feed append is
+  also gated on the pref (no `getFollowFeed` for it). Settings: General checkbox
+  `pref_people_follow` (`PLUGIN_LBF_PEOPLE_FOLLOW_SETTING`), added to `Settings::prefs()` and
+  `Plugin.pm` init. No cache-version bump (pure gating; nothing about the cached shapes changed).
+  `perl -c` clean (Browse + Settings; Plugin's only stub-env error is the LMS `main::WEBUI`
+  constant, past the edit).
+
+- **Code-review fixes on the People You Follow build (0.9.117) — no cache-version bump.** Pre-commit
+  review of the 0.9.99–0.9.116 trending work. All logic-only; `matcher_sync_check.py` still exits 0
+  (nothing touched the shared matcher); `perl -c` clean on Browse + API (scratchpad stublib).
+  - **Trending Albums streaming gate: watchdog-truncated build now caches SHORT.** The gate's
+    `$finish` called `$settle(\@keep, 0)` (full 7d/30d TTL) whether it fired from normal completion
+    OR the `PLAYLIST_TIMEOUT` watchdog — so a cold build that timed out mid-gate pinned a partial
+    album list for weeks. Added a `$timedOut` flag the watchdog sets before `$finish`; a timed-out
+    finish now settles at `PLAYLIST_INCONCLUSIVE_TTL` (1h) so a healthy build replaces it soon.
+  - **`_resolveTrending` `$empty` now caches the "no data" outcome SHORT.** The success path already
+    caches an empty resolve, but the `$empty` short-circuits (not following anyone / all stale / no
+    candidates) rendered text and returned without writing `$rkey` — so every browse re-ran the whole
+    follower aggregation. `$empty` gained a `$cacheEmpty` flag: the three genuine no-data callers pass
+    it (writes `{items=>[],total=>0}` at 1h TTL); the network-error `onError` caller does NOT (a
+    transient failure must never pin the list empty).
+  - **`topLevel` no longer holds the whole menu on the All Releases fetch.** The menu inlines the
+    All Releases weeks from `getFreshReleasesAll` (usually a synchronous cache hit); on a cold miss a
+    slow LB delayed the ENTIRE menu incl. Settings until `FEED_TIMEOUT` (10s). Added a
+    `TOPLEVEL_ALL_WAIT`(5s) local watchdog + idempotent `$finish` (guard + `killSpecific`): if the
+    feed is slow the menu renders with the drill-tile fallback first, inlined weeks appear next open.
+  - **`_fanFollowers` re-entrancy guard.** With warm-cached per-user stats `$fetch` calls back
+    synchronously, so the completion's `$pump->()` recursed one level per follower (≤FOLLOWER_MAX
+    deep, whole downstream build on that stack). A `$pumping` flag makes a synchronous re-entry a
+    no-op and lets the outer `while` keep launching iteratively — same work, flat stack.
+  - **Dead `$onError` removed from `getRecordingMetadata`/`getReleaseGroupMetadata`.** Both are
+    onDone-ALWAYS (best-effort enrichment: chunk failures fall through to onDone with whatever was
+    gathered, cached soft-hits included). The `$onError` default was never invoked and callers'
+    error subs were dead (onDone already continues the chain) — param + the 5 dead call-site args
+    dropped. No behaviour change.
+
+- **Stale-follower filter (0.9.116).** `_activeFollowers` (reuses `_fanFollowers`) drops followers
+  whose `API::getLatestListenTs` (GET /1/user/<u>/listens?count=1 → `payload.latest_listen_ts`,
+  cached `lbf:lastlisten:1:` 24h; errors NOT cached) is older than `FOLLOWER_STALE_DAYS`(183) —
+  wired into `_resolveTrending` + `_buildAlbumsData` between getFollowing and the stats fan-out.
+  Unknown activity (0) always KEEPS the follower (private feed/transient error can't empty the
+  lists). Bumps: trending resolved `:8:`, albums `:6:`. Tile-label pass was 0.9.115 (covers retitled
+  Trending Tracks/Recommended Tracks via make_covers.py, row texts Weekly/Your Followers, follow
+  tile's matched-count line2 removed; PLUGIN_LBF_FOLLOW_TILE new).
+
+- **Playlist years (0.9.114).** The Created-for-You playlists now show " (YYYY)" — `resolvePlaylist`
+  AND the warm both run `_enrichYears` before `_resolveTracks` (same pass as the follow feed).
+  **`_enrichYears` is now the year GATE:** every enriched track leaves with a `year` KEY (possibly
+  ''), which is what lets `_resolveTracks` apply the item-`_year` fallbacks; un-enriched sources
+  (DSTM pools, unmatched-debug) still have no key → no years (DSTM unaffected). Library items now
+  carry `_year` from the LMS tag year (`_localItemHash` 6th arg, `_titlesSearch` tags `ulay` — the
+  piece parked in 0.9.110; no lbf:track bump needed, library entries live 1d). `lbf:pl:resolved:7:`
+  (years bake into cached names; tiles show no count until the warm/open re-resolve — transient).
+
+- **Yearless metadata = SOFT cache hit (0.9.113) — the poisoned-cache class.** `getRecordingMetadata`
+  and `getReleaseGroupMetadata` cached whatever LB/MB returned for 90d "immutable" — but a missing
+  date is NOT immutable (LB backfills first_release_date; MB RG dates land post-release), so a lag-
+  window fetch pinned `year=''` for 3 months and defeated the whole date ladder (proven live: the
+  server rebuilt through ALL the 0.9.112 code — line-number-fingerprinted — and still served dateless
+  Rennicks/Suede rows while the API returned their dates). Both subs now treat a cached entry without
+  a year as a soft hit (kept as fallback, mbid refetched) and write yearless results at
+  `RECMETA_YEARLESS_TTL` (1d). Self-heals existing poisoned entries — no key bump; dated entries keep
+  90d (no extra traffic in the normal case). Trending resolved key `:7:` (rebake names on install).
+  **Repro/testing lessons:** scratchpad stublib now has STATEFUL Cache (get/set/TTL recorded) + Prefs;
+  `rlib/` overlays REAL curl-backed SimpleAsyncHTTP + REAL JSON::PP `from_json` — the stub's no-op
+  `from_json` produced a false "plugin code broken" repro. Fingerprint the deployed build via the
+  log's `Sub::Name (LINE)` numbers vs the local source.
+
+- **Targeted candidate metadata fill (0.9.112).** The pre-grouping recording→album map is capped at
+  TREND_MAP_CAP(250) by breadth and breadth-1 ties fall outside it ARBITRARILY — a chosen candidate
+  could reach the final 50 with NO metadata (year/rg never fetched; the Stephen Rennicks case — its
+  `first_release_date` existed all along). `_resolveTrending` now runs `$fillMeta` after candidate
+  selection: getRecordingMetadata for exactly the chosen candidates missing year/rg (≤80 mbids,
+  recmeta-cached, 0–2 requests), then `$fillDates` (RG pass, moved into a sub since fillMeta can add
+  rg mbids) → name-search → resolve. Trending resolved key `:6:`.
+
+## People You Follow — 0.9.100–0.9.111 addenda (supplements the 0.9.99 section below)
+
+- **Blocked artists apply to the whole section (0.9.111).** `_trendBlocked($artist,$ambid,$set)`
+  shims a row into the shared `_isBlocked`. Applied BOTH at build (trending candidates +
+  album aggregate — no wasted resolves/gate searches) and at RENDER (`_trendingResult`,
+  `_trendingAlbumsResult`, `_followResult` — immediate effect, the NRFY render-time rule).
+  Resolved items are tagged `_artist`/`_amb` in `_resolveTracks` (like `_created`) so cached
+  lists filter too; keys bumped `lbf:trending:resolved:5:` / `lbf:follow:resolved:5:` to bake
+  the tags (pre-tag cached items pass through unfiltered until re-resolve — deliberate). This
+  is THE answer to unblockable functional-audio uploads ("10 Hours of Ocean Waves…"): they're
+  on streaming (gate keeps them) and NOT in MB (no genre/mood data exists to filter on) — so
+  the user blocks the uploader once from the album's detail page (name-only block works).
+
+- **Service-year fallback (0.9.110) — the LAST date source.** Unmapped-on-LB + absent-from-MB items
+  can still get a date from the STREAMING catalogue: every matched item is tagged `_year` by the six
+  adapters via `_svcYear` (probes Qobuz `release_date_original`/`released_at`, Tidal `releaseDate`,
+  Deezer `release_date` — field names VERIFIED against lms-plugin-tidal/lms-deezer sources; plain
+  scalar, survives `_cacheStream`/track caches). Consumers: `_resolveTracks`' year-append (gated on
+  `exists $tr->{year}` — since 0.9.114 the playlists are enriched too, so the gate now distinguishes
+  enriched lists from DSTM pools rather than keeping playlists dateless) and the albums gate (fills
+  `$a->{year}` from the first match). Date-source ladder is
+  now: LB stats/recording metadata → MB release-group date → MB name-search → **service catalogue**.
+  Bumps: `lbf:stream:19`, `lbf:track:7`, trending resolved `:4:`, albums `:5:`; `lbf:pl:resolved:6:`
+  deliberately NOT bumped (playlists render no years — avoid a pointless 250-track re-match).
+
+- **Streaming gate on Trending Albums (0.9.109).** `_buildAlbumsData` (now takes `$client`) resolves
+  each ranked album via `_findPlayable` (same call + cache as the detail page — gated albums open
+  instantly) and DROPS albums with no streaming match anywhere (Simon: "any without streaming matches
+  should be ignored" — kills 10-hour-noise/off-catalogue rows). Pool = TRENDING_MAX+10 head-room;
+  slots keep rank order; early-stop at 50 kept; conc 5; PLAYLIST_TIMEOUT watchdog. Degrades safely:
+  no client/adapters OR gate-keeps-zero → UNGATED result at PLAYLIST_INCONCLUSIVE_TTL (1h). Key
+  `lbf:trending:albums:4:` now carries the service order.
+- **Collab credits & MB search (0.9.109).** MB fielded artist search returns 0 for a JOINED credit
+  ("Julianna Barwick & Mary Lattimore") while either name alone scores 100 (verified live) — and some
+  collabs are entered in MB as ONE unique artist. `getReleaseGroupByName` tries the full credit, then
+  each collaborator (≤3 terms). **`API::splitArtistCredits` is THE one collab splitter**
+  (& + , ; x vs feat ft featuring with; deliberately NOT bare "and" — real band names);
+  `Browse::_bandcampArtists` (the original 0.9.56 Panda Bear & Sonic Boom fix) now delegates to it.
+  LBF-local, not in the fleet matcher-sync set — but a port candidate for Discography's artist-first
+  fetch if collab discographies ever miss there.
+
+- **Refresh = the shared `_refreshItem` ONLY** (0.9.107). The bespoke `refreshTrending`/`refreshTrendingAlbums`
+  subs (drilled into a new page — no `nextWindow`) are GONE; `_refreshItem` gained `$which` values
+  `trending` (clears `_trendingResolvedKey`) and `trending_albums` (clears `_albumsDataKey($range)`),
+  reloading in place like every other feed. **Rule: never hand-roll a per-feature refresh row.**
+- **Unmapped-listen gap — THE key data lesson (0.9.108).** LB listen-stats rows are only as good as
+  each follower's LISTEN MAPPING: unmapped listens return `release_group_mbid`/`caa_id` = null (the
+  same album can arrive both mapped and unmapped from different followers). NRFY never sees this (its
+  feed is MB-derived). Fixes: `_aggregateAlbums` merges mapped+unmapped rows of one album (two-pass
+  text-key index + per-field `||=` backfill); rows still mbid-less after aggregation are resolved via
+  **`API::getReleaseGroupByName`** (fielded ws/2 release-group search, `_mbBase()` mirror-aware,
+  score≥90, mirror-0-results→public retry, cache `lbf:rgbyname:1:` 30d/1d) → mbid+date+type;
+  artwork falls back to `coverartarchive.org/release-group/<mbid>/front-250` when there's no
+  caa_release_mbid; Weekly Tracks candidates missing a year get the same name-lookup (bounded 25/build).
+  Track years also read `recording.first_release_date` (0.9.107 — the `release` object in LB recording
+  metadata is often EMPTY).
+- **Trending Albums sort (0.9.108):** NRFY-style Options section on both album lists —
+  `_trendingSortToggle`, durable `trending_sort` pref shared by month/year, modes
+  Trending (breadth, default) / Release Date / Artist / Album Title, `nextWindow=>'refresh'`.
+- **Cache keys current:** `lbf:trending:resolved:3:`, `lbf:trending:albums:3:` (bump BOTH the shape
+  and the baked-name layers when year/date sources change — the 0.9.106 miss), `lbf:recmeta:2:`,
+  `lbf:rgmeta:1:`, `lbf:rgbyname:1:`.
+
+## People You Follow — Trending (0.9.99)
+
+A new top-level **"People You Follow"** browse section (`Browse::topLevel`) built from what the
+users you follow **actually PLAY** (public listen-stats) — distinct from *Recommended by People You
+Follow* (the social FEED). The Recommended tile is **relocated into this section**. Gated on
+**`username` only** (all endpoints public — no token).
+
+- **API** (`API.pm`): `getFollowing` (`GET /1/user/<u>/following` → bare username strings, cached
+  `lbf:following:` 12h); `getUserTopRecordings`/`getUserTopReleaseGroups` (shared `_getUserStats` →
+  `GET /1/stats/user/<u>/{recordings,release-groups}?range=…` — **`release-groups` is HYPHEN, NO
+  trailing slash**; **204 = empty/private**, cached-empty, never an error; per-user cache
+  `lbf:userstats:{rec,rg}:<range>:<user>` 24h ≈ LB's recompute cadence). `getRecordingMetadata`
+  extended to `inc=artist release` so it returns `release_group_mbid` (the track→album join,
+  editions collapsed) — additive, older callers unaffected.
+- **What's Trending (this week)** — a Play-all playlist tile (`_trendingTile` → `resolveTrending` →
+  `_resolveTrending`). Fans out each follower's weekly top recordings (`_fanFollowers`, bounded
+  `FOLLOWER_FANOUT`=6, `FOLLOWER_MAX`=250 cap, `FANOUT_DEADLINE`=30s watchdog so a slow LB never
+  hangs the browse), maps recordings→albums, then `_buildTrendingCandidates` ranks. **Ranking is
+  one-follower-one-vote / equal weight:** every signal is *distinct-follower breadth*, never play
+  volume — a repeat/heavy or single-track-spammer listener counts once per album. Trends at the
+  **release-group (album)** level and represents each album by its **highest-follower-breadth
+  track** (so a full-album play doesn't flood the list; singles/EPs are 1-track albums). Candidates
+  ordered unique-artist-first then repeats (lean-week fallback), owned tracks dropped via
+  `_resolveTracks(…, 'exclude')`, capped `TRENDING_MAX`=50. Resolved cache
+  `lbf:trending:resolved:1:<user>|<svc-order>` (`TREND_RESOLVED_TTL` 24h; svc-order re-keys on a
+  service change; refreshed by the daily warm). **LESSON:** never name a lexical `my $a`/`$b` in a
+  scope containing a `sort` block — it shadows sort's package `$a`/`$b` and silently broke the
+  representative-track pick (caught by a unit test, `tools/` prototype below).
+- **Trending Albums · This Month / This Year** — two browse lists (`_trendingAlbumsTile` →
+  `resolveTrendingAlbums` → `_buildAlbumsData`/`_aggregateAlbums`), same breadth ranking straight
+  from `release-groups` stats (`range=this_month`/`this_year`). **Show-all** (owned NOT filtered —
+  trending is about popularity). Rows (`_trendingAlbumRow`) reuse `_releaseDetail`, which resolves an
+  album to streaming from just its `release_group_mbid` (no tracklist needed) — so no pre-resolution;
+  each album resolves on tap like a fresh release. Ranked aggregate cached `lbf:trending:albums:1:…`
+  (`TREND_ALBUMS_TTL` 6h; plain hashes only — rows with their coderef `url` are rebuilt each open).
+- **Warm**: `_warmTrending` (chained in `warmCache` after `_warmFollow`) pre-resolves the tracks
+  list (needs a player) and pre-builds both album aggregates (no player needed).
+- **Covers**: `menu-trending.png` (FIRE) + `menu-trending-albums.png` (MAGENTA) via
+  `tools/make_covers.py`. **Debug/prototype tool**: `tools/fetch_trending.py` implements the identical
+  breadth algorithm against the live public API (username [range] [max]) — the reference for the
+  aggregation, runnable without LMS.
 
 ## Recommended by People You Follow (0.9.65; **new-music-only + single day-divided list in 0.9.71–0.9.72**)
 
@@ -653,6 +886,7 @@ belongs in `handler`, before `SUPER::handler`. Fleet-wide rule — LBF, PFR and 
   - Feeds are always fetched with `sort=release_date` (stable cache key); all ordering is client-side (`_sortReleases` pre-sorts by date for week-bucketing, `_sortWithin` applies the per-view mode within each week). `group_by_artist`'s collapse was effectively dead anyway (the weekly branch always outranked it) — see the 0.9.97 changelog.
   - **Artist sort keys on the MusicBrainz sort-name** ("White, Jack"; a stage name like "Panda Bear" keeps its natural order), not the display credit. The LB feed sends only the display credit, so the sort-name comes from MB by artist MBID: `API::warmArtistSorts(\@mbids)` fetches `artist/<mbid>` → `sort-name` serially (MB courtesy gap on public, none on a mirror; capped `SORT_WARM_MAX`=100/pass, in-flight-guarded), cached `lbf:artistsort:1:<mbid>` (30d found / 1d none); `API::peekArtistSort($mbid)` is the sync render-path read. `Browse::_artistSortKey` = `artist_sort_name` (MuSpy supplies it inline) → `peekArtistSort` → display credit. The warm fires **only from the Artist-sort code paths** (`_warmArtistSorts`, gated on `$mode eq 'artist'` in `fetchForYou` and the All-Releases week coderef), so a user who never picks Artist sort triggers no MB traffic; a cold artist sorts by display credit on the first Artist-sorted render and corrects on re-entry (second-load, like bios/emblems).
 - `play_via` — show inline playable streaming matches on the detail page (default ON)
+- `people_follow` — master on/off for the whole **People You Follow** browse section (What's Trending, both Trending Albums lists, Recommended); default ON (0.9.118). When off the section is absent AND its warm pre-build + unmatched-debug entry are skipped, so nothing there is fetched/cached/warmed
 - `follow_sort` — People You Follow list ordering: `date` (day dividers, newest first) or `recommender` (grouped by the follower who recommended each track); default `date`. Flipped in place by the inline toggle at the top of that list, not shown on the settings page (0.9.88; toggle label made state+hint "Sorted by … (tap for …)" in 0.9.91)
 - `prefer_library` — when building a Created-for-You playlist, use a track from the user's own LMS library (matched by MusicBrainz ID, then artist + title) before searching streaming services (default ON; see "Prefer local library")
 - `debug_log` — opt-in dedicated warm/resolve debug log (default OFF, 0.9.54). When on, `Plugin::dbg` appends the playlist warm/match timeline — incl. the per-playlist **library-match count** and scan-defers — to `lbf-debug.log` in the LMS log dir (`Slim::Utils::OSDetect::dirsFor('log')`, cachedir fallback), size-capped ~1 MB with one `.old` rotation. The same lines always also go to `server.log` at INFO. Turn on to diagnose a match/caching problem, off after.
@@ -664,7 +898,7 @@ Grouped separately from the ListenBrainz prefs so the two aren't confused. All t
 - `muspy_future_months` — how far ahead the MuSpy upcoming side reaches (1-24 months, default 12; 0.9.80). Kept separate from the LB feed's narrow `days` window; `_mergeMuSpy` caps the future side at `months * 30` days, clamped by `MUSPY_FUTURE_MONTHS_DEFAULT`/`_MAX` so a garbage pref can't blow the window open. Only applies when `muspy_future` is on
 
 ### Blocked Artists Settings
-- `blocked_artists` — arrayref of `{ mbid, name }`. Releases by these artists are hidden from EVERY feed (For You / All Releases / home shelves) by `Browse::_filterSection` → `_isBlocked` (matches any blocked `artist_mbids` OR normalised credit name). No ListenBrainz API exists for this — the `fresh_releases` endpoint takes only date/sort params and the feedback API is per-recording (love/hate, `score 1/-1`) and isn't consumed by the feed — so it's a purely local, render-time filter (takes effect on next browse; no feed-cache clear). Added from a release detail page's **"Block this artist"** link (`Browse::_blockArtist`); VA is never offered (would hide unrelated compilations). The settings section lists each blocked artist with an Unblock checkbox (`lbf_unblock_<i>`); `Settings::handler` removes ticked entries on save (the pref is NOT in the `prefs()` list, so it's mutated directly).
+- `blocked_artists` — arrayref of `{ mbid, name }`. Releases by these artists are hidden from EVERY feed (For You / All Releases / home shelves via `Browse::_filterSection`, and since 0.9.111 the whole People You Follow section via `_trendBlocked`) by `_isBlocked` (matches any blocked `artist_mbids` OR normalised credit name). No ListenBrainz API exists for this — the `fresh_releases` endpoint takes only date/sort params and the feedback API is per-recording (love/hate, `score 1/-1`) and isn't consumed by the feed — so it's a purely local, render-time filter (takes effect on next browse; no feed-cache clear). Added from a release detail page's **"Block this artist"** link (`Browse::_blockArtist`); VA is never offered (would hide unrelated compilations). The settings section lists each blocked artist with an Unblock checkbox (`lbf_unblock_<i>`); `Settings::handler` removes ticked entries on save (the pref is NOT in the `prefs()` list, so it's mutated directly).
 
 ### Streaming Services Settings
 - `svc_priority_<qobuz|bandcamp|tidal>` — search priority per service (number 0–9; lower = searched first, **0 = never search it**). Search stops at the first service that matches. Drives BOTH album play-via and playlist track matching. The page lists each known service as detected/not installed via `Browse::serviceStatus`.

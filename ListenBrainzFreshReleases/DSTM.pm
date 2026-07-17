@@ -417,11 +417,18 @@ sub _recommendedFill {
                     my $m = $meta->{$mbid} or next;
                     push @pool, { recording_mbid => $mbid, artist => $m->{artist}, title => $m->{title} };
                 }
-                eval { $cache->set($key, \@pool, RECS_TTL); 1 }
-                    or $log->warn("DSTM recs pool cache set failed: $@");
+                # Only persist a NON-EMPTY pool. getRecordingMetadata is onDone-always
+                # (best-effort — a transient metadata outage resolves onDone with {}),
+                # so an empty @pool here can be a failure, not a genuine "no recs". Caching
+                # it for RECS_TTL(1d) would pin DSTM to zero recommendations for a day (the
+                # poisoned-cache class). Serve what we have; let an empty result retry.
+                if (@pool) {
+                    eval { $cache->set($key, \@pool, RECS_TTL); 1 }
+                        or $log->warn("DSTM recs pool cache set failed: $@");
+                }
                 $log->info("DSTM recommended pool: " . scalar(@pool) . " of " . scalar(@$ids));
                 $serve->(\@pool);
-            }, sub { $cb->($client, []) });
+            });   # getRecordingMetadata is onDone-always (no onError arg)
         },
         onError => sub { $log->warn("DSTM recs fetch failed: " . (shift // '')); $cb->($client, []); },
     );

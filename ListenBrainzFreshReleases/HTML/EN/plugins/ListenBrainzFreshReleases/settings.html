@@ -27,6 +27,10 @@
 <input type="checkbox" name="pref_play_via" value="1" [% IF prefs.play_via %]checked="checked"[% END %]>
 [% END %]
 
+[% WRAPPER setting title="PLUGIN_LBF_PEOPLE_FOLLOW_SETTING" desc="PLUGIN_LBF_PEOPLE_FOLLOW_SETTING_DESC" %]
+<input type="checkbox" name="pref_people_follow" value="1" [% IF prefs.people_follow %]checked="checked"[% END %]>
+[% END %]
+
 [% WRAPPER setting title="PLUGIN_LBF_PREFER_LIBRARY" desc="PLUGIN_LBF_PREFER_LIBRARY_DESC" %]
 <input type="checkbox" name="pref_prefer_library" value="1" [% IF prefs.prefer_library %]checked="checked"[% END %]>
 [% END %]

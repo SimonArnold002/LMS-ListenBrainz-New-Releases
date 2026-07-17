@@ -53,6 +53,13 @@ $prefs->init({
     foryou_sort          => 'release_date',
     all_sort             => 'release_date',
     play_via             => 1,
+    # Master on/off for the whole "People You Follow" browse section (trending
+    # tracks + both trending-albums lists + the Recommended list). Default ON
+    # (preserves existing behaviour — the pref is new, so this default applies to
+    # every install on update). When OFF the section, its warm pre-build and its
+    # unmatched-debug entry are ALL skipped — no following/stats/feed calls, no
+    # caching, no warming for it at all.
+    people_follow        => 1,
     # People You Follow list ordering: 'date' (day dividers, newest first) or
     # 'recommender' (grouped by the follower who recommended each track). Flipped
     # in place by the inline toggle at the top of that list.

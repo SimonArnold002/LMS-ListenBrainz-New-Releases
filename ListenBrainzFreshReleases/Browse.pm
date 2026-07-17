@@ -4,6 +4,7 @@ use strict;
 use warnings;
 
 use Time::Local ();
+use Time::HiRes ();
 use Digest::MD5 ();
 
 use Slim::Utils::Log;
@@ -107,6 +108,12 @@ use constant PLAYLIST_CONCURRENCY => 6;
 # Overall watchdog for resolving a playlist, so a hung service search can't leave
 # the playlist page spinning forever.
 use constant PLAYLIST_TIMEOUT => 45;
+# The top-level menu inlines the All Releases weeks from an async feed fetch (usually a
+# cache hit → synchronous). On a cold miss a slow ListenBrainz would otherwise hold the
+# WHOLE menu (Created for You, People You Follow AND Settings) until the feed's own 10s
+# timeout. This local watchdog renders the menu with the drill-tile fallback first if the
+# fetch hasn't returned quickly, so navigation (esp. Settings) never waits on the network.
+use constant TOPLEVEL_ALL_WAIT => 5;
 
 # "Recommended by People You Follow" is ONE new-music list (owned tracks excluded),
 # newest-first, with day dividers in the opened view. The source recs are accumulated
@@ -124,6 +131,36 @@ use constant FOLLOW_STORE_TTL => 30 * 86400;
 # up to; 0 = never (baselined on first list render to the newest rec then).
 use constant FOLLOW_SEEN_PREF => 'follow_last_seen';
 
+# "People You Follow → Trending" — top PLAYED tracks/albums of the users you follow,
+# ranked by one-follower-one-vote breadth (see _buildTrendingCandidates). Tracks:
+# fan out each follower's weekly top recordings, group to albums, pick a
+# representative track per album, exclude owned, cap at TRENDING_MAX. Albums lists:
+# aggregate weekly/monthly/yearly top release-groups by the same breadth.
+use constant TRENDING_MAX        => 50;    # final playlist cap (owned already excluded)
+use constant TRENDING_CANDIDATES => 80;    # ranked candidates fed to resolve — enough head-room for
+                                           # owned/unmatched attrition without streaming a big wasted tail
+use constant TRENDING_RANGE      => 'week';# rolling last 7 days — "what they're all playing this week"
+use constant TRENDING_PER_USER   => 60;    # equal per-follower cap (a heavy listener can't dominate);
+                                           # 60 covers a week's real listening, less metadata/aggregation work
+use constant TREND_MAP_CAP       => 250;   # map only the top-breadth recordings to albums — a big library
+                                           # of distinct one-off plays can't trigger dozens of metadata calls
+use constant TREND_RESOLVE_CONC  => 10;    # streaming-resolve parallelism for trending (> the playlist
+                                           # default; the cold build's dominant cost is the per-track search)
+use constant FOLLOWER_FANOUT     => 10;    # concurrent per-follower stat fetches (LB stats endpoint is
+                                           # cheap — safe to parallelise more than the streaming resolve)
+use constant FOLLOWER_MAX        => 250;   # cap the fan-out (and bound the async pump depth)
+use constant FANOUT_DEADLINE     => 30;    # proceed with partial data if the fan-out drags (never hang the browse)
+use constant FOLLOWER_STALE_DAYS => 183;   # drop followers with no listen in ~6 months from the trending builds —
+                                           # a user who quit the service keeps seeding This Year with old plays
+                                           # otherwise (week/month self-clean; the year window doesn't)
+# Refresh cadence scales with the window each feed summarises — the data (LB
+# listen-stats) only recomputes ~daily, and a month/year of trending barely moves.
+# The album caches are also keyed by the current month/year (see _albumsDataKey), so
+# a calendar rollover rebuilds immediately regardless of TTL.
+use constant TREND_RESOLVED_TTL     => 2 * 86400;   # Weekly Tracks — rebuilt ~every 2 days
+use constant TREND_ALBUMS_MONTH_TTL => 7 * 86400;   # Trending Albums · This Month — weekly
+use constant TREND_ALBUMS_YEAR_TTL  => 30 * 86400;  # Trending Albums · This Year — monthly
+
 use constant ICON => 'plugins/ListenBrainzFreshReleases/html/images/ListenBrainzFreshReleasesIcon_svg.png';
 
 # Branded cover-style images for the top-level menu rows (same look as the
@@ -135,6 +172,9 @@ use constant MENU_NEW      => IMG_BASE . 'menu-new-releases.png';
 use constant MENU_PLAYLISTS=> IMG_BASE . 'menu-playlists.png';
 use constant MENU_ALL      => IMG_BASE . 'menu-all-releases.png';
 use constant MENU_FOLLOW   => IMG_BASE . 'menu-follow.png';
+use constant MENU_TRENDING => IMG_BASE . 'menu-trending.png';
+use constant MENU_TRENDING_ALB => IMG_BASE . 'menu-trending-albums.png';        # This Month
+use constant MENU_TRENDING_ALB_YEAR => IMG_BASE . 'menu-trending-albums-year.png';  # This Year (distinct colour)
 use constant MENU_COG      => IMG_BASE . 'lbf-cog_MTL_icon_settings.png';
 use constant MENU_REFRESH  => IMG_BASE . 'lbf-refresh_MTL_icon_refresh.png';
 use constant MENU_SORT     => IMG_BASE . 'lbf-sort_MTL_icon_sort.png';
@@ -185,11 +225,22 @@ sub topLevel {
 
     my @createdFor = ($newReleases);
     push @createdFor, _playlistsTile($client, $feat) if $username;
-    # "Recommended by People You Follow" — a single playable playlist built from
-    # the social feed. The feed endpoint is private, so it needs username + token.
-    push @createdFor, _followTile($client, $feat) if $username && $token;
 
-    my @allReleases = ( _categoryTile($client, 'all', MENU_ALL, \&fetchAll, $feat) );
+    # "People You Follow" — features driven by what the users you follow actually
+    # PLAY (public listen-stats) and recommend. What's Trending + the two Trending
+    # Albums lists need a username only (public endpoints); the Recommended list
+    # (relocated here from Created for You) reads the private social feed, so it
+    # also needs a token.
+    # Master switch (default on): when off, the whole section is absent AND its warm
+    # pre-build + unmatched-debug entry are skipped, so nothing here is fetched, cached
+    # or warmed (the tiles' resolve coderefs are the only entry points and never render).
+    my @people;
+    if ($username && $prefs->get('people_follow')) {
+        push @people, _trendingTile($client, $feat);
+        push @people, _trendingAlbumsTile($client, 'this_month', $feat);
+        push @people, _trendingAlbumsTile($client, 'this_year',  $feat);
+        push @people, _followTile($client, $feat) if $token;
+    }
 
     my @settings = ({
         name => cstring($client, 'PLUGIN_LBF_SETTINGS'), type => 'link',
@@ -205,14 +256,53 @@ sub topLevel {
     } if $username;
 
     # --- assemble with Material section headers --------------------------
-    my @items;
-    push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_CREATED_FOR_YOU', $useH, \@createdFor), @createdFor;
-    push @items, _sectionHeader($client, 'PLUGIN_LBF_ALL_RELEASES',           $useH, \@allReleases), @allReleases;
-    push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_SETTINGS',       $useH, \@settings),    @settings;
+    # The static sections build synchronously; the All Releases weeks are fetched and
+    # inlined DIRECTLY under their header (no intermediate tile/folder). The feed is
+    # cached (24h) + warm-fetched, so this is usually instant; on a cold miss it costs
+    # one fetch, and on error we fall back to the old drill tile so the menu still works.
+    my @head;
+    push @head, _sectionHeader($client, 'PLUGIN_LBF_SECTION_CREATED_FOR_YOU', $useH, \@createdFor), @createdFor;
+    push @head, _sectionHeader($client, 'PLUGIN_LBF_SECTION_PEOPLE', $useH, \@people), @people if @people;
 
-    # cachetime => 0 so Material doesn't cache the top menu per-player — keeps the
-    # date-span tiles in step with the weekly rollover (same rationale as the feeds).
-    $callback->({ items => \@items, cachetime => 0 });
+    my ($finished, $watchdog);
+    my $finish = sub {
+        my ($allRows) = @_;
+        return if $finished;   # idempotent: whichever of feed / fallback / watchdog wins renders once
+        $finished = 1;
+        Slim::Utils::Timers::killSpecific($watchdog) if $watchdog;
+        my @items = @head;
+        push @items, _sectionHeader($client, 'PLUGIN_LBF_ALL_RELEASES', $useH, $allRows), @$allRows;
+        push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_SETTINGS', $useH, \@settings), @settings;
+        # cachetime => 0 so Material doesn't cache the top menu per-player — keeps the
+        # inlined weeks in step with the weekly rollover (same rationale as the feeds).
+        $callback->({ items => \@items, cachetime => 0 });
+    };
+
+    # If the feed fetch is slow (cold cache), render the menu with the drill-tile fallback
+    # so Settings et al. aren't held hostage to the network; the inlined weeks then appear
+    # on the next open (the feed populates its own cache meanwhile).
+    $watchdog = Slim::Utils::Timers::setTimer(undef, time() + TOPLEVEL_ALL_WAIT, sub {
+        $finish->([ _categoryTile($client, 'all', MENU_ALL, \&fetchAll, $feat) ]);
+    });
+
+    Plugins::ListenBrainzFreshReleases::API->getFreshReleasesAll(
+        sort   => 'release_date',
+        past   => $prefs->get('all_past')   // 1,
+        future => $prefs->get('all_future') // 0,
+        days   => $prefs->get('days')       // 14,
+        onDone => sub {
+            my $releases = _sortReleases(_filterAll(shift));
+            _stashSummary('all', $releases);
+            # No inline Refresh row at the top level (it's cluttered there); All Releases
+            # refreshes on its own 24h cadence, and each week drill has its own controls.
+            $finish->([ @{ _buildAllLanding($releases, $client, $useH) } ]);
+        },
+        onError => sub {
+            $log->error("top-level All Releases fetch error: " . (shift // ''));
+            # Fall back to the drill tile so the section still works.
+            $finish->([ _categoryTile($client, 'all', MENU_ALL, \&fetchAll, $feat) ]);
+        },
+    );
 }
 
 # Which header item-type to emit for a header-capable (Material) client.
@@ -522,23 +612,40 @@ sub fetchAll {
     );
 }
 
-# A "Refresh" row for the feed lists. The feeds cache for a day; tapping this
-# clears that feed's working cache key (API::clearFeedCache) and reloads the list
-# in place via nextWindow 'refresh' (same mechanism as the detail-page streaming
-# refresh), so the next render cache-misses and re-fetches fresh data. $which is
-# 'user' (New Releases for You) or 'all' (All Releases).
+# A "Refresh" row for the feed lists — ONE builder shared by EVERY section (the
+# rule the People You Follow feeds must follow too). The feeds cache; tapping this
+# clears that feed's working cache key and reloads the list IN PLACE via nextWindow
+# 'refresh' (same mechanism as the detail-page streaming refresh), so the next
+# render cache-misses and re-fetches fresh data. $which selects which cache to drop:
+#   'user'  — New Releases for You feed   (API::clearFeedCache)
+#   'all'   — All Releases feed           (API::clearFeedCache)
+#   'trending'        — Weekly Tracks resolved list   (lbf:trending:resolved)
+#   'trending_albums' — a Trending Albums aggregate    (lbf:trending:albums, per $range)
+# The trending caches live in Browse.pm (keyed by user/service-order/period), so
+# they're dropped here directly; the parent level (resolveTrending /
+# resolveTrendingAlbums) then re-walks, cache-misses, and rebuilds in place — exactly
+# like For You / All Releases. $range is only needed for 'trending_albums'.
 sub _refreshItem {
-    my ($client, $which) = @_;
+    my ($client, $which, $range) = @_;
     return {
         name        => cstring($client, 'PLUGIN_LBF_REFRESH_FEED'),
         type        => 'link',
         image       => MENU_REFRESH,
         nextWindow  => 'refresh',
-        passthrough => [{ which => $which }],
+        passthrough => [{ which => $which, range => $range }],
         url         => sub {
             my ($c, $cb, $a, $pass) = @_;
             my $w = (ref $pass eq 'HASH' && $pass->{which}) ? $pass->{which} : 'user';
-            Plugins::ListenBrainzFreshReleases::API->clearFeedCache($w);
+            if ($w eq 'trending') {
+                $cache->remove(_trendingResolvedKey());
+            }
+            elsif ($w eq 'trending_albums') {
+                my $r = (ref $pass eq 'HASH' && $pass->{range}) ? $pass->{range} : 'this_month';
+                $cache->remove(_albumsDataKey($r, $prefs->get('username') // ''));
+            }
+            else {
+                Plugins::ListenBrainzFreshReleases::API->clearFeedCache($w);
+            }
             $cb->({ items => [] });
         },
     };
@@ -628,7 +735,7 @@ sub _playlistTile {
     my $matched = '';
     my @adapters = _orderedAdapters();
     my $svcOrder = join(',', map { lc $_->{name} } @adapters);
-    my $rkey = 'lbf:pl:resolved:6:' . join('|', ($pl->{mbid} // ''), $lastMod, $svcOrder);
+    my $rkey = 'lbf:pl:resolved:7:' . join('|', ($pl->{mbid} // ''), $lastMod, $svcOrder);
     if (my $c = $cache->get($rkey)) {
         # Count only tracks whose service is still usable, so the tile agrees with
         # the count shown when the playlist is opened (_playlistResult applies the
@@ -696,7 +803,7 @@ sub resolvePlaylist {
 
     # Key includes the service order so changing priorities re-resolves.
     my $svcOrder = join(',', map { lc $_->{name} } _orderedAdapters());
-    my $rkey = 'lbf:pl:resolved:6:' . join('|', $mbid, ($lastMod // ''), $svcOrder);
+    my $rkey = 'lbf:pl:resolved:7:' . join('|', $mbid, ($lastMod // ''), $svcOrder);
 
     my $title = ref $pass eq 'HASH' ? $pass->{title} : undef;
 
@@ -716,6 +823,10 @@ sub resolvePlaylist {
                 return;
             }
 
+            # Enrich with release years first (same pass as the follow feed), so the
+            # rows show " (YYYY)" like the rest of the plugin — one cached, chunked
+            # metadata call; the resolve then bakes the year into each item name.
+            _enrichYears($tracks, sub {
             _resolveTracks($client, $tracks, sub {
                 my ($items, $inconclusive) = @_;
                 $items //= [];
@@ -727,6 +838,7 @@ sub resolvePlaylist {
                 _dbg("resolved playlist $mbid: $payload->{matched}/$payload->{total} matched ($lib library)"
                     . ($inconclusive ? " ($inconclusive inconclusive — short TTL)" : ""));
                 $callback->(_playlistResult($client, $payload, $title));
+            });
             });
         },
         sub {
@@ -799,7 +911,9 @@ sub _mergeFollow {
 sub _followResolvedKey {
     my $user     = $prefs->get('username') // '';
     my $svcOrder = join(',', map { lc $_->{name} } _orderedAdapters());
-    return 'lbf:follow:resolved:4:' . join('|', $user, $svcOrder);
+    # :4:->:5: (0.9.111) — items now carry _artist/_amb so the blocked-artists
+    # filter applies to this list too; one re-resolve bakes the tags in.
+    return 'lbf:follow:resolved:5:' . join('|', $user, $svcOrder);
 }
 
 # A stable, order-sensitive signature of a week's track set, so a cached resolve is
@@ -815,23 +929,15 @@ sub _followSig {
     return Digest::MD5::md5_hex($s);
 }
 
-# The "People You Follow" tile: a playable container (Play/Add queues the whole list)
-# that also drills into the day-divided view. Match count (from the resolved cache the
-# warm populates) sits on line2, filtered to services still usable.
+# The Recommended tile ("Recommended Tracks" cover): a playable container (Play/Add
+# queues the whole list) that drills into the day-divided view. Row text = "Your
+# Followers" — names the source; the matched-count line2 was dropped (0.9.115, not
+# needed on the tile — the opened page title still carries matched/total).
 sub _followTile {
     my ($client, $feat) = @_;
 
-    my @adapters = _orderedAdapters();
-    my $matched  = '';
-    if (my $c = $cache->get(_followResolvedKey())) {
-        my $enabled = { map { lc($_->{name}) => 1 } @adapters };
-        my $usable  = grep { _cachedSvcUsable($_->{_svc}, $enabled) } @{ $c->{items} || [] };
-        $matched = sprintf(cstring($client, 'PLUGIN_LBF_PL_MATCHED'), $usable, $c->{total});
-    }
-
     return {
-        name        => cstring($client, 'PLUGIN_LBF_FOLLOW_FEED'),
-        ($matched ne '' ? (line2 => $matched) : ()),
+        name        => cstring($client, 'PLUGIN_LBF_FOLLOW_TILE'),
         type        => 'playlist',
         image       => MENU_FOLLOW,
         url         => \&resolveFollowFeed,
@@ -881,8 +987,9 @@ sub _resolveFollow {
     }
 
     # On the open path with no player, still resolve-and-report (don't hang the browse
-    # level); the warm guards $client before calling here.
-
+    # level); the warm guards $client before calling here. Enrich the recs with their
+    # release year first (shown in the list, like New Releases), then resolve.
+    _enrichYears($tracks, sub {
     _resolveTracks($client, $tracks, sub {
         my ($items, $inconclusive, $unmatched, $owned) = @_;
         $items //= [];
@@ -897,6 +1004,44 @@ sub _resolveFollow {
             . ($inconclusive ? " ($inconclusive inconclusive — short TTL)" : ""));
         $callback->(_followResult($client, $payload, $feat)) if $callback;
     }, 'exclude', $force);
+    });
+}
+
+# Enrich track hashes IN PLACE with their release `year` (from the recording
+# metadata), for any that carry a recording_mbid and don't already have one. Used
+# by the follow list AND (since 0.9.114) the Created-for-You playlists, so their
+# rows show the year like New Releases. Every track leaves with a `year` KEY
+# (possibly '') — that key is the gate that lets _resolveTracks apply the
+# remaining date fallbacks (the matched item's service `_year`, a library
+# track's own tag year) to enriched lists, while un-enriched sources (DSTM
+# pools) stay untouched. Always calls $onDone (even on no-op / fetch failure)
+# so the caller's flow continues.
+sub _enrichYears {
+    my ($tracks, $onDone) = @_;
+    my $finish = sub {
+        $_->{year} //= '' for @$tracks;   # open the year gate for this list
+        $onDone->();
+    };
+    my (%seen, @mbids);
+    for my $t (@$tracks) {
+        next if defined $t->{year} && length $t->{year};
+        my $m = $t->{recording_mbid} || '';
+        push @mbids, $m if $m && !$seen{$m}++;
+    }
+    unless (@mbids) { $finish->(); return; }
+
+    Plugins::ListenBrainzFreshReleases::API->getRecordingMetadata(\@mbids, sub {
+        my ($meta) = @_;
+        if (ref $meta eq 'HASH') {
+            for my $t (@$tracks) {
+                next if defined $t->{year} && length $t->{year};
+                my $m = $t->{recording_mbid} || '' or next;
+                my $e = $meta->{$m} or next;
+                $t->{year} = $e->{year} if $e->{year};
+            }
+        }
+        $finish->();
+    });   # getRecordingMetadata is onDone-always (best-effort enrichment)
 }
 
 # Build the follow browse level: the owned-excluded matched tracks, newest-first, with a
@@ -909,6 +1054,11 @@ sub _followResult {
 
     my $enabled = { map { lc($_->{name}) => 1 } _orderedAdapters() };
     my @tracks  = grep { _cachedSvcUsable($_->{_svc}, $enabled) } @{ $payload->{items} || [] };
+    # Blocked artists drop here too (the whole People You Follow section honours
+    # the same blocklist as For You / All Releases). Pre-tag cached items (no
+    # _artist) pass through until their next re-resolve.
+    my $blkF = _blockedSet();
+    @tracks = grep { !_trendBlocked($_->{_artist}, $_->{_amb}, $blkF) } @tracks;
     my $matched = scalar @tracks;
     my $total   = $payload->{total} // $matched;
 
@@ -1111,6 +1261,885 @@ sub _warmFollow {
 }
 
 # ===========================================================================
+# People You Follow — TRENDING (top PLAYED tracks/albums of the users you follow).
+# One-follower-one-vote / equal weight: every ranking signal is "how many DISTINCT
+# followers", never play volume, so a heavy listener (or someone hammering one
+# track) counts once per album — "what are they ALL listening to". Tracks trend at
+# the ALBUM level (release-group) so a full-album play doesn't flood the list with
+# its tracks; each album is represented by the one track the circle converges on.
+# Singles/EPs are 1-track albums, captured the same way. Public endpoints → needs a
+# username only. See tools/fetch_trending.py for the same algorithm, live.
+# ===========================================================================
+
+# Bounded-concurrency async fan-out over followers: $fetch->($user, $cb) per user
+# (each $cb->($rows)); when all are in, $onAll->({ user => rows }). Per-user stats
+# are cached, so a warm-populated run may call back synchronously — the followers
+# list is capped (FOLLOWER_MAX) by the caller so the pump can't recurse too deep.
+sub _fanFollowers {
+    my ($users, $fetch, $onAll) = @_;
+    my $total = scalar @$users;
+    unless ($total) { $onAll->({}); return; }
+
+    my %result;
+    my @queue = @$users;
+    my ($active, $done, $fin) = (0, 0, 0);
+
+    # Overall deadline: proceed with whatever's collected rather than hanging the
+    # browse if some followers' stats are slow/unreachable (late callbacks no-op).
+    my $watchdog;
+    my $finish = sub {
+        return if $fin;
+        $fin = 1;
+        Slim::Utils::Timers::killSpecific($watchdog) if $watchdog;
+        $onAll->(\%result);
+    };
+    $watchdog = Slim::Utils::Timers::setTimer(undef, time() + FANOUT_DEADLINE, sub { $finish->() });
+
+    my $pumping = 0;
+    my $pump;
+    $pump = sub {
+        return if $fin;
+        # Re-entrancy guard: with per-user stats cached (warm run), $fetch calls back
+        # SYNCHRONOUSLY, so the completion's $pump->() would recurse one level per follower
+        # (a ~FOLLOWER_MAX-deep stack, with the whole downstream build running on it). The
+        # guard makes a synchronous re-entry a no-op and lets the outer while loop keep
+        # launching iteratively instead — same work, flat stack.
+        return if $pumping;
+        $pumping = 1;
+        while ($active < FOLLOWER_FANOUT && @queue) {
+            my $u = shift @queue;
+            $active++;
+            $fetch->($u, sub {
+                return if $fin;
+                $result{$u} = shift || [];
+                $active--; $done++;
+                ($done >= $total) ? $finish->() : $pump->();
+            });
+        }
+        $pumping = 0;
+    };
+    $pump->();
+}
+
+# Filter the followed users down to the ACTIVE ones before a trending build:
+# anyone whose latest listen (API::getLatestListenTs, per-user cached 1d) is older
+# than FOLLOWER_STALE_DAYS is dropped, so a user who stopped using ListenBrainz
+# can't keep seeding the aggregates (This Year especially — the week/month stats
+# self-clean, a year of history doesn't). UNKNOWN activity (0 — private feed,
+# transient error, brand-new account) KEEPS the follower: only an affirmative
+# "last listen was months ago" drops anyone, and an all-unknown outage degrades
+# to today's behaviour. Reuses _fanFollowers (bounded concurrency + deadline).
+sub _activeFollowers {
+    my ($followers, $onDone, $force) = @_;
+    unless (@{ $followers || [] }) { $onDone->($followers || []); return; }
+    _fanFollowers($followers,
+        sub {
+            my ($u, $cb) = @_;
+            Plugins::ListenBrainzFreshReleases::API->getLatestListenTs($u, $cb, force => $force);
+        },
+        sub {
+            my ($ts) = @_;
+            my $cutoff = time() - FOLLOWER_STALE_DAYS * 86400;
+            my (@active, @stale);
+            for my $u (@$followers) {
+                my $t = $ts->{$u};
+                $t = 0 if ref $t;   # _fanFollowers turns a 0/undef result into []
+                if ($t && $t < $cutoff) { push @stale, $u; }
+                else                    { push @active, $u; }
+            }
+            _dbg("trending: dropped " . scalar(@stale) . " stale follower(s): @stale") if @stale;
+            $onDone->(\@active);
+        });
+}
+
+# Blocked-artists test for a People You Follow row (aggregate album / candidate /
+# resolved-item tags): shape it like a release and reuse the shared _isBlocked,
+# so "Block this artist" hides an artist from THIS section exactly as it does
+# from For You / All Releases. Purely local + render/build-time (the NRFY rule):
+# takes effect on the next browse, no cache clear needed.
+sub _trendBlocked {
+    my ($artist, $ambid, $set) = @_;
+    return _isBlocked({ artist => ($artist // ''), artist_mbids => [ $ambid ? ($ambid) : () ] }, $set);
+}
+
+sub _trendingResolvedKey {
+    my $user     = $prefs->get('username') // '';
+    my $svcOrder = join(',', map { lc $_->{name} } _orderedAdapters());
+    return 'lbf:trending:resolved:8:' . join('|', $user, $svcOrder);   # :7:->:8: — stale-follower filter (0.9.116)
+}
+
+# Aggregate every follower's weekly top recordings into per-album breadth, pick a
+# representative track per album, then return an ORDERED candidate source-track
+# list: unique-artist albums (by rank) first, repeat-artist albums after — so
+# taking the first N after owned/streaming attrition prefers artist variety but a
+# lean week still fills from repeats. $rgmap: recording_mbid => { rg, album }.
+sub _buildTrendingCandidates {
+    my ($followers, $perFollower, $rgmap, $limit) = @_;
+
+    my %rg;   # rg-key => { fol => {}, plays, artist, artist_mbid, album, tracks => { tkey => {...} } }
+    for my $fu (@$followers) {
+        for my $r (@{ $perFollower->{$fu} || [] }) {
+            my $rm    = $r->{recording_mbid} || '';
+            my $info  = $rgmap->{$rm} || {};
+            my $tfall = 't:' . lc(($r->{artist} // '') . '|' . ($r->{title} // ''));
+            # getRecordingMetadata keys the album as release_group_mbid (NOT 'rg');
+            # an unmapped/mbid-less track buckets alone (still a candidate).
+            my $rgk   = $info->{release_group_mbid} || $tfall;
+            my $tkey  = $rm || $tfall;
+
+            # NB: never name a lexical $a/$b in a scope containing a sort block — it
+            # shadows sort's package $a/$b and silently breaks the comparator.
+            my $alb = $rg{$rgk} ||= { fol => {}, plays => 0, artist => '', artist_mbid => '', album => '', year => '', release_group_mbid => '', tracks => {} };
+            $alb->{fol}{$fu}    = 1;
+            $alb->{plays}      += $r->{listen_count} // 0;
+            $alb->{artist}    ||= $r->{artist}     // '';
+            $alb->{artist_mbid} ||= $r->{artist_mbid} // '';
+            $alb->{album}     ||= ($info->{album} || $r->{release_name} || '');
+            $alb->{release_group_mbid} ||= ($info->{release_group_mbid} // '');
+            # Album-level year = first non-empty year among the album's tracks, so a
+            # track missing its own year can still show the album's (no extra fetch).
+            $alb->{year} = $info->{year} if !$alb->{year} && $info->{year};
+
+            my $t = $alb->{tracks}{$tkey} ||= {
+                fol => {}, plays => 0, title => ($r->{title} // ''),
+                artist => ($r->{artist} // ''), recording_mbid => $rm,
+                year => ($info->{year} // ''),   # release year from the recording metadata
+            };
+            $t->{fol}{$fu} = 1;
+            $t->{plays}   += $r->{listen_count} // 0;
+        }
+    }
+
+    # Rank albums by breadth (distinct followers), tie-break rep-track breadth then
+    # plays. The representative track is the one the MOST followers played (breadth),
+    # tie-break its plays.
+    my @ranked;
+    for my $rgk (keys %rg) {
+        my $alb = $rg{$rgk};
+        my ($rep) = sort {
+            scalar(keys %{ $b->{fol} }) <=> scalar(keys %{ $a->{fol} })
+            || $b->{plays} <=> $a->{plays}
+        } values %{ $alb->{tracks} };
+        next unless $rep;
+        push @ranked, {
+            breadth  => scalar(keys %{ $alb->{fol} }),
+            rbreadth => scalar(keys %{ $rep->{fol} }),
+            plays    => $alb->{plays},
+            a => $alb, rep => $rep,
+        };
+    }
+    @ranked = sort {
+        $b->{breadth} <=> $a->{breadth}
+        || $b->{rbreadth} <=> $a->{rbreadth}
+        || $b->{plays} <=> $a->{plays}
+    } @ranked;
+
+    # Artist-diversify: unique primary artist first, repeats appended after.
+    my (@uniq, @rest, %seen);
+    for my $row (@ranked) {
+        my $am = $row->{a}{artist_mbid} || ('name:' . lc($row->{a}{artist}));
+        if ($seen{$am}++) { push @rest, $row; } else { push @uniq, $row; }
+    }
+    my @ordered = (@uniq, @rest);
+    @ordered = @ordered[0 .. $limit - 1] if @ordered > $limit;
+
+    return [ map {
+        {
+            artist             => $_->{rep}{artist},
+            title              => $_->{rep}{title},
+            album              => $_->{a}{album},
+            recording_mbid     => $_->{rep}{recording_mbid},
+            release_group_mbid => $_->{a}{release_group_mbid},
+            artist_mbid        => ($_->{a}{artist_mbid} // ''),   # blocked-artists filter + item tag
+            year               => ($_->{rep}{year} || $_->{a}{year} || ''),   # track year, else album year
+        }
+    } @ordered ];
+}
+
+# The "What's Trending" tile: a playable container (Play/Add queues the whole list)
+# that drills into the ranked, owned-excluded track list. Track count (from the
+# resolved cache the warm populates) on line2, filtered to services still usable.
+sub _trendingTile {
+    my ($client, $feat) = @_;
+    my $line2 = '';
+    if (my $c = $cache->get(_trendingResolvedKey())) {
+        my $enabled = { map { lc($_->{name}) => 1 } _orderedAdapters() };
+        my $n = grep { _cachedSvcUsable($_->{_svc}, $enabled) } @{ $c->{items} || [] };
+        $n = TRENDING_MAX if $n > TRENDING_MAX;
+        $line2 = sprintf(cstring($client, 'PLUGIN_LBF_N_TRACKS'), $n) if $n;
+    }
+    # The branded cover already says "What's Trending"; the row label names what it
+    # is — weekly tracks (cf. All Releases, whose row shows the period not the name).
+    return {
+        name => cstring($client, 'PLUGIN_LBF_WEEKLY_TRACKS'),
+        ($line2 ne '' ? (line2 => $line2) : ()),
+        type        => 'playlist',
+        image       => MENU_TRENDING,
+        url         => \&resolveTrending,
+        passthrough => [{ features => $feat }],
+    };
+}
+
+# Open "What's Trending" → resolved, owned-excluded, breadth-ranked track list.
+sub resolveTrending {
+    my ($client, $callback, $args, $pass) = @_;
+    my $feat = (ref $pass eq 'HASH') ? $pass->{features} : undef;
+    _resolveTrending($client, $callback, 0, $feat);
+}
+
+# Shared build (open path + warm). Serves the keyed resolved cache while fresh
+# (refreshed daily by the warm; a service-order change re-keys); else fans out
+# following → each follower's weekly recordings → recording→album map → candidate
+# ranking → _resolveTracks('exclude', drops owned) → cap TRENDING_MAX. $callback is
+# undef on the warm path. NB: needs a connected player for the streaming API
+# context; on the open path with no player _resolveTracks still reports (empty).
+sub _resolveTrending {
+    my ($client, $callback, $force, $feat) = @_;
+
+    my $user = $prefs->get('username') // '';
+    unless (length $user) {
+        $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_SETUP_REQUIRED'), type => 'text' }], cachetime => 0 }) if $callback;
+        return;
+    }
+
+    my $rkey = _trendingResolvedKey();
+    if (!$force && (my $c = $cache->get($rkey))) {
+        _dbg("trending cache hit (" . scalar(@{ $c->{items} || [] }) . " tracks)");
+        $callback->(_trendingResult($client, $c, $feat)) if $callback;
+        return;
+    }
+
+    my $empty = sub {
+        my ($msg, $cacheEmpty) = @_;
+        _dbg("trending: $msg") if $msg;
+        # Cache a genuine "no data" outcome (nobody followed / all stale / no candidates)
+        # SHORT, so it doesn't re-run the whole fan-out + aggregation on every browse but
+        # re-checks within the hour. NEVER cache the network-error path ($cacheEmpty unset)
+        # — a transient following/stats failure must not pin the list empty.
+        eval { $cache->set($rkey, { items => [], total => 0 }, PLAYLIST_INCONCLUSIVE_TTL); 1 } if $cacheEmpty;
+        $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_NO_TRENDING'), type => 'text' }], cachetime => 0 }) if $callback;
+    };
+
+    # Phase timing so a slow cold build points at the culprit (fan-out / metadata /
+    # streaming resolve) rather than being guessed at. dt() = ms since the last mark.
+    my $t0 = Time::HiRes::time();
+    my $tp = $t0;
+    my $dt = sub { my $now = Time::HiRes::time(); my $d = int(($now - $tp) * 1000); $tp = $now; return $d };
+
+    Plugins::ListenBrainzFreshReleases::API->getFollowing(
+        # force => 1 (manual Refresh) bypasses the following/stats read caches so it's
+        # a genuine cold rebuild — the whole point of Refresh (and how to time it).
+        force  => $force,
+        onDone => sub {
+            my $followers = shift // [];
+            @$followers = @{ $followers }[0 .. FOLLOWER_MAX - 1] if @$followers > FOLLOWER_MAX;
+            unless (@$followers) { $empty->("not following anyone", 1); return; }
+            _dbg("trending timing: following " . scalar(@$followers) . " in " . $dt->() . "ms");
+
+            _activeFollowers($followers, sub {
+            $followers = shift;
+            unless (@$followers) { $empty->("no active followed users", 1); return; }
+
+            _fanFollowers($followers,
+                sub {
+                    my ($u, $cb) = @_;
+                    Plugins::ListenBrainzFreshReleases::API->getUserTopRecordings(
+                        $u, range => TRENDING_RANGE, count => TRENDING_PER_USER, force => $force, onDone => $cb);
+                },
+                sub {
+                    my ($perFollower) = @_;
+                    _dbg("trending timing: stats fan-out in " . $dt->() . "ms");
+
+                    # Rank distinct recordings by breadth (distinct followers) and map ONLY
+                    # the top TREND_MAP_CAP to albums — a huge library of one-off plays can't
+                    # trigger dozens of sequential metadata calls; low-breadth tail can't make
+                    # the top albums anyway. (getRecordingMetadata caches per-mbid, so repeat
+                    # builds mostly hit cache regardless.)
+                    my %recFol;
+                    for my $fu (@$followers) {
+                        for my $r (@{ $perFollower->{$fu} || [] }) {
+                            my $m = $r->{recording_mbid} || '' or next;
+                            $recFol{$m}{$fu} = 1;
+                        }
+                    }
+                    my @mbids = sort { scalar(keys %{ $recFol{$b} }) <=> scalar(keys %{ $recFol{$a} }) } keys %recFol;
+                    @mbids = @mbids[0 .. TREND_MAP_CAP - 1] if @mbids > TREND_MAP_CAP;
+
+                    my $afterMap = sub {
+                        my ($meta) = @_;
+                        _dbg("trending timing: mapped " . scalar(@mbids) . " recordings in " . $dt->() . "ms");
+                        my $cands = _buildTrendingCandidates($followers, $perFollower, $meta || {}, TRENDING_CANDIDATES);
+                        # Blocked artists never reach the resolve (no wasted searches);
+                        # the render side filters again for blocks added after this build.
+                        my $blk = _blockedSet();
+                        @$cands = grep { !_trendBlocked($_->{artist}, $_->{artist_mbid}, $blk) } @$cands;
+                        unless (@$cands) { $empty->("no candidate tracks", 1); return; }
+
+                        my $resolve = sub {
+                            _resolveTracks($client, $cands, sub {
+                            my ($items, $inconclusive, $unmatched, $owned) = @_;
+                            $items //= []; $owned //= 0;
+                            @$items = @{ $items }[0 .. TRENDING_MAX - 1] if @$items > TRENDING_MAX;
+                            my $payload = { items => $items, total => scalar(@$items) };
+                            my $ttl = $inconclusive ? PLAYLIST_INCONCLUSIVE_TTL : TREND_RESOLVED_TTL;
+                            eval { $cache->set($rkey, $payload, $ttl); 1 }
+                                or $log->warn("resolved trending cache set failed: $@");
+                            _dbg("resolved trending: " . scalar(@$items) . " tracks"
+                                . " ($owned owned excluded"
+                                . ($inconclusive ? ", $inconclusive inconclusive — short TTL" : "") . ")"
+                                . " — resolve " . $dt->() . "ms, total " . int((Time::HiRes::time() - $t0) * 1000) . "ms");
+                            $callback->(_trendingResult($client, $payload, $feat)) if $callback;
+                            # early-stop at TRENDING_MAX matches (ranked pool — we only need the
+                            # first N), higher parallelism (the resolve is the cold build's cost).
+                            }, 'exclude', $force, limit => TRENDING_MAX, concurrency => TREND_RESOLVE_CONC);
+                        };
+
+                        # TARGETED metadata fill: the pre-grouping map is capped at
+                        # TREND_MAP_CAP by breadth, and breadth-1 ties fall outside it
+                        # ARBITRARILY — so a track can reach the final list with no
+                        # metadata at all (no year, no rg; the Stephen Rennicks case:
+                        # its recording had first_release_date all along, just never
+                        # fetched). Fetch metadata for exactly the CHOSEN candidates
+                        # that missed the map — ≤TRENDING_CANDIDATES mbids, chunked,
+                        # recmeta-cached, so this is 0–2 requests and feeds the whole
+                        # date ladder below (rg date → name-search → service year).
+                        my $fillMeta = sub {
+                            my ($next) = @_;
+                            my @need = do { my %s;
+                                grep { $_ && !$s{$_}++ }
+                                map  { $_->{recording_mbid} }
+                                grep { !$_->{year} || !$_->{release_group_mbid} } @$cands };
+                            unless (@need) { $next->(); return; }
+                            Plugins::ListenBrainzFreshReleases::API->getRecordingMetadata(\@need, sub {
+                                my ($m2) = @_;
+                                if (ref $m2 eq 'HASH') {
+                                    for my $c (@$cands) {
+                                        my $e = $m2->{ lc($c->{recording_mbid} || '') } or next;
+                                        $c->{year}               ||= $e->{year}               || '';
+                                        $c->{album}              ||= $e->{album}              || '';
+                                        $c->{release_group_mbid} ||= $e->{release_group_mbid} || '';
+                                    }
+                                }
+                                _dbg("trending timing: candidate metadata fill (" . scalar(@need) . ") in " . $dt->() . "ms");
+                                $next->();
+                            });   # onDone-always
+                        };
+
+                        # LAST year fallback: candidates from UNMAPPED listens have no
+                        # recording mbid (so no metadata, no rg mbid, no year at all) —
+                        # resolve their album by artist+name against MusicBrainz
+                        # (mirror-aware, per-name cached 30d, so this drains to zero
+                        # over builds). Bounded per build; sequential pump.
+                        my $fillByName = sub {
+                            my @miss = grep { !$_->{year}
+                                              && length($_->{artist} // '') && length($_->{album} // '') } @$cands;
+                            splice(@miss, 25) if @miss > 25;
+                            unless (@miss) { $resolve->(); return; }
+                            my $i = 0;
+                            my $step = sub {
+                                my ($self) = @_;
+                                if ($i >= @miss) {
+                                    _dbg("trending timing: name-resolved years in " . $dt->() . "ms");
+                                    $resolve->(); return;
+                                }
+                                my $c = $miss[$i++];
+                                Plugins::ListenBrainzFreshReleases::API->getReleaseGroupByName(
+                                    $c->{artist}, $c->{album}, sub {
+                                        my ($rgi) = @_;
+                                        if (ref $rgi eq 'HASH') {
+                                            $c->{year}               ||= $rgi->{year} || '';
+                                            $c->{release_group_mbid} ||= $rgi->{mbid} || '';
+                                        }
+                                        $self->($self);
+                                    });
+                            };
+                            $step->($step);
+                        };
+
+                        # Fill any missing years from the album's release-group date (more
+                        # reliably present than a recording's own release year), then the
+                        # name fallback for whatever's still blank, then resolve. Runs
+                        # AFTER $fillMeta (which can supply the rg mbids this pass needs).
+                        my $fillDates = sub {
+                            my @rgs = do { my %s; grep { $_ && !$s{$_}++ } map { $_->{release_group_mbid} } @$cands };
+                            my $needYear = grep { !$_->{year} } @$cands;
+                            if (@rgs && $needYear) {
+                                Plugins::ListenBrainzFreshReleases::API->getReleaseGroupMetadata(\@rgs, sub {
+                                    my ($rgmeta) = @_;
+                                    if (ref $rgmeta eq 'HASH') {
+                                        for my $c (@$cands) {
+                                            next if $c->{year};
+                                            my $rg = $c->{release_group_mbid} or next;
+                                            my $y = ref $rgmeta->{$rg} eq 'HASH' ? $rgmeta->{$rg}{year} : '';
+                                            $c->{year} = $y if $y;
+                                        }
+                                    }
+                                    _dbg("trending timing: album years in " . $dt->() . "ms");
+                                    $fillByName->();
+                                });   # onDone-always
+                            } else {
+                                $fillByName->();
+                            }
+                        };
+                        $fillMeta->($fillDates);
+                    };
+
+                    @mbids ? Plugins::ListenBrainzFreshReleases::API->getRecordingMetadata(\@mbids, $afterMap)
+                           : $afterMap->({});
+                });
+            }, $force);   # _activeFollowers — stale-follower filter
+        },
+        onError => sub { $empty->("following fetch failed: " . (shift // '')); },
+    );
+}
+
+# Render the resolved trending track list. A top-of-view "Refresh (rebuild now)"
+# action row precedes the tracks (per the top-of-feed action-row rule); Play-all
+# still works from the TILE (a type=>'playlist' container), like the follow list.
+# Count in the title.
+sub _trendingResult {
+    my ($client, $payload, $feat) = @_;
+    my $enabled = { map { lc($_->{name}) => 1 } _orderedAdapters() };
+    my @tracks  = grep { _cachedSvcUsable($_->{_svc}, $enabled) } @{ $payload->{items} || [] };
+    # Blocked artists drop at render (immediate, like every other feed) via the
+    # _artist/_amb tags; pre-tag cached items pass through until they re-resolve.
+    my $blk = _blockedSet();
+    @tracks = grep { !_trendBlocked($_->{_artist}, $_->{_amb}, $blk) } @tracks;
+    @tracks = @tracks[0 .. TRENDING_MAX - 1] if @tracks > TRENDING_MAX;
+    my $n = scalar @tracks;
+
+    my @items = @tracks
+        ? ( _refreshItem($client, 'trending'), @tracks )
+        : ( { name => cstring($client, 'PLUGIN_LBF_NO_TRENDING'), type => 'text' } );
+
+    return {
+        title     => cstring($client, 'PLUGIN_LBF_TRENDING') . " ($n)",
+        items     => \@items,
+        cachetime => 0,
+    };
+}
+
+# --- Trending Albums (This Month / This Year) ------------------------------
+# Same one-vote-per-follower breadth, straight from each follower's top
+# release-groups. Rendered as album tiles that resolve to streaming on tap via
+# _releaseDetail (like fresh releases) — no pre-resolution needed. Show-all (owned
+# NOT filtered — trending is about popularity).
+
+sub _trendingAlbumsTile {
+    my ($client, $range, $feat) = @_;
+    my $isYear = $range eq 'this_year';
+    # Cover says "Trending Albums"; the row label names the period. Year gets a
+    # distinct-colour cover so the two album rows are easy to tell apart at a glance.
+    return {
+        name        => cstring($client, $isYear ? 'PLUGIN_LBF_PERIOD_YEAR' : 'PLUGIN_LBF_PERIOD_MONTH'),
+        type        => 'link',
+        image       => $isYear ? MENU_TRENDING_ALB_YEAR : MENU_TRENDING_ALB,
+        url         => \&resolveTrendingAlbums,
+        passthrough => [{ range => $range, features => $feat }],
+    };
+}
+
+sub resolveTrendingAlbums {
+    my ($client, $callback, $args, $pass) = @_;
+    my $range = (ref $pass eq 'HASH' && $pass->{range}) ? $pass->{range} : 'this_month';
+    my $feat  = (ref $pass eq 'HASH') ? $pass->{features} : undef;
+
+    _buildAlbumsData($client, $range, sub {
+        my ($data) = @_;
+        $callback->(_trendingAlbumsResult($client, $data, $range, $feat));
+    }, 0);
+}
+
+# Build (or serve cached) the ranked album aggregate for a range: following →
+# fan-out top release-groups → per-album breadth → ranked plain-hash arrayref
+# (no coderefs, so it's Storable-cacheable; rows are rebuilt each open). Always
+# calls $onDone with an arrayref (possibly empty).
+# Cache key includes the CURRENT calendar month/year, so a rollover (new month/
+# year) is a fresh key that rebuilds at once regardless of the long TTL.
+sub _albumsDataKey {
+    my ($range, $user) = @_;
+    my @n = localtime(time);
+    my $period = ($range eq 'this_year')
+        ? sprintf('%04d', $n[5] + 1900)
+        : sprintf('%04d-%02d', $n[5] + 1900, $n[4] + 1);
+    # :2:->:3: — 0.9.106 added date/type to the stored shape WITHOUT bumping (the
+    # layered-cache lesson again: month/year aggregates live 7d/30d, so users kept
+    # serving dateless pre-0.9.106 rows); :3: baked in the unmapped-row merge
+    # + MB name-resolution (0.9.108). :3:->:4: — the streaming gate (0.9.109):
+    # survivors depend on the enabled services, so the key carries the service
+    # order (like the resolved-playlist keys) and re-keys on a service change.
+    # :4:->:5: (0.9.110) — years also from the matched item's service date (_year).
+    my $svcOrder = join(',', map { lc $_->{name} } _orderedAdapters());
+    return "lbf:trending:albums:6:$range:$period:$user|$svcOrder";
+}
+
+sub _buildAlbumsData {
+    my ($client, $range, $onDone, $force) = @_;
+    $force ||= 0;
+
+    my $user = $prefs->get('username') // '';
+    unless (length $user) { $onDone->([]); return; }
+
+    my $dkey = _albumsDataKey($range, $user);
+    if (!$force && (my $data = $cache->get($dkey))) { $onDone->($data); return; }
+    my $ttl = ($range eq 'this_year') ? TREND_ALBUMS_YEAR_TTL : TREND_ALBUMS_MONTH_TTL;
+
+    Plugins::ListenBrainzFreshReleases::API->getFollowing(
+        force  => $force,
+        onDone => sub {
+            my $followers = shift // [];
+            @$followers = @{ $followers }[0 .. FOLLOWER_MAX - 1] if @$followers > FOLLOWER_MAX;
+            unless (@$followers) { $onDone->([]); return; }
+
+            _activeFollowers($followers, sub {
+            $followers = shift;
+            unless (@$followers) { $onDone->([]); return; }
+
+            _fanFollowers($followers,
+                sub {
+                    my ($u, $cb) = @_;
+                    Plugins::ListenBrainzFreshReleases::API->getUserTopReleaseGroups(
+                        $u, range => $range, count => 50, force => $force, onDone => $cb);
+                },
+                sub {
+                    my ($perFollower) = @_;
+                    my $data = _aggregateAlbums($followers, $perFollower);
+                    # Blocked artists never take a pool slot (or a gate search); the
+                    # render side filters again for blocks added after this build.
+                    my $blk = _blockedSet();
+                    @$data = grep { !_trendBlocked($_->{artist}, $_->{artist_mbid}, $blk) } @$data;
+                    # Pool = shown cap + head-room: the streaming gate below drops
+                    # non-streamable albums, so rank a few extra candidates to keep
+                    # the list near TRENDING_MAX after attrition (bounded — every
+                    # pooled row costs metadata + one gated streaming search).
+                    my $pool = TRENDING_MAX + 10;
+                    @$data = @{ $data }[0 .. $pool - 1] if @$data > $pool;
+
+                    # STREAMING GATE (after the metadata fill): only albums that
+                    # actually match a streaming service are kept — a not-on-services
+                    # album (10-hour noise uploads, private rips) can't take a slot it
+                    # can't play. Resolves through the SAME _findPlayable/cache the
+                    # detail page uses, so gated albums open instantly afterwards.
+                    # Rank order preserved via slots; early-stop at TRENDING_MAX kept.
+                    # Degrades safely: no player/services → ungated result; gate keeps
+                    # NOTHING (streaming down / not yet authed) → ungated result; both
+                    # cached SHORT (inconclusive) so a healthy build replaces them soon.
+                    my $gate = sub {
+                        my $settle = sub {
+                            my ($kept, $short) = @_;
+                            @$kept = @{ $kept }[0 .. TRENDING_MAX - 1] if @$kept > TRENDING_MAX;
+                            eval { $cache->set($dkey, $kept, ($short ? PLAYLIST_INCONCLUSIVE_TTL : $ttl)); 1 }
+                                or $log->warn("trending albums cache set failed: $@");
+                            $onDone->($kept);
+                        };
+                        unless ($client && scalar(_orderedAdapters())) {
+                            _dbg("trending albums ($range): no client/services — gate skipped (short TTL)");
+                            $settle->($data, 1); return;
+                        }
+                        my $total = scalar @$data;
+                        unless ($total) { $settle->($data, 0); return; }
+
+                        my (@slots, $finished, $timedOut);
+                        my ($idx, $active, $completed, $kept) = (0, 0, 0, 0);
+                        my $finish = sub {
+                            return if $finished; $finished = 1;
+                            my @keep = grep { ref $_ } @slots;
+                            if (!@keep) {   # nothing survived → streaming likely unavailable
+                                _dbg("trending albums ($range): gate kept 0/$total — serving ungated (short TTL)");
+                                $settle->($data, 1); return;
+                            }
+                            # A watchdog-truncated build (timed out mid-gate) holds only the albums
+                            # gated so far — cache it SHORT so a healthy build replaces the partial
+                            # list within the hour, not at the full 7d/30d TTL.
+                            _dbg("trending albums ($range): gate kept " . scalar(@keep) . "/$total"
+                                . ($timedOut ? " (timed out — short TTL)" : ""));
+                            $settle->(\@keep, $timedOut ? 1 : 0);
+                        };
+                        my $watchdog = Slim::Utils::Timers::setTimer(undef, time() + PLAYLIST_TIMEOUT, sub { $timedOut = 1; $finish->() });
+                        my $pump;
+                        $pump = sub {
+                            return if $finished;
+                            while ($active < 5 && $idx < $total) {
+                                last if $kept >= TRENDING_MAX;
+                                my $i = $idx++;
+                                my $a = $data->[$i];
+                                $active++;
+                                _findPlayable($client, sub {
+                                    my $res = shift;
+                                    my @m = (ref $res eq 'HASH' && ref $res->{items} eq 'ARRAY')
+                                        ? grep { ($_->{type} // '') ne 'text' } @{ $res->{items} } : ();
+                                    if (@m) {
+                                        $slots[$i] = $a; $kept++;
+                                        # LAST date fallback: unmapped on LB + absent from
+                                        # MB, but the service catalogue knows the year
+                                        # (`_year`, tagged by the adapters).
+                                        unless ($a->{year}) {
+                                            my ($sy) = grep { $_ } map { $_->{_year} } @m;
+                                            $a->{year} = $sy if $sy;
+                                        }
+                                    }
+                                    else    { $slots[$i] = 0; }
+                                    $active--; $completed++;
+                                    if ($completed >= $total || ($kept >= TRENDING_MAX && $active == 0)) {
+                                        Slim::Utils::Timers::killSpecific($watchdog) if $watchdog;
+                                        $finish->();
+                                    }
+                                    elsif ($kept < TRENDING_MAX) { $pump->(); }
+                                }, $a->{artist}, $a->{title}, '', $force, $a->{year}, $a->{type});
+                            }
+                        };
+                        $pump->();
+                    };
+
+                    my $finish2 = sub {
+                        my ($ymeta) = @_;
+                        if (ref $ymeta eq 'HASH') {
+                            for my $a (@$data) {
+                                my $m = $a->{release_group_mbid} or next;
+                                my $e = ref $ymeta->{$m} eq 'HASH' ? $ymeta->{$m} : {};
+                                # date + type feed _buildReleaseItem exactly like a fresh release
+                                $a->{year} = $e->{year} if $e->{year};
+                                $a->{date} = $e->{date} if $e->{date};
+                                $a->{type} = $e->{type} if $e->{type};
+                            }
+                        }
+                        $gate->();
+                    };
+                    my $rgPass = sub {
+                        my @rgm = grep { $_ } map { $_->{release_group_mbid} } @$data;
+                        @rgm ? Plugins::ListenBrainzFreshReleases::API->getReleaseGroupMetadata(\@rgm, $finish2)
+                             : $finish2->({});
+                    };
+
+                    # Rows STILL missing an rg mbid = every follower's listen was
+                    # UNMAPPED on ListenBrainz (verified live — those rows also have
+                    # no caa/date/type). Resolve them by artist+album against
+                    # MusicBrainz (mirror-aware, per-name cached) so they get an
+                    # mbid + date + type — and thereby art (CAA release-group) and a
+                    # full NRFY-equivalent detail page. Sequential pump: typically a
+                    # handful of rows; each result is cached 30d so later builds are
+                    # free. Self-passing sub (no self-capturing closure leak).
+                    my @miss = grep { !$_->{release_group_mbid}
+                                      && length($_->{artist} // '') && length($_->{title} // '') } @$data;
+                    unless (@miss) { $rgPass->(); return; }
+                    my $i = 0;
+                    my $step = sub {
+                        my ($self) = @_;
+                        if ($i >= @miss) { $rgPass->(); return; }
+                        my $a = $miss[$i++];
+                        Plugins::ListenBrainzFreshReleases::API->getReleaseGroupByName(
+                            $a->{artist}, $a->{title}, sub {
+                                my ($rgi) = @_;
+                                if (ref $rgi eq 'HASH' && $rgi->{mbid}) {
+                                    $a->{release_group_mbid} = $rgi->{mbid};
+                                    $a->{date} ||= $rgi->{date} || '';
+                                    $a->{year} ||= $rgi->{year} || '';
+                                    $a->{type} ||= $rgi->{type} || '';
+                                }
+                                $self->($self);
+                            });
+                    };
+                    $step->($step);
+                });
+            }, $force);   # _activeFollowers — stale-follower filter
+        },
+        onError => sub { $log->info("trending albums: following fetch failed: " . (shift // '')); $onDone->([]); },
+    );
+}
+
+# Aggregate top release-groups across followers → ranked arrayref of plain hashes,
+# one-vote-per-follower breadth desc (tie-break total plays).
+# MERGE RULE: a stats row is only as good as that follower's LISTEN MAPPING — the
+# SAME album arrives WITH release_group_mbid/caa from one follower and with them
+# null from another (verified live: "Mácula" mapped + unmapped split into two rows
+# and split the breadth). So bucket by mbid, but first index each mbid's
+# lc(artist|title) so an UNMAPPED row of the same album joins the mapped bucket
+# instead of forking its own; per-field ||= backfills mbid/caa from whichever row
+# carries them.
+sub _aggregateAlbums {
+    my ($followers, $perFollower) = @_;
+
+    # Pass 1: text-key → the mbid bucket key, for every row that HAS an mbid.
+    my %byText;
+    for my $fu (@$followers) {
+        for my $r (@{ $perFollower->{$fu} || [] }) {
+            next unless $r->{release_group_mbid};
+            my $tk = lc(($r->{artist} // '') . '|' . ($r->{title} // ''));
+            $byText{$tk} ||= $r->{release_group_mbid};
+        }
+    }
+
+    # Pass 2: aggregate. An mbid-less row joins its mapped sibling's bucket when
+    # one exists; otherwise it buckets by text (and may be MB-resolved later).
+    my %rg;
+    for my $fu (@$followers) {
+        for my $r (@{ $perFollower->{$fu} || [] }) {
+            my $tk  = lc(($r->{artist} // '') . '|' . ($r->{title} // ''));
+            my $key = $r->{release_group_mbid} || $byText{$tk} || ('t:' . $tk);
+            my $alb = $rg{$key} ||= {
+                release_group_mbid => '', title => ($r->{title} // ''), artist => ($r->{artist} // ''),
+                artist_mbid => '', caa_id => undef, caa_release_mbid => '',
+                fol => {}, plays => 0,
+            };
+            $alb->{fol}{$fu} = 1;
+            $alb->{plays}   += $r->{listen_count} // 0;
+            # Backfill identity/art from whichever follower's row carries them.
+            $alb->{release_group_mbid} ||= $r->{release_group_mbid} || '';
+            $alb->{artist_mbid}        ||= $r->{artist_mbid}        || '';
+            $alb->{caa_id}             //= $r->{caa_id};
+            $alb->{caa_release_mbid}   ||= $r->{caa_release_mbid}   || '';
+        }
+    }
+
+    my @ranked = sort {
+        scalar(keys %{ $b->{fol} }) <=> scalar(keys %{ $a->{fol} })
+        || $b->{plays} <=> $a->{plays}
+    } values %rg;
+
+    return [ map {
+        {
+            release_group_mbid => $_->{release_group_mbid},
+            title => $_->{title}, artist => $_->{artist}, artist_mbid => $_->{artist_mbid},
+            caa_id => $_->{caa_id}, caa_release_mbid => $_->{caa_release_mbid},
+            breadth => scalar(keys %{ $_->{fol} }), plays => $_->{plays},
+        }
+    } @ranked ];
+}
+
+sub _trendingAlbumsResult {
+    my ($client, $data, $range, $feat) = @_;
+
+    # Blocked artists drop at render (immediate — no cache clear needed), exactly
+    # like For You / All Releases; the aggregate rows carry artist + artist_mbid.
+    my $blk = _blockedSet();
+    my @src = grep { !_trendBlocked($_->{artist}, $_->{artist_mbid}, $blk) } @{ $data || [] };
+
+    # Per-view sort, NRFY-style: a durable pref (shared by both album lists, like
+    # All Releases' all_sort) applied at render time — the cached aggregate stays
+    # in breadth order. 'trending' (the breadth ranking) is the extra, default mode.
+    my $mode   = $prefs->get('trending_sort') || 'trending';
+    my @sorted = @src;
+    if ($mode eq 'release_date') {
+        @sorted = sort { ($b->{date} // '') cmp ($a->{date} // '') } @sorted;   # newest first
+    }
+    elsif ($mode eq 'artist') {
+        @sorted = sort { lc($a->{artist} // '') cmp lc($b->{artist} // '')
+                         || ($b->{date} // '') cmp ($a->{date} // '') } @sorted;
+    }
+    elsif ($mode eq 'album') {
+        @sorted = sort { lc($a->{title} // '') cmp lc($b->{title} // '') } @sorted;
+    }
+
+    my @rows = map { _trendingAlbumRow($client, $_) } @sorted;
+    @rows = @rows[0 .. TRENDING_MAX - 1] if @rows > TRENDING_MAX;
+    my $n = scalar @rows;
+
+    my $title = cstring($client, $range eq 'this_year'
+        ? 'PLUGIN_LBF_TRENDING_ALBUMS_YEAR' : 'PLUGIN_LBF_TRENDING_ALBUMS_MONTH') . " ($n)";
+
+    # Options section on top (Material header + rows), exactly like New Releases
+    # for You: the sort toggle then Refresh — the SAME _refreshItem every other
+    # section uses (drops this range's aggregate cache, reloads in place).
+    my $useH  = _wantHeaders($feat);
+    my @items;
+    if (@rows) {
+        my @opt = ( _trendingSortToggle($client, $mode), _refreshItem($client, 'trending_albums', $range) );
+        @items  = ( _sectionHeader($client, 'PLUGIN_LBF_SECTION_OPTIONS', $useH, \@opt), @opt, @rows );
+    }
+    else {
+        @items = ( { name => cstring($client, 'PLUGIN_LBF_NO_TRENDING'), type => 'text' } );
+    }
+
+    return {
+        title     => $title,
+        items     => \@items,
+        cachetime => 0,
+    };
+}
+
+# The Trending Albums "Sorted by <mode> (tap to change)" row — same mechanics as
+# NRFY's _sortToggle (durable pref, advance from the LIVE pref, nextWindow refresh
+# re-walks and re-sorts in place) with 'trending' (the breadth ranking) as an
+# extra mode ahead of the shared Release Date / Artist / Album Title trio.
+my @TREND_SORT_MODES = ('trending', 'release_date', 'artist', 'album');
+sub _trendingSortToggle {
+    my ($client, $mode) = @_;
+    my $label = $mode eq 'trending'
+        ? cstring($client, 'PLUGIN_LBF_SORT_TRENDING')
+        : _sortLabel($client, $mode);
+    return {
+        name        => sprintf(cstring($client, 'PLUGIN_LBF_SORTED_BY'), $label),
+        type        => 'link',
+        image       => MENU_SORT,
+        nextWindow  => 'refresh',
+        url         => sub {
+            my ($c, $cb) = @_;
+            my $cur  = $prefs->get('trending_sort') || 'trending';
+            my $next = $TREND_SORT_MODES[0];
+            for my $i (0 .. $#TREND_SORT_MODES) {
+                $next = $TREND_SORT_MODES[($i + 1) % @TREND_SORT_MODES], last
+                    if $TREND_SORT_MODES[$i] eq $cur;
+            }
+            $prefs->set('trending_sort', $next);
+            $cb->({ items => [] });
+        },
+    };
+}
+
+# One trending-album row. Rendered through the SAME builder as New Releases
+# (_buildReleaseItem) from a full fresh-release-shaped $rel, so the year suffix,
+# release-type line, cover art, tap-through and streaming-match behaviour are all
+# IDENTICAL to NRFY. The album's release date + primary type come from the
+# release-group metadata (fetched in _buildAlbumsData). We only override line2 with
+# the trending signal (breadth) and keep the always-link safety net for the rare
+# release-group with no MBID.
+sub _trendingAlbumRow {
+    my ($client, $agg) = @_;
+    my $rel = {
+        artist_credit_name         => $agg->{artist},
+        release_name               => $agg->{title},
+        release_date               => ($agg->{date} || ($agg->{year} ? "$agg->{year}-01-01" : '')),
+        release_group_mbid         => $agg->{release_group_mbid},
+        release_group_primary_type => ($agg->{type} // ''),
+        caa_id                     => $agg->{caa_id},
+        caa_release_mbid           => $agg->{caa_release_mbid},
+        artist_mbids               => ($agg->{artist_mbid} ? [ $agg->{artist_mbid} ] : []),
+    };
+
+    my $item = _buildReleaseItem($rel, $client);
+    # Artwork fallback: stats rows built from UNMAPPED listens carry no
+    # caa_release_mbid (coverArtUrl → undef → plugin icon), but once the row has a
+    # release-group mbid (from stats or the MB name-resolution) the Cover Art
+    # Archive can serve the GROUP's front cover directly — same host, so the
+    # registered image proxy caches it like every other cover.
+    if (($item->{image} // '') eq ICON && $agg->{release_group_mbid}) {
+        $item->{image} = 'https://coverartarchive.org/release-group/' . $agg->{release_group_mbid} . '/front-250';
+    }
+    # Trending signal in place of the type/genre line.
+    $item->{line2} = sprintf(cstring($client, 'PLUGIN_LBF_TREND_BREADTH'), $agg->{breadth} // 0);
+    # _buildReleaseItem only links when there's an MBID; a release-group without one
+    # can still resolve to streaming from artist+album, so never leave a dead text row.
+    if (($item->{type} // '') eq 'text' && (length($agg->{artist} // '') || length($agg->{title} // ''))) {
+        $item->{type} = 'link';
+        $item->{url}  = sub { my ($c, $cb) = @_; _releaseDetail($rel, $c, $cb); };
+    }
+    return $item;
+}
+
+# Warm hook: pre-resolve the trending tracks (needs a player) and pre-build the two
+# album aggregates (no player needed), so the section opens instantly. Chained after
+# the follow-feed warm in warmCache.
+sub _warmTrending {
+    my ($client, $force) = @_;
+    return unless ($prefs->get('username') // '') ne '';
+    _resolveTrending($client, undef, $force) if $client;
+    # The albums build now needs the player too (its streaming gate resolves each
+    # album via _findPlayable); with no player it builds ungated on a short TTL.
+    _buildAlbumsData($client, 'this_month', sub {}, $force);
+    _buildAlbumsData($client, 'this_year',  sub {}, $force);
+}
+
+# ===========================================================================
 # Diagnostics: "Unmatched tracks (debug)" — list, per playlist, the source tracks
 # that didn't resolve to any service, so a matcher/recall gap (e.g. a stylised
 # title the service search can't find) is visible in the UI on or off-network.
@@ -1152,8 +2181,9 @@ sub fetchUnmatchedPlaylists {
 
             # Append the People-You-Follow list (token-gated — the feed is private),
             # drilling into its unmatched view. A feed outage just falls back to the
-            # createdfor playlists (still a useful diagnostic).
-            if (($prefs->get('token') // '') ne '') {
+            # createdfor playlists (still a useful diagnostic). Skipped when the whole
+            # section is disabled (no feed fetch for it at all).
+            if (($prefs->get('token') // '') ne '' && $prefs->get('people_follow')) {
                 Plugins::ListenBrainzFreshReleases::API->getFollowFeed(
                     onDone => sub {
                         my $store = _mergeFollow(shift // []);
@@ -1316,13 +2346,19 @@ sub _playlistTtl {
 # playlist order. Matched items only are returned (unmatched are dropped). A
 # watchdog guarantees the page renders even if a service search hangs.
 sub _resolveTracks {
-    my ($client, $tracks, $done, $libMode, $force) = @_;
+    my ($client, $tracks, $done, $libMode, $force, %opt) = @_;
+    # $opt{limit}: stop launching new resolves once this many have MATCHED (playable),
+    #   letting in-flight ones drain — for a ranked candidate pool where we only need
+    #   the first N (trending). $opt{concurrency}: parallelism (default PLAYLIST_CONCURRENCY).
+    my $limit       = $opt{limit};
+    my $concurrency = $opt{concurrency} || PLAYLIST_CONCURRENCY;
 
     my $total        = scalar @$tracks;
     my @slots        = (undef) x $total;   # per-index: hashref (match) / 0 (miss) / 'owned' (excluded) / undef (pending)
     my $next         = 0;
     my $active       = 0;
     my $completed    = 0;
+    my $matched      = 0;   # playable matches so far (drives the early-stop limit)
     my $finished     = 0;
     my $inconclusive = 0;   # tracks whose no-match was inconclusive (svc unavailable)
     my $owned        = 0;   # tracks dropped as already-owned ('exclude' mode only)
@@ -1348,7 +2384,8 @@ sub _resolveTracks {
     my $pump;
     $pump = sub {
         return if $finished;
-        while ($active < PLAYLIST_CONCURRENCY && $next < $total) {
+        while ($active < $concurrency && $next < $total) {
+            last if $limit && $matched >= $limit;   # got enough — stop launching new
             my $i  = $next++;
             my $tr = $tracks->[$i];
             $active++;
@@ -1361,7 +2398,25 @@ sub _resolveTracks {
                     # Harmless elsewhere (undef/absent → not set).
                     $item->{_created}     = $tr->{created}     if defined $tr->{created};
                     $item->{_recommender} = $tr->{recommender} if defined $tr->{recommender};
+                    # Source-artist identity (name + mbid when known) — lets the
+                    # trending/follow renders apply the blocked-artists filter to
+                    # already-resolved lists immediately (like every other feed).
+                    $item->{_artist} = $tr->{artist}      if defined $tr->{artist};
+                    $item->{_amb}    = $tr->{artist_mbid} if $tr->{artist_mbid};
+                    # Append the release year to the display name (like New Releases),
+                    # for any source track that carries one (trending + follow). Inert
+                    # for playlists (no year). Guard against a double-append on re-resolve.
+                    # LAST fallback: the matched item's own service year (`_year`, tagged
+                    # by the adapters) — for tracks unmapped on LB AND absent from MB,
+                    # the streaming catalogue still knows the date. Gated on the source
+                    # track CARRYING a year key (trending candidates always do), so the
+                    # playlists' deliberate no-year look is unchanged.
+                    my $y = $tr->{year} || (exists $tr->{year} ? ($item->{_year} // '') : '');
+                    if ($y && defined $item->{name} && $item->{name} !~ /\(\d{4}\)\s*$/) {
+                        $item->{name} .= " ($y)";
+                    }
                     $slots[$i] = $item;
+                    $matched++;
                 }
                 else {
                     $slots[$i] = $own ? 'owned' : 0;
@@ -1370,7 +2425,14 @@ sub _resolveTracks {
                 $owned++ if $own;
                 $active--;
                 $completed++;
-                ($completed >= $total) ? $finish->() : $pump->();
+                # Finish when every track is done, OR (early-stop) we have enough
+                # matches and the in-flight ones have drained. Otherwise pump more.
+                if ($completed >= $total || ($limit && $matched >= $limit && $active == 0)) {
+                    $finish->();
+                }
+                elsif (!($limit && $matched >= $limit)) {
+                    $pump->();
+                }
             }, $tr->{artist}, $tr->{title}, $tr->{album}, $tr->{recording_mbid}, $force, $libMode);
         }
     };
@@ -1415,10 +2477,16 @@ sub warmCache {
             $next = sub {
                 my $pl = shift @queue or do {
                     _dbg("warm: playlists done");
-                    # Then warm the follow feed (a no-op without a token). Chained
-                    # after the playlists so the two don't hit the streaming APIs at
+                    # Then warm the follow feed (a no-op without a token), then the
+                    # People-You-Follow trending list + album aggregates. Chained
+                    # after the playlists so they don't all hit the streaming APIs at
                     # once; runs on both the daily tick and the manual forced refresh.
-                    _warmFollow($client, $force);
+                    # Skipped entirely when the section is disabled — no following/stats/
+                    # feed calls, no resolve, no cache writes for it.
+                    if ($prefs->get('people_follow')) {
+                        _warmFollow($client, $force);
+                        _warmTrending($client, $force);
+                    }
                     return;
                 };
 
@@ -1427,7 +2495,7 @@ sub warmCache {
                     sub {
                         my $tracks = shift // [];
 
-                        my $rkey = 'lbf:pl:resolved:6:'
+                        my $rkey = 'lbf:pl:resolved:7:'
                             . join('|', $pl->{mbid}, ($pl->{last_modified} // ''), $svcOrder);
 
                         # Already resolved (same week) or no client → move on. A forced
@@ -1437,6 +2505,9 @@ sub warmCache {
                             return;
                         }
 
+                        # Year-enrich first (mirrors resolvePlaylist) so the warm bakes
+                        # the same " (YYYY)" names the open path would.
+                        _enrichYears($tracks, sub {
                         _resolveTracks($client, $tracks, sub {
                             my ($items, $inconclusive) = @_;
                             $items //= [];
@@ -1450,6 +2521,7 @@ sub warmCache {
                                 . ($inconclusive ? " ($inconclusive inconclusive)" : ""));
                             $next->();
                         }, undef, $force);
+                        });
                     },
                     sub { $next->() },
                 );
@@ -2856,7 +3928,9 @@ sub _pluginIcon {
 sub _streamKey {
     my ($idPart) = @_;
     my $svcOrder = join(',', map { lc $_->{name} } _orderedAdapters());
-    my $key = 'lbf:stream:18:' . $svcOrder . ':' . ($idPart // '');
+    # :18→:19 (0.9.110): matched album items gained `_year` (the service release
+    # year, the trending lists' last date fallback) — re-resolve once to bake it in.
+    my $key = 'lbf:stream:19:' . $svcOrder . ':' . ($idPart // '');
     utf8::encode($key) if utf8::is_utf8($key);   # octet key — non-Latin fallback can't crash md5
     return $key;
 }
@@ -3270,6 +4344,30 @@ sub _candReleaseType {
     return '';   # 3+ tracks: don't presume EP-vs-album — only the single case matters here
 }
 
+# Extract a release YEAR from a streaming service's RAW result hash — the LAST
+# date fallback for the People You Follow rows: when a track/album is unmapped on
+# ListenBrainz AND absent from MusicBrainz, the streaming catalogue still knows
+# its date (Qobuz release_date_original / released_at epoch, Tidal releaseDate,
+# Deezer release_date). Each adapter tags its matched items `_year` from this
+# (a plain scalar, so it survives the Storable stream/track caches); the trending
+# renders read it only when the source data had no year of its own.
+sub _svcYear {
+    my (@hashes) = @_;
+    for my $h (@hashes) {
+        next unless ref $h eq 'HASH';
+        for my $k (qw(release_date_original release_date releaseDate date streamStartDate)) {
+            my $v = $h->{$k};
+            return $1 if defined $v && !ref $v && $v =~ /^(\d{4})/;
+        }
+        my $e = $h->{released_at};   # Qobuz epoch variant
+        if (defined $e && !ref $e && $e =~ /^\d{9,}$/) {
+            return (localtime($e))[5] + 1900;
+        }
+        return $1 if defined $h->{year} && !ref $h->{year} && $h->{year} =~ /^(\d{4})/;
+    }
+    return '';
+}
+
 sub _searchQobuz {
     my ($client, $query, $artistNorm, $albumNorm, $svc, $collect, $albumRaw) = @_;
 
@@ -3310,6 +4408,7 @@ sub _searchQobuz {
             }
             $item->{_albumid} = $album->{id};   # native id → ListenLater favurl (album:<id>)
             $item->{_ctype}   = _candReleaseType($album);   # album/single/ep — for the type filter
+            $item->{_year}    = _svcYear($album);           # service release year (trending date fallback)
             push @out, $item;
         }
         # Matched the album but the renderer produced nothing usable → inconclusive
@@ -3386,18 +4485,11 @@ sub _bandcampSearchRow {
 # which would wrongly split single-act names like "Belle and Sebastian" — an over-
 # split only costs an extra search anyway, since _albumMatches still gates results.
 sub _bandcampArtists {
+    # Delegates to THE shared collab-credit splitter (API::splitArtistCredits) —
+    # the 0.9.56 Panda Bear & Sonic Boom fix generalised, also used by the MB
+    # release-group name-resolver. Keep the ladder in ONE place.
     my ($artist) = @_;
-    $artist //= '';
-    my @parts = ($artist,
-        split m{\s*(?:&|\+|\bfeat\b\.?|\bft\b\.?|\bwith\b|\bx\b|\bvs\b\.?)\s*}i, $artist);
-    my (%seen, @out);
-    for my $a (@parts) {
-        $a =~ s/^\s+|\s+$//g;
-        next unless length $a;
-        next if $seen{ lc $a }++;
-        push @out, $a;
-    }
-    return @out;
+    return Plugins::ListenBrainzFreshReleases::API::splitArtistCredits($artist);
 }
 
 # Manual "Search Bandcamp" for the detail page. Bandcamp is excluded from the
@@ -3561,6 +4653,7 @@ sub _searchTidal {
             }
             $item->{_albumid} = $album->{id};   # native id → ListenLater favurl (album:<id>)
             $item->{_ctype}   = _candReleaseType($album);   # album/single/ep — for the type filter
+            $item->{_year}    = _svcYear($album);           # service release year (trending date fallback)
             push @out, $item;
         }
         # Matched the album but the renderer produced nothing usable → inconclusive
@@ -3612,6 +4705,7 @@ sub _searchDeezer {
             }
             $item->{_albumid} = $album->{id};   # native id → ListenLater favurl (album:<id>)
             $item->{_ctype}   = _candReleaseType($album);   # album/single/ep — for the type filter
+            $item->{_year}    = _svcYear($album);           # service release year (trending date fallback)
             push @out, $item;
         }
         # Matched but the renderer produced nothing usable → inconclusive (see _searchTidal).
@@ -3686,7 +4780,14 @@ sub _findPlayableTrack {
     # The non-default library modes get their own key suffix so a streaming-first
     # result can't collide with the playlist feature's library-preferring cache.
     my $svcOrder = join(',', map { lc $_->{name} } @adapters);
-    my $key = 'lbf:track:6:' . $svcOrder . ':' . ($recMbid || _norm($query));
+    # :6→:7 (0.9.110): matched track items gained `_year` (service release year,
+    # the Weekly Tracks last date fallback) — cached pre-:7 items lack it. Since
+    # 0.9.114 the Created-for-You playlists ARE year-enriched too (`_enrichYears`),
+    # so the OUTER lbf:pl:resolved key was bumped to :7: in step — the `exists
+    # $tr->{year}` gate now distinguishes enriched lists (playlists/follow/trending,
+    # which render years) from un-enriched pools (DSTM), not "playlists never render
+    # years" as the earlier note here claimed.
+    my $key = 'lbf:track:7:' . $svcOrder . ':' . ($recMbid || _norm($query));
     $key .= ":$libMode" unless $libMode eq 'first';
     utf8::encode($key) if utf8::is_utf8($key);
     if (!$force && (my $c = $cache->get($key))) {
@@ -3941,7 +5042,7 @@ sub _titlesSearch {
     return (undef, 0) unless length $term;
 
     my $req = Slim::Control::Request::executeRequest(undef,
-        ['titles', 0, ($limit || 20), "search:$term", 'tags:ula']);
+        ['titles', 0, ($limit || 20), "search:$term", 'tags:ulay']);   # y = year (library date fallback)
     return (undef, 0) unless $req;
 
     my $loop = $req->getResult('titles_loop') || [];
@@ -3961,19 +5062,24 @@ sub _localItem {
     my $artist = eval { $tr->artistName } || eval { $tr->artist && $tr->artist->name } || '';
     my $album  = eval { $tr->album && $tr->album->title } || '';
     my $id     = eval { $tr->id };
-    return _localItemHash($url, eval { $tr->title } // '', $artist, $album, $id);
+    my $year   = eval { $tr->year } || '';
+    return _localItemHash($url, eval { $tr->title } // '', $artist, $album, $id, $year);
 }
 
 # Build a playable library item from a 'titles' query loop entry.
 sub _localItemFromLoop {
     my ($e) = @_;
     my $url = $e->{url} or return undef;
-    return _localItemHash($url, $e->{title} // '', $e->{artist} // '', $e->{album} // '', $e->{id});
+    return _localItemHash($url, $e->{title} // '', $e->{artist} // '', $e->{album} // '', $e->{id}, $e->{year});
 }
 
 sub _localItemHash {
-    my ($url, $title, $artist, $album, $id) = @_;
+    my ($url, $title, $artist, $album, $id, $year) = @_;
     my $line2 = join(" \x{2013} ", grep { defined && length } $artist, $album);
+    # _year: the library track's own tag year — the date fallback for enriched
+    # lists (playlists/follow), mirroring the streaming adapters' `_year`. A
+    # 0/garbage tag year is dropped.
+    my $y = (defined $year && $year =~ /^(\d{4})$/) ? $1 : '';
     return {
         name  => $title,
         ($line2 ne '' ? (line2 => $line2) : ()),
@@ -3982,6 +5088,7 @@ sub _localItemHash {
         play  => $url,
         (defined $id ? (image => "/music/$id/cover.jpg") : ()),
         _svc  => 'Library',
+        ($y ? (_year => $y) : ()),
     };
 }
 
@@ -4048,6 +5155,7 @@ sub _searchQobuzTrack {
                 url   => $url,
                 play  => $url,
                 image => $cover,
+                _year => _svcYear($tr->{album}, $tr),   # service release year (trending date fallback)
             };
         }
         $log->info("Qobuz track-match '$query': " . scalar(@$items) . " results, " . scalar(@out) . " matched");
@@ -4080,6 +5188,7 @@ sub _searchTidalTrack {
             my $item = Plugins::TIDAL::Plugin->can('_renderTrack')
                 ? eval { Plugins::TIDAL::Plugin::_renderTrack($tr) } : undef;
             next unless ref $item eq 'HASH' && defined $item->{url} && !ref $item->{url};
+            $item->{_year} = _svcYear($tr->{album}, $tr);   # service release year (trending date fallback)
             push @out, $item;
         }
         $log->info("Tidal track-match '$query': " . scalar(@{ $tracks || [] }) . " results, " . scalar(@out) . " matched");
@@ -4122,6 +5231,7 @@ sub _searchDeezerTrack {
             $item->{url}  = $u;
             $item->{play} = $u;
             $item->{type} = 'audio';
+            $item->{_year} = _svcYear($tr->{album}, $tr);   # service release year (trending date fallback)
             push @out, $item;
         }
         $log->info("Deezer track-match '$query': " . scalar(@{ $tracks || [] }) . " results, " . scalar(@out) . " matched");
