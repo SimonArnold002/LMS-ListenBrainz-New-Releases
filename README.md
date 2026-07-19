@@ -17,7 +17,7 @@ Tested on LMS 9.x with the **Material Skin**.
 | **Created-for-You Playlists** | Your Weekly Jams / Exploration / Daily Jams as Play-all lists | ListenBrainz username |
 | **People You Follow** *(optional)* | What the people you follow are playing — trending tracks & albums — plus their recommendations | ListenBrainz username |
 | **Don't Stop The Music** | Two auto-DJ mixers (Radio + Recommended) | ListenBrainz username |
-| **Streaming playback** | Play matched albums/tracks on your services | Qobuz / Tidal / Bandcamp / Deezer plugin |
+| **Streaming playback** | Play matched albums/tracks on your services | Qobuz / Tidal / Bandcamp / Deezer / Spotify (Spotty) plugin |
 | **Artist bios + photos** | On the detail page and behind "Read more" | MAI plugin, or a Last.fm key (bio only) |
 | **Block artists** | Hide an artist from every feed | — |
 | **Material home shelves** | Three home-screen rows | Material Skin |
@@ -29,7 +29,7 @@ Tested on LMS 9.x with the **Material Skin**.
 - **LMS / Lyrion Music Server 9.0.0+** (tested with Material Skin).
 - A **ListenBrainz account + API token** for anything personalised (For You, Playlists, Don't Stop The Music). The global *All Releases* feed needs nothing. Your token is on your [ListenBrainz settings page](https://listenbrainz.org/settings/); the For You feed only reflects artists you've actually submitted listens for.
 - **Optional add-ons** the plugin uses when present:
-  - **Qobuz**, **Tidal**, **Bandcamp** and/or **Deezer** LMS plugins (installed + signed in) → streaming playback.
+  - **Qobuz**, **Tidal**, **Bandcamp**, **Deezer** and/or **Spotify** (via the **Spotty** plugin) LMS plugins (installed + signed in) → streaming playback.
   - **Music & Artist Information (MAI)** plugin → artist biographies *and* photos.
   - A free **Last.fm API key** → genre fallback, artist-bio fallback (no photo), and a similar-artist fallback for the radio. Get one at [last.fm/api/account/create](https://www.last.fm/api/account/create).
 
@@ -55,7 +55,7 @@ Then install **ListenBrainz Fresh Releases** from the plugin list and restart.
 
 1. Open **Settings → Advanced → ListenBrainz Fresh Releases** (also linked from the plugin menu as **Plugin Settings**).
 2. Enter your **ListenBrainz username** and **API token** (needed for the personalised features).
-3. *(Optional)* Paste a **Last.fm API key** and set **Streaming Services** priorities if you have Qobuz/Tidal/Bandcamp/Deezer.
+3. *(Optional)* Paste a **Last.fm API key** and set **Streaming Services** priorities if you have Qobuz/Tidal/Bandcamp/Deezer/Spotify (Spotty).
 4. *(Optional)* Add your **MuSpy user ID** (bottom of the settings page, in the **MuSpy** section) to fold your followed artists' releases into New Releases for You.
 5. Save. The plugin appears in **Apps → ListenBrainz Fresh Releases**.
 
@@ -84,12 +84,12 @@ Because MuSpy is upcoming-heavy, it has its **own** controls, separate from the 
 ### Release detail pages
 Tap any release for a page in three sections:
 
-- **Streaming** — playable matches on your services. Qobuz/Tidal/Deezer are matched automatically; **Bandcamp** is a one-tap **Search Bandcamp** button (it's slower/heavier, so it runs only when you ask, and a found match is remembered). A **Refresh** re-searches.
+- **Streaming** — playable matches on your services. Qobuz/Tidal/Deezer/Spotify are matched automatically; **Bandcamp** is a one-tap **Search Bandcamp** button (it's slower/heavier, so it runs only when you ask, and a found match is remembered). A **Refresh** re-searches.
 - **Artist Details** — artist photo + a short biography preview with **Read more** for the full text, and **Block this artist**.
 - **Album Details** — tracklist (with durations), genres, tags, and **View on MusicBrainz**.
 
 ### Streaming playback
-With **Qobuz**, **Tidal**, **Bandcamp** and/or **Deezer** installed, releases and playlist tracks are matched and made playable. In **Streaming Services** settings, give each service a **search priority** (lower = tried first, **0 = never use it**); matching stops at the first service that has it. Qobuz/Tidal/Deezer are searched automatically; **Bandcamp** is searched on demand from the detail page (a found Bandcamp match is remembered, so a Bandcamp-only release stays playable). Change a service's priority — or remove its plugin — and affected tracks **re-match** to your remaining services automatically.
+With **Qobuz**, **Tidal**, **Bandcamp**, **Deezer** and/or **Spotify** (via **Spotty**) installed, releases and playlist tracks are matched and made playable. In **Streaming Services** settings, give each service a **search priority** (lower = tried first, **0 = never use it**); matching stops at the first service that has it. Qobuz/Tidal/Deezer/Spotify are searched automatically; **Bandcamp** is searched on demand from the detail page (a found Bandcamp match is remembered, so a Bandcamp-only release stays playable). Change a service's priority — or remove its plugin — and affected tracks **re-match** to your remaining services automatically.
 
 ### Created-for-You Playlists
 With a username set, the **Playlists** section turns your ListenBrainz **Weekly Jams**, **Weekly Exploration** and **Daily Jams** into Play-all lists. Each track is matched to your **own library first** (then streaming); unmatched tracks are dropped and the page title shows how many matched. A **Refresh playlist matches** row at the top of the Playlists view forces a fresh, library-first re-match of every playlist (handy if the matches were built before your library finished scanning). A **Settings → Unmatched tracks (debug)** view lists, per playlist, any tracks that couldn't be matched — handy for spotting a gap.
@@ -128,13 +128,13 @@ The plugin adds **New Releases for You**, **Playlists** and **All Releases** row
 | User Token | *(empty)* | From listenbrainz.org/settings/ |
 | Last.fm API Key | *(empty)* | Optional — enables genre + artist-bio + radio similar-artist fallbacks |
 | Days window | **14** | 1–90 days of releases to show |
-| Find on Streaming Services | **On** | Show playable Qobuz/Tidal/Bandcamp/Deezer matches on detail pages |
+| Find on Streaming Services | **On** | Show playable Qobuz/Tidal/Bandcamp/Deezer/Spotify matches on detail pages |
 | Show "People You Follow" section | **On** | Turn the whole People You Follow section (trending tracks & albums, recommendations) off to skip all its calls, caching and warming |
 | Prefer Tracks from My Library | **On** | Use your own copy (by MusicBrainz ID, then artist + title) before streaming — for Playlists and Don't Stop The Music |
 | Write a debug log | **Off** | Records the playlist warm/match activity to `lbf-debug.log` (next to the server log) — turn on only to troubleshoot a matching/caching issue |
 
 ### Streaming Services
-A **search priority** per detected service (Qobuz / Tidal / Bandcamp / Deezer): lower number = searched first, **0 = never use it**. Drives detail-page matches, Playlists and Don't Stop The Music.
+A **search priority** per detected service (Qobuz / Tidal / Bandcamp / Deezer / Spotify): lower number = searched first, **0 = never use it**. Drives detail-page matches, Playlists and Don't Stop The Music.
 
 ### Blocked Artists
 Lists the artists you've blocked; tick **Unblock** and save to restore them. Various Artists can't be blocked (it would hide unrelated compilations).
@@ -175,7 +175,7 @@ Shown at the bottom of the settings page, kept separate from the ListenBrainz op
 ## Credits
 
 - Release data from [ListenBrainz](https://listenbrainz.org) / [MusicBrainz](https://musicbrainz.org); cover art from the [Cover Art Archive](https://coverartarchive.org). All part of the [MetaBrainz](https://metabrainz.org) project.
-- Streaming via the community **Qobuz**, **Tidal**, **Bandcamp** and **Deezer** LMS plugins.
+- Streaming via the community **Qobuz**, **Tidal**, **Bandcamp**, **Deezer** and **Spotty** (Spotify) LMS plugins.
 - Artist biographies and photos via the **Music & Artist Information (MAI)** plugin, with **Last.fm** fallbacks.
 
 See [LICENSE](LICENSE) for licensing.

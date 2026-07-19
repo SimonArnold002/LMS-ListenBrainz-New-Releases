@@ -3857,6 +3857,25 @@ sub _streamingAdapters {
       && Plugins::Deezer::Plugin->can('_renderTrack')
       && Plugins::Deezer::Plugin->can('getAlbum');
 
+    # Spotify — via the Spotty plugin, an OLDER, independent codebase (not the
+    # Michael-Herger Qobuz/Tidal/Deezer family): getAPIHandler is a CLASS method
+    # (returns undef with no client OR no Spotty account), the renderers live in
+    # OPML.pm (not Plugin.pm), and search results arrive pre-normalized. Album
+    # nodes from OPML::_albumItem carry a CODEREF `url` (\&OPML::album, the
+    # spotify:album:<id> uri in passthrough) like Tidal/Deezer — reattached in
+    # _rebuildStreamItems. Tracks render via OPML::trackList (plain string
+    # spotify://track:<id> urls). OPML.pm is `use`d by Spotty's Plugin.pm, so its
+    # methods are loaded whenever the plugin is enabled; ->can on the absent
+    # package is safe, and a missing method → the service doesn't register.
+    # Confirmed against the deployed Spotty source.
+    push @adapters, {
+        name => 'Spotify', icon => _pluginIcon('Plugins::Spotty::Plugin'),
+        run => \&_searchSpotify, runTrack => \&_searchSpotifyTrack, query_enc => 'chars',
+    } if Plugins::Spotty::Plugin->can('getAPIHandler')
+      && Plugins::Spotty::OPML->can('_albumItem')
+      && Plugins::Spotty::OPML->can('trackList')
+      && Plugins::Spotty::OPML->can('album');
+
     return @adapters;
 }
 
@@ -3897,6 +3916,7 @@ sub serviceStatus {
         [ 'bandcamp', 'Bandcamp' ],
         [ 'tidal',    'Tidal'    ],
         [ 'deezer',   'Deezer'   ],
+        [ 'spotify',  'Spotify'  ],
     );
     my %installed = map { lc($_->{name}) => 1 } _streamingAdapters();
     return [ map {
@@ -4023,7 +4043,8 @@ sub _findPlayable {
     # service plugins' URL layers differ — Qobuz escapes with uri_escape_utf8 and
     # Tidal transliterates with Text::Unidecode, both needing CHARACTER strings
     # (octets double-encode: "Sigur Rós" searched as "Sigur RÃ³s" -> junk/empty
-    # results; found + fixed in the Discography plugin 2026-07-10), while
+    # results; found + fixed in the Discography plugin 2026-07-10) — Spotty also
+    # escapes with uri_escape_utf8, so it's in the character camp — while
     # Deezer's complex_to_query and Bandcamp want OCTETS. Each adapter's
     # query_enc picks its spelling at the call site.
     my $qChars     = $artist;
@@ -4176,6 +4197,19 @@ sub _cacheStream {
 # and plays in LBF; it just can't be added to ListenLater with full fidelity).
 sub _attachFavUrl {
     my ($it, $svc, $art, $artist, $year) = @_;
+
+    # Spotify is EXEMPT — the one service whose renderer already ships a WORKING
+    # native favorites_url: Spotty's _albumItem sets it to the spotify:album:<id>
+    # uri, which Spotty itself replays (explodePlaylist → tracksFromURI → album).
+    # Overwriting it with the decorated <svc>://album:<id>?cover=… scheme would
+    # REGRESS a natively-saved favourite: Spotty's album() extracts the id with
+    # /album:(.*)/, so the query string would be captured INTO the id and the
+    # albums/<id> API call errors → empty tracklist on replay. For Qobuz/Tidal/
+    # Deezer there was no working favurl to preserve (their renderers leaked a
+    # broken coderef — the reason this decorator exists), so only Spotify keeps
+    # its own. Nothing is lost: ListenLater has no spotify source support.
+    return if $svc eq 'Spotify';
+
     my $id = $it->{_albumid};
     return unless defined $id && length $id;
     my $fav = lc($svc) . '://album:' . $id;   # scheme = ListenLater's qobuz/tidal/bandcamp source tag
@@ -4294,6 +4328,14 @@ sub _rebuildStreamItems {
             # `else { next }` below and silently vanished on re-read (fixed 0.9.76).
             $item{url} = \&Plugins::Deezer::Plugin::getAlbum;
         }
+        elsif ($svc eq 'Spotify' && Plugins::Spotty::OPML->can('album')) {
+            # Spotify album nodes are the Tidal/Deezer shape too — Spotty's OPML
+            # `_albumItem` sets `url => \&OPML::album` (a CODEREF, stripped on
+            # cache) and keeps the spotify:album:<id> uri in `passthrough` (plain
+            # data, survives the cache), so OPML::album resolves the tracklist on
+            # read. Only the renderer's home differs (OPML.pm, not Plugin.pm).
+            $item{url} = \&Plugins::Spotty::OPML::album;
+        }
         else {
             next;
         }
@@ -4321,15 +4363,20 @@ sub _bcMatchItems {
 # service's OWN album data, so a non-single release isn't resolved to a like-named single
 # (0.9.89 — the type filter in _findPlayable uses this). Deliberately CONSERVATIVE: it
 # only commits to 'single'/'ep' when the service is clear, else '' (unknown = keep). An
-# explicit trusted type field wins (Qobuz release_type, Deezer record_type, TIDAL type);
+# explicit trusted type field wins (Qobuz release_type, Deezer record_type, Spotify
+# album_type, TIDAL type — album_type sits BEFORE type as DEFENSIVE ordering: Spotify's
+# raw `type` is the OBJECT type, but Spotty's Cache normalize() deletes it unconditionally
+# (_removeUnused), so it can't reach us today; the ordering just guarantees it could never
+# be misread as a release type if that changes);
 # otherwise the track count decides — a real ALBUM never has 1-2 tracks, so a low count is
 # a safe single signal, while a many-track album (even if mistyped) stays unflagged. Field
-# names verified per plugin: Qobuz tracks_count, Deezer nb_tracks, TIDAL numberOfTracks.
+# names verified per plugin: Qobuz tracks_count, Deezer nb_tracks, TIDAL numberOfTracks,
+# Spotify total_tracks.
 sub _candReleaseType {
     my ($album) = @_;
     return '' unless ref $album eq 'HASH';
 
-    for my $f (qw(release_type record_type type)) {
+    for my $f (qw(release_type record_type album_type type)) {
         my $t = lc($album->{$f} // '');
         next unless $t;
         return 'single' if $t eq 'single';
@@ -4338,7 +4385,7 @@ sub _candReleaseType {
         # unrecognised value → fall through to the track-count heuristic
     }
 
-    my $tc = $album->{tracks_count} // $album->{nb_tracks} // $album->{numberOfTracks};
+    my $tc = $album->{tracks_count} // $album->{nb_tracks} // $album->{numberOfTracks} // $album->{total_tracks};
     return '' unless defined $tc && "$tc" =~ /^\d+$/;
     return 'single' if $tc <= 2;
     return '';   # 3+ tracks: don't presume EP-vs-album — only the single case matters here
@@ -4714,6 +4761,71 @@ sub _searchDeezer {
     }, { search => $query, type => 'album', strict => 'off', limit => 50 });
 }
 
+# Spotify album search — via the Spotty plugin. getAPIHandler is a CLASS method
+# and returns undef with no client OR no Spotty account → inconclusive (exactly
+# the missing-handler path of the other adapters). ->search(cb,{query,type,limit})
+# runs through Spotty's Pipeline, which calls back with a bare arrayref of
+# ALREADY-NORMALIZED album hashes ({name, artist, artists, uri, id, image,
+# release_date, album_type, total_tracks}). CAVEAT (verified in the deployed
+# source): the Pipeline swallows API errors — _gotError/_call feed its extractor
+# an error HASH, whose ->{albums}{items} extracts to nothing — so an errored
+# search arrives as the SAME empty arrayref as a genuine zero-hit search and is
+# cached as a real miss. Only undef / a non-arrayref (never seen from this
+# Pipeline, kept defensively) can signal inconclusive here; a Spotify outage can
+# therefore pin a no-match for STREAM_NOMATCH_TTL — accepted, nothing upstream
+# distinguishes the two. Rendering reuses OPML::_albumItem (url => \&OPML::album
+# coderef + uri in passthrough — reattached by _rebuildStreamItems).
+sub _searchSpotify {
+    my ($client, $query, $artistNorm, $albumNorm, $svc, $collect, $albumRaw) = @_;
+
+    my $api = Plugins::Spotty::Plugin->getAPIHandler($client);
+    # undef (not []) → inconclusive (see _findPlayable / _searchTidal).
+    unless ($api) {
+        $collect->(undef);
+        return;
+    }
+
+    $api->search(sub {
+        my $albums = shift;
+        # No response / unexpected shape → treated as "couldn't query" → inconclusive
+        # (defensive only — see the header note: this Pipeline always sends an arrayref).
+        return $collect->(undef) unless defined $albums && ref $albums eq 'ARRAY';
+        my @out;
+        my $rendererFailed = 0;
+        for my $album (@$albums) {
+            next unless ref $album eq 'HASH';
+            # Normalized albums carry `artist` (first credit, a plain string) plus the
+            # full `artists` list; the album TITLE is `name` (not `title` as elsewhere).
+            my $candArtist = (defined $album->{artist} && !ref $album->{artist})
+                ? $album->{artist}
+                : (ref $album->{artists} eq 'ARRAY' && ref $album->{artists}[0] eq 'HASH')
+                    ? $album->{artists}[0]{name} : '';
+            next unless _albumMatches($artistNorm, $albumNorm, $candArtist, $album->{name}, $albumRaw);
+            # Guard the foreign renderer (dies here run inside this async callback,
+            # not under _findPlayable's eval) — skip a bad item (mirrors _searchTidal).
+            my $item = eval { Plugins::Spotty::OPML::_albumItem($client, $album) };
+            if ($@ || ref $item ne 'HASH') {
+                $log->warn("Spotify _albumItem failed: $@") if $@;
+                $rendererFailed = 1;
+                next;
+            }
+            # Native id, kept for parity with the other adapters (bare id field,
+            # else parsed from the spotify:album:<id> uri). Deliberately NOT
+            # turned into a decorated favurl — Spotty's own favorites_url is the
+            # working one and is preserved (see _attachFavUrl's Spotify exemption).
+            my $sid = $album->{id};
+            ($sid) = ($album->{uri} // '') =~ /album:([A-Za-z0-9]+)$/ unless defined $sid && length $sid;
+            $item->{_albumid} = $sid;
+            $item->{_ctype}   = _candReleaseType($album);   # album/single/ep — for the type filter (album_type)
+            $item->{_year}    = _svcYear($album);           # service release year (trending date fallback)
+            push @out, $item;
+        }
+        # Matched but the renderer produced nothing usable → inconclusive (see _searchTidal).
+        return $collect->(undef) if !@out && $rendererFailed;
+        $collect->(\@out);
+    }, { query => $query, type => 'album', limit => 50 });
+}
+
 # ===========================================================================
 # Track-level matching (for the Created-for-You playlists). The album path above
 # resolves to a playable ALBUM node; here each playlist track resolves to a single
@@ -4753,7 +4865,7 @@ sub _findPlayableTrack {
     # the spaced one. Normalisation is only for OUR match validation (_trackMatches);
     # the outgoing query must stay faithful to what the service indexed.
     # Both spellings, per-adapter query_enc — see the album-search site's note
-    # (Qobuz/Tidal need characters, Deezer/Bandcamp octets).
+    # (Qobuz/Tidal/Spotify need characters, Deezer/Bandcamp octets).
     my $qRaw       = join(' ', grep { length } $artist, $title);
     my $qChars     = $qRaw;
     utf8::decode($qChars) unless utf8::is_utf8($qChars);   # no-op if not valid UTF-8
@@ -5237,6 +5349,56 @@ sub _searchDeezerTrack {
         $log->info("Deezer track-match '$query': " . scalar(@{ $tracks || [] }) . " results, " . scalar(@out) . " matched");
         $collect->(\@out);
     }, { search => $query, type => 'track', strict => 'off', limit => 20 });
+}
+
+# Spotify track search — mirror of _searchDeezerTrack, via the Spotty plugin.
+# ->search(cb,{type=>'track'}) calls back (through Spotty's Pipeline — same
+# error-swallowing caveat as _searchSpotify) with a bare arrayref of normalized
+# track hashes. Rendering reuses OPML::trackList (one-track list → one item),
+# whose items carry a plain string url (spotify://track:<id>) — the
+# cache-stability rule. The renderer's `name` is its long spoken form ("Title BY
+# Artist FROM Album"), so it's reset to the bare title (line1) to match the
+# other adapters' rows — the year-append and dedupe key off `name`. A track the
+# renderer withholds a url from (explicit-content filtering) fails the
+# string-url rule and simply doesn't match.
+sub _searchSpotifyTrack {
+    my ($client, $query, $artistNorm, $titleNorm, $album, $collect) = @_;
+
+    my $api = Plugins::Spotty::Plugin->getAPIHandler($client);
+    unless ($api) { $log->info("Spotify track-match: no API handler"); $collect->(undef); return; }
+
+    $api->search(sub {
+        my $tracks = shift;
+        # No response / unexpected shape → inconclusive (defensive — see _searchSpotify).
+        return $collect->(undef) unless defined $tracks && ref $tracks eq 'ARRAY';
+        my @out;
+        for my $tr (@$tracks) {
+            next unless ref $tr eq 'HASH';
+            # Normalized tracks carry the full `artists` credit list (no flattened
+            # `artist` field) — accept if ANY credited artist matches, like the
+            # Qobuz track path does for its several artist fields.
+            my @artists = grep { defined && length }
+                map { ref $_ eq 'HASH' ? $_->{name} : undef }
+                @{ (ref $tr->{artists} eq 'ARRAY') ? $tr->{artists} : [] };
+            next unless grep { _trackMatches($artistNorm, $titleNorm, $_, $tr->{name}) } @artists;
+
+            # Guard the foreign renderer (async callback — see _searchDeezerTrack).
+            my ($item) = eval { @{ Plugins::Spotty::OPML::trackList($client, [$tr]) || [] } };
+            next unless ref $item eq 'HASH';
+            my $u = (defined $item->{url}  && !ref $item->{url})  ? $item->{url}
+                  : (defined $item->{play} && !ref $item->{play}) ? $item->{play}
+                  : undef;
+            next unless defined $u && length $u;
+            $item->{url}  = $u;
+            $item->{play} = $u;
+            $item->{type} = 'audio';
+            $item->{name} = $item->{line1} if defined $item->{line1} && length $item->{line1};   # bare title (see header)
+            $item->{_year} = _svcYear($tr->{album}, $tr);   # service release year (trending date fallback)
+            push @out, $item;
+        }
+        $log->info("Spotify track-match '$query': " . scalar(@$tracks) . " results, " . scalar(@out) . " matched");
+        $collect->(\@out);
+    }, { query => $query, type => 'track', limit => 20 });
 }
 
 # Bandcamp: its search is album/track-mixed and individual-track streaming isn't a
