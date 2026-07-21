@@ -735,7 +735,7 @@ sub _playlistTile {
     my $matched = '';
     my @adapters = _orderedAdapters();
     my $svcOrder = join(',', map { lc $_->{name} } @adapters);
-    my $rkey = 'lbf:pl:resolved:7:' . join('|', ($pl->{mbid} // ''), $lastMod, $svcOrder);
+    my $rkey = 'lbf:pl:resolved:8:' . join('|', ($pl->{mbid} // ''), $lastMod, $svcOrder);
     if (my $c = $cache->get($rkey)) {
         # Count only tracks whose service is still usable, so the tile agrees with
         # the count shown when the playlist is opened (_playlistResult applies the
@@ -803,7 +803,7 @@ sub resolvePlaylist {
 
     # Key includes the service order so changing priorities re-resolves.
     my $svcOrder = join(',', map { lc $_->{name} } _orderedAdapters());
-    my $rkey = 'lbf:pl:resolved:7:' . join('|', $mbid, ($lastMod // ''), $svcOrder);
+    my $rkey = 'lbf:pl:resolved:8:' . join('|', $mbid, ($lastMod // ''), $svcOrder);
 
     my $title = ref $pass eq 'HASH' ? $pass->{title} : undef;
 
@@ -2495,7 +2495,7 @@ sub warmCache {
                     sub {
                         my $tracks = shift // [];
 
-                        my $rkey = 'lbf:pl:resolved:7:'
+                        my $rkey = 'lbf:pl:resolved:8:'
                             . join('|', $pl->{mbid}, ($pl->{last_modified} // ''), $svcOrder);
 
                         # Already resolved (same week) or no client → move on. A forced
@@ -3930,7 +3930,7 @@ sub _streamKey {
     my $svcOrder = join(',', map { lc $_->{name} } _orderedAdapters());
     # :18→:19 (0.9.110): matched album items gained `_year` (the service release
     # year, the trending lists' last date fallback) — re-resolve once to bake it in.
-    my $key = 'lbf:stream:19:' . $svcOrder . ':' . ($idPart // '');
+    my $key = 'lbf:stream:20:' . $svcOrder . ':' . ($idPart // '');
     utf8::encode($key) if utf8::is_utf8($key);   # octet key — non-Latin fallback can't crash md5
     return $key;
 }
@@ -4787,7 +4787,7 @@ sub _findPlayableTrack {
     # $tr->{year}` gate now distinguishes enriched lists (playlists/follow/trending,
     # which render years) from un-enriched pools (DSTM), not "playlists never render
     # years" as the earlier note here claimed.
-    my $key = 'lbf:track:7:' . $svcOrder . ':' . ($recMbid || _norm($query));
+    my $key = 'lbf:track:8:' . $svcOrder . ':' . ($recMbid || _norm($query));
     $key .= ":$libMode" unless $libMode eq 'first';
     utf8::encode($key) if utf8::is_utf8($key);
     if (!$force && (my $c = $cache->get($key))) {
@@ -5429,12 +5429,59 @@ sub _norm {
              Unicode::Normalize::NFD($s) =~ s/[\x{0300}-\x{036F}]+//gr );
         $s =~ s/([^\x00-\x7f])/exists $FOLD{$1} ? $FOLD{$1} : $1/ge;
     }
+    # LEETSPEAK SUBSTITUTIONS - a punctuation mark standing in for a LETTER.
+    #
+    # Applied ONLY when a word character FOLLOWS the mark. That is precisely
+    # what separates a letter from decoration: "P!nk" -> pink and "Ke$ha" ->
+    # kesha (the mark sits INSIDE the word), while a trailing or free-standing
+    # mark is punctuation and falls through to the [^\p{Alnum}] rule below.
+    #
+    # WHY, and it is not cosmetic (field via DSC, 2026-07-21): the old
+    # unconditional fold made a name spelled WITH the mark disagree with the
+    # same name spelled WITHOUT it - "Layo & Bushwacka!" -> 'layo bushwackai'
+    # against 'layo bushwacka'. `_albumMatches`' artist gate is MANDATORY, so
+    # EVERY streaming candidate was rejected and the page read "No releases
+    # found" for an artist with a correctly resolved MBID. The same fold also
+    # made "Panic At The Disco" unsearchable without typing the "!".
+    #
+    # A name made ENTIRELY of these marks ("!!!", a real band) keeps the old
+    # unconditional fold: stripping would leave '', and `_artistMatch` rejects
+    # an empty side outright - i.e. this very bug in a new costume.
+    # "$" and "@" are UNCONDITIONAL: in a stylised name they are effectively
+    # always a letter, including at the END - "$uicideboy$" is Suicideboy(s),
+    # so the trailing "$" is an s, not decoration. Scoping the boundary rule
+    # below to them broke exactly that (caught by the cross-repo behaviour
+    # harness, which PFR documents as a supported case).
     $s =~ s/\$/s/g;
+    $s =~ s/\@/a/g;
+    # "!" IS different, and it is the one that motivated this: it has a real
+    # decorative use that the others do not - "Wham!", "Panic! At The Disco",
+    # "Godspeed You! Black Emperor", "Layo & Bushwacka!" - where the mark is
+    # punctuation and the name is spelled both ways in the wild. So "!" folds
+    # to a letter ONLY when a word character FOLLOWS it (inside a word, as in
+    # "P!nk"); otherwise it falls through to the [^\p{Alnum}] pass below.
+    #
+    # A name of nothing BUT marks ("!!!", a real band) keeps the unconditional
+    # fold: stripping would leave '', and `_artistMatch` rejects an empty side
+    # outright - this very bug in a new costume.
+    if ($s =~ /[\p{Alnum}]/) { $s =~ s/(?<=\w)!(?=\w)/i/g }
+    else                      { $s =~ s/!/i/g }
     $s =~ s/\x{20ac}/e/g;   # euro sign
     $s =~ s/\x{a3}/l/g;     # pound sign
     $s =~ s/\x{a5}/y/g;     # yen sign
-    $s =~ s/!/i/g;
-    $s =~ s/\@/a/g;
+
+    # "&" and "+" are SPOKEN "and", and this is the same rule as every
+    # substitution above it - a symbol folded to the word it stands for, like
+    # $ -> s and ! -> i. Without it the two spellings key differently ("simon
+    # garfunkel" vs "simon and garfunkel", because & alone becomes a space
+    # below), so the SAME act arriving from two services became two search rows
+    # and only merged if MusicBrainz happened to record the variant as an
+    # alias. Field 2026-07-21: Deezer says "Layo and bushwacka!" where Tidal
+    # says "Layo & Bushwacka" - one act, two rows.
+    #
+    # "+" is included because services use it the same way; MB's own alias list
+    # for that duo literally carries "Layo + Bushwacka!".
+    $s =~ s/[&+]/ and /g;
     $s =~ s/[\(\[].*?[\)\]]//g;
     $s =~ s/[^\p{Alnum}]+/ /g;
     $s =~ s/^\s+//; $s =~ s/\s+$//;

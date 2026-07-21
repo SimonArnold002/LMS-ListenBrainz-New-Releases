@@ -108,7 +108,28 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-0.9.119
+0.9.120
+
+- **FLEET MATCHER SYNC: a decorative `!` is punctuation, not the letter i; `&`/`+` fold to "and" (0.9.120).**
+  Ported from Discography 0.44.19/0.44.23, where the bug was found in the field. Landed across
+  **DSC / LBF / PFR / SH in one session**; `matcher_sync_check.py` exits **0**. LL untouched (its `_norm`
+  is the pinned legacy ASCII variant and carries none of these substitutions).
+  - **`!` folds to a letter only when TOKEN-INTERNAL** (`s/(?<=\w)!(?=\w)/i/g`): `P!nk` -> `pink`, while
+    `Wham!`, `Panic! At The Disco` and `Godspeed You! Black Emperor` shed the mark. Previously the
+    unconditional fold made a name spelled WITH the mark disagree with the same name spelled WITHOUT
+    it, and `_albumMatches`' artist gate is MANDATORY — so on Discography every streaming candidate was
+    rejected and the page read "No releases found" for a correctly resolved artist.
+  - **`$` and `@` stay UNCONDITIONAL, deliberately.** Scoping them too broke `$uicideboy$` -> `suicideboy`
+    (that trailing `$` is an *s*). Caught by a cross-repo BEHAVIOURAL harness, not by the sync check —
+    which compares text and would have reported four identical copies of the bug.
+  - **A name of nothing but marks keeps the old fold**, so `!!!` still keys `iii`. Letting it empty would
+    make `_artistMatch` (which returns 0 on an empty side) reject every candidate — the same bug again.
+  - **`&` and `+` -> "and"**, the same "symbol becomes the word it stands for" family as `$`->s. Without it
+    one act arriving from two services as "X & Y" and "X and Y" became two rows.
+- **ALL match-decision caches bumped** — `lbf:stream` 19->20, `lbf:track` 7->8, `lbf:pl:resolved` 7->8.
+  The keys are only partly `_norm`-derived, but every one of them stores a DECISION computed with the old
+  normaliser, and the outer `lbf:pl:resolved` wraps the inner `lbf:track` — bumping the inner alone does
+  nothing, because an outer hit never reaches it.
 
 - **Code-review fixes: two transient-failure cache-poison paths (0.9.119) — no cache-version bump.**
   Pre-commit review of the People You Follow / DSTM work. Both are the "never cache a network
