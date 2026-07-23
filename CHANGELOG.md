@@ -3,6 +3,11 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## Unreleased
+
+### Added
+- **Spotify streaming playback, via the Spotty plugin.** With Spotty installed and signed in, Spotify joins Qobuz / Tidal / Bandcamp / Deezer as a full streaming service: release detail pages get one-tap playable Spotify album matches, and the Created-for-You playlists, People You Follow lists and both Don't Stop The Music mixers can resolve tracks to Spotify too. It appears in **Settings → Streaming Services** with its own search priority (default 5, after Deezer — set it lower to prefer it, or 0 to never use it), and like the other services it's detected automatically and re-matches affected items when you change its priority or remove the plugin.
+
 ## 0.9.119
 
 ### Fixed

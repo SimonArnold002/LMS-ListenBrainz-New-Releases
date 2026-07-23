@@ -92,6 +92,7 @@ $prefs->init({
     svc_priority_bandcamp => 2,
     svc_priority_tidal    => 3,
     svc_priority_deezer   => 4,
+    svc_priority_spotify  => 5,
 
     # Don't Stop The Music propagators (Similar / Raw / Top). dstm_count = how many
     # recommended recordings to pull from ListenBrainz into the pool; dstm_batch =
