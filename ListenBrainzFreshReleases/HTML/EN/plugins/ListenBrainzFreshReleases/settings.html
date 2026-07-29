@@ -24,23 +24,29 @@
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LBF_PLAY_VIA_SETTING" desc="PLUGIN_LBF_PLAY_VIA_SETTING_DESC" %]
-<input type="checkbox" name="pref_play_via" value="1" [% IF prefs.play_via %]checked="checked"[% END %]>
+<label><input type="checkbox" name="pref_play_via" value="1" [% IF prefs.play_via %]checked="checked"[% END %]> [% 'PLUGIN_LBF_ENABLED' | string %]</label>
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LBF_PEOPLE_FOLLOW_SETTING" desc="PLUGIN_LBF_PEOPLE_FOLLOW_SETTING_DESC" %]
-<input type="checkbox" name="pref_people_follow" value="1" [% IF prefs.people_follow %]checked="checked"[% END %]>
+<label><input type="checkbox" name="pref_people_follow" value="1" [% IF prefs.people_follow %]checked="checked"[% END %]> [% 'PLUGIN_LBF_ENABLED' | string %]</label>
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LBF_PREFER_LIBRARY" desc="PLUGIN_LBF_PREFER_LIBRARY_DESC" %]
-<input type="checkbox" name="pref_prefer_library" value="1" [% IF prefs.prefer_library %]checked="checked"[% END %]>
+<label><input type="checkbox" name="pref_prefer_library" value="1" [% IF prefs.prefer_library %]checked="checked"[% END %]> [% 'PLUGIN_LBF_ENABLED' | string %]</label>
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LBF_MB_BASE_URL" desc="PLUGIN_LBF_MB_BASE_URL_DESC" %]
 <input type="text" name="pref_mb_base_url" value="[% prefs.mb_base_url %]" size="48" placeholder="https://musicbrainz.org/ws/2/">
 [% END %]
 
+[% WRAPPER setting title="PLUGIN_LBF_GENRE_LOOKUP" desc="PLUGIN_LBF_GENRE_LOOKUP_DESC" %]
+<label><input type="radio" name="pref_genre_lookup" value="auto" [% IF prefs.genre_lookup != 'always' AND prefs.genre_lookup != 'off' %]checked="checked"[% END %]> [% 'PLUGIN_LBF_GENRE_LOOKUP_AUTO' | string %]</label><br>
+<label><input type="radio" name="pref_genre_lookup" value="always" [% IF prefs.genre_lookup == 'always' %]checked="checked"[% END %]> [% 'PLUGIN_LBF_GENRE_LOOKUP_ALWAYS' | string %]</label><br>
+<label><input type="radio" name="pref_genre_lookup" value="off" [% IF prefs.genre_lookup == 'off' %]checked="checked"[% END %]> [% 'PLUGIN_LBF_GENRE_LOOKUP_OFF' | string %]</label>
+[% END %]
+
 [% WRAPPER setting title="PLUGIN_LBF_DEBUG_LOG" desc="PLUGIN_LBF_DEBUG_LOG_DESC" %]
-<input type="checkbox" name="pref_debug_log" value="1" [% IF prefs.debug_log %]checked="checked"[% END %]>
+<label><input type="checkbox" name="pref_debug_log" value="1" [% IF prefs.debug_log %]checked="checked"[% END %]> [% 'PLUGIN_LBF_ENABLED' | string %]</label>
 [% END %]
 
 </div>
@@ -103,19 +109,19 @@
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LBF_FORYOU_PAST" desc="PLUGIN_LBF_FORYOU_PAST_DESC" %]
-<input type="checkbox" name="pref_foryou_past" value="1" [% IF prefs.foryou_past %]checked="checked"[% END %]>
+<label><input type="checkbox" name="pref_foryou_past" value="1" [% IF prefs.foryou_past %]checked="checked"[% END %]> [% 'PLUGIN_LBF_ENABLED' | string %]</label>
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LBF_FORYOU_FUTURE" desc="PLUGIN_LBF_FORYOU_FUTURE_DESC" %]
-<input type="checkbox" name="pref_foryou_future" value="1" [% IF prefs.foryou_future %]checked="checked"[% END %]>
+<label><input type="checkbox" name="pref_foryou_future" value="1" [% IF prefs.foryou_future %]checked="checked"[% END %]> [% 'PLUGIN_LBF_ENABLED' | string %]</label>
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LBF_DISPLAY_ARTWORK" desc="PLUGIN_LBF_DISPLAY_ARTWORK_DESC" %]
-<input type="checkbox" name="pref_foryou_artwork_only" value="1" [% IF prefs.foryou_artwork_only %]checked="checked"[% END %]>
+<label><input type="checkbox" name="pref_foryou_artwork_only" value="1" [% IF prefs.foryou_artwork_only %]checked="checked"[% END %]> [% 'PLUGIN_LBF_ENABLED' | string %]</label>
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LBF_DISPLAY_VARIOUS" desc="PLUGIN_LBF_DISPLAY_VARIOUS_DESC" %]
-<input type="checkbox" name="pref_foryou_various" value="1" [% IF prefs.foryou_various %]checked="checked"[% END %]>
+<label><input type="checkbox" name="pref_foryou_various" value="1" [% IF prefs.foryou_various %]checked="checked"[% END %]> [% 'PLUGIN_LBF_ENABLED' | string %]</label>
 [% END %]
 
 </div>
@@ -124,11 +130,11 @@
 <div id="lbf_all">
 
 [% WRAPPER setting title="PLUGIN_LBF_ALL_PAST" desc="PLUGIN_LBF_ALL_PAST_DESC" %]
-<input type="checkbox" name="pref_all_past" value="1" [% IF prefs.all_past %]checked="checked"[% END %]>
+<label><input type="checkbox" name="pref_all_past" value="1" [% IF prefs.all_past %]checked="checked"[% END %]> [% 'PLUGIN_LBF_ENABLED' | string %]</label>
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LBF_ALL_FUTURE" desc="PLUGIN_LBF_ALL_FUTURE_DESC" %]
-<input type="checkbox" name="pref_all_future" value="1" [% IF prefs.all_future %]checked="checked"[% END %]>
+<label><input type="checkbox" name="pref_all_future" value="1" [% IF prefs.all_future %]checked="checked"[% END %]> [% 'PLUGIN_LBF_ENABLED' | string %]</label>
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LBF_ALL_TYPES" desc="PLUGIN_LBF_ALL_TYPES_DESC" %]
@@ -147,11 +153,11 @@
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LBF_DISPLAY_ARTWORK" desc="PLUGIN_LBF_DISPLAY_ARTWORK_DESC" %]
-<input type="checkbox" name="pref_all_artwork_only" value="1" [% IF prefs.all_artwork_only %]checked="checked"[% END %]>
+<label><input type="checkbox" name="pref_all_artwork_only" value="1" [% IF prefs.all_artwork_only %]checked="checked"[% END %]> [% 'PLUGIN_LBF_ENABLED' | string %]</label>
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LBF_DISPLAY_VARIOUS" desc="PLUGIN_LBF_DISPLAY_VARIOUS_DESC" %]
-<input type="checkbox" name="pref_all_various" value="1" [% IF prefs.all_various %]checked="checked"[% END %]>
+<label><input type="checkbox" name="pref_all_various" value="1" [% IF prefs.all_various %]checked="checked"[% END %]> [% 'PLUGIN_LBF_ENABLED' | string %]</label>
 [% END %]
 
 </div>
@@ -164,7 +170,7 @@
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LBF_MUSPY_FUTURE" desc="PLUGIN_LBF_MUSPY_FUTURE_HINT" %]
-<input type="checkbox" name="pref_muspy_future" value="1" [% IF prefs.muspy_future %]checked="checked"[% END %]>
+<label><input type="checkbox" name="pref_muspy_future" value="1" [% IF prefs.muspy_future %]checked="checked"[% END %]> [% 'PLUGIN_LBF_ENABLED' | string %]</label>
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LBF_MUSPY_FUTURE_MONTHS" desc="PLUGIN_LBF_MUSPY_FUTURE_MONTHS_HINT" %]

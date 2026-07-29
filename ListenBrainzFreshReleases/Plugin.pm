@@ -52,6 +52,22 @@ $prefs->init({
     # every week view). Replaced the old global `sort` pref in 0.9.97.
     foryou_sort          => 'release_date',
     all_sort             => 'release_date',
+    # Per-view release-family filter, flipped in place by the "Showing …" toggle in
+    # each view's Options section (NOT on the settings page — like the sort toggles).
+    # Two states: 'albums' (everything that ISN'T a single/EP) or 'singles_eps'
+    # (primary type Single or EP). Applied AFTER the settings type-checkbox filter,
+    # so it only narrows within the types the user has ticked (nothing ticked is
+    # lost — Broadcast/Other/compilations fall into the 'albums' bucket). Default
+    # 'albums' so the feeds look as before out of the box. `foryou_view` = New
+    # Releases for You; `all_view` = All Releases (shared across every week view).
+    foryou_view          => 'albums',
+    all_view             => 'albums',
+    # Genre filter (0.9.136): arrayref of selected top-level FAMILY names, set only
+    # via the in-view Genres picker (not the settings page — like the sort/view
+    # prefs). EMPTY = show everything, the same convention the release-type
+    # checkboxes use, so a new install is unfiltered.
+    foryou_genres        => [],
+    all_genres           => [],
     play_via             => 1,
     # Master on/off for the whole "People You Follow" browse section (trending
     # tracks + both trending-albums lists + the Recommended list). Default ON
@@ -74,6 +90,22 @@ $prefs->init({
     # mirror speaks the identical ws/2 API, so it's a pure host swap. (Cover art
     # still comes from the public Cover Art Archive.)
     mb_base_url          => '',
+    # Genre lookup (0.9.140): where the genre labels on list rows are allowed to
+    # come from, and — the point of the pref — whether looking them up is allowed to
+    # cost anything. Three values:
+    #   'auto'   (DEFAULT) — use a local MusicBrainz mirror when there is one
+    #                        (40–120ms per artist, unthrottled). With NO mirror this
+    #                        means NO lookup: rows show only the genres that arrive
+    #                        free with the feed, exactly as before 0.9.129.
+    #   'always'           — no mirror, but look genres up from ListenBrainz anyway.
+    #                        Opt-in because that host answers a 50-release batch in
+    #                        anything from 0.25s to 24s; a cold feed can take minutes
+    #                        to fill (it fills in the background, but the labels only
+    #                        appear as it lands).
+    #   'off'              — never look genres up from anywhere.
+    # Default 'auto' so the plugin is never slow out of the box for a label, while a
+    # mirror owner gets full genres for free. See Browse::_genreLookupMode.
+    genre_lookup         => 'auto',
     # Opt-in dedicated warm/resolve debug log (lbf-debug.log beside server.log).
     # Off by default — turn on to track a match/caching issue, off again after.
     debug_log            => 0,

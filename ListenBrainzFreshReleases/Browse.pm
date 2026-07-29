@@ -178,6 +178,25 @@ use constant MENU_TRENDING_ALB_YEAR => IMG_BASE . 'menu-trending-albums-year.png
 use constant MENU_COG      => IMG_BASE . 'lbf-cog_MTL_icon_settings.png';
 use constant MENU_REFRESH  => IMG_BASE . 'lbf-refresh_MTL_icon_refresh.png';
 use constant MENU_SORT     => IMG_BASE . 'lbf-sort_MTL_icon_sort.png';
+# Per-view release-family toggle: ONE cycling row whose icon reflects the CURRENT
+# family — an album disc while showing Albums, a music note while showing Singles &
+# EPs. The _MTL_icon_<name> filenames make Material render its own themed
+# album/music_note font-icons; the PNGs are minimal fallbacks for other skins.
+use constant VIEW_ALBUMS   => IMG_BASE . 'lbf-view-albums_MTL_icon_album.png';
+use constant VIEW_SINGLES  => IMG_BASE . 'lbf-view-singles_MTL_icon_music_note.png';
+# Genre picker: an Options row that opens a checkbox list of the genre families
+# actually present in the feed. Material draws its own themed category/check_box
+# font-icons from these _MTL_icon_<name> filenames; the PNGs are fallbacks.
+use constant MENU_GENRE    => IMG_BASE . 'lbf-genre_MTL_icon_category.png';
+use constant CHECK_ON      => IMG_BASE . 'lbf-check-on_MTL_icon_check_box.png';
+use constant CHECK_OFF     => IMG_BASE . 'lbf-check-off_MTL_icon_check_box_outline_blank.png';
+use constant MENU_APPLY    => IMG_BASE . 'lbf-apply_MTL_icon_done.png';
+# How many release groups the genre fill may cover in one pass when it needs the
+# WHOLE feed rather than one page — the daily warm, and any render with a genre
+# filter active (which must filter before paging). Declared here, not next to
+# _warmGenres, because `use constant` is compile-time: the picker and the All
+# Releases week coderef both reference it and both appear earlier in this file.
+use constant GENRE_WARM_MAX => 600;
 # "Show more"/"Show less" paging rows for the All Releases per-week lists — the
 # global feed can list hundreds of releases in a single week, so each week is
 # capped and grown a page at a time. The _MTL_icon_<name> filename makes Material
@@ -291,10 +310,13 @@ sub topLevel {
         future => $prefs->get('all_future') // 0,
         days   => $prefs->get('days')       // 14,
         onDone => sub {
-            my $releases = _sortReleases(_filterAll(shift));
+            my $releases = _allSection(shift);
             _stashSummary('all', $releases);
             # No inline Refresh row at the top level (it's cluttered there); All Releases
-            # refreshes on its own 24h cadence, and each week drill has its own controls.
+            # refreshes on its own 24h cadence, and each week drill carries the Options
+            # section — family selector, sort toggle AND Refresh. (Until 0.9.127 that
+            # last one was missing, so inlining the weeks here left the feed with no
+            # reachable Refresh: fetchAll's row is only seen via the fallback tile.)
             $finish->([ @{ _buildAllLanding($releases, $client, $useH) } ]);
         },
         onError => sub {
@@ -405,6 +427,27 @@ sub _playlistsTile {
 # Stash the earliest period the Created-for-You playlists cover (weekly → the
 # week-commencing Monday, else the day), so _playlistsTile can show the span
 # without re-fetching. Called wherever the playlist list is fetched.
+# Has a stashed summary actually moved since we last wrote it? (0.9.139)
+#
+# The three summary keys are written on EVERY walk of their render paths — the top
+# level alone rewrites two of them three-plus times per tap — and the value is
+# almost always byte-identical to what is already stored. Skipping the redundant
+# SQLite write is free; the only thing to be careful of is the TTL, because a
+# skipped write is also a skipped RENEWAL. So rewrite unconditionally once every
+# SUMMARY_REWRITE, well inside the 25h TTL, and an unchanging feed can never let its
+# tile subtitle quietly expire.
+use constant SUMMARY_REWRITE => 6 * 3600;
+my %_SUMMARY_SIG;   # summary key => [ signature, last written ]
+
+sub _summaryChanged {
+    my ($which, $sig) = @_;
+    my $e   = $_SUMMARY_SIG{$which};
+    my $now = time();
+    return 0 if $e && $e->[0] eq $sig && $now - $e->[1] < SUMMARY_REWRITE;
+    $_SUMMARY_SIG{$which} = [ $sig, $now ];
+    return 1;
+}
+
 sub _stashPlaylistSummary {
     my ($playlists) = @_;
     return unless ref $playlists eq 'ARRAY' && @$playlists;
@@ -418,6 +461,7 @@ sub _stashPlaylistSummary {
     }
     return unless @starts;
     my ($min) = sort @starts;
+    return unless _summaryChanged('playlists', $min);
     eval { $cache->set('lbf:summary:playlists', { min => $min }, 25 * 3600); 1 };
 }
 
@@ -427,12 +471,27 @@ sub _stashPlaylistSummary {
 sub _stashSummary {
     my ($which, $releases) = @_;
     return unless ref $releases eq 'ARRAY';
-    my @d = sort grep { length } map { $_->{release_date} // '' } @$releases;
-    eval { $cache->set('lbf:summary:' . $which, {
-        count => scalar(@$releases),
-        min   => ($d[0]  // ''),
-        max   => ($d[-1] // ''),
-    }, 25 * 3600); 1 };
+
+    # Scan for min/max rather than sorting the whole list: this runs on every walk
+    # of every render path, and only two of those values are ever wanted.
+    my ($min, $max);
+    for my $rel (@$releases) {
+        my $d = $rel->{release_date} // '';
+        next unless length $d;
+        $min = $d if !defined $min || $d lt $min;
+        $max = $d if !defined $max || $d gt $max;
+    }
+
+    my %sum = (count => scalar(@$releases), min => ($min // ''), max => ($max // ''));
+
+    # SKIP THE WRITE when nothing has changed (0.9.139). This is an SQLite write, and
+    # it was firing on every root walk, every fetchAll and every home-shelf load —
+    # three-plus times per tap — to store bytes identical to what was already there.
+    # The summary only moves when the feed does, which is at most once per feed TTL.
+    my $sig = join('|', $sum{count}, $sum{min}, $sum{max});
+    return unless _summaryChanged($which, $sig);
+
+    eval { $cache->set('lbf:summary:' . $which, \%sum, 25 * 3600); 1 };
 }
 
 # ---------------------------------------------------------------------------
@@ -443,6 +502,10 @@ sub fetchForYou {
 
     my $headers = _wantHeaders(ref $passDict eq 'HASH' ? $passDict->{features} : undef);
     my $mode   = $prefs->get('foryou_sort')   || 'release_date';
+    # Effective release-family view + which families this section offers (clamped
+    # so a section with only one family ticked never renders empty; the selector
+    # rows are shown only when BOTH families are available).
+    my ($view, $viewHasAlb, $viewHasSing) = _effectiveView('foryou', 'foryou_view');
     my $past   = $prefs->get('foryou_past')   // 1;
     my $future = $prefs->get('foryou_future') // 0;
 
@@ -456,8 +519,16 @@ sub fetchForYou {
         my ($lbReleases, $lbFailed) = @_;
         Plugins::ListenBrainzFreshReleases::API->getMuSpyReleases(
             onDone => sub {
-                my $releases = _sortReleases(_filterForYou(_mergeMuSpy($lbReleases, shift)));
-                _stashSummary('user', $releases);
+                # _viewFilter narrows to the current release family (albums vs
+                # singles/EPs) AFTER the settings type filter, so it only ever
+                # narrows within the ticked types.
+                my $section  = _forYouSection($lbReleases, shift);
+                # Summary is stashed from the UNFILTERED section: the top-level tile's
+                # "<date span> · N releases" describes the whole feed, not whichever
+                # family lens is active — otherwise the tile's count halved (and its
+                # span moved) the moment the user tapped Singles & EPs.
+                _stashSummary('user', $section);
+                my $releases = _viewFilter($section, $view);
                 # cachetime => 0: don't let Material cache this dynamic feed per-player
                 # (proven for Playlists in 0.9.24 — forces a re-fetch on each open so the
                 # weekly rollover shows immediately rather than a stale cached copy).
@@ -473,10 +544,25 @@ sub fetchForYou {
                 # Options section (Material header + rows) at the top: the sort
                 # toggle then Refresh, like Discography/Pitchfork. The toggle sorts
                 # the releases inside each W/C week; Refresh re-fetches the feed.
-                my @opt   = ( _sortToggle($client, 'foryou_sort', $mode), _refreshItem($client, 'user') );
-                my @items = ( _sectionHeader($client, 'PLUGIN_LBF_SECTION_OPTIONS', $headers, \@opt),
-                              @opt, @{ _buildItems($releases, $client, $headers, $mode) } );
-                $callback->({ items => \@items, cachetime => 0 });
+                my @opt   = ( _viewToggle($client, 'foryou_view', $view, $viewHasAlb, $viewHasSing),
+                              _genresRow($client, 'foryou', $releases),
+                              _sortToggle($client, 'foryou_sort', $mode),
+                              _refreshItem($client, 'user') );
+                # Genres for the rows, CACHE ONLY (peek — 0.9.140). A render never
+                # waits on a lookup: rows draw with whatever is known and a bounded
+                # background top-up fills the rest for next time. Before this, a cold
+                # list sat on ListenBrainz's metadata host, which answers in anything
+                # from 0.25s to 24s per batch.
+                _withGenres($releases, sub {
+                    my $meta  = shift;
+                    # Genre filter applies AFTER the fill (it needs the genres) but
+                    # BEFORE rendering. For You is one native-windowed level, so the
+                    # whole list is already filled and this costs nothing extra.
+                    my $shown = _genreSelectFilter($releases, 'foryou', $meta);
+                    my @items = ( _sectionHeader($client, 'PLUGIN_LBF_SECTION_OPTIONS', $headers, \@opt),
+                                  @opt, @{ _buildItems($shown, $client, $headers, $mode, $meta) } );
+                    $callback->({ items => \@items, cachetime => 0 });
+                }, undef, peek => 1);
             },
         );
     };
@@ -517,7 +603,7 @@ sub homeForYou {
         my ($lbReleases) = @_;
         Plugins::ListenBrainzFreshReleases::API->getMuSpyReleases(
             onDone => sub {
-                my $releases = _sortReleases(_filterForYou(_mergeMuSpy($lbReleases, shift)));
+                my $releases = _forYouSection($lbReleases, shift);
                 _stashSummary('user', $releases);
                 $cb->({ items => [ map { _buildReleaseItem($_, $client) } @$releases ], cachetime => 0 });
             },
@@ -574,7 +660,7 @@ sub homeAllReleases {
         future  => $prefs->get('all_future') // 0,
         days    => $prefs->get('days')       // 14,
         onDone  => sub {
-            my $releases = _sortReleases(_filterAll(shift));
+            my $releases = _allSection(shift);
             _stashSummary('all', $releases);
             $cb->({ items => _buildAllLanding($releases, $client, 0), cachetime => 0 });
         },
@@ -601,7 +687,7 @@ sub fetchAll {
         future  => $future,
         days    => $prefs->get('days') // 14,
         onDone  => sub {
-            my $releases = _sortReleases(_filterAll(shift));
+            my $releases = _allSection(shift);
             _stashSummary('all', $releases);
             $callback->({ items => [ _refreshItem($client, 'all'), @{ _buildAllLanding($releases, $client, $headers) } ], cachetime => 0 });
         },
@@ -638,6 +724,7 @@ sub _refreshItem {
             my $w = (ref $pass eq 'HASH' && $pass->{which}) ? $pass->{which} : 'user';
             if ($w eq 'trending') {
                 $cache->remove(_trendingResolvedKey());
+                _dropTrendingCount();   # the tile's count memo must not outlive the list
             }
             elsif ($w eq 'trending_albums') {
                 my $r = (ref $pass eq 'HASH' && $pass->{range}) ? $pass->{range} : 'this_month';
@@ -1459,15 +1546,47 @@ sub _buildTrendingCandidates {
 # The "What's Trending" tile: a playable container (Play/Add queues the whole list)
 # that drills into the ranked, owned-excluded track list. Track count (from the
 # resolved cache the warm populates) on line2, filtered to services still usable.
+#
+# The COUNT is memoed (0.9.139). This tile is built on every walk of the top level,
+# and working the number out meant reading the whole resolved track list back out of
+# SQLite — a deserialise of up to TRENDING_MAX full item hashes — purely to count
+# what survives the service filter. The resolved list only changes on the daily warm
+# or an explicit Refresh, so one read per interaction is plenty; the key carries the
+# resolved-cache key (which itself carries user + service order), so a Refresh or a
+# service change re-counts rather than showing a stale figure.
+# Same few-seconds window as the feed and section memos — one user interaction's
+# worth of re-walks. (Declared here rather than reusing SECTION_MEMO_TTL: that one
+# is defined further down the file, and a constant has to be compiled before the
+# code that names it.)
+use constant TRENDING_COUNT_TTL => 5;
+my %_TRENDING_COUNT;    # resolved key => [ expiry, count ]
+
+# Dropped by the Refresh row so the tile can't keep quoting a count for a list that
+# has just been thrown away. A sub, not a direct reset, because _refreshItem is
+# compiled ABOVE this declaration and so can't see the lexical itself.
+sub _dropTrendingCount { %_TRENDING_COUNT = () }
+
 sub _trendingTile {
     my ($client, $feat) = @_;
-    my $line2 = '';
-    if (my $c = $cache->get(_trendingResolvedKey())) {
-        my $enabled = { map { lc($_->{name}) => 1 } _orderedAdapters() };
-        my $n = grep { _cachedSvcUsable($_->{_svc}, $enabled) } @{ $c->{items} || [] };
-        $n = TRENDING_MAX if $n > TRENDING_MAX;
-        $line2 = sprintf(cstring($client, 'PLUGIN_LBF_N_TRACKS'), $n) if $n;
+    my $rkey = _trendingResolvedKey();
+    my $e    = $_TRENDING_COUNT{$rkey};
+    my $n;
+    if ($e && $e->[0] >= time()) {
+        $n = $e->[1];
     }
+    else {
+        $n = 0;
+        if (my $c = $cache->get($rkey)) {
+            my $enabled = { map { lc($_->{name}) => 1 } _orderedAdapters() };
+            $n = grep { _cachedSvcUsable($_->{_svc}, $enabled) } @{ $c->{items} || [] };
+            $n = TRENDING_MAX if $n > TRENDING_MAX;
+        }
+        # Memo the "nothing resolved yet" answer too — before the first warm that is
+        # every walk, and it's the same SQLite lookup either way. One key only: the
+        # resolved key changes with the user/service order, and an old one is dead.
+        %_TRENDING_COUNT = ($rkey => [ time() + TRENDING_COUNT_TTL, $n ]);
+    }
+    my $line2 = $n ? sprintf(cstring($client, 'PLUGIN_LBF_N_TRACKS'), $n) : '';
     # The branded cover already says "What's Trending"; the row label names what it
     # is — weekly tracks (cf. All Releases, whose row shows the period not the name).
     return {
@@ -2487,6 +2606,11 @@ sub warmCache {
                         _warmFollow($client, $force);
                         _warmTrending($client, $force);
                     }
+                    # Genres last: it's the cheapest stage (one bulk request per 50
+                    # release groups, all of them cached long) and the least urgent,
+                    # so it queues behind the streaming resolves rather than
+                    # competing with them.
+                    _warmGenres();
                     return;
                 };
 
@@ -2618,6 +2742,91 @@ sub _filterSection {
 
 sub _filterForYou { _filterSection(shift, 'foryou') }
 sub _filterAll    { _filterSection(shift, 'all') }
+
+# ---------------------------------------------------------------------------
+# Derived-section memo (0.9.139)
+# ---------------------------------------------------------------------------
+# The companion to API's %FEED_MEMO, and the other half of the same fix. That memo
+# stopped the re-walks RE-READING the feed; this one stops them RE-DERIVING it.
+#
+# XMLBrowser re-walks from the ROOT on every drill-in, in-place refresh and paging
+# tap, and the root builds both sections — so `_sortReleases(_filterAll(...))` was
+# running three or more times per user tap, over the WHOLE raw feed each time.
+# Measured against a live feed (2902 raw releases, the 14-day default window) on a
+# dev Mac: filter 1.1ms + dedupe/sort 3.7ms = ~4.8ms per walk, and a Pi is an order
+# of magnitude slower again. None of that work can differ between two walks of the
+# same interaction: the input is the same arrayref and the prefs that shape it
+# haven't moved.
+#
+# Validity is by IDENTITY of the source arrayref(s), not a content hash — the feed
+# memo hands back the same ref for its whole TTL, and a Refresh (clearFeedCache →
+# _memoDrop) forces a re-fetch that necessarily produces a NEW ref, so a refresh can
+# never be masked. The memo holds those refs itself, which is what makes `==`
+# sound: an address can't be recycled by a different array while we're still
+# pointing at it. Everything else that shapes the result is prefs, so those go in a
+# signature — a settings change lands on the very next walk.
+#
+# For You needs TWO sources: _mergeMuSpy builds a fresh arrayref every call, so the
+# identity has to come from the LB feed and the MuSpy list separately (which is why
+# getMuSpyReleases is memoed too).
+use constant SECTION_MEMO_TTL => 5;
+my %SECTION_MEMO;    # prefix => [ expiry, sig, [ source refs ], result ]
+
+# Every pref that can change what a section's derived list contains: the type
+# checkboxes, the Various-Artists and artwork gates, the blocklist, and the MuSpy
+# merge window (For You). The feed-shaping prefs (days/past/future) are already in
+# the feed's own cache key, so a change there arrives as a different source ref.
+sub _sectionSig {
+    my ($prefix) = @_;
+    my @v = map { $prefs->get("${prefix}_type_$_") ? 1 : 0 } @RELEASE_TYPES;
+    push @v, ($prefs->get("${prefix}_artwork_only") // 1) ? 1 : 0;
+    push @v, ($prefs->get("${prefix}_various")      // 1) ? 1 : 0;
+    push @v, map { $prefs->get($_) // '' } qw(foryou_past muspy_future muspy_future_months days);
+    my $blocked = $prefs->get('blocked_artists');
+    push @v, ref $blocked eq 'ARRAY'
+        ? join(',', map { ref $_ eq 'HASH' ? (($_->{mbid} // '') . '/' . ($_->{name} // '')) : '' } @$blocked)
+        : '';
+    return join('|', @v);
+}
+
+sub _sectionList {
+    my ($prefix, $sources, $build) = @_;
+
+    # A non-ref source (shouldn't happen — every caller passes an arrayref) can't be
+    # identity-checked, so just build it.
+    for my $s (@$sources) { return $build->() unless ref $s eq 'ARRAY' }
+
+    my $now = time();
+    my $sig = _sectionSig($prefix);
+    my $e   = $SECTION_MEMO{$prefix};
+    if ($e && $e->[0] >= $now && $e->[1] eq $sig && @{ $e->[2] } == @$sources) {
+        my $same = 1;
+        for my $i (0 .. $#$sources) {
+            next if $e->[2][$i] == $sources->[$i];
+            $same = 0;
+            last;
+        }
+        return $e->[3] if $same;
+    }
+
+    my $out = $build->();
+    $SECTION_MEMO{$prefix} = [ $now + SECTION_MEMO_TTL, $sig, [ @$sources ], $out ];
+    return $out;
+}
+
+# The two derived lists, as every render path wants them: filtered to the section's
+# settings, deduped and date-sorted. Call these rather than composing the steps by
+# hand, or the walk pays for the pipeline again.
+sub _allSection {
+    my ($feed) = @_;
+    return _sectionList('all', [$feed], sub { _sortReleases(_filterAll($feed)) });
+}
+
+sub _forYouSection {
+    my ($lb, $muspy) = @_;
+    return _sectionList('foryou', [$lb, $muspy],
+        sub { _sortReleases(_filterForYou(_mergeMuSpy($lb, $muspy))) });
+}
 
 # ---------------------------------------------------------------------------
 # MuSpy merge (For You feed only)
@@ -2867,6 +3076,119 @@ sub _sortToggle {
 }
 
 # ---------------------------------------------------------------------------
+# Per-view release-family filter (the "Showing …" toggle). Two states:
+#   'singles_eps' — keep releases whose PRIMARY type is Single or EP
+#   'albums'      — keep everything else (Album, Broadcast, Other, and the
+#                   secondary-typed album variants Compilation/Soundtrack/Live/…,
+#                   all of which have primary type Album)
+# Partitioned by PRIMARY type so the two states are mutually exclusive and cover
+# every release — nothing a user has ticked in Settings is lost. Applied AFTER
+# _filterSection (the settings type/artwork/VA filter), so it only ever narrows
+# WITHIN the ticked types. An unknown/blank primary type falls into 'albums'
+# (the default, non-single bucket).
+# ---------------------------------------------------------------------------
+my %_SINGLE_FAMILY = ( single => 1, ep => 1 );
+sub _viewFilter {
+    my ($releases, $mode) = @_;
+    $releases //= [];
+    my $wantSingles = ($mode // 'albums') eq 'singles_eps';
+    return [ grep {
+        my $p = lc($_->{release_group_primary_type} // '');
+        $wantSingles ? $_SINGLE_FAMILY{$p} : !$_SINGLE_FAMILY{$p}
+    } @$releases ];
+}
+
+# Which release families a section actually offers, from its type checkboxes.
+# Returns ($hasAlbums, $hasSingles). An empty allowed-set means the settings
+# filter is "show everything" (the _typeMatches safety net), so BOTH families
+# are available. Otherwise a family is available iff at least one of its types
+# is ticked. Every @RELEASE_TYPES value is in exactly one family (single/ep vs
+# the rest), so at least one family is always available when anything is ticked.
+sub _familyAvail {
+    my ($prefix) = @_;
+    my $allowed = _allowedTypes($prefix);
+    return (1, 1) unless %$allowed;   # nothing ticked → all types shown
+    my $hasSingles = ($allowed->{single} || $allowed->{ep}) ? 1 : 0;
+    my $hasAlbums  = 0;
+    for my $t (@RELEASE_TYPES) {
+        next if $_SINGLE_FAMILY{$t};
+        if ($allowed->{$t}) { $hasAlbums = 1; last }
+    }
+    return ($hasAlbums, $hasSingles);
+}
+
+# The view mode to actually apply for a section, plus the family-availability
+# flags. Clamps the stored pref to a family the section can show — so a section
+# with only Single/EP ticked doesn't render EMPTY under the default 'albums'
+# view (and vice versa). Returns ($view, $hasAlbums, $hasSingles).
+sub _effectiveView {
+    my ($prefix, $pref) = @_;
+    my ($hasAlbums, $hasSingles) = _familyAvail($prefix);
+    my $stored = $prefs->get($pref) || 'albums';
+    my $view   = $stored;
+    $view = 'albums'      if $view eq 'singles_eps' && !$hasSingles;
+    $view = 'singles_eps' if $view eq 'albums'      && !$hasAlbums;
+    # PERSIST the clamp, don't just apply it. The selector is HIDDEN while only one
+    # family is available (_viewToggle returns ()), so a stored value the section can't
+    # show is unreachable from the UI — it sits there invisibly and then takes effect
+    # the moment the user ticks the other family in Settings, silently opening that
+    # feed on Singles & EPs. Writing the clamped value back keeps what's stored equal
+    # to what's displayed. Guarded on an actual change, so it's a no-op normally.
+    $prefs->set($pref, $view) if $view ne $stored;
+    return ($view, $hasAlbums, $hasSingles);
+}
+
+# The release-family selector for the Options section: ONE cycling row —
+# "Showing Albums (tap for Singles & EPs)" and vice versa — exactly like the
+# neighbouring "Sorted by …" toggle. 0.9.125–0.9.127 used TWO radio-marked rows so
+# you could see the option you were NOT on; 0.9.128 collapsed them back to one row
+# because two rows cost a line of screen for a two-state choice, and the option
+# rows sit above the releases you actually came to look at.
+#
+# **Why not two buttons side by side** (asked twice — don't re-derive): Material
+# gives a plugin feed NO way to lay rows out horizontally. Re-verified against the
+# server's own material-deferred.min.js: the header toolbar's `currentActions` is
+# filled by `browseActions(...)` from native-library `stdItem` shapes or
+# `getCustomActions(...)` keyed on a media item's `favorites_url`, and rows flagged
+# `isListItemInMenu` are pushed to `d.actionItems` (the ⋮ overflow) — both set only
+# on native-menu paths. A plain OPML `type=>'link'` row always lands in `d.items`
+# as a full-width v-list-tile. Grid view is the only horizontal layout and applies
+# to the WHOLE list, releases included. So one row is the floor.
+#
+# The icon REFLECTS THE CURRENT STATE (album disc vs music note), which is what
+# carries the at-a-glance "which lens am I in" that the radio marks used to give;
+# the label's "(tap for …)" carries the action. $pref is the DURABLE pref the
+# choice lives in — 'foryou_view' or 'all_view' (All Releases, shared across every
+# week). Returns a LIST so the call sites can spread it — EMPTY when only ONE
+# family is available for the section (nothing to switch to, so the row is hidden
+# rather than showing a dead toggle or one that opens an empty list).
+# $hasAlbums/$hasSingles come from _effectiveView (i.e. _familyAvail).
+sub _viewToggle {
+    my ($client, $pref, $mode, $hasAlbums, $hasSingles) = @_;
+    return () unless $hasAlbums && $hasSingles;
+    my $singles = (($mode // 'albums') eq 'singles_eps') ? 1 : 0;
+    my $now  = cstring($client, $singles ? 'PLUGIN_LBF_VIEW_SINGLES' : 'PLUGIN_LBF_VIEW_ALBUMS');
+    my $next = cstring($client, $singles ? 'PLUGIN_LBF_VIEW_ALBUMS'  : 'PLUGIN_LBF_VIEW_SINGLES');
+    return ({
+        name        => sprintf(cstring($client, 'PLUGIN_LBF_SHOWING'), $now, $next),
+        type        => 'link',
+        image       => $singles ? VIEW_SINGLES : VIEW_ALBUMS,
+        nextWindow  => 'refresh',
+        passthrough => [{ pref => $pref }],
+        url         => sub {
+            my ($c, $cb, $a, $p) = @_;
+            # Flip from the LIVE pref, not the mode captured at render time — the
+            # same rule as _sortToggle: a value changed in between (another player,
+            # or the _effectiveView clamp) must not make this tap land back on the
+            # state we're already showing and read as a dead row.
+            my $cur = $prefs->get($p->{pref}) || 'albums';
+            $prefs->set($p->{pref}, $cur eq 'singles_eps' ? 'albums' : 'singles_eps');
+            $cb->({ items => [] });
+        },
+    });
+}
+
+# ---------------------------------------------------------------------------
 # Helper to pick the first available value from a list of candidate keys
 # ---------------------------------------------------------------------------
 sub _pickValue {
@@ -3020,7 +3342,7 @@ sub _wantHeaders {
 }
 
 sub _buildItems {
-    my ($releases, $client, $headers, $mode) = @_;
+    my ($releases, $client, $headers, $mode, $meta) = @_;   # $meta: genre map (see _withGenres)
 
     unless ($releases && scalar @$releases) {
         return [{ name => cstring($client, 'PLUGIN_LBF_NO_RESULTS'), type => 'text' }];
@@ -3031,7 +3353,7 @@ sub _buildItems {
     # every item). The Options sort ($mode) reorders releases inside each week; the
     # week grouping is unconditional (the old week_dividers/group_by_artist toggles
     # were retired in 0.9.97).
-    return _buildWeekly($releases, $client, $headers, $mode);
+    return _buildWeekly($releases, $client, $headers, $mode, $meta);
 }
 
 # ---------------------------------------------------------------------------
@@ -3151,14 +3473,58 @@ sub _buildAllLanding {
                 # All Releases week can list hundreds of releases). Paging is still
                 # per-week module state (keyed "arweek:<ws>"); re-sorting/paging
                 # re-walks this coderef, which re-reads the pref. Options header +
-                # sort toggle sit on top.
+                # family selector + sort toggle + Refresh sit on top.
                 my $mode  = $prefs->get('all_sort') || 'release_date';
-                _warmArtistSorts($rels) if $mode eq 'artist';
-                my @tiles = map { _buildReleaseItem($_, $c) } @{ _sortWithin($rels, $mode) };
-                my ($vis, $pgRows) = _pageSection($c, $key, \@tiles);
-                my @opt = ( _sortToggle($c, 'all_sort', $mode) );
-                $cb->({ items => [ _sectionHeader($c, 'PLUGIN_LBF_SECTION_OPTIONS', $headers, \@opt),
-                                   @opt, @$vis, @$pgRows ] });
+                # Effective release-family view + which families All Releases offers
+                # (clamped so a single-family section never renders empty; the
+                # selector rows show only when BOTH families are available).
+                # Re-read each walk so the selector refreshes in place, like sort.
+                my ($view, $vHasAlb, $vHasSing) = _effectiveView('all', 'all_view');
+                my $rows  = _viewFilter($rels, $view);
+                _warmArtistSorts($rows) if $mode eq 'artist';
+                # Refresh belongs HERE, not only in fetchAll. Since the top-level menu
+                # started inlining these week rows directly (0.9.99–0.9.119), fetchAll —
+                # the only other place with a Refresh row — is reached only via the
+                # watchdog/error fallback tile, so in normal use the All Releases feed
+                # had NO reachable Refresh at all. The week drill is the level a user is
+                # actually looking at when the feed looks wrong, so it carries it.
+                my @opt = ( _viewToggle($c, 'all_view', $view, $vHasAlb, $vHasSing),
+                            _genresRow($c, 'all', $rows),
+                            _sortToggle($c, 'all_sort', $mode),
+                            _refreshItem($c, 'all') );
+
+                # Page on the RELEASES, not the finished tiles, so the genre fill
+                # covers only the rows about to be shown — one bulk request per
+                # 30-row page instead of one for the whole week. _pageSection only
+                # slices and counts, so it behaves identically given releases.
+                my $render = sub {
+                    my ($set) = @_;
+                    my ($visRel, $pgRows) = _pageSection($c, $key, _sortWithin($set, $mode));
+                    # Cache ONLY (peek — 0.9.140): a week draws immediately with the
+                    # genres already known and tops the rest up in the background,
+                    # instead of holding the page open on a metadata request.
+                    _withGenres($visRel, sub {
+                        my $meta  = shift;
+                        my @tiles = map { _buildReleaseItem($_, $c, $meta) } @$visRel;
+                        $cb->({ items => [ _sectionHeader($c, 'PLUGIN_LBF_SECTION_OPTIONS', $headers, \@opt),
+                                           @opt, @tiles, @$pgRows ] });
+                    }, undef, peek => 1);
+                };
+
+                # A genre filter has to be applied BEFORE paging, or a page of 30
+                # would be mostly filtered away and "Show more" counts would lie. That
+                # needs genres for the WHOLE week, not just the visible slice — so the
+                # wider fill happens only when a filter is actually set. Unfiltered
+                # (the default) keeps the cheap one-page-one-request behaviour.
+                if (@{ _selectedGenres('all') }) {
+                    _withGenres($rows, sub {
+                        my $meta = shift;
+                        $render->(_genreSelectFilter($rows, 'all', $meta));
+                    }, GENRE_WARM_MAX, peek => 1);
+                }
+                else {
+                    $render->($rows);
+                }
             },
         };
     }
@@ -3172,7 +3538,7 @@ sub _buildAllLanding {
 # newest-first; weeks run Monday–Sunday.
 # ---------------------------------------------------------------------------
 sub _buildWeekly {
-    my ($releases, $client, $headers, $mode) = @_;
+    my ($releases, $client, $headers, $mode, $meta) = @_;
 
     # Real header item for Material (bold, accent colour); plain text elsewhere.
     # _headerType() => 'header-basic' on Material 6.4.3+ (a non-actionable divider,
@@ -3207,13 +3573,13 @@ sub _buildWeekly {
             # at this week's releases (the same already-sorted $rels shown below).
             $hdr->{url} = sub {
                 my ($c, $cb) = @_;
-                $cb->({ items => [ map { _buildReleaseItem($_, $c) } @$rels ] });
+                $cb->({ items => [ map { _buildReleaseItem($_, $c, $meta) } @$rels ] });
             };
             $hdr->{passthrough} = [{}];
         }
 
         push @items, $hdr;
-        push @items, map { _buildReleaseItem($_, $client) } @$rels;
+        push @items, map { _buildReleaseItem($_, $client, $meta) } @$rels;
     }
 
     return \@items;
@@ -3224,9 +3590,20 @@ sub _buildWeekly {
 # boundary even across a DST change). The result is the same regardless of zone for
 # a date-only input — the weekday of a calendar date is timezone-independent — but
 # computing it in local time keeps the whole date path consistent with "today".
+#
+# MEMOED (0.9.139) — a pure function of a date STRING, and the week grouping calls
+# it once per release while a feed only ever holds a couple of dozen distinct dates.
+# Measured on a live feed: 726 calls resolving to 15 distinct dates, 2.7ms a walk
+# (timelocal + two localtimes + an eval each), in both _buildAllLanding and
+# _buildWeekly — so it ran on every root walk AND every week render. Cached it is
+# ~0.05ms. The map is keyed by the input string and never expires: the answer for a
+# given date cannot change, and the key space is bounded by the dates a feed carries.
+my %_WEEK_START;
+
 sub _weekStart {
     my ($date) = @_;
     return '' unless $date && $date =~ /^(\d{4})-(\d{2})-(\d{2})/;
+    return $_WEEK_START{$date} if exists $_WEEK_START{$date};
 
     my $epoch = eval { Time::Local::timelocal(0, 0, 12, $3, $2 - 1, $1) };
     return '' unless defined $epoch;
@@ -3234,7 +3611,7 @@ sub _weekStart {
     my $wday = (localtime $epoch)[6];       # 0 = Sunday
     my $mon  = $epoch - (($wday + 6) % 7) * 86400;
     my @m    = localtime $mon;
-    return sprintf('%04d-%02d-%02d', $m[5] + 1900, $m[4] + 1, $m[3]);
+    return $_WEEK_START{$date} = sprintf('%04d-%02d-%02d', $m[5] + 1900, $m[4] + 1, $m[3]);
 }
 
 # Pick the All Releases week cover by how many weeks $ws (a Monday) is from the
@@ -3342,7 +3719,7 @@ sub _isoToLocalDate {
 # Build a single OPML item from one release
 # ---------------------------------------------------------------------------
 sub _buildReleaseItem {
-    my ($rel, $client) = @_;
+    my ($rel, $client, $meta) = @_;   # $meta: optional genre map from _withGenres
 
     my $artist     = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist') || 'Unknown Artist';
     my $album      = _pickValue($rel, 'release_name', 'title', 'name') || 'Unknown Album';
@@ -3357,13 +3734,24 @@ sub _buildReleaseItem {
     $name .= " ($year)" if $year;
 
     my $line2 = $type;
-    # Genre/style tags ride along in the payload (release_tags) — show up to 3
-    # next to the title. Coverage is partial (~20%) and tag-only, so many rows
-    # legitimately have none; no extra API call is made.
-    my @tags = _releaseTags($rel);
-    if (@tags) {
-        my $max = $#tags < 2 ? $#tags : 2;
-        $line2 .= " \x{00B7} " . join(', ', @tags[0..$max]);
+    # Genres, strongest first. Real MusicBrainz genres (album's own, else the
+    # artist's — see _genresFor) are preferred; the payload's inline release_tags
+    # are the fallback for rows the bulk lookup had nothing for. $meta is absent on
+    # paths that don't pre-fill genres (the home shelves), which just means those
+    # rows behave exactly as they did before.
+    # ONE top-level family on a list row (_familyFor), never the raw genre list —
+    # scanning a week of releases wants "Electronic"; the detail page is where the
+    # sub-genres belong. _familyFor owns EVERY source, including the payload's
+    # inline release_tags, so there is exactly one path to a row label and nothing
+    # can reach the row unrolled (the 0.9.132 bug).
+    # "Funk (funk rock, funk soul)" — the top-level family for scanning and sorting,
+    # with the release's own sub-genres in brackets so the row still says something
+    # specific. Brackets are omitted when the family is all we know.
+    my ($family, @subs) = _familyFor($rel, $meta);
+    if (defined $family && length $family) {
+        my $label = $family;
+        $label .= ' (' . join(', ', @subs) . ')' if @subs;
+        $line2 .= " \x{00B7} " . $label;
     }
     if (defined $conf) {
         my $stars = $conf >= 3 ? "\x{2605}\x{2605}\x{2605}"
@@ -3542,17 +3930,45 @@ sub _releaseDetail {
         }, $artist, $album, $mbid, undef, $year, $rel->{release_group_primary_type});
     }
 
-    # Genres — from the release-group (release-level genres are nearly always empty)
+    # Genres — the SAME source the lists use (0.9.131), so the detail page can no
+    # longer contradict the row you tapped. Was a per-album MusicBrainz
+    # `release-group?inc=genres` call, which covers only ~5% of fresh releases and
+    # left the other 95% falling through to raw, ungated Last.fm — so a row reading
+    # "post-punk" could open a page reading "japanese, 90s, seen live".
+    # _withGenres reads the shared bulk cache (already filled by the list that got
+    # you here, so this is normally a pure cache hit and makes NO request at all),
+    # and _genresFor applies the same album-genres-then-artist-genres preference.
+    # Net effect: one MB call FEWER than before, and the two views agree.
+    #
+    # The detail page shows the FULL, specific genres — the lists roll them up to a
+    # top-level family (_familyFor). That's the deliberate split: families where
+    # you're scanning, detail where you've drilled in.
+    #
+    # This is the ONE genre path that still fetches on demand (0.9.140), and it can
+    # afford to: it's a single release, so it's one lookup, on a page that already
+    # fans out to streaming and MusicBrainz in parallel behind DETAIL_TIMEOUT — not
+    # a list holding hundreds of rows hostage. If the shared tiers come back with
+    # nothing (the usual case when genre lookup is off, and the reason the page
+    # could look emptier than the row that opened it), fall back to asking
+    # MusicBrainz for this release group's own genres — the per-album call that
+    # 0.9.131 retired. It goes to the MIRROR when there is one, so for a mirror
+    # user it costs ~75ms; on public MusicBrainz it's one throttled request per
+    # page open, which is exactly what the plugin did before 0.9.131.
     if ($wantGenres) {
-        Plugins::ListenBrainzFreshReleases::API->getReleaseGroupGenres(
-            $rgMbid,
-            sub { $mbGenres = shift; $pending--; $finish->(); },
-            sub {
-                $log->info("Release-group genres lookup failed: " . (shift // ''));
+        _withGenres([$rel], sub {
+            my $meta = shift;
+            $mbGenres = [ _genresFor($rel, $meta) ];
+            if (@$mbGenres || !$rel->{release_group_mbid}) {
                 $pending--;
                 $finish->();
-            },
-        );
+                return;
+            }
+            Plugins::ListenBrainzFreshReleases::API->getReleaseGroupGenres(
+                $rel->{release_group_mbid},
+                sub { $mbGenres = shift || []; $pending--; $finish->() },
+                sub { $pending--; $finish->() },
+            );
+        }, undef, peek => 1, kick => 0);
     }
 
     # Last.fm tags — fallback genre source (album tags, then artist tags). Only
@@ -3862,7 +4278,22 @@ sub _streamingAdapters {
 
 # Installed adapters in search order: ascending svc_priority_<name>, dropping any
 # set to 0 (disabled). Used by _findPlayable to search one service at a time.
+#
+# Memoed for ADAPTER_MEMO_TTL (0.9.139). Building the list means ~10 ->can probes
+# plus a _pluginDataFor icon lookup per service, and it is asked for far more often
+# than it can change: the top level alone builds it twice per walk (once inside
+# _trendingResolvedKey, once for the tile's enabled-service set), and it is on the
+# per-item path of every resolved list via _cachedSvcUsable. Installed plugins can't
+# change without a restart and the priority prefs change only in Settings, so a few
+# seconds of staleness is invisible — a priority edit still takes effect on the next
+# browse, which is the same "next walk" contract as every other pref here.
+use constant ADAPTER_MEMO_TTL => 5;
+my @_ADAPTERS_MEMO;
+my $_ADAPTERS_EXP = 0;
+
 sub _orderedAdapters {
+    return @_ADAPTERS_MEMO if time() < $_ADAPTERS_EXP;
+
     my @out;
     for my $a (_streamingAdapters()) {
         my $prio = $prefs->get('svc_priority_' . lc $a->{name});
@@ -3871,6 +4302,8 @@ sub _orderedAdapters {
         push @out, { %$a, priority => $prio };
     }
     my @ordered = sort { $a->{priority} <=> $b->{priority} } @out;
+    @_ADAPTERS_MEMO = @ordered;
+    $_ADAPTERS_EXP  = time() + ADAPTER_MEMO_TTL;
     return @ordered;   # named array → safe count in scalar/boolean context
 }
 
@@ -5492,6 +5925,797 @@ sub _norm {
 # Extract usable tag names from the payload's release_tags. Entries may be plain
 # strings or { tag, count } hashes; drop blanks, dedupe case-insensitively, and
 # drop the over-long free-text junk ("adding tags for album ...") that isn't a genre.
+# ---------------------------------------------------------------------------
+# Genres for the LIST rows (0.9.129)
+# ---------------------------------------------------------------------------
+# The feed itself carries almost no genre: measured over 400 releases of a live
+# All Releases feed (2026-07-26), the inline `release_tags` populate 8% of rows and
+# MusicBrainz's release-group genres only 5% — which is why the genre line has
+# always looked broken. The credited ARTIST's genres cover 47%, and both arrive in
+# the SAME bulk ListenBrainz call (API::getReleaseGroupMetadata, `inc=tag`), so the
+# list can be filled at ~one request per 50 releases instead of one per release.
+#
+# **Why this isn't attached to an existing call:** there is none to attach it to at
+# feed level — the feed is ONE `fresh_releases` request that returns every release
+# and offers no tag option, and the per-album MB genre lookup only happens on a
+# drill-in. So the cost is kept invisible three other ways: (1) only the releases
+# actually being RENDERED are filled (the All Releases weeks page 30 at a time → one
+# request per page turn), (2) the daily warm pre-fills the cache so a browse is a
+# pure cache hit, and (3) the detail page's own per-album MB genre call is retired
+# in favour of this data, so that path makes one call FEWER than before.
+#
+# Bounded per render: a cold For You feed with hundreds of releases would otherwise
+# fan out to many chunks at once. Rows past the cap simply render without a genre
+# and pick one up once the warm has cached them.
+use constant GENRE_FETCH_MAX => 150;   # ≤3 batches per render
+use constant GENRE_BATCH     =>  50;   # == METADATA_CHUNK: one request + ≤50 cache reads per tick
+
+# NEVER do the fill inline on the render path (0.9.130). getReleaseGroupMetadata
+# opens with a SYNCHRONOUS cache-scan — one `$cache->get` per mbid — and writes one
+# `$cache->set` per fetched entry. At GENRE_FETCH_MAX that is up to 150 blocking
+# SQLite round-trips inside the browse callback, on EVERY feed render including
+# every sort tap, and every one of them is a miss right after a cache-prefix bump.
+# This plugin has form here: Bandcamp was pulled from the auto-search because
+# synchronous work in a browse handler stalled the event loop and dropped players
+# (see "Streaming matching & playlist robustness"), and the library probe was moved
+# behind an idle tick for the same reason in 0.9.48.
+#
+# So: the collect loop below touches no cache, then the work is handed to
+# `Slim::Utils::Timers` and run a batch at a time, yielding to the event loop
+# BETWEEN batches. Audio is serviced between slices and the render path itself
+# never blocks. Cost is one extra event-loop turn per batch — invisible next to a
+# feed fetch, and a fully-warmed feed still does no HTTP at all.
+#
+# $step is passed to ITSELF as a timer argument rather than captured in its own
+# closure: `my $s; $s = sub { ... $s ... }` is a reference cycle Perl never
+# collects — the exact leak fixed in API::getArtistMbidByName in 0.9.95.
+# ---------------------------------------------------------------------------
+# Where genres come from, and whether we're allowed to go and get them (0.9.140)
+# ---------------------------------------------------------------------------
+# 0.9.129–0.9.135 added genre labels by putting a REMOTE lookup on the path of a
+# render. Measured, that was the wrong trade: ListenBrainz's metadata host answers
+# a 50-mbid batch in anywhere from 0.25s to 24s, caps out below 100 mbids, and one
+# full fill of a 381-release feed took 125 SECONDS — which the genre picker sat and
+# waited for. The feature is worth having; paying for it on a tap is not.
+#
+#   'mirror' — a local MusicBrainz mirror is configured or was autodetected. Ask it
+#              directly, per artist, six at a time. Same data ListenBrainz would
+#              have served (verified: identical coverage over 50 artists, zero
+#              disagreement either way), at 40–120ms with no throttle and no
+#              variance. This is the only mode that's fast enough to be routine.
+#   'lb'     — no mirror, but the user has explicitly opted in knowing it's slow.
+#              The old ListenBrainz bulk path, now concurrent.
+#   'off'    — no lookup at all. Rows still show the genres that arrive FREE with
+#              the feed (its own release_tags) and anything the Last.fm tier has
+#              already cached, which is exactly the pre-0.9.129 behaviour. This is
+#              the DEFAULT without a mirror: a plugin must not be slow out of the
+#              box for a cosmetic label.
+sub _genreLookupMode {
+    my $pref = $prefs->get('genre_lookup') // 'auto';
+    return 'off' if $pref eq 'off';
+    return 'mirror' if Plugins::ListenBrainzFreshReleases::API->hasMirror();
+    return $pref eq 'always' ? 'lb' : 'off';
+}
+
+# The genre map for a list of releases, as { lc release-group-mbid => { genres,
+# agenres } } — the shape _genresFor consumes.
+#
+# $opt{peek} (every RENDER path) means CACHE ONLY: never fetch, never wait. The
+# rows draw immediately with whatever is known, and a bounded background fill is
+# kicked off so the next visit is complete. The warm calls without peek, which is
+# where the fetching actually happens — nobody is watching it there.
+sub _withGenres {
+    my ($releases, $cb, $max, %opt) = @_;   # $max: the warm passes a bigger bound than a render
+    $max ||= GENRE_FETCH_MAX;
+    my $mode = _genreLookupMode();
+
+    if ($mode eq 'off') { $cb->({}); return }
+
+    my @rels;
+    my %seenRg;
+    for my $r (@{ $releases || [] }) {
+        my $m = $r->{release_group_mbid} or next;
+        next if $seenRg{ lc $m }++;
+        push @rels, $r;
+        last if @rels >= $max;
+    }
+    unless (@rels) { $cb->({}); return }
+
+    # A peek normally kicks a background top-up; $opt{kick}=>0 suppresses that for
+    # callers that do their own follow-up lookup (the release detail page), so a
+    # single-release peek can not spend the whole feed's top-up budget.
+    my $kick = exists $opt{kick} ? $opt{kick} : 1;
+    if ($mode eq 'mirror') { _withGenresMirror(\@rels, $cb, $opt{peek}, $kick) }
+    else                   { _withGenresLB(\@rels, $cb, $opt{peek}, $kick) }
+}
+
+# Mirror path: genres are keyed by ARTIST, so the map is assembled by looking each
+# release's credited artists up rather than by release group.
+sub _withGenresMirror {
+    my ($rels, $cb, $peek, $kick) = @_;
+
+    # NB: never name a loop variable $a or $b in this file — they're sort's globals,
+    # and a lexical one silently breaks any sort in the same scope.
+    my (@artists, %seen);
+    for my $r (@$rels) {
+        my $am = ref $r->{artist_mbids} eq 'ARRAY' ? $r->{artist_mbids} : [];
+        for my $amb (@$am) {
+            next unless $amb;
+            push @artists, $amb unless $seen{ lc $amb }++;
+        }
+    }
+    unless (@artists) { $cb->({}); return }
+
+    if ($peek) {
+        my %known;
+        my $missing = 0;
+        for my $a (@artists) {
+            my $g = Plugins::ListenBrainzFreshReleases::API->peekArtistGenres($a);
+            defined $g ? ($known{ lc $a } = $g) : $missing++;
+        }
+        $cb->(_metaFromArtists($rels, \%known));
+        _kickGenreFill($rels) if $kick && $missing;
+        return;
+    }
+
+    Plugins::ListenBrainzFreshReleases::API->getArtistGenres(\@artists, sub {
+        $cb->(_metaFromArtists($rels, shift // {}));
+    });
+}
+
+# Fold artist genres back onto their releases, in the { genres, agenres } shape
+# _genresFor expects. `genres` (the release's OWN, tier 1) stays empty here: MB
+# release-group genres are ~5% on fresh releases — measured at 0 of 47 on a live
+# feed — so fetching a second per-release lookup for them would double the traffic
+# to change almost no rows. Tier 1 still arrives on the ListenBrainz path.
+sub _metaFromArtists {
+    my ($rels, $byArtist) = @_;
+    my %meta;
+    for my $r (@$rels) {
+        my $rg = lc($r->{release_group_mbid} // '') or next;
+        my $am = ref $r->{artist_mbids} eq 'ARRAY' ? $r->{artist_mbids} : [];
+        for my $amb (@$am) {
+            my $g = $amb ? $byArtist->{ lc $amb } : undef;
+            next unless ref $g eq 'ARRAY' && @$g;
+            $meta{$rg} = { genres => [], agenres => $g };
+            last;                                   # first credited artist with genres wins
+        }
+    }
+    return \%meta;
+}
+
+# ListenBrainz bulk path — the pre-0.9.140 behaviour, kept for opted-in users with
+# no mirror, with two fixes.
+#
+# NEVER do the fill inline on the render path (0.9.130). getReleaseGroupMetadata
+# opens with a SYNCHRONOUS cache-scan — one `$cache->get` per mbid — and writes one
+# `$cache->set` per fetched entry. At GENRE_FETCH_MAX that is up to 150 blocking
+# SQLite round-trips inside the browse callback, and this plugin has form here:
+# Bandcamp was pulled from the auto-search because synchronous work in a browse
+# handler stalled the event loop and dropped players. So each batch is launched on
+# its own idle tick, which spreads those scans across event-loop turns.
+#
+# What's new in 0.9.140 is that the batches no longer wait for EACH OTHER. They ran
+# strictly one at a time, so eight batches meant eight round trips end to end — the
+# 125s. They're still launched a tick apart (so the cache scans never gang up), but
+# up to GENRE_CONCURRENCY are in flight at once.
+#
+# $step is passed to ITSELF as a timer argument rather than captured in its own
+# closure: `my $s; $s = sub { ... $s ... }` is a reference cycle Perl never
+# collects — the exact leak fixed in API::getArtistMbidByName in 0.9.95.
+use constant GENRE_CONCURRENCY => 4;
+
+sub _withGenresLB {
+    my ($rels, $cb, $peek, $kick) = @_;
+
+    my @mbids = map { $_->{release_group_mbid} } @$rels;
+
+    # A peek can't use the bulk endpoint at all — it has no cache-only mode — so
+    # read the per-release-group entries directly and fetch nothing.
+    if ($peek) {
+        my %meta;
+        for my $m (@mbids) {
+            my $c = Plugins::ListenBrainzFreshReleases::API->peekReleaseGroupMetadata($m);
+            $meta{ lc $m } = $c if $c;
+        }
+        $cb->(\%meta);
+        _kickGenreFill($rels) if $kick && scalar(keys %meta) < scalar(@mbids);
+        return;
+    }
+
+    my @batches;
+    push @batches, [ splice(@mbids, 0, GENRE_BATCH) ] while @mbids;
+
+    my %meta;
+    my $active = 0;
+    my $fired  = 0;
+    my $step = sub {
+        my (undef, $self) = @_;                  # timer calls $step->($obj, @args)
+        my $batch = shift @batches;
+        unless ($batch) {
+            $cb->(\%meta) if !$active && !$fired++;
+            return;
+        }
+        $active++;
+        Plugins::ListenBrainzFreshReleases::API->getReleaseGroupMetadata($batch, sub {
+            my $m = shift || {};
+            @meta{ keys %$m } = values %$m;
+            $active--;
+            if (@batches)     { Slim::Utils::Timers::setTimer(undef, time(), $self, $self) }
+            elsif (!$active)  { $cb->(\%meta) unless $fired++ }
+        });
+    };
+
+    # Stagger the initial launches by a tick each: the point of the yield was never
+    # the HTTP (that's async), it was the synchronous cache scan at the head of each
+    # getReleaseGroupMetadata call. Firing four in one turn would gang four scans.
+    my $starts = @batches < GENRE_CONCURRENCY ? scalar @batches : GENRE_CONCURRENCY;
+    for my $i (1 .. $starts) {
+        Slim::Utils::Timers::setTimer(undef, Time::HiRes::time() + 0.05 * $i, $step, $step);
+    }
+}
+
+# Background top-up after a peek found gaps, so "open it, come back, they're there"
+# works without waiting for the nightly warm. Strictly fire-and-forget: no callback
+# reaches the render that triggered it. One at a time and no more often than
+# GENRE_KICK_GAP, so paging through a feed can't launch a fill per page.
+use constant GENRE_KICK_GAP    => 120;
+use constant GENRE_KICK_MAXRUN => 300;   # watchdog: never let the busy flag stick
+my $_genreKickAt  = 0;
+my $_genreKicking = 0;
+
+sub _kickGenreFill {
+    my ($rels) = @_;
+    my $now = time();
+    return if $_genreKicking || $now - $_genreKickAt < GENRE_KICK_GAP;
+    $_genreKicking = 1;
+    $_genreKickAt  = $now;
+    # A fill that never calls back (a wedged request) must not disable top-ups for
+    # the life of the server, so clear the flag on a watchdog as well as on
+    # completion. Whichever lands first wins; the other is a no-op.
+    Slim::Utils::Timers::setTimer(undef, time() + GENRE_KICK_MAXRUN, sub { $_genreKicking = 0 });
+    _dbg("genres: background top-up for " . scalar(@$rels) . " release(s)");
+    _withGenres($rels, sub { $_genreKicking = 0 }, GENRE_WARM_MAX);
+}
+
+# ---------------------------------------------------------------------------
+# Daily warm of the genre cache (0.9.134)
+# ---------------------------------------------------------------------------
+# Without this, the FIRST time you open a week the rows render before the fill
+# lands, so the genre labels only appear on the second visit. Pre-filling on the
+# daily tick means an open is a pure cache hit and the labels are there straight
+# away — which is also what makes the (per-artist, non-bulk) Last.fm tier
+# affordable when it lands.
+#
+# Bounded well above the per-render cap: this runs once a day in the background,
+# not per page. 600 release groups is ~12 bulk requests, and entries then sit in
+# the cache for 90 days, so in the steady state a tick only fetches whatever is
+# newly released. Reuses the same batched, idle-tick _withGenres the browse path
+# uses, so the warm can no more hold the event loop than a render can.
+#
+# Both feeds are themselves cached (24h) and the warm runs after the playlist
+# stage, so this normally adds no feed traffic at all — just the genre fill.
+# (GENRE_WARM_MAX is declared up with the other constants — the genre picker and
+# the All Releases week coderef both use it, and both sit earlier in this file.)
+
+# The Last.fm stage of the warm (phase 3). Fills the per-artist tag cache for the
+# releases the bulk ListenBrainz pass left with NO genre, so the render path — which
+# only ever peeks at that cache — has something to show next time.
+#
+# Deliberately the most conservative stage in the whole warm:
+#   • Only releases with nothing from any cheaper tier are considered.
+#   • Deduped by ARTIST, because the tags fetched are artist-level anyway. One call
+#     covers every release by that artist in the feed.
+#   • Hard-capped at LFM_WARM_MAX per tick. It's per-artist (not bulk), so this is
+#     the expensive tier; the cache holds 30 days, so a small daily allowance still
+#     converges — it just doesn't try to do it all in one night.
+#   • ONE call in flight at a time, each behind an idle tick, so we never burst at
+#     Last.fm and never hold the event loop.
+#   • No key configured → does nothing at all.
+use constant LFM_WARM_MAX => 40;
+
+sub _warmLastfm {
+    my ($releases, $meta, $done) = @_;
+    $done ||= sub {};
+    unless (($prefs->get('lastfm_api_key') // '') ne '') { $done->(); return }
+
+    my (@queue, %seenArtist);
+    for my $rel (@{ $releases || [] }) {
+        last if @queue >= LFM_WARM_MAX;
+        next if _genresFor($rel, $meta);          # a cheaper tier already answered
+        my $artist = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist') or next;
+        next if $seenArtist{ lc $artist }++;
+        push @queue, [ $artist, _pickValue($rel, 'release_name', 'title', 'name') // '' ];
+    }
+    unless (@queue) { _dbg("warm: last.fm — nothing to fill"); $done->(); return }
+
+    my $filled = 0;
+    my $step = sub {
+        my (undef, $self) = @_;
+        my $job = shift @queue;
+        unless ($job) {
+            _dbg("warm: last.fm — filled $filled artist(s)");
+            $done->();
+            return;
+        }
+        Plugins::ListenBrainzFreshReleases::API->getLastfmTags(
+            $job->[0], $job->[1],
+            sub {
+                my $tags = shift // [];
+                $filled++ if grep { _genreKnown($_) } @$tags;
+                # Yield between calls: paced for Last.fm, and the event loop keeps
+                # servicing audio through a long warm.
+                Slim::Utils::Timers::setTimer(undef, time() + 1, $self, $self);
+            },
+            sub { Slim::Utils::Timers::setTimer(undef, time() + 1, $self, $self) },
+        );
+    };
+    Slim::Utils::Timers::setTimer(undef, time(), $step, $step);
+}
+
+sub _warmGenres {
+    my $user  = $prefs->get('username') // '';
+    my $token = $prefs->get('token')    // '';
+
+    # All Releases needs no account, so it's warmed for everyone.
+    my $warmAll = sub {
+        Plugins::ListenBrainzFreshReleases::API->getFreshReleasesAll(
+            sort    => 'release_date',
+            past    => $prefs->get('all_past')   // 1,
+            future  => $prefs->get('all_future') // 0,
+            days    => $prefs->get('days')       // 14,
+            onDone  => sub {
+                # Filter first: no point warming genres for releases the user's own
+                # type/artwork/VA settings would never show.
+                my $rels = _filterAll(shift);
+                _withGenres($rels, sub {
+                    my $meta = shift // {};
+                    _dbg("warm: genres — All Releases, " . scalar(keys %$meta) . " release group(s)");
+                    _warmLastfm($rels, $meta);
+                }, GENRE_WARM_MAX);
+            },
+            onError => sub { _dbg("warm: genres — All Releases fetch failed: " . (shift // '')) },
+        );
+    };
+
+    unless ($user && $token) { $warmAll->(); return }
+
+    Plugins::ListenBrainzFreshReleases::API->getFreshReleasesForUser(
+        sort    => 'release_date',
+        past    => $prefs->get('foryou_past')   // 1,
+        future  => $prefs->get('foryou_future') // 0,
+        days    => $prefs->get('days')          // 14,
+        onDone  => sub {
+            my $rels = _filterForYou(shift);
+            _withGenres($rels, sub {
+                my $meta = shift // {};
+                _dbg("warm: genres — For You, " . scalar(keys %$meta) . " release group(s)");
+                _warmLastfm($rels, $meta, sub { $warmAll->() });   # chained, never fanned out
+            }, GENRE_WARM_MAX);
+        },
+        onError => sub {
+            _dbg("warm: genres — For You fetch failed: " . (shift // ''));
+            $warmAll->();
+        },
+    );
+}
+
+# The genres to SHOW for one release, strongest first. Prefers the album's own
+# release-group genres and falls back to the credited artist's — deliberately in
+# that order, because an artist genre is only a proxy for the record (a jazz
+# artist's ambient side project would inherit "jazz"), so it must never override a
+# genre the release itself carries. Returns () when neither has one.
+sub _genresFor {
+    my ($rel, $meta) = @_;
+    return () unless ref $rel eq 'HASH';
+
+    if (ref $meta eq 'HASH') {
+        my $m = $meta->{ lc($rel->{release_group_mbid} // '') };
+        if (ref $m eq 'HASH') {
+            my $own = ref $m->{genres}  eq 'ARRAY' ? $m->{genres}  : [];
+            return @$own if @$own;                              # tier 1: the album's own
+            my $art = ref $m->{agenres} eq 'ARRAY' ? $m->{agenres} : [];
+            return @$art if @$art;                              # tier 2: the artist's
+        }
+    }
+
+    # Tier 3: the feed payload's own release_tags. Free (already in hand) and
+    # release-specific, so it outranks the artist-level Last.fm tier below. Proven
+    # independent of ListenBrainz's tag block — André Cymone's "The Resurrection of
+    # Funk" has inline tags while LB returns nothing for its release group OR artist.
+    my @inline = _releaseTags($rel);
+    return @inline if @inline;
+
+    # Tier 4: Last.fm, gated to MusicBrainz's genre vocabulary.
+    return _lastfmGenres($rel);
+}
+
+# Last.fm artist/album tags, cache-ONLY and vocabulary-gated.
+#
+# Coverage: measured on the 206 releases (of 400) that ListenBrainz had no genre
+# for, Last.fm answered for 44% of them — taking the feed as a whole from ~49% to
+# ~71%. But its raw tags are unusable as genres ("japanese", "Colombia", "anime",
+# "Dreamy", "zzz", "brainrot"), so every tag must be a name MusicBrainz recognises.
+#
+# NEVER fetches here. Last.fm is per-ARTIST, not bulk — filling it on the render
+# path would mean ~15 HTTP calls for a 30-row page, which is the opposite of what
+# phase 1 was for. The daily warm populates the cache (_warmLastfm) and this reads
+# whatever landed; an artist not yet warmed simply has no genre this time round.
+sub _lastfmGenres {
+    my ($rel) = @_;
+    return () unless ($prefs->get('lastfm_api_key') // '') ne '';
+    my $artist = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist') or return ();
+    my $album  = _pickValue($rel, 'release_name', 'title', 'name') // '';
+    my $tags   = Plugins::ListenBrainzFreshReleases::API->peekLastfmTags($artist, $album);
+    return grep { _genreKnown($_) } @$tags;
+}
+
+# ---------------------------------------------------------------------------
+# Genre -> top-level family rollup (0.9.131)
+# ---------------------------------------------------------------------------
+# MusicBrainz publishes a curated genre VOCABULARY (2177 names via `genre/all`)
+# but NO hierarchy — verified against a mirror: `genre/<mbid>?inc=genre-rels` is
+# "Not Found" and genre search "hasn't been implemented". So the parent/child
+# rollup ships as a generated data file, `genre-families.txt`
+# (tools/make_genre_families.py — rerun it to regenerate; don't hand-edit).
+#
+# The split, as specified: the LISTS show the top-level family ("Electronic"),
+# because that's what you want when scanning a week of releases; the release
+# DETAIL page shows the full specific genres ("downtempo, chillwave, drone").
+#
+# Loaded once, lazily, from the plugin's own directory (derived from %INC so it
+# works for a manual install and a repo install alike). A missing or unreadable
+# file is not an error — every genre then simply has no family, and the lists fall
+# back to showing the genre itself.
+my %_GENRE_FAMILY;
+my %_GENRE_MODIFIER;   # family '-' in the table: a treatment word, not a style
+my %_GENRE_KNOWN;      # EVERY name MusicBrainz calls a genre — the Last.fm gate
+my $_familiesLoaded = 0;
+
+sub _loadGenreFamilies {
+    return if $_familiesLoaded;
+    $_familiesLoaded = 1;
+    my $path = $INC{'Plugins/ListenBrainzFreshReleases/Browse.pm'} or return;
+    $path =~ s{Browse\.pm$}{genre-families.txt};
+    open(my $fh, '<:encoding(UTF-8)', $path) or do {
+        $log->info("genre families: no table at $path (genres will show unrolled)");
+        return;
+    };
+    while (my $line = <$fh>) {
+        next if $line =~ /^\s*#/ || $line !~ /\t/;
+        chomp $line;
+        my ($g, $fam) = split /\t/, $line, 2;
+        next unless defined $g && defined $fam && length $g && length $fam;
+        $_GENRE_KNOWN{$g} = 1;                        # the vocabulary (gates Last.fm)
+        if    ($fam eq '-') { $_GENRE_MODIFIER{$g} = 1 }
+        elsif ($fam ne '?') { $_GENRE_FAMILY{$g}   = $fam }
+        # '?' = a real genre with no family yet: known, showable, not rolled up.
+    }
+    close $fh;
+    $log->info("genre families: loaded " . scalar(keys %_GENRE_FAMILY) . " genres");
+}
+
+# Normalise a genre the same way the generator did, so "synth-pop" and "Synth Pop"
+# both find the "synth pop" key.
+sub _genreKey {
+    my ($g) = @_;
+    $g = lc($g // '');
+    $g =~ s/[\s\-_\/]+/ /g;
+    $g =~ s/^\s+//; $g =~ s/\s+$//;
+    return $g;
+}
+
+sub _genreFamily {
+    my ($g) = @_;
+    _loadGenreFamilies();
+    return $_GENRE_FAMILY{ _genreKey($g) };
+}
+
+# A treatment word (instrumental, lo-fi, acoustic …) rather than a style. Distinct
+# from "no family": an UNKNOWN genre is still worth showing to the user, a modifier
+# never is.
+sub _genreModifier {
+    my ($g) = @_;
+    _loadGenreFamilies();
+    return $_GENRE_MODIFIER{ _genreKey($g) };
+}
+
+# Is this string a genre MusicBrainz actually recognises? This is the gate that
+# makes Last.fm usable: its tags are dominated by languages, countries, moods and
+# junk ("japanese", "seen live", "brainrot", "zzz"), and none of those are in MB's
+# curated vocabulary. Modifiers are in the vocabulary but excluded here — a tier
+# that only ever yielded "instrumental" would be worse than no tier.
+sub _genreKnown {
+    my ($g) = @_;
+    _loadGenreFamilies();
+    my $k = _genreKey($g);
+    return $_GENRE_KNOWN{$k} && !$_GENRE_MODIFIER{$k};
+}
+
+# ---------------------------------------------------------------------------
+# Genre picker + filter (0.9.136)
+# ---------------------------------------------------------------------------
+# A multi-select genre filter, modelled on the genre selection menu in SvenInNdh's
+# Qobuz fork (checkbox rows + a Select-all row + the count on the entry row).
+# Deliberately DIVERGES from it in three ways:
+#   • IMMEDIATE APPLY, no staging buffer and no "Store" row. Sven's version stages
+#     toggles in memory and commits on save, which forces a `refreshing` flag and a
+#     `$params->{index}` heuristic to tell an internal refresh from a fresh entry.
+#     Our picker is its own drill-in level, so a tap re-renders only the picker off
+#     cached data — the pref can just be written directly, and all that state goes
+#     away.
+#   • Material's OWN check_box font icons via the _MTL_icon_<name> convention, so
+#     no custom checkbox artwork is needed.
+#   • An ARRAYREF pref, not a "#id#id#" delimited string — no regex membership
+#     tests, and a family name containing the delimiter can't corrupt it. Matches
+#     the existing `blocked_artists` pref shape.
+#
+# The bucket key for a release is its FAMILY, or GENRE_NONE for anything that
+# doesn't roll up. An empty selection means "everything" — the same convention the
+# release-type checkboxes already use.
+use constant GENRE_NONE => '_none';   # stable internal key; displayed via a string
+
+sub _selectedGenres {
+    my ($prefix) = @_;
+    my $v = $prefs->get("${prefix}_genres");
+    return ref $v eq 'ARRAY' ? $v : [];
+}
+
+# The family a release is FILED under. Unlike _familyFor (which is for display and
+# falls back to the raw genre when nothing rolls up), this returns only a real
+# family — so the picker can't sprout a singleton bucket per obscure genre.
+sub _bucketFor {
+    my ($rel, $meta) = @_;
+    for my $g (_genresFor($rel, $meta)) {
+        my $fam = _genreFamily($g);
+        return $fam if $fam;
+    }
+    return GENRE_NONE;
+}
+
+sub _genreSelectFilter {
+    my ($releases, $prefix, $meta) = @_;
+    my $sel = _selectedGenres($prefix);
+    return $releases unless @$sel;                  # nothing ticked = show everything
+    my %want = map { $_ => 1 } @$sel;
+    return [ grep { $want{ _bucketFor($_, $meta) } } @{ $releases || [] } ];
+}
+
+# The Options row that opens the picker. Carries the count so an active filter is
+# visible without opening it ("Genres (3)" vs "Genres (All)") — the one idea from
+# Sven's version I took unchanged.
+sub _genresRow {
+    my ($client, $prefix, $rels) = @_;
+    my $sel = _selectedGenres($prefix);
+    my $n   = @$sel ? scalar(@$sel) : cstring($client, 'PLUGIN_LBF_GENRE_ALL');
+    return {
+        name        => sprintf(cstring($client, 'PLUGIN_LBF_GENRES_SELECT'), $n),
+        type        => 'link',
+        image       => MENU_GENRE,
+        # Hand the picker THIS level's releases (0.9.138). Two reasons, and the
+        # first is a correctness bug: the picker used to re-fetch the whole feed,
+        # so an All Releases week showed feed-wide counts — "Rock (188)" over a
+        # week listing twelve. Now the counts describe exactly the list you came
+        # from. It is also the bulk of the picker's cost: no second feed decode,
+        # and the genre fill covers one week instead of up to GENRE_WARM_MAX
+        # across every week. Rebuilt on every walk by the level that owns it, so
+        # it can't go stale.
+        passthrough => [{ prefix => $prefix, rels => $rels }],
+        url         => \&genrePicker,
+    };
+}
+
+# One feed, filtered by the section's settings. Shared by the picker and the warm
+# so the two can't drift on which prefs drive which feed.
+sub _feedFor {
+    my ($prefix, $cb) = @_;
+    if ($prefix eq 'foryou') {
+        Plugins::ListenBrainzFreshReleases::API->getFreshReleasesForUser(
+            sort   => 'release_date',
+            past   => $prefs->get('foryou_past')   // 1,
+            future => $prefs->get('foryou_future') // 0,
+            days   => $prefs->get('days')          // 14,
+            onDone  => sub { $cb->(_filterForYou(shift)) },
+            onError => sub { $cb->([]) },
+        );
+    }
+    else {
+        Plugins::ListenBrainzFreshReleases::API->getFreshReleasesAll(
+            sort   => 'release_date',
+            past   => $prefs->get('all_past')   // 1,
+            future => $prefs->get('all_future') // 0,
+            days   => $prefs->get('days')       // 14,
+            onDone  => sub { $cb->(_filterAll(shift)) },
+            onError => sub { $cb->([]) },
+        );
+    }
+}
+
+# The picker level: "All genres" then one checkbox row per family PRESENT in the
+# list it was opened from, with counts. Listing only what's actually there
+# (rather than all 21 families) doubles as a view of that list's shape, and can't
+# offer a filter that would return nothing.
+#
+# It works on the releases the OWNING LEVEL handed it (0.9.138) and only falls
+# back to fetching the feed if that's missing. The fallback exists for safety, not
+# for use: it's the old whole-feed path, whose counts don't describe the week you
+# came from.
+sub genrePicker {
+    my ($client, $cb, $args, $pass) = @_;
+    my $prefix = (ref $pass eq 'HASH' && $pass->{prefix}) ? $pass->{prefix} : 'all';
+    my $given  = (ref $pass eq 'HASH' && ref $pass->{rels} eq 'ARRAY') ? $pass->{rels} : undef;
+
+    my $scope = $given ? sub { $_[0]->($given) } : sub { _feedFor($prefix, $_[0]) };
+    $scope->(sub {
+        my $rels = shift // [];
+        # CACHE ONLY (peek — 0.9.140). This is the screen that made the problem
+        # visible: it asked for a fill of up to GENRE_WARM_MAX releases and then sat
+        # on it, and a measured cold fill of a 381-release feed took 125 SECONDS
+        # (8 ListenBrainz batches, 9–24s each). It now opens instantly off the cache
+        # and tops up behind. With a mirror the cache is filled in seconds, so the
+        # counts are complete almost immediately; without one the user has opted in
+        # to a slower source and the first open shows what's known so far.
+        _withGenres($rels, sub {
+            my $meta = shift // {};
+            # ONE bucketing pass (0.9.139). The counts and the apply row's "Show N
+            # releases" both need each release's family, and this used to work it out
+            # twice — once here, once inside _genreSelectFilter below. _bucketFor walks
+            # the whole genre tier ladder per release (and, with a Last.fm key set,
+            # reads the tag cache), so on a busy week that was hundreds of lookups
+            # done for a second time, on every tick of the picker.
+            my (%count, @bucket);
+            for my $rel (@$rels) {
+                my $b = _bucketFor($rel, $meta);
+                push @bucket, $b;
+                $count{$b}++;
+            }
+
+            my $sel  = _selectedGenres($prefix);
+            my %on   = map { $_ => 1 } @$sel;
+
+            # Apply & return. Material has NO server-driven way to mark a parent
+            # level as stale: browseGoBack() restores the history entry's CACHED
+            # items, and the only thing that forces a re-fetch is its own
+            # `needsRefresh` flag, which nothing but Material's internals sets
+            # (browse-functions: podcasts addshow/delshow, search, playlist moves).
+            # So plain Back can never show the newly filtered list — 0.9.136's
+            # bug. nextWindow 'parent' on an EMPTY response is the one lever a
+            # plugin does have: it pops this level off the history and calls
+            # browseGoBack(force=1), which DOES refreshList() the level below.
+            # This row is what Sven's "Store" row is for; we keep immediate apply
+            # so it's a return, not a commit, and the label re-renders on every
+            # tick as a live preview of what going back will show.
+            #
+            # It COUNTS the result, which it can only do honestly now that the
+            # picker is scoped to the level that opened it (0.9.138) — while it
+            # re-fetched the whole feed, every number here was feed-wide and
+            # didn't match the week you returned to. The tick marks already say
+            # which genres are on, so the useful thing to add is how many rows
+            # you'll land on.
+            # Counted off the single bucketing pass above — same answer
+            # _genreSelectFilter would give (nothing ticked = everything shows).
+            my $shown = @$sel ? scalar(grep { $on{$_} } @bucket) : scalar(@$rels);
+            my @rows  = ({
+                name        => sprintf(cstring($client,
+                                  $shown == 1 ? 'PLUGIN_LBF_GENRE_APPLY_ONE'
+                                              : 'PLUGIN_LBF_GENRE_APPLY'), $shown),
+                type        => 'link',
+                image       => MENU_APPLY,
+                nextWindow  => 'parent',
+                passthrough => [{}],
+                url         => sub { $_[1]->({ items => [] }) },
+            }, {
+                name        => cstring($client, 'PLUGIN_LBF_GENRE_SELECT_ALL'),
+                type        => 'link',
+                image       => @$sel ? CHECK_OFF : CHECK_ON,   # ticked when no filter is set
+                nextWindow  => 'refresh',
+                passthrough => [{ prefix => $prefix, all => 1 }],
+                url         => \&genreToggle,
+            });
+
+            # Families first (busiest first, then alphabetical), the catch-all last
+            # so it can never head the list.
+            my @fams = sort { $count{$b} <=> $count{$a} or $a cmp $b }
+                       grep { $_ ne GENRE_NONE } keys %count;
+            push @fams, GENRE_NONE if $count{ +GENRE_NONE };
+
+            for my $f (@fams) {
+                my $label = $f eq GENRE_NONE ? cstring($client, 'PLUGIN_LBF_GENRE_NONE') : $f;
+                push @rows, {
+                    name        => "$label (" . $count{$f} . ")",
+                    type        => 'link',
+                    image       => $on{$f} ? CHECK_ON : CHECK_OFF,
+                    nextWindow  => 'refresh',
+                    passthrough => [{ prefix => $prefix, genre => $f }],
+                    url         => \&genreToggle,
+                };
+            }
+            $cb->({ items => \@rows, cachetime => 0 });
+        }, GENRE_WARM_MAX, peek => 1);
+    });
+}
+
+# Immediate apply: flip the family in the pref and refresh the picker in place.
+# Re-reads the LIVE pref rather than trusting a value captured at render time —
+# the same rule as _sortToggle and _viewToggle.
+sub genreToggle {
+    my ($client, $cb, $args, $pass) = @_;
+    my $prefix = (ref $pass eq 'HASH' && $pass->{prefix}) ? $pass->{prefix} : 'all';
+
+    if (ref $pass eq 'HASH' && $pass->{all}) {
+        $prefs->set("${prefix}_genres", []);        # clear the filter entirely
+        $cb->({ items => [] });
+        return;
+    }
+
+    my $g   = $pass->{genre} // '';
+    my $sel = _selectedGenres($prefix);
+    my @out = grep { $_ ne $g } @$sel;
+    push @out, $g if @out == @$sel;                 # wasn't there -> turn it on
+    $prefs->set("${prefix}_genres", \@out);
+    $cb->({ items => [] });
+}
+
+# The single label a LIST row shows. Walks the release's genres strongest-first and
+# returns the first FAMILY it can resolve — so a release tagged
+# "instrumental, lo-fi hip hop" reads "Hip Hop", not "instrumental". Words that
+# describe a treatment rather than a family (instrumental, lo-fi, acoustic …) are
+# deliberately absent from the table precisely so they fall through like this.
+# If nothing rolls up, the strongest genre is shown as-is — still better than the
+# blank line these rows used to have.
+use constant GENRE_SUBS_MAX => 2;   # sub-genres shown in brackets on a list row
+
+sub _familyFor {
+    my ($rel, $meta) = @_;
+    # _genresFor owns the whole tier ladder now (album genres → artist genres →
+    # the feed's inline release_tags → gated Last.fm), so there is exactly ONE
+    # source of genres and exactly one producer of a row label. Appending a source
+    # here instead was the 0.9.132 bug: it bypassed the rollup and printed three raw
+    # sub-genres where the design calls for one family.
+    my @g = _genresFor($rel, $meta);
+    return () unless @g;
+
+    my $family;
+    for my $g (@g) {
+        my $f = _genreFamily($g);
+        if ($f) { $family = $f; last }
+    }
+    # Nothing rolled up — show the strongest single genre rather than a list, and
+    # no brackets (there's no family for them to be sub-genres OF).
+    return ($g[0]) unless defined $family;
+
+    # Sub-genres for the brackets: the release's OTHER genres, strongest first.
+    # Only the genre that merely RESTATES the family is dropped, so a row can't read
+    # "Funk (funk)".
+    #
+    # These are deliberately NOT restricted to genres that roll up to the same
+    # family. That was the first cut and it was wrong on the very case this feature
+    # was asked for: "funk rock" and "funk soul" roll up to Rock and Soul under the
+    # whole-word suffix rule, so a same-family filter emptied the brackets on
+    # "funk, funk rock, funk soul" — the one release that prompted this. The
+    # brackets are "what else this release is tagged", not a claim of descent.
+    # A bracket entry must not be a MODIFIER — otherwise "instrumental" and "lo-fi"
+    # walk straight back onto the row as "Hip Hop (instrumental, lo-fi hip hop)",
+    # reintroducing exactly the noise the modifier rule exists to remove.
+    #
+    # It does NOT have to be a genre we have a family for. Requiring that was the
+    # second wrong cut: "funk soul" isn't in MusicBrainz's vocabulary at all (it
+    # reached us as a free tag on the release), so it was silently dropped from
+    # "Funk (funk rock, funk soul)". Unknown genre = still worth showing; known
+    # modifier = never worth showing. That's why the table ships modifiers with
+    # family '-' rather than just omitting them.
+    my $famKey = _genreKey($family);
+    my (@subs, %seen);
+    for my $g (@g) {
+        next if _genreModifier($g);
+        my $k = _genreKey($g);
+        next if $k eq $famKey || $seen{$k}++;
+        push @subs, $g;
+        last if @subs >= GENRE_SUBS_MAX;
+    }
+    return ($family, @subs);
+}
+
 sub _releaseTags {
     my ($rel) = @_;
 

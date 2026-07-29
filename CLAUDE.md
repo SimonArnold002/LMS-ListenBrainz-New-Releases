@@ -1,5 +1,19 @@
 # ListenBrainz Fresh Releases — LMS Plugin
 
+> ## ⚠️ You are on the `alpha` branch — PARKED WORK, NOT THE RELEASE LINE
+>
+> This branch holds the **genre-labels** feature, parked on **2026-07-29 at 0.9.140**
+> pending a decision on whether the plugin adopts a **Lyrion API server** backend. It is
+> not released and must not be merged to `dev` or `main` until that decision is made.
+>
+> **Maintenance work belongs on `dev`.** The non-genre features developed alongside this
+> (Albums / Singles & EPs toggle, the All Releases Refresh row, the per-walk performance
+> pass) were deliberately taken to `dev`; only the genre work stayed here.
+>
+> **Read [ALPHA.md](ALPHA.md) before touching anything on this branch** — it records why
+> it is parked, the measurements behind that call, exactly what is here versus on `dev`,
+> and the known gaps it carries.
+
 ## Project Overview
 A plugin for Lyrion Music Server (LMS) that browses ListenBrainz Fresh Releases. It provides a personalised "For You" feed and a global "All Releases" feed. Filtering is controlled via settings, and the browse menu stays intentionally simple. The current build targets LMS v9.x and has been tested with Material Skin.
 
@@ -108,7 +122,445 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-0.9.120
+0.9.140
+
+- **Genres: mirror-first, artist-keyed, and NEVER on the critical path (0.9.140).** Reported as "clicking
+  on genres for the first time is painful". It was: `genrePicker` called `_withGenres(..., GENRE_WARM_MAX)`
+  and BLOCKED on the fill. Measured against the live All Releases feed (381 releases, 2026-07-29):
+  **8 sequential ListenBrainz batches, 9–24s each, 125.3s total.** Numbers worth keeping:
+  - `/1/metadata/release_group/` latency is a LOTTERY, not a size problem: **0.25s to 24s for the
+    byte-identical request**. Not rate limiting — `x-ratelimit-remaining` sat at 26–29 of 30 throughout.
+  - It **502s above ~90 mbids** (90 OK, 100 fails), so "just ask for more per call" is not available.
+    `GENRE_BATCH`=50 stays.
+  - **All the coverage is ARTIST-level**: of 47 release groups, **0** carried own tags, 24 carried artist
+    tags. The release-group-keyed bulk call was fetching artist data.
+  - A local MB mirror answers `artist/<mbid>?inc=genres` in **40–120ms**, unthrottled, no variance.
+  - **Coverage is IDENTICAL** — over the same 50 artists, LB had genres for 16 and the mirror for the
+    same 16, **zero disagreement either way**. This is the fact the whole change rests on; re-measure it
+    before doubting the swap.
+  - Artist keys also reuse better across feeds: **23%** of the next feed's artists already known vs **11%**
+    of its release groups.
+  - 3 of 381 release groups are never returned by the endpoint at all, and only returned entries are
+    cached — so those were re-requested on every fill, forever.
+  - **`Browse::_genreLookupMode`** — 'mirror' (a mirror exists → `API::getArtistGenres`, 6 concurrent),
+    'lb' (no mirror, user opted in → the old bulk path, now `GENRE_CONCURRENCY`=4 with the launches still
+    a tick apart so the synchronous cache scans don't gang), or **'off' (the DEFAULT with no mirror)** —
+    free `release_tags` + already-cached Last.fm only, i.e. exactly pre-0.9.129. Pref `genre_lookup`
+    (auto|always|off). **The 0.9.129–0.9.135 genre work put a remote lookup on a render path and that was
+    the defect**; the feature is opt-in for anyone who can't do it fast.
+  - **`$opt{peek}` on every render path** — cache only, never fetch, never wait; `_kickGenreFill` does a
+    bounded background top-up (one at a time, `GENRE_KICK_GAP`=120s, watchdog-cleared) so "come back and
+    they're there" works without waiting for the nightly warm. `$opt{kick}=>0` for the detail page, which
+    does its own follow-up. `API::peekArtistGenres` / `peekReleaseGroupMetadata` are the cache-only reads.
+  - **`_metaFromArtists`** folds artist genres back into the `{ genres, agenres }` shape `_genresFor`
+    already consumes, so the tier ladder and every consumer are untouched. Tier 1 (release's OWN genres)
+    is deliberately EMPTY on the mirror path — 0 of 47, so a second per-release lookup would double
+    traffic to change almost nothing.
+  - **`getReleaseGroupGenres` un-orphaned** — it had been dead since 0.9.131 (that's the "one MB call
+    fewer" line). The detail page now falls back to it when the shared tiers are empty: one request, on
+    the mirror when there is one. This is the answer to "why do we even have a mirror option if this
+    isn't being used" — the mirror was wired to artist-MBID lookup, sort names, RG-by-name and
+    tracklists, but genres had been moved OFF MusicBrainz onto ListenBrainz and never came back.
+  - **Verified end-to-end against the live mirror**, not just unit-checked: 30 real releases → real
+    mirror lookups → `_metaFromArtists` → `_familyFor` gave 13/30 labelled rows with correct rollups
+    ("Metal (deathcore, metalcore)", "Hip Hop (east coast hip hop)"). Script pattern is in the 0.9.139
+    bench harness; re-run it if the tier ladder changes.
+  - **Perl trap hit while testing, worth remembering**: a `for my $a (...)` loop variable shadows sort's
+    `$a`, silently breaking any sort in that scope. The artist loops use `$amb`.
+
+- **Per-walk work elimination (0.9.139) — the sequel to 0.9.138, and the half that memo left
+  undone.** `%FEED_MEMO` stopped the re-walks RE-READING the feed; they were still RE-DERIVING it.
+  Measured, don't guess: `tools/bench_walk.pl` extracts the real sub bodies from `Browse.pm` (the
+  `matcher_sync_check.py` trick) and runs them against a live feed with no LMS. On 2902 raw releases
+  (14-day default window) on a dev Mac, one walk of the All Releases pipeline was **1.1ms filter +
+  3.7ms dedupe/sort + 2.8ms week grouping ≈ 7.6ms**, ×3+ walks per tap, ×2 sections — and a Pi is an
+  order of magnitude slower. Rerun the script after any change to that pipeline.
+  - **`%SECTION_MEMO` + `_allSection`/`_forYouSection`** — the derived (filtered, deduped, sorted)
+    list per section, held `SECTION_MEMO_TTL`=5s. Validity is by **IDENTITY of the source
+    arrayref(s)**, not a content hash: the feed memo returns the same ref for its TTL, and a Refresh
+    (`clearFeedCache` → `_memoDrop`) necessarily produces a NEW ref, so a refresh can't be masked.
+    The memo holds those refs itself, which is what makes `==` sound (an address can't be recycled
+    while we point at it). Everything else that shapes the result is prefs → `_sectionSig`. **For You
+    needs TWO sources** (`_mergeMuSpy` builds a fresh arrayref every call), which is why
+    `getMuSpyReleases` is memoed too — not for its own cache read, but to make its ref stable.
+    Callers must keep treating the returned list as READ-ONLY; it is shared across walks (as the raw
+    feed already was).
+  - **`_weekStart` memoed** — pure function of a date string, called once per release by BOTH
+    `_buildAllLanding` and `_buildWeekly`, resolving to ~15 distinct dates. 2.7ms → 0.2ms. Never
+    expires: the answer for a date can't change and the key space is what the feed carries.
+  - **`_stashSummary` / `_stashPlaylistSummary` write elision** (`_summaryChanged`) — these were
+    SQLite WRITES on every walk of every render path, storing bytes identical to what was there.
+    Watch the trap: a skipped write is a skipped TTL RENEWAL, so it rewrites unconditionally every
+    `SUMMARY_REWRITE`=6h, well inside the 25h TTL. `_stashSummary` also scans for min/max instead of
+    sorting the whole list.
+  - **`genrePicker` single bucketing pass** — it bucketed every release for the counts, then
+    `_genreSelectFilter` bucketed every release AGAIN for the apply row's figure. One pass, `@bucket`
+    reused for both. `_bucketFor` walks the whole tier ladder per release, so this was hundreds of
+    duplicate lookups per tick.
+  - **`_orderedAdapters` memoed** (`ADAPTER_MEMO_TTL`=5s) — ~10 `->can` probes + a `_pluginDataFor`
+    icon lookup per service, built TWICE per root walk by `_trendingTile` alone (once inside
+    `_trendingResolvedKey`) and on the per-item path via `_cachedSvcUsable`. Adapters are read-only
+    to every consumer (checked), so sharing the hashrefs is safe.
+  - **`_trendingTile` count memoed** — it deserialised the whole resolved track list out of SQLite on
+    every root walk purely to count what survives the service filter. Keyed on the resolved key (so a
+    user/service-order change re-counts), dropped by the Refresh row via `_dropTrendingCount`.
+  - **`API::peekLastfmTags` memoed** (`LFM_MEMO_TTL`=60s, capped `LFM_MEMO_MAX`) — tier 4 of
+    `_genresFor`, which the render path calls several times for the SAME release in one walk (row
+    build, genre bucket, picker count), each a separate SQLite read. `getLastfmTags` refreshes the
+    entry after a warm write so a render during a warm can't read a stale empty list.
+  - **NO persisted cache prefix was bumped**: nothing about a stored structure changed, and bumping
+    would throw away resolved playlists and streaming matches for no reason. Every memo here is
+    in-process and dies with a restart — which a plugin update performs anyway.
+  - **Compile-order gotcha, twice**: a `use constant` and a file-scoped `my` are only visible to code
+    compiled AFTER them. `_refreshItem` sits above `%_TRENDING_COUNT`, hence `_dropTrendingCount()`
+    (a sub call resolves at runtime); `_trendingTile` sits above `SECTION_MEMO_TTL`, hence its own
+    `TRENDING_COUNT_TTL`. `perl -c` catches both — run it against a stub `Slim::` tree.
+
+- **Picker scope + the feed memo (0.9.138) — two fixes to one report ("counts don't match, and it's
+  sluggish").**
+  - **Scope.** `genrePicker` called `_feedFor` and counted the WHOLE feed, so an All Releases week
+    showed feed-wide counts. `_genresRow($client, $prefix, $rels)` now hands the picker the level's
+    own releases via `passthrough` (rebuilt every walk, so never stale); `_feedFor` survives only as a
+    defensive fallback. This is also most of the speed-up: no second full-feed decode, and the genre
+    fill covers one week instead of up to `GENRE_WARM_MAX` across all of them. The apply row can now
+    count honestly (`Show 12 releases`), which it couldn't at feed scope.
+  - **`API::%FEED_MEMO`** — the last decoded copy of each feed key, held `FEED_MEMO_TTL`=5s.
+    `Slim::Utils::Cache` is SQLite: a feed "cache hit" is a disk read plus a full deserialise of
+    thousands of releases, and **XMLBrowser re-walks from the ROOT on every drill-in, in-place refresh
+    and paging tap** — the root builds both sections, so one tap decoded the same feeds 3+ times and a
+    genre tick (toggle request + `refreshList`) did it twice over. Confirmed in the live log: bursts of
+    `All + ForYou + ForYou` repeating every ~0.5s. 5s covers one interaction and nothing more;
+    `clearFeedCache` calls `_memoDrop` so Refresh can't be masked, and every pref that shapes a feed is
+    already in the cache key so a settings change can't be served a stale copy. `our`, not `my`, so
+    `t_memo.pl` can age it.
+  - **If browsing feels slow again, look here first**: the cost is almost never the network (feeds are
+    cached) — it's re-walk × deserialise × per-release work. Measure by counting `$cache->get` calls,
+    not by timing HTTP. Since 0.9.139 the per-release half of that has a harness:
+    `perl tools/bench_walk.pl`.
+
+- **Genre picker needs an explicit apply row — plain Back can NEVER work (0.9.137).** 0.9.136 shipped
+  the picker with immediate apply and no return path; the ticks saved fine (verified live: the pref
+  held `["Electronic"]`) but Back showed the unfiltered list. **Verified in Material's own bundle**
+  (`http://plex:9000/material/html/js/material-deferred.min.js` — fetch and grep it, it's the fastest
+  way to settle a navigation question):
+  - `browseGoBack()` **restores the history entry's cached `items`** (`a.items=g.items; a.listSize=…`).
+    It re-fetches ONLY if `b || g.needsRefresh`.
+  - `needsRefresh` is set **exclusively by Material's own internals** — podcasts `addshow`/`delshow`,
+    search, playlist drag-moves. **There is no server-driven way to mark a parent level stale.** So a
+    plugin can never make plain Back re-render. Any "change a setting on a drill-in level" flow needs
+    an explicit apply row.
+  - `browseHandleNextWindow(a,b,c,e,d,g)` runs only when the response has **0 items**, and from the
+    normal drill-in path is called as `(…,d=false,g=true)`. With those args:
+    **`refresh`** → `browseGoBack(a,true)` = pop the empty window, restore the row's OWN level, refresh it.
+    **`parent`** → `a.history.pop(); browseGoBack(a,true)` = pop this level too, land one BELOW, refresh it.
+    Both also `bus.$emit("showMessage", <row title>)`, so every tap toasts its own label.
+  - So: ticks use `refresh` (flip in place), the apply row uses **`parent`** (return + rebuild).
+  The apply row **names the selection** ("Show Rock, Electronic", `GENRE_APPLY_NAMES`=2 then "+N more")
+  rather than counting results — the picker is opened from an All Releases **week** but reads the whole
+  feed, so any count would be feed-wide and wouldn't match the week it returns to. (The per-genre counts
+  are feed-wide for the same reason; there they're wanted, as a view of the feed's shape.)
+
+- **Genre picker — multi-select filter (0.9.136).** Modelled on the genre-selection menu in
+  **SvenInNdh's Qobuz fork** (`https://github.com/Sveninndh/SqueezeboxRepo`, `Qobuz-30.7.3.6`,
+  `Plugin.pm::QobuzGenreSelection/QobuzGenreToggle/QobuzGenreStore`) — worth reading if this area is
+  revisited. **Taken:** checkbox rows + a Select-all row + the count on the entry row
+  ("Genres (3)" / "Genres (All)"). **Deliberately diverged, three ways:**
+  1. **IMMEDIATE APPLY — no staging buffer, no Store row.** Sven's stages toggles in memory and commits
+     on save, which forces a `refreshing` flag plus a `$params->{index} eq 0` heuristic to tell an
+     internal refresh from a fresh entry. Our picker is its own drill-in level rendering off cached
+     data, so the pref is written directly and all that state disappears.
+  2. **Material's own `_MTL_icon_check_box` / `_check_box_outline_blank`** font icons — no custom
+     checkbox artwork (Sven ships `checkbox-checked_svg.png`).
+  3. **ARRAYREF pref**, not a `#id#id#` delimited string — no regex membership tests, and a family name
+     can't corrupt the separator. Matches the existing `blocked_artists` shape.
+  - Prefs `foryou_genres` / `all_genres` (arrayrefs, EMPTY = show everything — same convention as the
+    release-type checkboxes). `_bucketFor` is the FILING key: a real family only, or `GENRE_NONE`
+    (`_none`) — distinct from `_familyFor`, which is for DISPLAY and falls back to the raw genre.
+    Without that split an obscure genre would sprout its own singleton bucket in the picker.
+  - Picker lists **only families present in the feed**, busiest first, `Other` forced last.
+  - **ORDERING CONSTRAINT:** the genre filter must be applied BEFORE `_pageSection`, or a 30-row page
+    is mostly filtered away and the "Show more (N)" counts lie. That needs genres for the WHOLE week,
+    so the All Releases week coderef does the wider `GENRE_WARM_MAX` fill **only when a filter is
+    actually set**; unfiltered keeps the cheap one-request-per-page path.
+  - **COMPILE-TIME GOTCHA:** `use constant` is BEGIN-time, so a constant must appear EARLIER IN THE FILE
+    than any use of it. `GENRE_WARM_MAX` was defined next to `_warmGenres` (line ~5800) but is now used
+    by the picker and the week coderef (line ~3360) → "Bareword not allowed while strict subs". Moved up
+    with the other constants. Subs don't have this problem, only constants.
+
+- **PHASE 3 DONE — gated Last.fm tier (0.9.135). 49% → ~71% coverage.**
+  - **THE TIER LADDER now lives entirely in `_genresFor`** — one source of genres, one producer of a
+    row label: **(1)** the album's own LB genres → **(2)** the artist's LB genres → **(3)** the feed
+    payload's inline `release_tags` (free, release-specific, proven independent of LB's tag block) →
+    **(4)** Last.fm, gated. Nothing may append a source anywhere else; that was the 0.9.132 bug.
+  - **The gate is MusicBrainz's vocabulary.** `genre-families.txt` now carries the WHOLE 2177-name
+    vocabulary (2216 rows: 855 in 21 families, 27 modifiers `-`, 1334 family-less `?`), so it is both
+    the rollup table AND the "is this actually a genre?" list. `_genreKnown` = in the vocabulary AND not
+    a modifier. Measured raw Last.fm noise it rejects: japanese, Colombia, anime, Dreamy, zzz, brainrot,
+    seen live, 90s. **`?` vs `-` matters:** a family-less genre is still shown; a modifier never is.
+  - **The render path NEVER fetches.** Last.fm is per-ARTIST, not bulk — filling on render would be
+    ~15 HTTP calls per 30-row page, the exact opposite of phase 1. `API::peekLastfmTags` is a
+    cache-ONLY read (mirrors `peekArtistSort`); `_lastfmGenres` uses only that. Asserted by test.
+  - **`_warmLastfm` does the filling**, chained inside `_warmGenres` after each feed's bulk pass:
+    only releases no cheaper tier answered, **deduped by ARTIST** (the tags are artist-level anyway),
+    hard-capped at `LFM_WARM_MAX`=40 per tick, ONE call in flight behind a 1s idle tick (paced for
+    Last.fm, never holds the event loop). 30-day cache, so a small nightly allowance converges over a
+    few days. No API key → the whole tier is inert.
+  - Side benefit: because tier 3 moved into `_genresFor`, the detail page's Genres line now shows inline
+    `release_tags` too — closing the "sub-genres appear under Tags: not Genres:" gap noted in 0.9.132.
+
+- **PHASE 1b DONE — `_warmGenres` (0.9.134).** Chained LAST in `warmCache` (after playlists, follow and
+  trending): it's the cheapest stage and the least urgent, so it queues behind the streaming resolves
+  rather than competing with them. Warms **For You first, then All Releases, strictly chained** so the
+  two never fan out together. Filters each feed through `_filterForYou`/`_filterAll` first — no point
+  warming genres for releases the user's own type/artwork/VA settings would hide. All Releases needs no
+  account so it's warmed for everyone; For You is skipped without username+token.
+  `_withGenres` gained an optional `$max` (default `GENRE_FETCH_MAX`=150 for a render);
+  the warm passes **`GENRE_WARM_MAX`=600** (~12 bulk requests). Entries live 90 days, so a steady-state
+  tick only fetches what's newly released. Reuses the same batched idle-tick `_withGenres`, so the warm
+  is no more able to hold the event loop than a render is.
+  - **Why it matters beyond convenience:** without it the first open of a week renders before the fill
+    lands and labels only show on the second visit. It's also the prerequisite that makes the phase-3
+    Last.fm tier affordable — that one is per-artist, not bulk.
+  - Test note: `t_warm` must `require Plugins::…::Plugin` — `Browse::_dbg` calls `Plugin::dbg` directly
+    and Browse never requires it (the real plugin loads it at init), so a suite that reaches a `_dbg`
+    call dies without the stub.
+
+- **List label is now `Family (sub, genres)` (0.9.133).** Spec: *"we have the group shown as it is and
+  next to it in brackets the sub genres if we have them; sorting is by the main genre as planned."*
+  `_familyFor` returns `($family, @subs)`; `_buildReleaseItem` renders
+  `Album · Funk (funk rock, funk soul)`. `GENRE_SUBS_MAX`=2. Sorting (phase 4) keys on the family only,
+  so brackets are display-only.
+- **TWO wrong cuts at "what goes in the brackets" — don't repeat either:**
+  1. **Same-family only.** Emptied the brackets on the very release that prompted the feature:
+     `funk rock`/`funk soul` roll up to **Rock**/**Soul** under the whole-word suffix rule, not Funk.
+     The brackets mean "what else this release is tagged", NOT a claim of descent.
+  2. **Must be a known genre (`_genreFamily($g)` true).** Dropped `funk soul`, which isn't in MB's
+     vocabulary at all — it reached us as a free tag in the feed's `release_tags`.
+  The correct test is **"not a MODIFIER"**: unknown genre = still worth showing; known modifier =
+  never. That distinction is why `genre-families.txt` now ships modifiers explicitly as `name<TAB>-`
+  instead of just omitting them, and why `Browse` keeps `%_GENRE_MODIFIER` separate from
+  `%_GENRE_FAMILY` (`_genreModifier`). Regenerate with `tools/make_genre_families.py`.
+- Verified across the real genre sets: `Funk (funk rock, funk soul)`, `Electronic (downtempo,
+  chillwave)`, `Hip Hop (lo-fi hip hop, boom bap)`, `Electronic (jazz, experimental)`, plain `Rock`
+  (genre only restates the family → no brackets), `Rock (alternative rock)`, `yakousei` (nothing
+  rolls up → strongest genre, no brackets).
+
+- **Inline `release_tags` now go through the rollup too (0.9.132).** Field report: *André Cymone – "The
+  Resurrection of Funk"* rendered `Album · funk, funk rock, funk soul` instead of `Album · Funk`.
+  `_buildReleaseItem` had TWO paths to a row label — `_familyFor` (rolled up) and a separate
+  `@tags = _releaseTags($rel) unless @tags` fallback that joined up to 3 RAW tags. The fallback was the
+  one path bypassing the rollup. Fixed by giving `_familyFor` ownership of **every** source
+  (`push @g, _releaseTags($rel) unless @g`) and reducing the caller to a single scalar
+  `my ($family) = _familyFor(...)`. **RULE: a list row's genre label has exactly ONE producer —
+  `_familyFor`. Never join a genre source onto `line2` directly.**
+  - Verified live for that release: LB returns **no tags at all** for its release group AND its artist,
+    so the inline `release_tags` are a genuinely INDEPENDENT source, not a duplicate of the `tag` block
+    — worth keeping as the last tier, not deleting.
+  - **Known gap (not fixed):** `_releaseDetail`'s Genres line comes from `_genresFor`, which is empty
+    for exactly these releases, so their sub-genres appear on the detail page's separate **Tags:** line
+    (`_albumRows` → `_releaseTags`) rather than under Genres. Visible, but inconsistent — fold inline
+    tags into the detail Genres line as a fallback in a later pass.
+
+- **PHASE 2 DONE — genre rollup + the list/detail split (0.9.131).** Spec from Simon: *"downtempo rolls
+  into electronic. On front page we keep it to top levels where possible and when we drill in give more
+  of the sub genre details."*
+  - **`tools/make_genre_families.py` → `ListenBrainzFreshReleases/genre-families.txt`** (857 lines,
+    `genre<TAB>Family`, 21 families). Pulls MB's whole `genre/all` vocabulary (2177), assigns a family
+    by whole-word suffix/prefix rule, then a curated OVERRIDES table for names that are a genre in their
+    own right (boom bap, chillwave, shoegaze…). **Rerun the script to regenerate; never hand-edit the
+    .txt.** Coverage on real feed occurrences: **88% mapped, 10% modifiers, 2% unmapped tail.**
+  - **MODIFIERS get NO family ON PURPOSE.** "instrumental" was the 5th most common genre in the live
+    sample; "lo-fi" the 2nd. They describe a treatment, not a family, so they're omitted from the table
+    and `_familyFor` falls through to the next genre — "instrumental, lo-fi hip hop" → **Hip Hop**.
+  - **Perl side:** `_loadGenreFamilies` (lazy, one read, path derived from `%INC` so manual and repo
+    installs both work; a missing file is NOT an error — genres just show unrolled), `_genreKey`
+    (same normalisation as the generator — flattens hyphens so `synth-pop` finds `synth pop`),
+    `_genreFamily`, `_familyFor` (first genre that resolves to a family; else the strongest genre as-is).
+  - **`_buildReleaseItem` shows `_familyFor` (ONE label); `_releaseDetail` shows the full `_genresFor`
+    list.** That's the whole list/detail split — don't "fix" a list row to show sub-genres.
+  - **GENERATOR GOTCHA (cost a regenerate):** OVERRIDES/MODIFIERS are written the way humans spell
+    genres ("lo-fi", "post-rock") but every lookup goes through `norm()`, which flattens hyphens — so
+    the hyphenated keys silently never matched. The tables are now normalised once at import. Symptom
+    was "lo-fi" (52 occurrences) appearing in the UNMAPPED report despite being listed as a MODIFIER.
+- **Detail page consolidated onto the shared bulk data (0.9.131).** `_releaseDetail` no longer calls
+  `API::getReleaseGroupGenres` (~5% coverage) and no longer falls through to raw, ungated Last.fm for
+  the other 95% — a row reading "post-punk" could open a page reading "japanese, 90s, seen live". It now
+  calls `_withGenres([$rel])`, normally a pure cache hit filled by the list that got you there, so the
+  page makes **one MB call FEWER** than before and the two views cannot disagree.
+  **`API::getReleaseGroupGenres` now has NO callers** — dead code, left in place for now; remove it in
+  the next cleanup pass along with its comment references.
+
+- **Genre fill moved OFF the render path (0.9.130) — event-loop safety.** `_withGenres` collected mbids
+  then called `getReleaseGroupMetadata` INLINE in the browse callback. That sub opens with a
+  SYNCHRONOUS cache scan (one `$cache->get` per mbid) and writes one `$cache->set` per fetched entry —
+  up to `GENRE_FETCH_MAX`(150) blocking SQLite round-trips per render, on EVERY feed render including
+  every sort/view tap, and all of them misses right after the `:2:` prefix bump. Same hazard class that
+  got Bandcamp pulled from the auto-search and moved the library probe behind an idle tick in 0.9.48.
+  Now the collect loop touches no cache, then the work is handed to `Slim::Utils::Timers` and run
+  `GENRE_BATCH`(50) at a time with a **yield between batches** — the yield is required, not cosmetic:
+  a fully-cached batch calls back synchronously, so without it the whole fill would still collapse into
+  one uninterrupted block. `$step` is passed to ITSELF as a timer arg, never captured in its own
+  closure — that's the uncollectable reference cycle fixed in `getArtistMbidByName` in 0.9.95.
+  Verified: zero cache reads before the first yield, callback not fired on the render path, 120 mbids =
+  3 batches, bound still holds at 150, and no timer scheduled at all when there's nothing to fill.
+  **Triggered by a field report** ("changing sort stopped playback") whose log timeline actually showed
+  a server restart from the install, with the player's Tidal stream failing to reopen 4s later and the
+  first browse 23s after that — i.e. not proven to be this code, but the hazard was real and latent.
+
+## GENRES — measured coverage & the plan (0.9.129 = phase 1 of 4)
+
+**Measured 2026-07-26** over 400 releases of the LIVE All Releases feed, with the plugin's own
+type/artwork filters applied. Don't re-derive these:
+
+| source | coverage |
+|---|---|
+| MB **release-group** genres (`getReleaseGroupGenres`, detail page) | **5%** |
+| inline `release_tags` in the feed payload | 8% |
+| MB **artist** genres | **47%** |
+| release-group ∪ artist | **49%** |
+| + Last.fm artist tags on the remainder (44% of the 51% miss) | **~71%** |
+
+- **`inc=tag` is THE source.** `/1/metadata/release_group/` accepts `inc=release_group tag` and returns
+  BOTH `tag.release_group[]` and `tag.artist[]`. Each tag has a **`genre_mbid` iff it is a real MB
+  genre** — that flag is the quality gate (drops "seen live"/country/mood noise). Bulk, ≤50 per request.
+- **DO NOT add a per-artist MB lookup.** Tested `artist/<mbid>?inc=genres` against the mirror on the 206
+  releases LB had no genre for: **0/80**. LB's artist tag block IS that same MB data. A fan-out would be
+  pure cost for zero gain.
+- **MB has NO genre hierarchy.** `genre/<mbid>?inc=genre-rels` → *Not Found*; genre search → *"hasn't
+  been implemented"*. `genre/all` DOES return the full curated vocabulary (**2177** names) — that's the
+  gate list for Last.fm and the seed for the rollup table. Rollup must be a table WE ship.
+- **Rollup is tractable:** a plain suffix/prefix rule (`… hip hop` → Hip Hop) covers **52% of real
+  occurrences**; only 244 distinct genres appeared across 400 releases, top 100 = 84% of occurrences,
+  top 200 = 96%. So rule + ~150–200 curated overrides ≈ complete.
+- **Streaming-service genre is a DETAIL-PAGE enricher only, never a list source.** List-level would be
+  ~3 searches × N releases (≈860 requests for one week, ≈10,500 for the feed) vs 1-per-50 here; and its
+  coverage correlates with MB's (obscure releases are missing from both). Deezer's album *search*
+  response already carries `genre_id` (free, but only **23** broad buckets); Qobuz's genre is
+  **hierarchical** (`genre.path`) and is the one genuinely useful extra — harvest opportunistically on
+  albums the user opens. Tidal album objects carry no genre.
+
+**Phase 1 (0.9.129) — DONE.** `API::_genreTags` (the `genre_mbid` gate) + `genres`/`agenres` on every
+`getReleaseGroupMetadata` entry; `RGMETA_PFX` `:1:`→`:2:`. `Browse::_withGenres` (bounded
+`GENRE_FETCH_MAX`=150, cache-first so a warm feed makes NO request) + `Browse::_genresFor` (album's own
+genres preferred; artist genres are only a PROXY fallback — a jazz artist's ambient side project would
+otherwise inherit "jazz"). `_buildReleaseItem` takes an optional `$meta` and shows genres on line2,
+falling back to `_releaseTags`. Threaded through `_buildItems`/`_buildWeekly`. **The All Releases week
+coderef now pages on RELEASES, not finished tiles** (`_pageSection` only slices/counts, so it's
+equivalent) so the genre fill covers only the visible 30.
+- **Ordering lesson:** `_genreTags` sorts by `count` DESC **only**, no name tie-break. Most real tags
+  tie at count 1, so an alphabetical tie-break silently becomes "show the alphabetically first genres" —
+  it labelled a drum-and-bass artist "ambient, breakcore". Perl's stable sort keeps LB's own order on
+  ties, which tracks the primary genre. Caught by a test against a real captured response.
+
+**Still outstanding on phase 1's cost story:** the detail page still makes its own per-album
+`getReleaseGroupGenres` MB call ([Browse.pm](ListenBrainzFreshReleases/Browse.pm) `_releaseDetail`) — it
+should read the bulk data instead, making that path one call cheaper; and `warmCache` should pre-fill
+the feed's genre cache so a browse is always a pure cache hit.
+**Phases 2–4 not started:** rollup table (`tools/` generator + shipped data file), Last.fm gated by the
+MB vocabulary, and "Group by genre" as a fourth mode on the per-view sort toggle.
+
+- **Family selector collapsed back to ONE cycling row — `_viewToggle` (0.9.128).** Replaces
+  `_viewRows` (the 0.9.125–0.9.127 two-row radio pair). Same signature
+  (`$client,$pref,$mode,$hasAlbums,$hasSingles`), still returns a LIST so the call sites spread it,
+  still EMPTY when only one family is available. Label = `PLUGIN_LBF_SHOWING`
+  ("Showing %s (tap for %s)") built from `PLUGIN_LBF_VIEW_ALBUMS`/`_SINGLES`, mirroring
+  `_sortToggle`'s state+hint wording. **The icon reflects the CURRENT family** —
+  `lbf-view-albums_MTL_icon_album.png` / `lbf-view-singles_MTL_icon_music_note.png` (Material renders
+  its own themed `album`/`music_note` font-icons) — which is what carries the at-a-glance state the
+  radio marks used to. Retired `VIEW_ON`/`VIEW_OFF` + the two `lbf-radio-*` PNGs. Flips from the LIVE
+  pref, not the render-time `$mode` (the `_sortToggle` rule).
+- **WHY NOT TWO BUTTONS SIDE BY SIDE — asked twice now, don't re-derive.** A plugin feed has NO way to
+  lay rows out horizontally in Material. Re-verified 2026-07-26 against the server's own
+  `material-deferred.min.js`: the header toolbar's `currentActions` is filled by `browseActions(...)`
+  from native-library `stdItem` shapes or `getCustomActions(...)` keyed on a media item's
+  `favorites_url`; rows flagged `isListItemInMenu` are pushed to `d.actionItems` (the ⋮ overflow) and
+  that flag is only set on those same native-menu paths. A plain OPML `type=>'link'` row always lands
+  in `d.items` as a full-width `v-list-tile`. `"choice"` in the bundle is `lms-choice-dialog`, not a
+  browse item type. Grid view is the only horizontal layout and applies to the WHOLE list. **One row is
+  the floor** — that's why this is a cycling toggle, not buttons.
+- Render-only; **no cache bumps**, matcher untouched. `perl -c` clean; 40 behavioural assertions
+  (label text from the REAL strings.txt in both states, correct icon per state, flip both directions,
+  flip-from-live-pref, hidden on each single-family case, exactly one row when both, and the in-situ
+  All Releases week Options block = header / Showing / Sorted by / Refresh).
+
+- **All Releases Refresh restored to the week drill (0.9.127).** `_refreshItem($c,'all')` is now the
+  third Options row in the per-week coderef in `_buildAllLanding`, after `_viewRows` + `_sortToggle`.
+  **The regression:** `_refreshItem($client,'all')` lives only in `fetchAll`, and since the top-level
+  menu began inlining the weeks (0.9.99–0.9.119) `fetchAll` is reached ONLY via the `TOPLEVEL_ALL_WAIT`
+  watchdog / `onError` fallback tile — so in normal browsing the All Releases feed had **no reachable
+  Refresh at all**. Diagnosed while chasing a "feed is stuck / showing very little" report that turned
+  out to be `all_past=0` (see below), but the missing row was real and independent. `topLevel`'s "each
+  week drill has its own controls" comment was true of sort, not refresh — corrected.
+- **`_effectiveView` now PERSISTS its clamp (0.9.127).** It clamped the applied view to an available
+  family but left the pref alone. Since `_viewRows` HIDES the selector when only one family is ticked,
+  a stored value the section can't show is unreachable from the UI — it sits invisible and then bites
+  the moment the user ticks the other family in Settings (verified live: `foryou_view` was stored
+  `singles_eps` on a For You section with Single/EP unticked). `$prefs->set` is guarded on an actual
+  change, so it's a no-op in the normal case.
+- **`_stashSummary('user', …)` moved ABOVE `_viewFilter` (0.9.127).** 0.9.126 stashed the summary from
+  the view-filtered list, so the New Releases for You tile's "*span · N releases*" described the active
+  lens and changed when the user switched families. The tile describes the section; the list follows
+  the lens. (All Releases was already correct — `fetchAll`/`homeAllReleases`/`topLevel` stash pre-filter,
+  since its filter runs inside the per-week coderef.)
+- Render/pref-state only — **no API change, no cache-version bumps** (`lbf:summary:*` is rewritten on
+  every fetch at a 25h TTL, so it self-heals immediately); matcher untouched (`matcher_sync_check` N/A).
+  `perl -c` clean; 36 behavioural assertions against the real subs (clamp persistence both directions,
+  nothing-ticked case, `_viewFilter` partition, week-drill row order + Refresh wiring + `which=>'all'`,
+  selector hidden on default prefs with Refresh still present, summary unaffected by the lens).
+
+- **FIELD DIAGNOSIS (0.9.127 session) — "All Releases is stuck / showing very little" was `all_past=0`,
+  not a cache.** Live prefs read over JSON-RPC showed `all_past=0`/`all_future=1`, and the log showed
+  `Fetching all releases: …past=false&future=true…` → **342 releases** where `past=true` returns 4502.
+  Root cause is the 0.9.122 `@CHECKBOX_PREFS` coercion finally making a long-unticked box bite (it had
+  been overridden by the `// 1` default). **The tell:** with `past=false` the feed only ever holds
+  today→+21d, so the *This Week* bucket **decays through the week** — the full week on Monday (90+
+  albums), only that day's releases by Sunday (7) — which reads exactly like a cache that stopped
+  updating. `lbf:feed:all:` keys on `sort|past|future|days|TODAY`, so it cannot serve stale data; check
+  the pref and the fetch URL first. See [[material-bare-checkbox-invisible]].
+
+- **Selector shown only when both families are available (0.9.126).** `_viewRows` now returns an
+  EMPTY list unless the section has BOTH album-family AND single/EP types ticked — so the default
+  (Album + Compilation) shows NO selector, and a Singles & EPs row never appears for a section that
+  can't populate it. Backed by **`_familyAvail($prefix)`** (→ `($hasAlbums,$hasSingles)` from
+  `_allowedTypes`; empty allowed-set = all types = both true) and **`_effectiveView($prefix,$pref)`**,
+  which also CLAMPS the applied view to an available family — fixing a latent bug where a section with
+  only Single/EP ticked would render EMPTY under the default `albums` view (and vice versa). Both call
+  sites (For You top of `fetchForYou`; All Releases inside the per-week coderef) now take
+  `($view,$hasAlb,$hasSing) = _effectiveView(...)` and pass the flags to `_viewRows`. Verified across
+  all cases (default→no selector, both→both rows, single-only→clamped+no selector, all→both rows).
+
+- **In-view "Albums / Singles & EPs" family selector (0.9.124 cycling toggle → 0.9.125 two-row).**
+  New Releases for You and each All Releases week show a release-family selector in their Options
+  section (next to the sort toggle), backed by durable prefs **`foryou_view`** / **`all_view`**
+  (default `'albums'`; selector-only, NOT on the settings page — like `foryou_sort`/`all_sort`).
+  **`_viewFilter`** partitions by PRIMARY type — `singles_eps` keeps primary Single/EP, `albums`
+  keeps everything else (Album, Broadcast, Other + the secondary-typed album variants
+  Compilation/Soundtrack/Live/…). Applied **AFTER** `_filterSection`, so it only narrows WITHIN the
+  user's ticked type checkboxes (nothing ticked is lost — non-single/EP types all fall into the
+  `albums` bucket); to see anything in the Singles & EPs view the section must have Single/EP ticked
+  in Settings.
+  - **UI = two rows, not header lozenges (0.9.125).** Simon asked for two Material "lozenge"
+    buttons (Albums / Singles) like the Play/Append pills on a drilled-in album. **Not possible from
+    a plugin feed** — verified against the server's `material-deferred.min.js`: the header toolbar
+    (`currentActions`) is filled only from items flagged `isListItemInMenu`, and that flag is set
+    ONLY for native-library menu shapes (`metadata`/`STD_ITEM_*`, or a level whose `items[0].menu[0]
+    ==PLAY_ACTION` with trailing `itemNoAction` rows) or `getCustomActions(...favorites_url)`; a plain
+    OPML `type=>'link'` row always lands in `d.items` (the list), never in `currentActions`. So the
+    closest plugin-owned "two buttons" is **`_viewRows`** — two always-visible rows (**Albums** /
+    **Singles & EPs**) with the active one carrying a filled radio icon (`VIEW_ON`) and the other an
+    empty one (`VIEW_OFF`); tapping a row sets the pref and refreshes in place. Replaced the 0.9.124
+    single cycling `_viewToggle` row.
+  - **Wiring.** For You: `_viewFilter` in the `$render` sub after `_filterForYou`; `_viewRows`
+    spread into `@opt`. All Releases: `_viewFilter` + `_viewRows` INSIDE the per-week coderef
+    (`_buildAllLanding`), re-read from the pref each walk so `nextWindow=>'refresh'` re-filters —
+    same mechanism as `all_sort`; the shared coderef also serves the top-level inlined weeks. Home
+    shelves (`homeForYou`/`homeAllReleases`) deliberately left UNFILTERED (no selector there,
+    glanceable carousel). Strings `PLUGIN_LBF_VIEW_ALBUMS`/`_SINGLES`; icons
+    `lbf-radio-on_MTL_icon_radio_button_checked.png` / `lbf-radio-off_MTL_icon_radio_button_unchecked.png`
+    (Material renders its own radio font-icons; PNGs are placeholder copies of the sort icon).
+  - Render-only — **no API calls, no cache-version bumps, no matcher change** (`matcher_sync_check`
+    N/A). `perl -c` clean (Browse via scratchpad stublib; Plugin's only error is the LMS
+    `main::WEBUI` constant, past the edit).
 
 - **FLEET MATCHER SYNC: a decorative `!` is punctuation, not the letter i; `&`/`+` fold to "and" (0.9.120).**
   Ported from Discography 0.44.19/0.44.23, where the bug was found in the field. Landed across
@@ -906,6 +1358,11 @@ belongs in `handler`, before `SUPER::handler`. Fleet-wide rule — LBF, PFR and 
   - **All Releases** per-week views each carry the toggle, backed by a **single durable `all_sort` pref shared across every week** — set it once and every week honours it, and it survives restarts. (0.9.97 first shipped this as per-week module state; that was changed because opening a *different* week always started at the default, which read as "the sort keeps resetting".) Paging stays per-week module state (`%pageState`); only the sort is a pref now.
   - Feeds are always fetched with `sort=release_date` (stable cache key); all ordering is client-side (`_sortReleases` pre-sorts by date for week-bucketing, `_sortWithin` applies the per-view mode within each week). `group_by_artist`'s collapse was effectively dead anyway (the weekly branch always outranked it) — see the 0.9.97 changelog.
   - **Artist sort keys on the MusicBrainz sort-name** ("White, Jack"; a stage name like "Panda Bear" keeps its natural order), not the display credit. The LB feed sends only the display credit, so the sort-name comes from MB by artist MBID: `API::warmArtistSorts(\@mbids)` fetches `artist/<mbid>` → `sort-name` serially (MB courtesy gap on public, none on a mirror; capped `SORT_WARM_MAX`=100/pass, in-flight-guarded), cached `lbf:artistsort:1:<mbid>` (30d found / 1d none); `API::peekArtistSort($mbid)` is the sync render-path read. `Browse::_artistSortKey` = `artist_sort_name` (MuSpy supplies it inline) → `peekArtistSort` → display credit. The warm fires **only from the Artist-sort code paths** (`_warmArtistSorts`, gated on `$mode eq 'artist'` in `fetchForYou` and the All-Releases week coderef), so a user who never picks Artist sort triggers no MB traffic; a cold artist sorts by display credit on the first Artist-sorted render and corrects on re-entry (second-load, like bios/emblems).
+- **Release-family view is per-view too (0.9.124–0.9.128).** Each list has an **Albums / Singles & EPs toggle** — ONE cycling row, "Showing Albums (tap for Singles & EPs)", icon reflecting the current family (`_viewToggle`) — in its Options section (next to Sorted-by), backed by a durable pref set only via the in-view toggle (not on the settings page — like `foryou_sort`):
+  - **For You** → `foryou_view`; **All Releases** per-week views → shared `all_view`. Both default `albums`.
+  - `_viewFilter` partitions by PRIMARY type: `singles_eps` = primary Single/EP; `albums` = everything else. Applied AFTER `_filterSection`, so it NARROWS within the ticked type checkboxes. Nothing ticked is lost (non-single/EP types fall into `albums`). Home shelves are deliberately unfiltered.
+  - **The toggle row appears only when the section has BOTH families ticked** (`_familyAvail`/`_effectiveView`, 0.9.126) — default Album+Compilation shows no toggle; a single-only section is clamped so it never renders empty, and since 0.9.127 the clamp is PERSISTED so a hidden pref can't lie in wait.
+  - **One cycling row, not two rows and not header lozenges:** Material gives plugin feeds no way to lay rows out horizontally OR to add pill buttons to the header toolbar (`currentActions`/`isListItemInMenu` is native-library-menu or favorites_url-custom-action only — re-verified in `material-deferred.min.js` 2026-07-26). Two stacked rows cost a line of screen, so 0.9.128 collapsed them into one. See the Current Version note — **don't re-derive this**.
 - `play_via` — show inline playable streaming matches on the detail page (default ON)
 - `people_follow` — master on/off for the whole **People You Follow** browse section (What's Trending, both Trending Albums lists, Recommended); default ON (0.9.118). When off the section is absent AND its warm pre-build + unmatched-debug entry are skipped, so nothing there is fetched/cached/warmed
 - `follow_sort` — People You Follow list ordering: `date` (day dividers, newest first) or `recommender` (grouped by the follower who recommended each track); default `date`. Flipped in place by the inline toggle at the top of that list, not shown on the settings page (0.9.88; toggle label made state+hint "Sorted by … (tap for …)" in 0.9.91)
@@ -946,6 +1403,7 @@ ListenBrainz Fresh Releases
 ├── ── Created for You ──                      ← Material section header
 │   ├── <date span> · N releases               ← New Releases for You tile (title is on the cover)
 │   │   ├── ── Options ──                        ← Material section header
+│   │   │   ├── Showing <family> (tap for <other>) ← ONE cycling row, icon = current family (foryou_view pref, default albums)
 │   │   │   ├── Sorted by <mode> (tap to change) ← cycles Release Date / Artist / Album Title (foryou_sort pref)
 │   │   │   └── Refresh (force update now)       ← clears the feed cache, reloads in place
 │   │   └── … For You feed (ALWAYS weekly W/C headers; releases sorted within each week per the toggle)
@@ -958,7 +1416,7 @@ ListenBrainz Fresh Releases
 ├── ── All Releases ──                         ← Material section header
 │   └── <date span> · N releases               ← All Releases tile
 │       ├── Refresh (force update now)
-│       ├── W/C <date>  [This/Last/Earlier badge]  ← that week's releases (Options: Sorted-by toggle, shared+durable all_sort; first 30, then "Show more" / "Show all")
+│       ├── W/C <date>  [This/Last/Earlier badge]  ← that week's releases (Options: Showing-family toggle (all_view) + Sorted-by toggle (all_sort), both shared+durable, + Refresh (0.9.127); first 30, then "Show more" / "Show all")
 │       └── …                                  ← one entry per week-commencing
 └── ── Settings ──                             ← Material section header
     ├── Plugin Settings                         ← weblink to settings.html

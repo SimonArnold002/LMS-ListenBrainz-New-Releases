@@ -10,6 +10,25 @@ use Slim::Utils::Strings qw(string);
 my $prefs = preferences('plugin.listenbrainzfreshreleases');
 my $log   = logger('plugin.listenbrainzfreshreleases');
 
+# Every boolean/checkbox pref on the settings page. An unchecked checkbox posts
+# nothing, so handler() coerces each of these to an explicit 0/1 (see the note in
+# handler) — otherwise a turned-off toggle stored as undef reads back ON through
+# the `// <default>` guards used across the plugin.
+#
+# KEEP IN SYNC: @TYPE_KEYS is the release-type list, and it is duplicated in three
+# other places that must all agree — the foryou_type_*/all_type_* names in prefs(),
+# the $prefs->init defaults in Plugin.pm, and the checkboxes in settings.html. A type
+# added there but missed here silently loses its 0/1 coercion (reintroducing the
+# undef-reads-ON bug for that one type).
+my @TYPE_KEYS = qw(album single ep broadcast other compilation soundtrack live remix demo);
+my @CHECKBOX_PREFS = (
+    qw(play_via people_follow prefer_library debug_log muspy_future),
+    qw(foryou_past foryou_future foryou_artwork_only foryou_various),
+    qw(all_past all_future all_artwork_only all_various),
+    (map { "foryou_type_$_" } @TYPE_KEYS),
+    (map { "all_type_$_"    } @TYPE_KEYS),
+);
+
 sub name {
     return Slim::Web::HTTP::CSRF->protectName('PLUGIN_LISTENBRAINZ_FRESH_RELEASES');
 }
@@ -20,7 +39,7 @@ sub page {
 
 sub prefs {
     return ($prefs, qw(
-        username token lastfm_api_key muspy_userid muspy_future muspy_future_months days play_via people_follow prefer_library mb_base_url debug_log
+        username token lastfm_api_key muspy_userid muspy_future muspy_future_months days play_via people_follow prefer_library mb_base_url genre_lookup debug_log
         svc_priority_qobuz svc_priority_bandcamp svc_priority_tidal svc_priority_deezer
         foryou_past foryou_future foryou_artwork_only foryou_various
         foryou_type_album foryou_type_single foryou_type_ep foryou_type_broadcast foryou_type_other
@@ -35,6 +54,29 @@ sub handler {
     my ($class, $client, $params, $callback, @args) = @_;
 
     if ($params->{saveSettings}) {
+        # Coerce every checkbox pref to an EXPLICIT 0/1 before SUPER::handler
+        # persists it. An unchecked HTML checkbox submits NOTHING, so
+        # $params->{pref_x} is undef — and the base handler would then store undef.
+        # Because the whole plugin reads these as `$prefs->get('x') // <default>`,
+        # a stored undef is indistinguishable from "never set" and the `//` default
+        # (e.g. // 1 for the past/various/artwork toggles) flips a just-turned-OFF
+        # box back ON — the toggle could never be disabled (all_past / foryou_past
+        # etc.). Forcing an explicit 0 means `0 // 1` stays 0 (defined), so OFF
+        # sticks; a ticked box arrives as "1" and stays 1.
+        #
+        # Guard: only coerce when this is the REAL settings form (an unchecked box
+        # and a box absent because the POST is partial/non-form are indistinguishable,
+        # so a blind coercion would zero every toggle on a partial save — the same
+        # hazard the svc_priority block below guards against). `pref_days` is a
+        # number field the full form always submits, so its presence confirms the
+        # form was posted; a partial POST skips coercion and falls back to the base
+        # handler (same philosophy as the svc_priority "keep current on partial" rule).
+        if (exists $params->{pref_days}) {
+            for my $cb (@CHECKBOX_PREFS) {
+                $params->{"pref_$cb"} = $params->{"pref_$cb"} ? 1 : 0;
+            }
+        }
+
         # Clamp the numeric prefs by writing the sanitised value back into the
         # params BEFORE SUPER::handler runs. These prefs are in the prefs() list,
         # so the base handler re-sets each one from $params->{pref_*}; setting the

@@ -218,9 +218,13 @@ sub getFreshReleasesForUser {
 
     my $cacheKey = 'lbf:feed:user:'   . join('|', $username, $sort, $past, $future, $days);
     my $fbKey    = 'lbf:feed:userfb:' . join('|', $username, $sort, $past, $future, $days);
+    if (my $memo = _memoGet($cacheKey)) {
+        $args{onDone}->($memo);
+        return;
+    }
     if (my $cached = $cache->get($cacheKey)) {
         $log->info("For-you releases cache hit ($cacheKey)");
-        $args{onDone}->($cached);
+        $args{onDone}->(_memoSet($cacheKey, $cached));
         return;
     }
 
@@ -273,9 +277,13 @@ sub getFreshReleasesAll {
 
     my $cacheKey = 'lbf:feed:all:'   . join('|', $sort, $past, $future, $days, $today);
     my $fbKey    = 'lbf:feed:allfb:' . join('|', $sort, $past, $future, $days);
+    if (my $memo = _memoGet($cacheKey)) {
+        $args{onDone}->($memo);
+        return;
+    }
     if (my $cached = $cache->get($cacheKey)) {
         $log->info("All releases cache hit ($cacheKey)");
-        $args{onDone}->($cached);
+        $args{onDone}->(_memoSet($cacheKey, $cached));
         return;
     }
 
@@ -325,9 +333,19 @@ sub getMuSpyReleases {
 
     my $cacheKey = 'lbf:muspy:'   . $userid;
     my $fbKey    = 'lbf:muspyfb:' . $userid;
+    # Memoed like the LB feeds (0.9.139). Two reasons, and the second is the one
+    # that matters: it saves the per-walk SQLite read, AND it makes the returned
+    # arrayref STABLE across the re-walks of one interaction — which is what lets
+    # Browse's derived-section memo recognise the For You inputs as unchanged
+    # (_mergeMuSpy builds a fresh arrayref from them, so identity has to come from
+    # the sources).
+    if (my $memo = _memoGet($cacheKey)) {
+        $args{onDone}->($memo);
+        return;
+    }
     if (my $cached = $cache->get($cacheKey)) {
         $log->info("MuSpy releases cache hit ($cacheKey)");
-        $args{onDone}->($cached);
+        $args{onDone}->(_memoSet($cacheKey, $cached));
         return;
     }
 
@@ -437,7 +455,45 @@ sub _cacheFeed {
     my ($cacheKey, $fbKey, $releases) = @_;
     eval { $cache->set($cacheKey, $releases, FEED_TTL);          1 } or $log->warn("feed cache set failed: $@");
     eval { $cache->set($fbKey,    $releases, FEED_FALLBACK_TTL); 1 } or $log->warn("feed fallback cache set failed: $@");
+    _memoSet($cacheKey, $releases);   # the walk that follows a fetch shouldn't re-read what we just wrote
 }
+
+# ---------------------------------------------------------------------------
+# In-process feed memo (0.9.138)
+# ---------------------------------------------------------------------------
+# Slim::Utils::Cache is SQLite-backed, so every "cache hit" on a feed is a disk
+# read plus a full deserialise of a structure holding hundreds to thousands of
+# releases. XMLBrowser re-walks the whole feed from the ROOT on every drill-in,
+# every in-place refresh and every paging tap, and the root builds both sections
+# — so a single tap deep in the tree was decoding the same feeds three or more
+# times, and a genre tick (toggle request + refreshList) did it twice over. On a
+# Pi that is the sluggishness, not the network: the requests were already cached.
+#
+# So hold the LAST decoded copy per key for a few seconds. That is far shorter
+# than any feed TTL and covers exactly one user interaction's worth of re-walks;
+# it can't mask a Refresh (clearFeedCache drops the memo too) and it can't survive
+# a settings change (the prefs are all in the key).
+our %FEED_MEMO;                         # key => [ expiry, $releases ]  (package-scoped so tests can age it)
+use constant FEED_MEMO_TTL => 5;
+
+sub _memoGet {
+    my ($key) = @_;
+    my $e = $FEED_MEMO{$key} or return undef;
+    if ($e->[0] < time()) { delete $FEED_MEMO{$key}; return undef }
+    return $e->[1];
+}
+
+sub _memoSet {
+    my ($key, $data) = @_;
+    # Drop anything expired while we're here — the plugin only ever holds a
+    # handful of keys, so this is cheaper than a timer and can't grow unbounded.
+    my $now = time();
+    delete @FEED_MEMO{ grep { $FEED_MEMO{$_}[0] < $now } keys %FEED_MEMO };
+    $FEED_MEMO{$key} = [ $now + FEED_MEMO_TTL, $data ];
+    return $data;
+}
+
+sub _memoDrop { delete $FEED_MEMO{ $_[0] } }
 
 # Drop the working cache key for a feed so the next view re-fetches (used by the
 # "Refresh" row). $which is 'user' or 'all'. The key here MUST match the one built
@@ -455,13 +511,17 @@ sub clearFeedCache {
         my $future = ($prefs->get('all_future') // 0) ? 'true' : 'false';
         my @t = localtime(time);
         my $today = sprintf('%04d-%02d-%02d', $t[5]+1900, $t[4]+1, $t[3]);
-        $cache->remove('lbf:feed:all:' . join('|', $sort, $past, $future, $days, $today));
+        my $k = 'lbf:feed:all:' . join('|', $sort, $past, $future, $days, $today);
+        $cache->remove($k);
+        _memoDrop($k);
     }
     else {
         my $username = $prefs->get('username') // '';
         my $past   = ($prefs->get('foryou_past')   // 1) ? 'true' : 'false';
         my $future = ($prefs->get('foryou_future') // 0) ? 'true' : 'false';
-        $cache->remove('lbf:feed:user:' . join('|', $username, $sort, $past, $future, $days));
+        my $k = 'lbf:feed:user:' . join('|', $username, $sort, $past, $future, $days);
+        $cache->remove($k);
+        _memoDrop($k);
 
         # The For You feed also folds in MuSpy releases, so a forced refresh must
         # drop MuSpy's working cache too — otherwise "Refresh (force update now)"
@@ -1009,11 +1069,38 @@ sub _mergeRecordingMetadata {
 }
 
 # Bulk-resolve release-group MBIDs to { year, name } via
-# GET /1/metadata/release_group/?release_group_mbids=<csv>&inc=release_group —
-# the album's first-release date (whose year the Trending Albums rows show, like
-# the New Releases rows). Same chunked/merge shape as getRecordingMetadata; a
-# failed chunk is logged and skipped. $onDone gets { rg_mbid => { year, name } }.
-use constant RGMETA_PFX => 'lbf:rgmeta:1:';
+# GET /1/metadata/release_group/?release_group_mbids=<csv>&inc=release_group tag
+# — the album's first-release date (whose year the Trending Albums rows show, like
+# the New Releases rows) AND its genres. Same chunked/merge shape as
+# getRecordingMetadata; a failed chunk is logged and skipped.
+# $onDone gets { rg_mbid => { year, date, type, name, genres, agenres } }.
+#
+# GENRES (0.9.129). `inc=tag` adds a `tag` block with TWO lists — `release_group`
+# (this album's own tags) and `artist` (the credited artist's tags). Each tag
+# carries a `genre_mbid` IFF it is a real MusicBrainz genre rather than a freeform
+# tag, which is the quality gate: we keep only those, so "seen live"/"favourites"
+# style noise never enters. Measured over 400 releases of a live All Releases feed
+# (2026-07-26): release-group genres cover **5%**, artist genres **47%**, union
+# **49%** — which is why the artist list is carried separately rather than merged
+# here. The caller decides (see Browse::_genresFor: prefer the album's own, fall
+# back to the artist's, because an artist genre is only a proxy — a jazz artist's
+# ambient side project inherits "jazz").
+#
+# Both lists arrive count-ordered-ish; we sort by count desc (then name) so the
+# strongest genre is first and the order is stable across refetches.
+use constant RGMETA_PFX => 'lbf:rgmeta:2:';   # :1: -> :2: — entries gained genres/agenres
+
+# Cache-only read of ONE release group's metadata (0.9.140). The bulk fetcher below
+# has no cache-only mode, and the render path must never fetch — so a peek reads the
+# same entries the bulk path writes, and simply has nothing to say for a release
+# group nobody has fetched yet. Returns undef on a miss (NOT an empty hash, which
+# would look like "fetched, no genres").
+sub peekReleaseGroupMetadata {
+    my ($class, $mbid) = @_;
+    return undef unless $mbid;
+    my $c = $cache->get(RGMETA_PFX . lc $mbid);
+    return ref $c eq 'HASH' ? $c : undef;
+}
 
 sub getReleaseGroupMetadata {
     my ($class, $mbids, $onDone) = @_;
@@ -1049,7 +1136,7 @@ sub getReleaseGroupMetadata {
 
         my $csv = join(',', @$chunk);
         (my $safe = $csv) =~ s/([^A-Za-z0-9\-_.~,])/sprintf("%%%02X",ord($1))/ge;
-        my $url = BASE_URL . '/1/metadata/release_group/?inc=release_group&release_group_mbids=' . $safe;
+        my $url = BASE_URL . '/1/metadata/release_group/?inc=release_group%20tag&release_group_mbids=' . $safe;
 
         my $http = Slim::Networking::SimpleAsyncHTTP->new(
             sub {
@@ -1087,13 +1174,44 @@ sub _mergeReleaseGroupMetadata {
         next unless ref $entry eq 'HASH';
         my $rg   = ref $entry->{release_group} eq 'HASH' ? $entry->{release_group} : {};
         my $date = $rg->{date} // '';
+        my $tag  = ref $entry->{tag} eq 'HASH' ? $entry->{tag} : {};
         $meta->{ lc $mbid } = {
-            year => ($date =~ /^(\d{4})/) ? $1 : '',
-            date => $date,                    # full first-release date (for release_date)
-            type => ($rg->{type} // ''),      # primary type (Album/EP/…) — for the type filter
-            name => ($rg->{name} // ''),
+            year    => ($date =~ /^(\d{4})/) ? $1 : '',
+            date    => $date,                    # full first-release date (for release_date)
+            type    => ($rg->{type} // ''),      # primary type (Album/EP/…) — for the type filter
+            name    => ($rg->{name} // ''),
+            genres  => _genreTags($tag->{release_group}),   # this album's own genres
+            agenres => _genreTags($tag->{artist}),          # the credited artist's genres
         };
     }
+}
+
+# Pull the GENRE tags out of one of the `tag` block's lists, strongest first.
+# A tag is a genre only when it carries a `genre_mbid` (LB marks the MusicBrainz
+# curated-genre vocabulary that way) — everything else is a freeform user tag
+# ("seen live", country names, moods) and is dropped.
+#
+# Ordered by `count` DESC only, and deliberately NOT tie-broken on name. Only the
+# first two or three are ever displayed, and in real data most tags tie at count 1
+# — so an alphabetical tie-break silently reduces to "show the alphabetically
+# first genres", which is actively misleading (a drum-and-bass artist whose tags
+# all sit at 1 would be labelled "ambient, breakcore"). Perl's sort is a stable
+# mergesort, so ties keep the order ListenBrainz returned them in, which tracks
+# the artist's actual primary genre far better and is still deterministic for a
+# given response.
+sub _genreTags {
+    my ($list) = @_;
+    return [] unless ref $list eq 'ARRAY';
+    my @g = grep { ref $_ eq 'HASH' && $_->{genre_mbid} && length($_->{tag} // '') } @$list;
+    @g = sort { ($b->{count} // 0) <=> ($a->{count} // 0) } @g;
+    my (@out, %seen);
+    for my $t (@g) {
+        my $n = lc $t->{tag};
+        $n =~ s/^\s+//; $n =~ s/\s+$//;
+        next if $n eq '' || $seen{$n}++;
+        push @out, $n;
+    }
+    return \@out;
 }
 
 # ---------------------------------------------------------------------------
@@ -1600,6 +1718,147 @@ use constant SORT_CACHE_PFX => 'lbf:artistsort:1:';
 use constant SORT_WARM_MAX  => 100;   # artists fetched per warm pass (rest self-heal on later opens)
 my %sortInFlight;
 
+# ---------------------------------------------------------------------------
+# Artist genres straight from MusicBrainz (0.9.140)
+# ---------------------------------------------------------------------------
+# WHY THIS EXISTS, because it looks like a duplicate of the ListenBrainz bulk
+# metadata call and is not. Measured against a live All Releases feed (2026-07-29):
+#
+#   * The genre a list row shows is ALMOST ALWAYS the ARTIST's, not the release's.
+#     Of 47 release groups ListenBrainz returned, 0 carried their own tags and 24
+#     carried artist tags. Tier 1 is nearly always empty for fresh releases —
+#     they're too new to have been tagged.
+#   * ListenBrainz serves that artist data from MusicBrainz, but its API host
+#     answers in anywhere from 0.25s to 24s for the byte-identical request, and
+#     hard-fails (502) above ~90 mbids per call. A 381-release feed is 8 calls, and
+#     one measured full fill took 125 SECONDS. That is what made the genre picker
+#     unusable on a cold cache — it blocked on exactly that.
+#   * A local MusicBrainz mirror answers `artist/<mbid>?inc=genres` in 40–120ms,
+#     unthrottled, with NO variance. 50 artists took 3.8s strictly sequential.
+#   * Coverage is IDENTICAL, which is the fact that makes this safe: over the same
+#     50 artists, ListenBrainz had genres for 16 and the mirror for the same 16 —
+#     zero disagreement in either direction. It is the same MusicBrainz data;
+#     ListenBrainz is just a slower way to ask for it.
+#
+# So where a mirror exists we ask it directly, per artist, concurrently. Keyed by
+# ARTIST, which is also the better cache shape: a release group is a one-shot key
+# (next week's feed is all-new release groups, so the whole cache misses), while
+# artists recur — measured at 23% of the next feed's artists already known versus
+# 11% of its release groups.
+#
+# NEVER used against public MusicBrainz: that's 1 req/s courtesy, i.e. ~6 minutes
+# for one feed. Without a mirror the caller falls back to the ListenBrainz bulk
+# path or to no lookup at all (see Browse::_genreLookupMode).
+use constant AGEN_PFX         => 'lbf:agen:1:';
+use constant AGEN_FOUND_TTL   => 90 * 86400;   # an artist's genres barely move
+use constant AGEN_EMPTY_TTL   =>  7 * 86400;   # "MB knows none" — recheck occasionally
+use constant AGEN_CONCURRENCY => 6;            # our own box; the public API is never used here
+use constant AGEN_TIMEOUT     => 12;
+my %agenInFlight;
+
+# True when the configured/detected MusicBrainz base is a local mirror rather than
+# the public API. The genre path is only allowed to fan out against a mirror.
+sub hasMirror { return _mbThrottled() ? 0 : 1 }
+
+# Cache-only read: the artist's genres (possibly an empty arrayref, meaning "MB
+# has none"), or undef when we've simply never looked. The render path uses this
+# and NEVER fetches — same contract as peekArtistSort/peekLastfmTags.
+sub peekArtistGenres {
+    my ($class, $mbid) = @_;
+    return undef unless $mbid;
+    my $v = $cache->get(AGEN_PFX . lc $mbid);
+    return ref $v eq 'ARRAY' ? $v : undef;
+}
+
+# Fill the artist-genre cache for @$mbids, then hand back everything known as
+# { lc mbid => [ genre, … ] }. Cached artists cost nothing; only the unknown ones
+# are fetched, AGEN_CONCURRENCY at a time. Best-effort throughout: a failed lookup
+# is left uncached (so it retries) and simply contributes no genres.
+sub getArtistGenres {
+    my ($class, $mbids, $onDone) = @_;
+    $onDone ||= sub {};
+
+    unless (hasMirror()) { $onDone->({}); return }   # never fan out at public MB
+
+    my (%out, %seen, @todo);
+    for my $m (@{ $mbids || [] }) {
+        next unless $m;
+        my $lc = lc $m;
+        next if $seen{$lc}++;
+        next if $lc eq lc VA_MBID;
+        if (my $c = $class->peekArtistGenres($lc)) { $out{$lc} = $c; next }
+        next if $agenInFlight{$lc};
+        push @todo, $lc;
+    }
+    unless (@todo) { $onDone->(\%out); return }
+
+    # Reserve the whole batch up front — see warmArtistSorts for why doing it one
+    # at a time lets a second pass re-fetch everything still queued.
+    $agenInFlight{$_} = 1 for @todo;
+
+    my $active = 0;
+    my $fired  = 0;
+
+    # $self arrives as an argument rather than being captured, so the closure never
+    # references itself (the uncollectable cycle fixed in 0.9.95).
+    my $pump = sub {
+        my ($self) = @_;
+        while ($active < AGEN_CONCURRENCY && @todo) {
+            my $mbid = shift @todo;
+            $active++;
+
+            my $done = sub {
+                delete $agenInFlight{$mbid};
+                $active--;
+                if (@todo)          { $self->($self) }
+                elsif (!$active)    { $onDone->(\%out) unless $fired++ }
+            };
+
+            (my $safe = $mbid) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
+            my $url = _mbBase() . 'artist/' . $safe . '?inc=genres&fmt=json';
+
+            my $http = Slim::Networking::SimpleAsyncHTTP->new(
+                sub {
+                    my $data  = eval { from_json($_[0]->content) };
+                    my $genres = _mbGenreNames(ref $data eq 'HASH' ? $data->{genres} : undef);
+                    $out{$mbid} = $genres;
+                    # An empty list is a REAL answer ("MB has no genres for them") and
+                    # is cached, or every artist without genres — most of them — would
+                    # be re-fetched on every single fill. Shorter TTL so tagging that
+                    # lands later is picked up.
+                    eval { $cache->set(AGEN_PFX . $mbid, $genres,
+                                       @$genres ? AGEN_FOUND_TTL : AGEN_EMPTY_TTL); 1 }
+                        or $log->warn("artist-genre cache set failed: $@");
+                    $done->();
+                },
+                sub {
+                    # Don't cache a transport failure — it would pin "no genres" for
+                    # AGEN_EMPTY_TTL on an artist we simply couldn't reach.
+                    $log->info("artist-genre fetch error for $mbid: " . ($_[1] // '?')) if $log->is_info;
+                    $done->();
+                },
+                { timeout => AGEN_TIMEOUT }
+            );
+            $http->get($url, 'Accept' => 'application/json', 'User-Agent' => USER_AGENT);
+        }
+    };
+
+    $pump->($pump);
+}
+
+# MusicBrainz `inc=genres` gives [ { name, count, id }, … ]. Strongest first, and
+# NOT tie-broken on name — same reasoning as _genreTags: most real tags tie at
+# count 1, so an alphabetical tie-break quietly becomes "show the alphabetically
+# first genres", which misdescribes the artist. Perl's sort is stable, so ties keep
+# MB's own order.
+sub _mbGenreNames {
+    my ($genres) = @_;
+    return [] unless ref $genres eq 'ARRAY';
+    my @g = sort { ($b->{count} // 0) <=> ($a->{count} // 0) }
+            grep { ref $_ eq 'HASH' && defined $_->{name} && length $_->{name} } @$genres;
+    return [ map { $_->{name} } @g ];
+}
+
 # Sync cache read used by the sorter — the sort-name string, or undef when it's
 # not cached yet OR MB had none (both fall back to the display credit). One local
 # cache read, no network; still, sorters must precompute the key ONCE per release
@@ -2026,6 +2285,48 @@ sub _cleanBio {
 # even when a new album doesn't yet). Requires a free Last.fm API key in the
 # lastfm_api_key pref; with no key this is a graceful no-op. Detail page only.
 # ---------------------------------------------------------------------------
+# Cache-ONLY read of the Last.fm tags for an artist/album — never makes a request.
+# Mirrors peekArtistSort. The list-render path uses this so browsing can never pay
+# for a per-artist Last.fm call: the background warm populates the cache, the render
+# just reads whatever is already there. Returns an arrayref (possibly empty).
+#
+# MEMOED (0.9.139), and this is the one peek that really needs it. It is tier 4 of
+# _genresFor, which the render path calls SEVERAL times for the same release in a
+# single walk — once to build the row (_familyFor), once to bucket it for the genre
+# filter, once more for the picker's counts — and every one of those was a separate
+# SQLite read. On a feed of a few hundred releases with a Last.fm key set, that is
+# hundreds of blocking reads inside the browse callback: exactly the shape 0.9.130
+# moved the release-group metadata scan off the render path to avoid. The tags
+# themselves are written only by the nightly warm, so an in-process copy can't be
+# meaningfully stale within one interaction. Bounded so a long browse can't grow it
+# without limit; the whole entry is cheap (a handful of short strings).
+use constant LFM_MEMO_TTL => 60;
+use constant LFM_MEMO_MAX => 2000;
+my %LFM_MEMO;                            # cache key => [ expiry, $tags ]
+
+sub peekLastfmTags {
+    my ($class, $artist, $album) = @_;
+    return [] unless length($artist // '');
+    utf8::encode($artist)               if utf8::is_utf8($artist);
+    utf8::encode($album) if defined $album && utf8::is_utf8($album);
+    my $key = 'lbf:lfm:' . lc("$artist|" . ($album // ''));
+
+    my $now = time();
+    if (my $e = $LFM_MEMO{$key}) {
+        return $e->[1] if $e->[0] >= $now;
+    }
+    my $c = $cache->get($key);
+    my $tags = ref $c eq 'ARRAY' ? $c : [];
+    # Cheaper than an LRU and bounded: at the cap, drop what has expired, and if
+    # that frees nothing (every entry still live) clear the lot and start again.
+    if (scalar keys %LFM_MEMO >= LFM_MEMO_MAX) {
+        delete @LFM_MEMO{ grep { $LFM_MEMO{$_}[0] < $now } keys %LFM_MEMO };
+        %LFM_MEMO = () if scalar keys %LFM_MEMO >= LFM_MEMO_MAX;
+    }
+    $LFM_MEMO{$key} = [ $now + LFM_MEMO_TTL, $tags ];
+    return $tags;
+}
+
 sub getLastfmTags {
     my ($class, $artist, $album, $onDone, $onError) = @_;
 
@@ -2055,6 +2356,9 @@ sub getLastfmTags {
         my $ttl  = @$tags ? LFM_FOUND_TTL : LFM_EMPTY_TTL;
         eval { $cache->set($cacheKey, $tags, $ttl); 1 }
             or $log->warn("Last.fm tag cache set failed: $@");
+        # Keep the peek memo honest: the warm is the only writer, so refreshing the
+        # entry here means a render during a warm can never read a stale empty list.
+        $LFM_MEMO{$cacheKey} = [ time() + LFM_MEMO_TTL, $tags ];
         $onDone->($tags);
     };
 

@@ -3,6 +3,112 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.140
+
+### Changed
+- **Genre labels no longer make you wait, ever.** Opening the **Genres** list for the first time could sit there for a minute or more. It was fetching genre information from ListenBrainz for every release in the list before it would show you anything, one batch of 50 at a time, waiting for each batch before starting the next — and that service answers anywhere between a quarter of a second and twenty-four seconds per batch. A full list measured at **125 seconds**. Nothing in the plugin waits for that any more: lists and the genre picker draw immediately with whatever is already known and fill in quietly behind you.
+- **If you run a local MusicBrainz mirror, genres now come from it** — around **75 milliseconds** per artist instead of ListenBrainz's lottery, with no rate limit. It is the same information: checked over 50 artists, ListenBrainz and a mirror had genres for exactly the same 16, with no disagreement either way. ListenBrainz was simply a slower way to ask MusicBrainz the same question. Genres are also now remembered per **artist** rather than per release, which is what they actually describe — so an artist you've already seen costs nothing next time, where before every new release started from scratch.
+- **Without a mirror, genre lookups are now off by default** — a new **Genre labels** setting. The plugin should not be slow out of the box for the sake of a label, and without a mirror there is no fast way to get this information. Lists still show the genres that arrive free with the feed, exactly as they did before genre labels were added. If you want the fuller labels anyway you can switch it to **Always** — the setting says plainly that it's slow — or turn lookups off entirely.
+- **The release page tells you what it knows again.** When the shared genre information is empty it now asks MusicBrainz for that release's own genres, which is a single request on a page that already does several — and goes to your mirror when you have one. That per-album lookup had been dropped in 0.9.131.
+- Where the ListenBrainz service is still used, its batches now run **four at a time** instead of one after another.
+
+## 0.9.139
+
+### Changed
+- **A second pass at making browsing quick on a Raspberry Pi, and this one goes after the work rather than the reading.** 0.9.138 stopped the server re-loading the same feed from its database several times for one tap; it was still *re-processing* it every time. Every drill-in, refresh and "Show more" makes the server rebuild the menu from the top, and each rebuild filtered, de-duplicated and sorted the entire feed again from scratch — several thousand releases, three or more times per tap. That result is now held for a few seconds and reused, which is all one tap needs. Change a setting and it rebuilds immediately; a **Refresh** always fetches and rebuilds from scratch.
+- **Working out which week a release belongs to was being done once per release**, on every screen, when a fortnight of releases only spans a handful of dates. Those answers are now remembered, which takes that part of drawing a list to roughly a tenth of what it was.
+- **The genre list no longer works out every release's genre twice.** It needed each release's family once for the counts beside each genre and again for the "Show 12 releases" row; it now does it once and uses it for both — so each tick costs half what it did.
+- **Three small pieces of housekeeping that were quietly repeating on every screen**: the tile subtitles ("14–28 July · 726 releases") were being written back to the database on every rebuild even when nothing had changed; the "What's Trending" row was re-reading the whole resolved track list just to count it; and the list of installed streaming services was being re-detected several times per tap. All three now do the work once and reuse the answer.
+- **Where a Last.fm key is set**, the genre labels no longer make a separate database read per release per screen — the tags read during one screen are held briefly, which matters most on the pages that look at the whole feed.
+- None of this changes what you see. Everything held in memory lasts a few seconds at most, every setting that shapes a list is accounted for, and **Refresh** and a server restart both clear the lot.
+
+## 0.9.138
+
+### Fixed
+- **The genre list now counts the list you opened it from.** It was showing figures for the whole feed — "Rock (188)" above a week listing twelve — which read as if releases were going missing behind the paging. They weren't; the numbers were describing every week at once. Each week (and New Releases for You) now counts only its own releases, so what the list promises is what you get.
+- The **Show …** row counts the result too — **Show 12 releases** — and updates as you tick.
+
+### Changed
+- **Much less work per tap, which matters most on a Raspberry Pi.** Opening the genre list no longer re-reads the entire feed and no longer looks up genres for every week when it only needs one; it uses the releases the page already has. Ticking a genre was doing that twice over.
+- **The feed is no longer re-read from disk several times for a single tap.** Every drill-in, refresh and "Show more" makes the server re-walk the menu from the top, and each walk was re-loading and unpacking the same few thousand releases from the cache database. The last copy is now held in memory for a few seconds, which covers one interaction's worth of walks. A forced **Refresh** still clears it, and any settings change bypasses it, so nothing can be served stale.
+
+## 0.9.137
+
+### Fixed
+- **Choosing genres now actually changes the list.** In 0.9.136 the ticks were saved correctly, but going back from the genre picker returned you to the list exactly as you left it — unfiltered. Material restores the previous screen from memory rather than re-reading it, and there is no way for a plugin to tell it otherwise. The picker now has a **Show …** row at the top which returns you to the list *and* rebuilds it, so your choices are applied.
+- That row names what you've picked — **Show Rock, Electronic** — and updates as you tick, so it doubles as a preview of what you'll get. With nothing ticked it reads **Show All genres**.
+
+## 0.9.136
+
+### Added
+- **Choose which genres a list shows.** A new **Genres** row in the Options section of New Releases for You and each All Releases week opens a tick-list of the genres actually in that feed, with a count each — `Rock (188)`, `Electronic (312)`, `Other (94)`. Tick any number of them and the list narrows immediately; the row itself reads **Genres (3)** or **Genres (All)** so you can see at a glance whether a filter is on. **All genres** clears it again.
+- The list offers **only genres that are really there**, busiest first, so it doubles as a view of what a week actually contains and can never offer you a choice that returns nothing. Releases we have no genre for are gathered under **Other**, which is selectable — so they're never silently hidden.
+- Each feed keeps its own selection, and it sticks across visits and restarts, like the sort and Albums/Singles choices.
+
+## 0.9.135
+
+### Added
+- **Last.fm now fills in genres for releases MusicBrainz knows nothing about** — taking genre coverage across the feed from roughly half to around **seven in ten**. It's used only where every cheaper source has come up empty, so it never overrides what MusicBrainz says about a release or its artist.
+- **Only real genres get through.** Last.fm tags are mostly not genres — languages, countries, moods and outright junk (*japanese*, *Colombia*, *anime*, *seen live*, *brainrot*). A tag is now accepted only if MusicBrainz recognises it as a genre, checked against its full 2,177-name list which ships with the plugin. Everything else is discarded, so the extra coverage doesn't come at the cost of nonsense on your screen.
+- **Browsing never waits for it.** Unlike the MusicBrainz lookup, Last.fm has to be asked one artist at a time, so it is filled entirely by the daily background refresh — the lists only ever read what's already stored. Opening a page makes no Last.fm requests at all. The refresh takes a deliberately small number of artists per night, spaced a second apart, and remembers each for a month, so coverage builds up quietly over a few days rather than all at once. Needs a Last.fm API key in Settings; without one nothing changes.
+
+## 0.9.134
+
+### Changed
+- **Genres are now ready before you open a list.** The daily background refresh pre-fills them for both New Releases for You and All Releases, so labels are there the first time you open a week rather than appearing on the second visit. It runs after the playlist matching so the two never compete, skips releases your own filters would hide anyway, and — because genres are cached for months — a typical day only fetches whatever has just been released.
+
+## 0.9.133
+
+### Changed
+- **List rows now show the broad genre with the specific ones in brackets** — `Funk (funk rock, funk soul)`, `Electronic (downtempo, chillwave)`, `Hip Hop (lo-fi hip hop, boom bap)`. You get the top-level label for scanning and sorting, and the detail that tells you what the record actually is, on the same line. Up to two are shown; a release we only know the broad genre for still reads as just `Rock`.
+- Words that describe a treatment rather than a style (*instrumental*, *lo-fi*, *acoustic*) stay out of the brackets as well as out of the main label, so they can't crowd out a real genre.
+
+## 0.9.132
+
+### Fixed
+- **A few list rows were still showing raw sub-genres instead of one broad label** — e.g. *André Cymone – The Resurrection of Funk* read "funk, funk rock, funk soul" where it should read "Funk". Where ListenBrainz knows nothing about a release the row falls back to the tags carried in the feed itself, and that one path was printing them unchanged instead of rolling them up. It now goes through exactly the same rollup as every other source, so a row always shows a single top-level genre. The specific tags are still there on the release page.
+
+## 0.9.131
+
+### Added
+- **Release lists now show a broad genre, and the release page shows the detail.** Scanning a week of releases works better with one recognisable label than with a string of niche tags, so a list row now reads **Electronic** where the release is tagged *downtempo, chillwave, drone* — and opening the release shows those specific genres in full. MusicBrainz publishes no genre hierarchy of its own, so the plugin ships a generated rollup table covering its whole 2,177-genre vocabulary; measured against a live feed it resolves **88%** of the genres that actually turn up.
+- **Words that describe a treatment rather than a style are skipped.** Tags like *instrumental*, *lo-fi* and *acoustic* deliberately have no family, so a release tagged "instrumental, lo-fi hip hop" is labelled **Hip Hop** rather than "instrumental". A genre with no family yet is simply shown as it is.
+
+### Fixed
+- **The release page can no longer contradict the row you tapped.** It was doing its own MusicBrainz lookup, which finds a genre for only about 5% of fresh releases, and falling back to raw Last.fm tags for the rest — so a row reading "post-punk" could open a page reading "japanese, 90s, seen live". Both views now come from the same place, and the release page makes one lookup *fewer* than before.
+
+## 0.9.130
+
+### Fixed
+- **The new genre lookup can no longer hold up playback.** Filling in genres involved a burst of database reads that ran *while the list was being drawn* — and because it happened on every render, that included every tap of the sort or Albums/Singles rows. On a busy server that kind of uninterrupted work can starve audio, which is why this plugin already defers its library lookups the same way. The genre fill now runs in small batches between screen updates, so music keeps playing while a list fills in. Nothing changes in what you see, and lists that are already cached are unaffected.
+
+## 0.9.129
+
+### Added
+- **Genres on the release lists, and far more of them.** Both New Releases for You and each All Releases week now show a release's genres next to its type, instead of only inside the release page. The genres come from MusicBrainz via ListenBrainz, and where a release has none of its own the **artist's** genres are used instead — which is what makes the difference: measured against a live feed, releases carrying their own genre sit at about **5%**, while the artist's genres cover about **47%**, so roughly half of all rows can now be labelled where almost none were before. A release that still has nothing falls back to whatever tags the feed itself carried, exactly as before.
+- **Only real genres are shown.** ListenBrainz marks which of an artist's tags are genuine MusicBrainz genres, and only those are used — so the listener-applied noise that makes tag lists useless ("seen live", country and language names, mood words) never reaches the screen.
+
+### Changed
+- Genres are fetched in **one bulk request per 50 releases**, and only for the rows actually on screen — so an All Releases week costs a single request per 30-row page, and nothing at all once they're cached. The genre cache is shared with the Trending Albums lists, whose release years will refresh themselves once after updating.
+
+## 0.9.128
+
+### Changed
+- **The Albums / Singles & EPs choice is now a single row instead of two.** It reads **"Showing Albums (tap for Singles & EPs)"** and flips when you tap it — exactly like the "Sorted by…" row beneath it. The two separate rows took a line of screen each above the releases you actually came to see; this gives the same choice back in half the space. Its icon now changes with the list: a record sleeve while you're on Albums, a music note while you're on Singles & EPs, so you can still tell at a glance which one you're looking at. As before, the row only appears when that section has both album-type and single/EP types ticked in Settings.
+
+## 0.9.127
+
+### Fixed
+- **The "Refresh (force update now)" row is back on All Releases.** Each week now carries it in its **Options** section, under the sort toggle. It had become unreachable: once the top-level menu started listing the weeks directly, the only page holding an All Releases Refresh was one you no longer passed through — so there was no way to force the feed to re-fetch short of waiting for its daily update. It's the same Refresh every other section uses: one tap drops the cached feed and reloads the list in place.
+- **The Albums / Singles & EPs choice can no longer sit hidden on a feed that isn't showing it.** If a feed only includes one of the two families, the selector is hidden — but the stored choice stayed as it was, so ticking **Single**/**EP** in Settings later could drop you straight into a Singles & EPs list you never asked for. The stored choice is now corrected to match what's actually on screen, so what you see and what's saved always agree.
+- **The New Releases for You tile counts the whole feed again.** Its "*date span · N releases*" line was being taken from the list *after* the Albums / Singles & EPs filter, so tapping between the two changed the tile's count and dates. The tile now always describes the whole section, while the list itself still follows your choice.
+
+## 0.9.126
+
+### Added
+- **Switch each feed between albums and singles/EPs, right from the list.** New Releases for You and each All Releases week now show two choices — **Albums** and **Singles & EPs** — in their **Options** section, next to "Sorted by…", with the active one marked. Tap the other to switch the whole list between full-length releases and singles & EPs, so you no longer see them all mixed together. The choice sticks across visits and restarts. It works within the release types you've ticked in Settings, so it only shows types you've chosen to include. Feeds default to **Albums**, so they look as they did before until you switch.
+- **The selector only appears when it's useful.** The two choices show up **only when that section has both album-type and single/EP types ticked in Settings** — so with the default types (Album + Compilation) you won't see them at all, and a section that only includes singles/EPs won't show an empty list. Tick **Single**/**EP** (alongside album types) for a section to get the switch.
+
 ## 0.9.119
 
 ### Fixed
