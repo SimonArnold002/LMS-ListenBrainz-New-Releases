@@ -135,10 +135,29 @@ genre work at 0.9.140 — pushed, see `ALPHA.md` there, do not merge it. `main` 
   description), ~3270 (`$text`, MAI album review) and `Discography/API.pm` ~705
   (`$canonName`, MB canonical artist name). All bare-string `$cache->set` calls. Port
   `API::_setText`/`_getText` — it is NOT the shared matcher, so the hold above doesn't apply.
-- **0.9.141 has not been run on a real server.** It is verified statically, against the live
-  ListenBrainz/MusicBrainz APIs, and against Listen Later's own source — but the Listen Later
-  `&rt=` handshake in particular needs one real add to confirm Material transports the favurl
-  param through a custom action.
+- **0.9.141 VERIFIED ON THE REAL SERVER (2026-07-29).** Installed build fingerprinted via the log's
+  `Sub::Name (LINE)` numbers (`_fetchArtistInfo (4074)`, MAI bio `(4108)`). Confirmed live:
+  - **The `&rt=` handshake works through Material.** Added *3OH!3 – MY FRIENDS* (MB **Single**, 3
+    tracks — so LL's count fallback would say **EP**) from a Qobuz match row. Log:
+    `LL: add -> qobuz / MY FRIENDS (id=189, already=0, list=later, rel=single)`, reached via
+    **`_finishAlbumAdd` 2.3 ms after** `LL: addctx params ->`. That path is only taken when
+    `$relType` is already set, which for a non-library source can ONLY come from `&rt=` — without it
+    LL would have gone through `_classifyThenAdd` + a Qobuz `getAlbum` round trip. The list row
+    renders `♪` (GLYPH_SINGLE) vs `♫` on every other row. **`&a=` and `&y=` proved too**: Material
+    sent `artist=` empty and `year=(undef)`, yet the stored row shows `3OH!3 … (2026)`.
+    (NB the log prints the favurl AFTER LL strips its private params in place, so a bare
+    `favurl=qobuz://album:<id>` there is expected and proves nothing either way.)
+  - **The Albums / Singles & EPs selector** renders on the real server once both families are ticked
+    (`Showing Singles & EPs (tap for Albums)`), and is correctly ABSENT under the default
+    Album+Compilation types.
+  - **The `lbf:bcmatch:` revert matters in the field**: two For You releases (*Phoebe Bridgers – Lost
+    Weekend*, *The Mountain Goats – Days*) resolve to **Bandcamp only** from pinned `:6:` matches —
+    the `:7:` bump would have left both with no playable entry.
+- **`_effectiveView`'s clamp is DRILL-IN ONLY** (noticed live): it runs inside the `_buildAllLanding`
+  week coderef, so a bad stored `all_view` is only corrected when a week is actually opened. Simon's
+  `all_view` was sitting at `singles_eps` and surfaced the moment Single/EP were ticked — the exact
+  0.9.127 symptom. Residue from before that fix rather than a new bug (the clamp persists correctly
+  once a week is opened), but if it recurs, the fix is to clamp at the landing level too.
 - **THE INDEX IS STALE — `git add` before any commit.** The staging area still holds the
   **alpha genre snapshot** (staged `Browse.pm` carries the genre subs, staged `install.xml`
   says 0.9.120) while the working tree is the genre-free 0.9.141 — which is why everything
