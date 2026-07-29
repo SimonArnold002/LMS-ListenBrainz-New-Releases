@@ -116,7 +116,7 @@
   <h1>ListenBrainz Fresh Releases — LMS Plugin</h1>
   <p class="tagline">A plugin for <strong>Lyrion Music Server (LMS)</strong> built around <a href="https://listenbrainz.org">ListenBrainz</a>. It browses newly released albums (a personalised feed plus the global feed), turns your ListenBrainz playlists and recommendations into playable music, and adds rich release detail pages with artist bios and one-tap streaming.</p>
   <div class="badges">
-    <span class="badge accent">v0.9.119</span>
+    <span class="badge accent">v0.9.141</span>
     <span class="badge">LMS 9.0.0+</span>
     <span class="badge">Material Skin</span>
     <span class="badge">Powered by ListenBrainz</span>
@@ -140,6 +140,7 @@
 <div class="card"><h4>Don't Stop The Music</h4><p>Two auto-DJ mixers (Radio + Recommended)</p><span class="needs">Needs: ListenBrainz username</span></div>
 <div class="card"><h4>Streaming playback</h4><p>Play matched albums/tracks on your services</p><span class="needs">Needs: Qobuz / Tidal / Bandcamp / Deezer plugin</span></div>
 <div class="card"><h4>Artist bios + photos</h4><p>On the detail page and behind "Read more"</p><span class="needs">Needs: MAI plugin, or a Last.fm key (bio only)</span></div>
+<div class="card"><h4>Albums / Singles &amp; EPs</h4><p>Flip either feed between full releases and singles/EPs, from the list itself</p></div>
 <div class="card"><h4>Block artists</h4><p>Hide an artist from every feed</p></div>
 <div class="card"><h4>Material home shelves</h4><p>Three home-screen rows</p><span class="needs">Needs: Material Skin</span></div>
 </div>
@@ -194,9 +195,11 @@
 </li>
 <li><strong>New Releases for You</strong> is grouped under <strong>weekly dividers</strong> (W/C week headers). Each list has a <strong>Sorted by…</strong> row in its Options section that cycles <strong>Release Date / Artist / Album Title</strong> — For You sorts within each week (keeping the headers); All Releases uses one sort shared across every week, set once and remembered (including across restarts). The <strong>Artist</strong> sort orders by MusicBrainz sort-name, so "Jack White" files under <strong>W</strong> while a stage name like "Panda Bear" stays under <strong>P</strong>.
 </li>
+<li>Each list also has a <strong>Showing Albums (tap for Singles &amp; EPs)</strong> row that flips the whole feed between the two, and back again — so singles and EPs can stay ticked in Settings without burying the albums. The row's icon changes with the view (a record sleeve for albums, a music note for singles/EPs) so you can see at a glance which you're in, and the choice sticks across visits and restarts. It appears only when that section has <strong>both</strong> kinds ticked in its Release types setting — with just one there's nothing to switch to.
+</li>
 <li>What appears in each feed (date window, past/future, artwork-only, Various Artists, release types) is controlled in the <strong>New Releases for You</strong> and <strong>All Releases</strong> settings sections.
 </li>
-<li>Use <strong>Refresh (force update now)</strong> at the top of a feed to bypass the cache and reload.
+<li>Use <strong>Refresh (force update now)</strong> at the top of a feed to bypass the cache and reload — it's in the Options section of each All Releases week as well as New Releases for You.
 </li></ul>
 <h3>Following artists on MuSpy (optional)</h3>
 <p><a href="https://muspy.com">MuSpy</a> tracks new releases from artists <strong>you</strong> pick — so it's more tailored than your listening history, and it's mostly about <strong>upcoming</strong> releases. Add your <strong>MuSpy user ID</strong> in the <strong>MuSpy</strong> settings section (public ID only — no password; find it in your MuSpy Settings or your RSS/notification URL as <code>id=…</code>) and those releases fold into <strong>New Releases for You</strong>. Duplicates that also come from ListenBrainz are shown once.</p>
@@ -217,6 +220,8 @@
 </li>
 <li><strong>Album Details</strong> — tracklist (with durations), genres, tags, and <strong>View on MusicBrainz</strong>.
 </li></ul>
+<h3>Works with Listen Later</h3>
+<p>If you also run the <strong>Listen Later</strong> plugin, adding a release from a detail page passes across what the release actually <strong>is</strong> — album, EP or single — straight from MusicBrainz. Streaming services mostly don't say, so Listen Later would otherwise have to guess from how many tracks it could resolve, which mislabels a short album or a long EP. That label drives the row's icon there and how many plays it takes to count as played.</p>
 <h3>Streaming playback</h3>
 <p>With <strong>Qobuz</strong>, <strong>Tidal</strong>, <strong>Bandcamp</strong> and/or <strong>Deezer</strong> installed, releases and playlist tracks are matched and made playable. In <strong>Streaming Services</strong> settings, give each service a <strong>search priority</strong> (lower = tried first, <strong>0 = never use it</strong>); matching stops at the first service that has it. Qobuz/Tidal/Deezer are searched automatically; <strong>Bandcamp</strong> is searched on demand from the detail page (a found Bandcamp match is remembered, so a Bandcamp-only release stays playable). Change a service's priority — or remove its plugin — and affected tracks <strong>re-match</strong> to your remaining services automatically.</p>
 <h3>Created-for-You Playlists</h3>
@@ -281,6 +286,7 @@
 <tr><td>Include Various Artists</td><td><strong>On</strong></td></tr>
 <tr><td>Release types</td><td><strong>Album</strong> + <strong>Compilation</strong> on; Single, EP, Broadcast, Other, Soundtrack, Live, Remix, Demo off</td></tr>
 </tbody></table>
+<p>Tick <strong>Single</strong> and/or <strong>EP</strong> as well as an album type and the feed gains the <strong>Showing Albums (tap for Singles &amp; EPs)</strong> row described above, so the two don't have to compete for the same list.</p>
 <h3>MuSpy</h3>
 <p>Shown at the bottom of the settings page, kept separate from the ListenBrainz options so the two aren't confused.</p>
 <table>

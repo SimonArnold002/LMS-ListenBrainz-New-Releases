@@ -218,9 +218,13 @@ sub getFreshReleasesForUser {
 
     my $cacheKey = 'lbf:feed:user:'   . join('|', $username, $sort, $past, $future, $days);
     my $fbKey    = 'lbf:feed:userfb:' . join('|', $username, $sort, $past, $future, $days);
+    if (my $memo = _memoGet($cacheKey)) {
+        $args{onDone}->($memo);
+        return;
+    }
     if (my $cached = $cache->get($cacheKey)) {
         $log->info("For-you releases cache hit ($cacheKey)");
-        $args{onDone}->($cached);
+        $args{onDone}->(_memoSet($cacheKey, $cached));
         return;
     }
 
@@ -273,9 +277,13 @@ sub getFreshReleasesAll {
 
     my $cacheKey = 'lbf:feed:all:'   . join('|', $sort, $past, $future, $days, $today);
     my $fbKey    = 'lbf:feed:allfb:' . join('|', $sort, $past, $future, $days);
+    if (my $memo = _memoGet($cacheKey)) {
+        $args{onDone}->($memo);
+        return;
+    }
     if (my $cached = $cache->get($cacheKey)) {
         $log->info("All releases cache hit ($cacheKey)");
-        $args{onDone}->($cached);
+        $args{onDone}->(_memoSet($cacheKey, $cached));
         return;
     }
 
@@ -325,9 +333,19 @@ sub getMuSpyReleases {
 
     my $cacheKey = 'lbf:muspy:'   . $userid;
     my $fbKey    = 'lbf:muspyfb:' . $userid;
+    # Memoed like the LB feeds (0.9.139). Two reasons, and the second is the one
+    # that matters: it saves the per-walk SQLite read, AND it makes the returned
+    # arrayref STABLE across the re-walks of one interaction — which is what lets
+    # Browse's derived-section memo recognise the For You inputs as unchanged
+    # (_mergeMuSpy builds a fresh arrayref from them, so identity has to come from
+    # the sources).
+    if (my $memo = _memoGet($cacheKey)) {
+        $args{onDone}->($memo);
+        return;
+    }
     if (my $cached = $cache->get($cacheKey)) {
         $log->info("MuSpy releases cache hit ($cacheKey)");
-        $args{onDone}->($cached);
+        $args{onDone}->(_memoSet($cacheKey, $cached));
         return;
     }
 
@@ -437,7 +455,45 @@ sub _cacheFeed {
     my ($cacheKey, $fbKey, $releases) = @_;
     eval { $cache->set($cacheKey, $releases, FEED_TTL);          1 } or $log->warn("feed cache set failed: $@");
     eval { $cache->set($fbKey,    $releases, FEED_FALLBACK_TTL); 1 } or $log->warn("feed fallback cache set failed: $@");
+    _memoSet($cacheKey, $releases);   # the walk that follows a fetch shouldn't re-read what we just wrote
 }
+
+# ---------------------------------------------------------------------------
+# In-process feed memo (0.9.138)
+# ---------------------------------------------------------------------------
+# Slim::Utils::Cache is SQLite-backed, so every "cache hit" on a feed is a disk
+# read plus a full deserialise of a structure holding hundreds to thousands of
+# releases. XMLBrowser re-walks the whole feed from the ROOT on every drill-in,
+# every in-place refresh and every paging tap, and the root builds both sections
+# — so a single tap deep in the tree was decoding the same feeds three or more
+# times, and any in-place toggle (sort, Albums/Singles) did it twice over. On a
+# Pi that is the sluggishness, not the network: the requests were already cached.
+#
+# So hold the LAST decoded copy per key for a few seconds. That is far shorter
+# than any feed TTL and covers exactly one user interaction's worth of re-walks;
+# it can't mask a Refresh (clearFeedCache drops the memo too) and it can't survive
+# a settings change (the prefs are all in the key).
+our %FEED_MEMO;                         # key => [ expiry, $releases ]  (package-scoped so tests can age it)
+use constant FEED_MEMO_TTL => 5;
+
+sub _memoGet {
+    my ($key) = @_;
+    my $e = $FEED_MEMO{$key} or return undef;
+    if ($e->[0] < time()) { delete $FEED_MEMO{$key}; return undef }
+    return $e->[1];
+}
+
+sub _memoSet {
+    my ($key, $data) = @_;
+    # Drop anything expired while we're here — the plugin only ever holds a
+    # handful of keys, so this is cheaper than a timer and can't grow unbounded.
+    my $now = time();
+    delete @FEED_MEMO{ grep { $FEED_MEMO{$_}[0] < $now } keys %FEED_MEMO };
+    $FEED_MEMO{$key} = [ $now + FEED_MEMO_TTL, $data ];
+    return $data;
+}
+
+sub _memoDrop { delete $FEED_MEMO{ $_[0] } }
 
 # Drop the working cache key for a feed so the next view re-fetches (used by the
 # "Refresh" row). $which is 'user' or 'all'. The key here MUST match the one built
@@ -455,22 +511,34 @@ sub clearFeedCache {
         my $future = ($prefs->get('all_future') // 0) ? 'true' : 'false';
         my @t = localtime(time);
         my $today = sprintf('%04d-%02d-%02d', $t[5]+1900, $t[4]+1, $t[3]);
-        $cache->remove('lbf:feed:all:' . join('|', $sort, $past, $future, $days, $today));
+        my $k = 'lbf:feed:all:' . join('|', $sort, $past, $future, $days, $today);
+        $cache->remove($k);
+        _memoDrop($k);
     }
     else {
         my $username = $prefs->get('username') // '';
         my $past   = ($prefs->get('foryou_past')   // 1) ? 'true' : 'false';
         my $future = ($prefs->get('foryou_future') // 0) ? 'true' : 'false';
-        $cache->remove('lbf:feed:user:' . join('|', $username, $sort, $past, $future, $days));
+        my $k = 'lbf:feed:user:' . join('|', $username, $sort, $past, $future, $days);
+        $cache->remove($k);
+        _memoDrop($k);
 
         # The For You feed also folds in MuSpy releases, so a forced refresh must
         # drop MuSpy's working cache too — otherwise "Refresh (force update now)"
         # re-fetches LB fresh but keeps serving a MuSpy copy up to FEED_TTL (24h)
         # old, hiding a just-added artist / newly-announced release. Only the
         # working key; the fallback copy is left intact (as with the feed above).
+        # BOTH layers, like the feed above: getMuSpyReleases checks the memo BEFORE
+        # the cache, and the rebuild this refresh triggers lands well inside
+        # FEED_MEMO_TTL — so dropping only the cache leaves the refresh serving the
+        # very copy it was meant to replace (0.9.141 review).
         my $userid = $prefs->get('muspy_userid') // '';
         $userid =~ s/^\s+|\s+$//g;
-        $cache->remove('lbf:muspy:' . $userid) if length $userid;
+        if (length $userid) {
+            my $mk = 'lbf:muspy:' . $userid;
+            $cache->remove($mk);
+            _memoDrop($mk);
+        }
     }
     $log->info("cleared $which feed cache (forced refresh)");
 }
@@ -1600,6 +1668,49 @@ use constant SORT_CACHE_PFX => 'lbf:artistsort:1:';
 use constant SORT_WARM_MAX  => 100;   # artists fetched per warm pass (rest self-heal on later opens)
 my %sortInFlight;
 
+# ---------------------------------------------------------------------------
+# Caching FREE TEXT (0.9.141)
+# ---------------------------------------------------------------------------
+# Never `$cache->set($key, $some_string)` with text that came from an API. Use
+# these.
+#
+# `Slim::Utils::DbCache::set` Storable-freezes a value only `if (ref $data)`; a
+# plain scalar is handed STRAIGHT to a DBI SQL_BLOB bind. Binding a Perl string
+# containing a codepoint above 255 there dies with
+#
+#     Wide character in subroutine entry at .../Slim/Utils/DbCache.pm line 78
+#
+# which is why every OTHER cache write in this file has always been safe (they all
+# store hashrefs/arrayrefs, so freeze handles the encoding) while the two that
+# stored a bare string — the MusicBrainz artist sort-name and the Last.fm bio —
+# failed for any text with a non-Latin-1 character. Seen live in server.log as
+# "artist-sort cache set failed", once per non-Latin artist. The consequences were
+# silent and ongoing, not cosmetic: nothing was ever cached for those artists, so
+# the sort-name warm re-fetched them from MusicBrainz on every pass, and an artist
+# bio — where a single curly quote or em-dash is enough to trip it — was re-fetched
+# from Last.fm on every single release-page open.
+#
+# Wrapping in a hashref puts the value back through Storable, which handles any
+# codepoint and hands the string back with its utf8 flag intact. That is preferred
+# over encode-on-write/decode-on-read: there is no second place to get wrong and no
+# way to mojibake a value that was stored before this existed — `_getText` reads a
+# legacy bare string unchanged, so NO cache prefix needed bumping.
+#
+# (Related but distinct: cache KEYS are md5'd by DbCache and die the same way on
+# wide input, which is the 0.6.15 bug. Keys built from free text are encoded to
+# octets at the point of use — see getLastfmTags / getArtistBio.)
+sub _setText {
+    my ($key, $text, $ttl) = @_;
+    eval { $cache->set($key, { t => $text }, $ttl); 1 };
+}
+
+sub _getText {
+    my ($key) = @_;
+    my $c = $cache->get($key);
+    return ref $c eq 'HASH' ? $c->{t} : $c;   # bare string = pre-0.9.141 entry
+}
+
+
 # Sync cache read used by the sorter — the sort-name string, or undef when it's
 # not cached yet OR MB had none (both fall back to the display credit). One local
 # cache read, no network; still, sorters must precompute the key ONCE per release
@@ -1608,7 +1719,7 @@ my %sortInFlight;
 sub peekArtistSort {
     my ($class, $mbid) = @_;
     return undef unless $mbid;
-    my $v = $cache->get(SORT_CACHE_PFX . lc $mbid);
+    my $v = _getText(SORT_CACHE_PFX . lc $mbid);
     return (defined $v && length $v) ? $v : undef;
 }
 
@@ -1667,7 +1778,9 @@ sub warmArtistSorts {
                 my $sort = (ref $data eq 'HASH') ? ($data->{'sort-name'} // '') : '';
                 # Cache the sort-name (30d) or a "none" sentinel (1d, so a transient
                 # miss retries within a day rather than pinning credit-name sort).
-                eval { $cache->set(SORT_CACHE_PFX . $mbid, $sort, length $sort ? MB_FOUND_TTL : MB_EMPTY_TTL); 1 }
+                # _setText, not a bare set: a non-Latin sort-name is exactly what used
+                # to die here (see the note by _setText).
+                _setText(SORT_CACHE_PFX . $mbid, $sort, length $sort ? MB_FOUND_TTL : MB_EMPTY_TTL)
                     or $log->warn("artist-sort cache set failed: $@");
                 $next->();
             },
@@ -1956,7 +2069,7 @@ sub getArtistBio {
     utf8::encode($artist) if utf8::is_utf8($artist);
 
     my $cacheKey = 'lbf:bio:2:' . lc $artist;   # :2: = full-content bio (was the short summary)
-    if (defined(my $c = $cache->get($cacheKey))) {
+    if (defined(my $c = _getText($cacheKey))) {
         $onDone->($c || undef);   # '' = cached "no bio"
         return;
     }
@@ -1980,7 +2093,10 @@ sub getArtistBio {
                 # Prefer the FULL bio (content); summary is only Last.fm's short teaser.
                 $bio = _cleanBio($data->{artist}{bio}{content} // $data->{artist}{bio}{summary} // '');
             }
-            eval { $cache->set($cacheKey, $bio, $bio ? LFM_FOUND_TTL : LFM_EMPTY_TTL); 1 }
+            # _setText: a bio is free text and reliably contains a curly quote or an
+            # em-dash, both above U+00FF — a bare set failed for most artists, so
+            # bios were never cached and were re-fetched on every page open.
+            _setText($cacheKey, $bio, $bio ? LFM_FOUND_TTL : LFM_EMPTY_TTL)
                 or $log->warn("bio cache set failed: $@");
             $onDone->($bio || undef);
         },

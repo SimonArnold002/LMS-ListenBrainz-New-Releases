@@ -4,6 +4,9 @@ PLUGIN_LISTENBRAINZ_FRESH_RELEASES
 PLUGIN_LISTENBRAINZ_FRESH_RELEASES_DESC
 	EN	Browse ListenBrainz Fresh Releases on your Squeezebox.
 
+PLUGIN_LBF_ENABLED
+	EN	Enabled
+
 PLUGIN_LBF_UNMATCHED
 	EN	Unmatched tracks (debug)
 
@@ -126,6 +129,15 @@ PLUGIN_LBF_SECTION_OPTIONS
 
 PLUGIN_LBF_SORTED_BY
 	EN	Sorted by %s (tap to change)
+
+PLUGIN_LBF_VIEW_ALBUMS
+	EN	Albums
+
+PLUGIN_LBF_VIEW_SINGLES
+	EN	Singles & EPs
+
+PLUGIN_LBF_SHOWING
+	EN	Showing %s (tap for %s)
 
 PLUGIN_LBF_FORYOU_PAST
 	EN	Include Past Releases

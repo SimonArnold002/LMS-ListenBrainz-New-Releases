@@ -178,6 +178,12 @@ use constant MENU_TRENDING_ALB_YEAR => IMG_BASE . 'menu-trending-albums-year.png
 use constant MENU_COG      => IMG_BASE . 'lbf-cog_MTL_icon_settings.png';
 use constant MENU_REFRESH  => IMG_BASE . 'lbf-refresh_MTL_icon_refresh.png';
 use constant MENU_SORT     => IMG_BASE . 'lbf-sort_MTL_icon_sort.png';
+# Per-view release-family toggle: ONE cycling row whose icon reflects the CURRENT
+# family — an album disc while showing Albums, a music note while showing Singles &
+# EPs. The _MTL_icon_<name> filenames make Material render its own themed
+# album/music_note font-icons; the PNGs are minimal fallbacks for other skins.
+use constant VIEW_ALBUMS   => IMG_BASE . 'lbf-view-albums_MTL_icon_album.png';
+use constant VIEW_SINGLES  => IMG_BASE . 'lbf-view-singles_MTL_icon_music_note.png';
 # "Show more"/"Show less" paging rows for the All Releases per-week lists — the
 # global feed can list hundreds of releases in a single week, so each week is
 # capped and grown a page at a time. The _MTL_icon_<name> filename makes Material
@@ -291,10 +297,13 @@ sub topLevel {
         future => $prefs->get('all_future') // 0,
         days   => $prefs->get('days')       // 14,
         onDone => sub {
-            my $releases = _sortReleases(_filterAll(shift));
+            my $releases = _allSection(shift);
             _stashSummary('all', $releases);
             # No inline Refresh row at the top level (it's cluttered there); All Releases
-            # refreshes on its own 24h cadence, and each week drill has its own controls.
+            # refreshes on its own 24h cadence, and each week drill carries the Options
+            # section — family selector, sort toggle AND Refresh. (Until 0.9.127 that
+            # last one was missing, so inlining the weeks here left the feed with no
+            # reachable Refresh: fetchAll's row is only seen via the fallback tile.)
             $finish->([ @{ _buildAllLanding($releases, $client, $useH) } ]);
         },
         onError => sub {
@@ -405,6 +414,27 @@ sub _playlistsTile {
 # Stash the earliest period the Created-for-You playlists cover (weekly → the
 # week-commencing Monday, else the day), so _playlistsTile can show the span
 # without re-fetching. Called wherever the playlist list is fetched.
+# Has a stashed summary actually moved since we last wrote it? (0.9.139)
+#
+# The three summary keys are written on EVERY walk of their render paths — the top
+# level alone rewrites two of them three-plus times per tap — and the value is
+# almost always byte-identical to what is already stored. Skipping the redundant
+# SQLite write is free; the only thing to be careful of is the TTL, because a
+# skipped write is also a skipped RENEWAL. So rewrite unconditionally once every
+# SUMMARY_REWRITE, well inside the 25h TTL, and an unchanging feed can never let its
+# tile subtitle quietly expire.
+use constant SUMMARY_REWRITE => 6 * 3600;
+my %_SUMMARY_SIG;   # summary key => [ signature, last written ]
+
+sub _summaryChanged {
+    my ($which, $sig) = @_;
+    my $e   = $_SUMMARY_SIG{$which};
+    my $now = time();
+    return 0 if $e && $e->[0] eq $sig && $now - $e->[1] < SUMMARY_REWRITE;
+    $_SUMMARY_SIG{$which} = [ $sig, $now ];
+    return 1;
+}
+
 sub _stashPlaylistSummary {
     my ($playlists) = @_;
     return unless ref $playlists eq 'ARRAY' && @$playlists;
@@ -418,6 +448,7 @@ sub _stashPlaylistSummary {
     }
     return unless @starts;
     my ($min) = sort @starts;
+    return unless _summaryChanged('playlists', $min);
     eval { $cache->set('lbf:summary:playlists', { min => $min }, 25 * 3600); 1 };
 }
 
@@ -427,12 +458,27 @@ sub _stashPlaylistSummary {
 sub _stashSummary {
     my ($which, $releases) = @_;
     return unless ref $releases eq 'ARRAY';
-    my @d = sort grep { length } map { $_->{release_date} // '' } @$releases;
-    eval { $cache->set('lbf:summary:' . $which, {
-        count => scalar(@$releases),
-        min   => ($d[0]  // ''),
-        max   => ($d[-1] // ''),
-    }, 25 * 3600); 1 };
+
+    # Scan for min/max rather than sorting the whole list: this runs on every walk
+    # of every render path, and only two of those values are ever wanted.
+    my ($min, $max);
+    for my $rel (@$releases) {
+        my $d = $rel->{release_date} // '';
+        next unless length $d;
+        $min = $d if !defined $min || $d lt $min;
+        $max = $d if !defined $max || $d gt $max;
+    }
+
+    my %sum = (count => scalar(@$releases), min => ($min // ''), max => ($max // ''));
+
+    # SKIP THE WRITE when nothing has changed (0.9.139). This is an SQLite write, and
+    # it was firing on every root walk, every fetchAll and every home-shelf load —
+    # three-plus times per tap — to store bytes identical to what was already there.
+    # The summary only moves when the feed does, which is at most once per feed TTL.
+    my $sig = join('|', $sum{count}, $sum{min}, $sum{max});
+    return unless _summaryChanged($which, $sig);
+
+    eval { $cache->set('lbf:summary:' . $which, \%sum, 25 * 3600); 1 };
 }
 
 # ---------------------------------------------------------------------------
@@ -443,6 +489,10 @@ sub fetchForYou {
 
     my $headers = _wantHeaders(ref $passDict eq 'HASH' ? $passDict->{features} : undef);
     my $mode   = $prefs->get('foryou_sort')   || 'release_date';
+    # Effective release-family view + which families this section offers (clamped
+    # so a section with only one family ticked never renders empty; the selector
+    # rows are shown only when BOTH families are available).
+    my ($view, $viewHasAlb, $viewHasSing) = _effectiveView('foryou', 'foryou_view');
     my $past   = $prefs->get('foryou_past')   // 1;
     my $future = $prefs->get('foryou_future') // 0;
 
@@ -456,8 +506,16 @@ sub fetchForYou {
         my ($lbReleases, $lbFailed) = @_;
         Plugins::ListenBrainzFreshReleases::API->getMuSpyReleases(
             onDone => sub {
-                my $releases = _sortReleases(_filterForYou(_mergeMuSpy($lbReleases, shift)));
-                _stashSummary('user', $releases);
+                # _viewFilter narrows to the current release family (albums vs
+                # singles/EPs) AFTER the settings type filter, so it only ever
+                # narrows within the ticked types.
+                my $section  = _forYouSection($lbReleases, shift);
+                # Summary is stashed from the UNFILTERED section: the top-level tile's
+                # "<date span> · N releases" describes the whole feed, not whichever
+                # family lens is active — otherwise the tile's count halved (and its
+                # span moved) the moment the user tapped Singles & EPs.
+                _stashSummary('user', $section);
+                my $releases = _viewFilter($section, $view);
                 # cachetime => 0: don't let Material cache this dynamic feed per-player
                 # (proven for Playlists in 0.9.24 — forces a re-fetch on each open so the
                 # weekly rollover shows immediately rather than a stale cached copy).
@@ -473,7 +531,9 @@ sub fetchForYou {
                 # Options section (Material header + rows) at the top: the sort
                 # toggle then Refresh, like Discography/Pitchfork. The toggle sorts
                 # the releases inside each W/C week; Refresh re-fetches the feed.
-                my @opt   = ( _sortToggle($client, 'foryou_sort', $mode), _refreshItem($client, 'user') );
+                my @opt   = ( _viewToggle($client, 'foryou_view', $view, $viewHasAlb, $viewHasSing),
+                              _sortToggle($client, 'foryou_sort', $mode),
+                              _refreshItem($client, 'user') );
                 my @items = ( _sectionHeader($client, 'PLUGIN_LBF_SECTION_OPTIONS', $headers, \@opt),
                               @opt, @{ _buildItems($releases, $client, $headers, $mode) } );
                 $callback->({ items => \@items, cachetime => 0 });
@@ -517,7 +577,7 @@ sub homeForYou {
         my ($lbReleases) = @_;
         Plugins::ListenBrainzFreshReleases::API->getMuSpyReleases(
             onDone => sub {
-                my $releases = _sortReleases(_filterForYou(_mergeMuSpy($lbReleases, shift)));
+                my $releases = _forYouSection($lbReleases, shift);
                 _stashSummary('user', $releases);
                 $cb->({ items => [ map { _buildReleaseItem($_, $client) } @$releases ], cachetime => 0 });
             },
@@ -574,7 +634,7 @@ sub homeAllReleases {
         future  => $prefs->get('all_future') // 0,
         days    => $prefs->get('days')       // 14,
         onDone  => sub {
-            my $releases = _sortReleases(_filterAll(shift));
+            my $releases = _allSection(shift);
             _stashSummary('all', $releases);
             $cb->({ items => _buildAllLanding($releases, $client, 0), cachetime => 0 });
         },
@@ -601,7 +661,7 @@ sub fetchAll {
         future  => $future,
         days    => $prefs->get('days') // 14,
         onDone  => sub {
-            my $releases = _sortReleases(_filterAll(shift));
+            my $releases = _allSection(shift);
             _stashSummary('all', $releases);
             $callback->({ items => [ _refreshItem($client, 'all'), @{ _buildAllLanding($releases, $client, $headers) } ], cachetime => 0 });
         },
@@ -638,6 +698,7 @@ sub _refreshItem {
             my $w = (ref $pass eq 'HASH' && $pass->{which}) ? $pass->{which} : 'user';
             if ($w eq 'trending') {
                 $cache->remove(_trendingResolvedKey());
+                _dropTrendingCount();   # the tile's count memo must not outlive the list
             }
             elsif ($w eq 'trending_albums') {
                 my $r = (ref $pass eq 'HASH' && $pass->{range}) ? $pass->{range} : 'this_month';
@@ -1459,15 +1520,47 @@ sub _buildTrendingCandidates {
 # The "What's Trending" tile: a playable container (Play/Add queues the whole list)
 # that drills into the ranked, owned-excluded track list. Track count (from the
 # resolved cache the warm populates) on line2, filtered to services still usable.
+#
+# The COUNT is memoed (0.9.139). This tile is built on every walk of the top level,
+# and working the number out meant reading the whole resolved track list back out of
+# SQLite — a deserialise of up to TRENDING_MAX full item hashes — purely to count
+# what survives the service filter. The resolved list only changes on the daily warm
+# or an explicit Refresh, so one read per interaction is plenty; the key carries the
+# resolved-cache key (which itself carries user + service order), so a Refresh or a
+# service change re-counts rather than showing a stale figure.
+# Same few-seconds window as the feed and section memos — one user interaction's
+# worth of re-walks. (Declared here rather than reusing SECTION_MEMO_TTL: that one
+# is defined further down the file, and a constant has to be compiled before the
+# code that names it.)
+use constant TRENDING_COUNT_TTL => 5;
+my %_TRENDING_COUNT;    # resolved key => [ expiry, count ]
+
+# Dropped by the Refresh row so the tile can't keep quoting a count for a list that
+# has just been thrown away. A sub, not a direct reset, because _refreshItem is
+# compiled ABOVE this declaration and so can't see the lexical itself.
+sub _dropTrendingCount { %_TRENDING_COUNT = () }
+
 sub _trendingTile {
     my ($client, $feat) = @_;
-    my $line2 = '';
-    if (my $c = $cache->get(_trendingResolvedKey())) {
-        my $enabled = { map { lc($_->{name}) => 1 } _orderedAdapters() };
-        my $n = grep { _cachedSvcUsable($_->{_svc}, $enabled) } @{ $c->{items} || [] };
-        $n = TRENDING_MAX if $n > TRENDING_MAX;
-        $line2 = sprintf(cstring($client, 'PLUGIN_LBF_N_TRACKS'), $n) if $n;
+    my $rkey = _trendingResolvedKey();
+    my $e    = $_TRENDING_COUNT{$rkey};
+    my $n;
+    if ($e && $e->[0] >= time()) {
+        $n = $e->[1];
     }
+    else {
+        $n = 0;
+        if (my $c = $cache->get($rkey)) {
+            my $enabled = { map { lc($_->{name}) => 1 } _orderedAdapters() };
+            $n = grep { _cachedSvcUsable($_->{_svc}, $enabled) } @{ $c->{items} || [] };
+            $n = TRENDING_MAX if $n > TRENDING_MAX;
+        }
+        # Memo the "nothing resolved yet" answer too — before the first warm that is
+        # every walk, and it's the same SQLite lookup either way. One key only: the
+        # resolved key changes with the user/service order, and an old one is dead.
+        %_TRENDING_COUNT = ($rkey => [ time() + TRENDING_COUNT_TTL, $n ]);
+    }
+    my $line2 = $n ? sprintf(cstring($client, 'PLUGIN_LBF_N_TRACKS'), $n) : '';
     # The branded cover already says "What's Trending"; the row label names what it
     # is — weekly tracks (cf. All Releases, whose row shows the period not the name).
     return {
@@ -2620,6 +2713,91 @@ sub _filterForYou { _filterSection(shift, 'foryou') }
 sub _filterAll    { _filterSection(shift, 'all') }
 
 # ---------------------------------------------------------------------------
+# Derived-section memo (0.9.139)
+# ---------------------------------------------------------------------------
+# The companion to API's %FEED_MEMO, and the other half of the same fix. That memo
+# stopped the re-walks RE-READING the feed; this one stops them RE-DERIVING it.
+#
+# XMLBrowser re-walks from the ROOT on every drill-in, in-place refresh and paging
+# tap, and the root builds both sections — so `_sortReleases(_filterAll(...))` was
+# running three or more times per user tap, over the WHOLE raw feed each time.
+# Measured against a live feed (2902 raw releases, the 14-day default window) on a
+# dev Mac: filter 1.1ms + dedupe/sort 3.7ms = ~4.8ms per walk, and a Pi is an order
+# of magnitude slower again. None of that work can differ between two walks of the
+# same interaction: the input is the same arrayref and the prefs that shape it
+# haven't moved.
+#
+# Validity is by IDENTITY of the source arrayref(s), not a content hash — the feed
+# memo hands back the same ref for its whole TTL, and a Refresh (clearFeedCache →
+# _memoDrop) forces a re-fetch that necessarily produces a NEW ref, so a refresh can
+# never be masked. The memo holds those refs itself, which is what makes `==`
+# sound: an address can't be recycled by a different array while we're still
+# pointing at it. Everything else that shapes the result is prefs, so those go in a
+# signature — a settings change lands on the very next walk.
+#
+# For You needs TWO sources: _mergeMuSpy builds a fresh arrayref every call, so the
+# identity has to come from the LB feed and the MuSpy list separately (which is why
+# getMuSpyReleases is memoed too).
+use constant SECTION_MEMO_TTL => 5;
+my %SECTION_MEMO;    # prefix => [ expiry, sig, [ source refs ], result ]
+
+# Every pref that can change what a section's derived list contains: the type
+# checkboxes, the Various-Artists and artwork gates, the blocklist, and the MuSpy
+# merge window (For You). The feed-shaping prefs (days/past/future) are already in
+# the feed's own cache key, so a change there arrives as a different source ref.
+sub _sectionSig {
+    my ($prefix) = @_;
+    my @v = map { $prefs->get("${prefix}_type_$_") ? 1 : 0 } @RELEASE_TYPES;
+    push @v, ($prefs->get("${prefix}_artwork_only") // 1) ? 1 : 0;
+    push @v, ($prefs->get("${prefix}_various")      // 1) ? 1 : 0;
+    push @v, map { $prefs->get($_) // '' } qw(foryou_past muspy_future muspy_future_months days);
+    my $blocked = $prefs->get('blocked_artists');
+    push @v, ref $blocked eq 'ARRAY'
+        ? join(',', map { ref $_ eq 'HASH' ? (($_->{mbid} // '') . '/' . ($_->{name} // '')) : '' } @$blocked)
+        : '';
+    return join('|', @v);
+}
+
+sub _sectionList {
+    my ($prefix, $sources, $build) = @_;
+
+    # A non-ref source (shouldn't happen — every caller passes an arrayref) can't be
+    # identity-checked, so just build it.
+    for my $s (@$sources) { return $build->() unless ref $s eq 'ARRAY' }
+
+    my $now = time();
+    my $sig = _sectionSig($prefix);
+    my $e   = $SECTION_MEMO{$prefix};
+    if ($e && $e->[0] >= $now && $e->[1] eq $sig && @{ $e->[2] } == @$sources) {
+        my $same = 1;
+        for my $i (0 .. $#$sources) {
+            next if $e->[2][$i] == $sources->[$i];
+            $same = 0;
+            last;
+        }
+        return $e->[3] if $same;
+    }
+
+    my $out = $build->();
+    $SECTION_MEMO{$prefix} = [ $now + SECTION_MEMO_TTL, $sig, [ @$sources ], $out ];
+    return $out;
+}
+
+# The two derived lists, as every render path wants them: filtered to the section's
+# settings, deduped and date-sorted. Call these rather than composing the steps by
+# hand, or the walk pays for the pipeline again.
+sub _allSection {
+    my ($feed) = @_;
+    return _sectionList('all', [$feed], sub { _sortReleases(_filterAll($feed)) });
+}
+
+sub _forYouSection {
+    my ($lb, $muspy) = @_;
+    return _sectionList('foryou', [$lb, $muspy],
+        sub { _sortReleases(_filterForYou(_mergeMuSpy($lb, $muspy))) });
+}
+
+# ---------------------------------------------------------------------------
 # MuSpy merge (For You feed only)
 # ---------------------------------------------------------------------------
 # Merge the user's MuSpy followed-artist releases into the ListenBrainz For You
@@ -2864,6 +3042,119 @@ sub _sortToggle {
             $cb->({ items => [] });
         },
     };
+}
+
+# ---------------------------------------------------------------------------
+# Per-view release-family filter (the "Showing …" toggle). Two states:
+#   'singles_eps' — keep releases whose PRIMARY type is Single or EP
+#   'albums'      — keep everything else (Album, Broadcast, Other, and the
+#                   secondary-typed album variants Compilation/Soundtrack/Live/…,
+#                   all of which have primary type Album)
+# Partitioned by PRIMARY type so the two states are mutually exclusive and cover
+# every release — nothing a user has ticked in Settings is lost. Applied AFTER
+# _filterSection (the settings type/artwork/VA filter), so it only ever narrows
+# WITHIN the ticked types. An unknown/blank primary type falls into 'albums'
+# (the default, non-single bucket).
+# ---------------------------------------------------------------------------
+my %_SINGLE_FAMILY = ( single => 1, ep => 1 );
+sub _viewFilter {
+    my ($releases, $mode) = @_;
+    $releases //= [];
+    my $wantSingles = ($mode // 'albums') eq 'singles_eps';
+    return [ grep {
+        my $p = lc($_->{release_group_primary_type} // '');
+        $wantSingles ? $_SINGLE_FAMILY{$p} : !$_SINGLE_FAMILY{$p}
+    } @$releases ];
+}
+
+# Which release families a section actually offers, from its type checkboxes.
+# Returns ($hasAlbums, $hasSingles). An empty allowed-set means the settings
+# filter is "show everything" (the _typeMatches safety net), so BOTH families
+# are available. Otherwise a family is available iff at least one of its types
+# is ticked. Every @RELEASE_TYPES value is in exactly one family (single/ep vs
+# the rest), so at least one family is always available when anything is ticked.
+sub _familyAvail {
+    my ($prefix) = @_;
+    my $allowed = _allowedTypes($prefix);
+    return (1, 1) unless %$allowed;   # nothing ticked → all types shown
+    my $hasSingles = ($allowed->{single} || $allowed->{ep}) ? 1 : 0;
+    my $hasAlbums  = 0;
+    for my $t (@RELEASE_TYPES) {
+        next if $_SINGLE_FAMILY{$t};
+        if ($allowed->{$t}) { $hasAlbums = 1; last }
+    }
+    return ($hasAlbums, $hasSingles);
+}
+
+# The view mode to actually apply for a section, plus the family-availability
+# flags. Clamps the stored pref to a family the section can show — so a section
+# with only Single/EP ticked doesn't render EMPTY under the default 'albums'
+# view (and vice versa). Returns ($view, $hasAlbums, $hasSingles).
+sub _effectiveView {
+    my ($prefix, $pref) = @_;
+    my ($hasAlbums, $hasSingles) = _familyAvail($prefix);
+    my $stored = $prefs->get($pref) || 'albums';
+    my $view   = $stored;
+    $view = 'albums'      if $view eq 'singles_eps' && !$hasSingles;
+    $view = 'singles_eps' if $view eq 'albums'      && !$hasAlbums;
+    # PERSIST the clamp, don't just apply it. The selector is HIDDEN while only one
+    # family is available (_viewToggle returns ()), so a stored value the section can't
+    # show is unreachable from the UI — it sits there invisibly and then takes effect
+    # the moment the user ticks the other family in Settings, silently opening that
+    # feed on Singles & EPs. Writing the clamped value back keeps what's stored equal
+    # to what's displayed. Guarded on an actual change, so it's a no-op normally.
+    $prefs->set($pref, $view) if $view ne $stored;
+    return ($view, $hasAlbums, $hasSingles);
+}
+
+# The release-family selector for the Options section: ONE cycling row —
+# "Showing Albums (tap for Singles & EPs)" and vice versa — exactly like the
+# neighbouring "Sorted by …" toggle. 0.9.125–0.9.127 used TWO radio-marked rows so
+# you could see the option you were NOT on; 0.9.128 collapsed them back to one row
+# because two rows cost a line of screen for a two-state choice, and the option
+# rows sit above the releases you actually came to look at.
+#
+# **Why not two buttons side by side** (asked twice — don't re-derive): Material
+# gives a plugin feed NO way to lay rows out horizontally. Re-verified against the
+# server's own material-deferred.min.js: the header toolbar's `currentActions` is
+# filled by `browseActions(...)` from native-library `stdItem` shapes or
+# `getCustomActions(...)` keyed on a media item's `favorites_url`, and rows flagged
+# `isListItemInMenu` are pushed to `d.actionItems` (the ⋮ overflow) — both set only
+# on native-menu paths. A plain OPML `type=>'link'` row always lands in `d.items`
+# as a full-width v-list-tile. Grid view is the only horizontal layout and applies
+# to the WHOLE list, releases included. So one row is the floor.
+#
+# The icon REFLECTS THE CURRENT STATE (album disc vs music note), which is what
+# carries the at-a-glance "which lens am I in" that the radio marks used to give;
+# the label's "(tap for …)" carries the action. $pref is the DURABLE pref the
+# choice lives in — 'foryou_view' or 'all_view' (All Releases, shared across every
+# week). Returns a LIST so the call sites can spread it — EMPTY when only ONE
+# family is available for the section (nothing to switch to, so the row is hidden
+# rather than showing a dead toggle or one that opens an empty list).
+# $hasAlbums/$hasSingles come from _effectiveView (i.e. _familyAvail).
+sub _viewToggle {
+    my ($client, $pref, $mode, $hasAlbums, $hasSingles) = @_;
+    return () unless $hasAlbums && $hasSingles;
+    my $singles = (($mode // 'albums') eq 'singles_eps') ? 1 : 0;
+    my $now  = cstring($client, $singles ? 'PLUGIN_LBF_VIEW_SINGLES' : 'PLUGIN_LBF_VIEW_ALBUMS');
+    my $next = cstring($client, $singles ? 'PLUGIN_LBF_VIEW_ALBUMS'  : 'PLUGIN_LBF_VIEW_SINGLES');
+    return ({
+        name        => sprintf(cstring($client, 'PLUGIN_LBF_SHOWING'), $now, $next),
+        type        => 'link',
+        image       => $singles ? VIEW_SINGLES : VIEW_ALBUMS,
+        nextWindow  => 'refresh',
+        passthrough => [{ pref => $pref }],
+        url         => sub {
+            my ($c, $cb, $a, $p) = @_;
+            # Flip from the LIVE pref, not the mode captured at render time — the
+            # same rule as _sortToggle: a value changed in between (another player,
+            # or the _effectiveView clamp) must not make this tap land back on the
+            # state we're already showing and read as a dead row.
+            my $cur = $prefs->get($p->{pref}) || 'albums';
+            $prefs->set($p->{pref}, $cur eq 'singles_eps' ? 'albums' : 'singles_eps');
+            $cb->({ items => [] });
+        },
+    });
 }
 
 # ---------------------------------------------------------------------------
@@ -3151,14 +3442,39 @@ sub _buildAllLanding {
                 # All Releases week can list hundreds of releases). Paging is still
                 # per-week module state (keyed "arweek:<ws>"); re-sorting/paging
                 # re-walks this coderef, which re-reads the pref. Options header +
-                # sort toggle sit on top.
+                # family selector + sort toggle + Refresh sit on top.
                 my $mode  = $prefs->get('all_sort') || 'release_date';
-                _warmArtistSorts($rels) if $mode eq 'artist';
-                my @tiles = map { _buildReleaseItem($_, $c) } @{ _sortWithin($rels, $mode) };
-                my ($vis, $pgRows) = _pageSection($c, $key, \@tiles);
-                my @opt = ( _sortToggle($c, 'all_sort', $mode) );
+                # Effective release-family view + which families All Releases offers
+                # (clamped so a single-family section never renders empty; the
+                # selector rows show only when BOTH families are available).
+                # Re-read each walk so the selector refreshes in place, like sort.
+                my ($view, $vHasAlb, $vHasSing) = _effectiveView('all', 'all_view');
+                my $rows  = _viewFilter($rels, $view);
+                _warmArtistSorts($rows) if $mode eq 'artist';
+                # Refresh belongs HERE, not only in fetchAll. Since the top-level menu
+                # started inlining these week rows directly (0.9.99–0.9.119), fetchAll —
+                # the only other place with a Refresh row — is reached only via the
+                # watchdog/error fallback tile, so in normal use the All Releases feed
+                # had NO reachable Refresh at all. The week drill is the level a user is
+                # actually looking at when the feed looks wrong, so it carries it.
+                my @opt = ( _viewToggle($c, 'all_view', $view, $vHasAlb, $vHasSing),
+                            _sortToggle($c, 'all_sort', $mode),
+                            _refreshItem($c, 'all') );
+
+                # Page on the RELEASES, not the finished tiles. _pageSection only
+                # slices and counts, so it behaves identically given releases.
+                my ($visRel, $pgRows) = _pageSection($c, $key, _sortWithin($rows, $mode));
+                my @tiles = map { _buildReleaseItem($_, $c) } @$visRel;
+
+                # The week ROWS are built from the section list before _viewFilter (the
+                # landing can't know the lens — it's re-read per walk in here), so a week
+                # holding nothing in the active family — all albums while Showing Singles
+                # & EPs — otherwise opens with its Options rows and no word of why. Say it,
+                # the same way an empty landing does.
+                @tiles = ({ name => cstring($c, 'PLUGIN_LBF_NO_RESULTS'), type => 'text' })
+                    unless @tiles;
                 $cb->({ items => [ _sectionHeader($c, 'PLUGIN_LBF_SECTION_OPTIONS', $headers, \@opt),
-                                   @opt, @$vis, @$pgRows ] });
+                                   @opt, @tiles, @$pgRows ] });
             },
         };
     }
@@ -3224,9 +3540,20 @@ sub _buildWeekly {
 # boundary even across a DST change). The result is the same regardless of zone for
 # a date-only input — the weekday of a calendar date is timezone-independent — but
 # computing it in local time keeps the whole date path consistent with "today".
+#
+# MEMOED (0.9.139) — a pure function of a date STRING, and the week grouping calls
+# it once per release while a feed only ever holds a couple of dozen distinct dates.
+# Measured on a live feed: 726 calls resolving to 15 distinct dates, 2.7ms a walk
+# (timelocal + two localtimes + an eval each), in both _buildAllLanding and
+# _buildWeekly — so it ran on every root walk AND every week render. Cached it is
+# ~0.05ms. The map is keyed by the input string and never expires: the answer for a
+# given date cannot change, and the key space is bounded by the dates a feed carries.
+my %_WEEK_START;
+
 sub _weekStart {
     my ($date) = @_;
     return '' unless $date && $date =~ /^(\d{4})-(\d{2})-(\d{2})/;
+    return $_WEEK_START{$date} if exists $_WEEK_START{$date};
 
     my $epoch = eval { Time::Local::timelocal(0, 0, 12, $3, $2 - 1, $1) };
     return '' unless defined $epoch;
@@ -3234,7 +3561,7 @@ sub _weekStart {
     my $wday = (localtime $epoch)[6];       # 0 = Sunday
     my $mon  = $epoch - (($wday + 6) % 7) * 86400;
     my @m    = localtime $mon;
-    return sprintf('%04d-%02d-%02d', $m[5] + 1900, $m[4] + 1, $m[3]);
+    return $_WEEK_START{$date} = sprintf('%04d-%02d-%02d', $m[5] + 1900, $m[4] + 1, $m[3]);
 }
 
 # Pick the All Releases week cover by how many weeks $ws (a Monday) is from the
@@ -3542,7 +3869,10 @@ sub _releaseDetail {
         }, $artist, $album, $mbid, undef, $year, $rel->{release_group_primary_type});
     }
 
-    # Genres — from the release-group (release-level genres are nearly always empty)
+    # Genres — MusicBrainz release-group genres for this album (the per-album
+    # `release-group?inc=genres` call). Goes to a local mirror when one is
+    # configured or auto-detected, so it costs ~75ms there; on the public API it is
+    # one throttled request per page open. $finish prefers these over Last.fm.
     if ($wantGenres) {
         Plugins::ListenBrainzFreshReleases::API->getReleaseGroupGenres(
             $rgMbid,
@@ -3862,7 +4192,22 @@ sub _streamingAdapters {
 
 # Installed adapters in search order: ascending svc_priority_<name>, dropping any
 # set to 0 (disabled). Used by _findPlayable to search one service at a time.
+#
+# Memoed for ADAPTER_MEMO_TTL (0.9.139). Building the list means ~10 ->can probes
+# plus a _pluginDataFor icon lookup per service, and it is asked for far more often
+# than it can change: the top level alone builds it twice per walk (once inside
+# _trendingResolvedKey, once for the tile's enabled-service set), and it is on the
+# per-item path of every resolved list via _cachedSvcUsable. Installed plugins can't
+# change without a restart and the priority prefs change only in Settings, so a few
+# seconds of staleness is invisible — a priority edit still takes effect on the next
+# browse, which is the same "next walk" contract as every other pref here.
+use constant ADAPTER_MEMO_TTL => 5;
+my @_ADAPTERS_MEMO;
+my $_ADAPTERS_EXP = 0;
+
 sub _orderedAdapters {
+    return @_ADAPTERS_MEMO if time() < $_ADAPTERS_EXP;
+
     my @out;
     for my $a (_streamingAdapters()) {
         my $prio = $prefs->get('svc_priority_' . lc $a->{name});
@@ -3871,6 +4216,8 @@ sub _orderedAdapters {
         push @out, { %$a, priority => $prio };
     }
     my @ordered = sort { $a->{priority} <=> $b->{priority} } @out;
+    @_ADAPTERS_MEMO = @ordered;
+    $_ADAPTERS_EXP  = time() + ADAPTER_MEMO_TTL;
     return @ordered;   # named array → safe count in scalar/boolean context
 }
 
@@ -3930,7 +4277,11 @@ sub _streamKey {
     my $svcOrder = join(',', map { lc $_->{name} } _orderedAdapters());
     # :18→:19 (0.9.110): matched album items gained `_year` (the service release
     # year, the trending lists' last date fallback) — re-resolve once to bake it in.
-    my $key = 'lbf:stream:20:' . $svcOrder . ':' . ($idPart // '');
+    # :20→:21 (0.9.141): the favurl gained '&rt=' for Listen Later's release type.
+    # `favorites_url` is part of the CACHED item (_cacheStream stores everything but
+    # `url`), so without this bump every already-resolved album would keep handing LL
+    # a favurl with no type on it and the handshake would look broken for weeks.
+    my $key = 'lbf:stream:21:' . $svcOrder . ':' . ($idPart // '');
     utf8::encode($key) if utf8::is_utf8($key);   # octet key — non-Latin fallback can't crash md5
     return $key;
 }
@@ -3970,6 +4321,9 @@ sub _bcMarkerKey {
 # cached match simply keeps playing without the favurl until it's re-searched.
 sub _bcMatchKey {
     my ($idPart) = @_;
+    # STILL :6: for the 0.9.141 '&rt=' favurl, for the reason above — 0.9.141 briefly
+    # bumped it to :7: "same reason _streamKey bumped", which is exactly the 0.9.42
+    # mistake 0.9.47 reverted: _streamKey re-resolves itself, this key does not.
     my $key = 'lbf:bcmatch:6:' . ($idPart // '');
     utf8::encode($key) if utf8::is_utf8($key);
     return $key;
@@ -4129,7 +4483,9 @@ sub _findPlayable {
                 my $art = $it->{image};          # native album cover, before the logo override
                 $it->{image} = $icon if $icon;   # service logo as thumbnail (LBF detail view)
                 $it->{_svc}  = $svc;             # for cache rebuild
-                _attachFavUrl($it, $svc, $art, $artist, $year);  # qobuz://album:<id>?cover=<art>&a=<artist>&y=<year> for ListenLater
+                # $tnorm is the release's OWN MusicBrainz primary type (the same value
+                # the single-drop above keys on) — pass it to Listen Later as '&rt='.
+                _attachFavUrl($it, $svc, $art, $artist, $year, _llRelType($tnorm));  # qobuz://album:<id>?cover=<art>&a=<artist>&y=<year>&rt=<type>
             }
             $result[$i] = \@matched;
             $resolve->();
@@ -4174,8 +4530,39 @@ sub _cacheStream {
 # which Material exposes as $FAVURL — without this the coderef `url` leaked through as
 # the favurl (the "broken link"). No native id → no favurl (the row still displays
 # and plays in LBF; it just can't be added to ListenLater with full fidelity).
+# ---------------------------------------------------------------------------
+# Release type for the Listen Later handshake (0.9.141)
+# ---------------------------------------------------------------------------
+# Listen Later 0.1.86 stores a release type per row ('album'|'ep'|'single') and uses
+# it for the row glyph, its Played auto-detection thresholds (a single needs one
+# play, an EP two) and its single-vs-single dedupe. It has no good way to work that
+# out for a streaming add: Qobuz exposes a release_type, but Tidal and the others
+# expose NOTHING on the track coderefs, so LL falls back to guessing from a resolved
+# TRACK COUNT (1 => single, <=6 => EP). That guess is wrong for a one-track album, a
+# seven-track EP, or any release whose count it can't resolve at all.
+#
+# We know the real answer — it comes from the MusicBrainz release group in the feed
+# — so we hand it over. LL's documented channel for this is a private '&rt=' param
+# on the favurl (Sources::relTypeFor takes it as `service =>`, and it WINS over the
+# count guess); it strips the param before use, exactly like the '&a='/'&y='/'&al='
+# handshakes already here.
+#
+# Only the three values LL understands are ever sent. A MusicBrainz primary type of
+# Broadcast or Other (or a blank one) maps to nothing and the param is omitted —
+# better to let LL fall back to its count heuristic than to assert "album" for a
+# release we can't actually classify. Compilations/soundtracks/live albums arrive as
+# primary type Album with a SECONDARY type, so they correctly map to 'album'.
+sub _llRelType {
+    my ($type) = @_;
+    my $t = lc($type // '');
+    return 'single' if $t eq 'single';
+    return 'ep'     if $t eq 'ep';
+    return 'album'  if $t eq 'album';
+    return undef;
+}
+
 sub _attachFavUrl {
-    my ($it, $svc, $art, $artist, $year) = @_;
+    my ($it, $svc, $art, $artist, $year, $relType) = @_;
     my $id = $it->{_albumid};
     return unless defined $id && length $id;
     my $fav = lc($svc) . '://album:' . $id;   # scheme = ListenLater's qobuz/tidal/bandcamp source tag
@@ -4216,6 +4603,12 @@ sub _attachFavUrl {
     # is silently dropped as a duplicate. Bare 4-digit, no escaping needed.
     if (defined $year && $year =~ /^\d{4}$/) {
         push @params, 'y=' . $year;
+    }
+
+    # The authoritative MusicBrainz release type, for Listen Later (see _llRelType).
+    # Bare word from a fixed three-value set — no escaping needed.
+    if (defined $relType && length $relType) {
+        push @params, 'rt=' . $relType;
     }
 
     $fav .= '?' . join('&', @params) if @params;
@@ -4561,7 +4954,8 @@ sub _searchBandcampOnly {
             my $name = $cand->{name} // $cand->{line1} // $album;
             $cand->{image} = $bc->{icon} if $bc->{icon};        # service logo (as inline detail rows)
             $cand->{_svc}  = 'Bandcamp';
-            _attachFavUrl($cand, 'Bandcamp', $art, $artist, $year); # bandcamp://album:<id>?b=<art|url>&a=<artist>&y=<year>
+            _attachFavUrl($cand, 'Bandcamp', $art, $artist, $year,
+                          _llRelType($rel->{release_group_primary_type}));  # …&rt=<type>
             push @rows, {
                 name        => $name,
                 line2       => $artist,
@@ -5489,9 +5883,7 @@ sub _norm {
     return $s;
 }
 
-# Extract usable tag names from the payload's release_tags. Entries may be plain
-# strings or { tag, count } hashes; drop blanks, dedupe case-insensitively, and
-# drop the over-long free-text junk ("adding tags for album ...") that isn't a genre.
+
 sub _releaseTags {
     my ($rel) = @_;
 

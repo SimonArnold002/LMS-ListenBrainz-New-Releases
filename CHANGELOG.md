@@ -3,6 +3,45 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.141
+
+### Added
+- **Albums added to Listen Later are now labelled correctly as an album, EP or single.** Listen Later can't tell them apart on its own — most streaming services don't say — so it has been guessing from how many tracks it managed to resolve, which gets a short album wrong, a long EP wrong, and a single-track album wrong. This plugin knows the real answer from MusicBrainz, so it now passes it across when you add a release. That fixes the icon on the row, and it fixes Listen Later's "played" detection, which expects one play for a single and two for an EP. Releases MusicBrainz classes as something else entirely (a broadcast, say) are left for Listen Later to work out as before, rather than being asserted wrongly.
+
+### Fixed
+- **Artists with non-Latin names, and most artist biographies, were never being remembered.** Anything the plugin stores as plain text — a MusicBrainz artist sort-name, a Last.fm biography — was failing to save whenever it contained a character outside the Western European set. For sort-names that meant every Japanese, Korean, Cyrillic or Greek artist was looked up again on every refresh and never sorted by their proper sort-name. For biographies it was worse: a single curly apostrophe or dash is enough to trigger it, so almost no biography was ever stored and each one was re-fetched from Last.fm every time you opened a release page. Both now save correctly, first time, whatever the alphabet. Nothing already stored is lost, and no re-fetch is forced.
+
+### Changed
+- **Browsing does noticeably less work per tap, which matters most on a Raspberry Pi.** Every drill-in, refresh and "Show more" makes the server rebuild the menu from the top, and each rebuild was re-loading the feed from its database *and* filtering, de-duplicating and sorting it again from scratch — several thousand releases, three or more times per tap. Both the loaded feed and the finished list are now held for a few seconds and reused, which is all one tap needs. Change a setting and it rebuilds immediately; **Refresh** always fetches and rebuilds from scratch.
+- **Working out which week a release belongs to was being done once per release**, on every screen, when a fortnight of releases only spans a handful of dates. Those answers are now remembered, taking that part of drawing a list to roughly a tenth of what it was.
+- **Three smaller pieces of housekeeping that were quietly repeating on every screen**: the tile subtitles ("14–28 July · 726 releases") were being written back to the database on every rebuild even when nothing had changed; the "What's Trending" row was re-reading the whole resolved track list just to count it; and the list of installed streaming services was being re-detected several times per tap. All three now do the work once and reuse the answer.
+- None of this changes what you see. Everything held in memory lasts a few seconds at most, every setting that shapes a list is accounted for, and **Refresh** and a server restart both clear it.
+
+### Note on version numbers
+- Versions **0.9.129–0.9.140** are not missing: they are genre-labels work, parked on the `alpha` branch pending a decision on the metadata backend. They were never released. This release carries the non-genre work developed alongside them (the Albums / Singles & EPs toggle in 0.9.126–0.9.128, and the performance work above), and continues from a number above them so no version ever means two different things.
+
+## 0.9.128
+
+### Changed
+- **The Albums / Singles & EPs choice is now a single row instead of two.** It reads **"Showing Albums (tap for Singles & EPs)"** and flips when you tap it — exactly like the "Sorted by…" row beneath it. The two separate rows took a line of screen each above the releases you actually came to see; this gives the same choice back in half the space. Its icon now changes with the list: a record sleeve while you're on Albums, a music note while you're on Singles & EPs, so you can still tell at a glance which one you're looking at. As before, the row only appears when that section has both album-type and single/EP types ticked in Settings.
+
+## 0.9.127
+
+### Fixed
+- **The "Refresh (force update now)" row is back on All Releases.** Each week now carries it in its **Options** section, under the sort toggle. It had become unreachable: once the top-level menu started listing the weeks directly, the only page holding an All Releases Refresh was one you no longer passed through — so there was no way to force the feed to re-fetch short of waiting for its daily update. It's the same Refresh every other section uses: one tap drops the cached feed and reloads the list in place.
+- **The Albums / Singles & EPs choice can no longer sit hidden on a feed that isn't showing it.** If a feed only includes one of the two families, the selector is hidden — but the stored choice stayed as it was, so ticking **Single**/**EP** in Settings later could drop you straight into a Singles & EPs list you never asked for. The stored choice is now corrected to match what's actually on screen, so what you see and what's saved always agree.
+- **The New Releases for You tile counts the whole feed again.** Its "*date span · N releases*" line was being taken from the list *after* the Albums / Singles & EPs filter, so tapping between the two changed the tile's count and dates. The tile now always describes the whole section, while the list itself still follows your choice.
+
+## 0.9.126
+
+### Added
+- **Switch each feed between albums and singles/EPs, right from the list.** New Releases for You and each All Releases week now show two choices — **Albums** and **Singles & EPs** — in their **Options** section, next to "Sorted by…", with the active one marked. Tap the other to switch the whole list between full-length releases and singles & EPs, so you no longer see them all mixed together. The choice sticks across visits and restarts. It works within the release types you've ticked in Settings, so it only shows types you've chosen to include. Feeds default to **Albums**, so they look as they did before until you switch.
+- **The selector only appears when it's useful.** The two choices show up **only when that section has both album-type and single/EP types ticked in Settings** — so with the default types (Album + Compilation) you won't see them at all, and a section that only includes singles/EPs won't show an empty list. Tick **Single**/**EP** (alongside album types) for a section to get the switch.
+
+> **0.9.120–0.9.125 have no entries.** 0.9.120 was released (a shared-matcher fix across the plugin family) but never got a changelog entry, and 0.9.121–0.9.125 were never written up. Rather than invent them after the fact, the gap is left as it is.
+>
+> **0.9.129–0.9.140 are absent for a different reason:** they are genre-labelling work that was never released. It needs a metadata source fast enough to be usable, and is parked pending that decision.
+
 ## 0.9.119
 
 ### Fixed
