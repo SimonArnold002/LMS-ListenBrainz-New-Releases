@@ -3,6 +3,13 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.149
+
+### Fixed
+- **Trending Albums · This Month and · This Year no longer get stuck on "No trending data yet".** If a build happened to catch ListenBrainz at a bad moment — the listening stats briefly unavailable, or every request timing out at once — the empty result it produced was stored as though it were the answer, for a week (This Month) or a **month** (This Year). Both lists then said there was nothing to show without asking ListenBrainz again, even though the people you follow had been listening all along. An empty result is now treated as a bad moment rather than a fact, and kept for an hour at most, so the next visit rebuilds. A list that really does have albums in it is cached exactly as long as before.
+- **The empty view now has a Refresh row.** Previously it showed nothing but the message, so there was no way to make it try again — you had to wait out the week, or, for This Year, wait until January. Refresh rebuilds that list on the spot.
+- **Existing stuck lists clear themselves on update** — this release stops reading anything the old code stored, so both lists rebuild the first time you open them.
+
 ## 0.9.148
 
 ### Fixed

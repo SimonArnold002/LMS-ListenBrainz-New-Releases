@@ -1862,8 +1862,11 @@ sub _albumsDataKey {
     # survivors depend on the enabled services, so the key carries the service
     # order (like the resolved-playlist keys) and re-keys on a service change.
     # :4:->:5: (0.9.110) — years also from the matched item's service date (_year).
+    # :6:->:7: (0.9.149) — NOT a shape change: it abandons the EMPTY aggregates the
+    # pre-0.9.149 full-TTL empty-cache write pinned for 7d/30d. Without the bump a
+    # poisoned This Year list stays empty until the calendar year rolls over.
     my $svcOrder = join(',', map { lc $_->{name} } _orderedAdapters());
-    return "lbf:trending:albums:6:$range:$period:$user|$svcOrder";
+    return "lbf:trending:albums:7:$range:$period:$user|$svcOrder";
 }
 
 sub _buildAlbumsData {
@@ -1930,7 +1933,16 @@ sub _buildAlbumsData {
                             $settle->($data, 1); return;
                         }
                         my $total = scalar @$data;
-                        unless ($total) { $settle->($data, 0); return; }
+                        # An EMPTY aggregate is INCONCLUSIVE, never a fact worth 7d/30d.
+                        # It means every follower's stats came back empty this build — a
+                        # transient LB blip, a fan-out that all timed out, or a following
+                        # fetch that emptied — and caching that at the full TTL pinned
+                        # "No trending data yet" for a week (month) or a MONTH (year), on a
+                        # view whose empty state doesn't even render a Refresh row. Short
+                        # TTL, like every other inconclusive settle below (diagnosed live
+                        # 2026-07-30: LB was serving 650 rows / 558 albums while the plugin
+                        # returned the empty message from cache without a single request).
+                        unless ($total) { $settle->($data, 1); return; }
 
                         my (@slots, $finished, $timedOut);
                         my ($idx, $active, $completed, $kept) = (0, 0, 0, 0);
@@ -2140,7 +2152,13 @@ sub _trendingAlbumsResult {
         @items  = ( _sectionHeader($client, 'PLUGIN_LBF_SECTION_OPTIONS', $useH, \@opt), @opt, @rows );
     }
     else {
-        @items = ( { name => cstring($client, 'PLUGIN_LBF_NO_TRENDING'), type => 'text' } );
+        # The empty view keeps its Refresh row (no sort toggle — nothing to sort).
+        # Without it a bad build was a DEAD END: the aggregate cache is the only way
+        # back and the user had no way to drop it, so the only exits were the cache
+        # TTL or the period rolling over (January, for This Year).
+        my @opt = ( _refreshItem($client, 'trending_albums', $range) );
+        @items  = ( _sectionHeader($client, 'PLUGIN_LBF_SECTION_OPTIONS', $useH, \@opt), @opt,
+                    { name => cstring($client, 'PLUGIN_LBF_NO_TRENDING'), type => 'text' } );
     }
 
     return {

@@ -110,12 +110,13 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-0.9.148
+0.9.149
 
 ### State of play (2026-07-30) — read this before starting anything
 
-**Branches.** `dev` (this one) is the working line at **0.9.148** (uncommitted: the 0.9.147
-`&al=` artist-affix work and the 0.9.148 correction that narrows it to Bandcamp). `alpha` holds the parked
+**Branches.** `dev` (this one) is the working line at **0.9.149**, committed and pushed
+(0.9.147–0.9.148 landed as `a7e1ac4`; 0.9.149 is the Trending Albums empty-cache fix, tagged
+`v0.9.149`). `alpha` holds the parked
 genre work at 0.9.140 — pushed, see `ALPHA.md` there, do not merge it. `main` is still at
 **0.9.98**: everything from 0.9.99 on (People You Follow, Trending, the matcher fleet sync,
 0.9.126–0.9.128 and 0.9.141) has never been promoted, so "what users have" is far behind
@@ -182,7 +183,9 @@ genre work at 0.9.140 — pushed, see `ALPHA.md` there, do not merge it. `main` 
 (the DbCache bare-string bug, reproduced against real DBD::SQLite),
 `tools/t_ll_handshake.pl` (the `&rt=` release-type handshake, driven from BOTH repos' live
 source), `tools/t_review_fixes.pl` (the three 0.9.141 pre-release review defects — bcmatch bump,
-MuSpy memo on Refresh, empty week under the family lens), `tools/matcher_sync_check.py`
+MuSpy memo on Refresh, empty week under the family lens), `tools/t_trending_empty.pl` (the
+0.9.149 empty-aggregate TTL + the Refresh row on the empty Trending Albums view;
+`LBF_BROWSE=` points it at a mutated copy for anti-testing), `tools/matcher_sync_check.py`
 (currently exits 1 — see the hold).
 
 - **Listen Later release-type handshake — `&rt=` on the favurl (0.9.141).** LL 0.1.86 stores a
@@ -1677,6 +1680,40 @@ that cause empty/junk pools:
    ([[mb-mirror-search-index-gotcha]]); test the library with `["artists",…,"search:NAME"]`.
 
 ## Version History
+- **0.9.149** — **a transient LB blip pinned "No trending data yet" on Trending Albums for a WEEK
+  (This Month) or a MONTH (This Year) — the empty-aggregate cache-poison class, one the rest of this
+  file already gets right.** Field report: both album lists empty, "all ok until recently".
+  **Diagnosed without touching the box:** replayed the plugin's own pipeline against the live API
+  (following → 13 users, all with listens that day, `stats/user/<u>/release-groups` 200 for every one
+  of them, **650 rows / 558 distinct albums** for `this_month`, same for `this_year`), then opened
+  This Month over the CLI (`listenbrainzfreshreleases items 0 10 item_id:5`) and read `log.txt`: the
+  message came back with **zero new log lines**. No build ran → `_buildAlbumsData` was serving a
+  cache hit, and **`$cache->get` is truthy for an empty arrayref**, which is the whole bug.
+  - **`_buildAlbumsData`'s gate settled an EMPTY aggregate with `$short = 0`** — full
+    `TREND_ALBUMS_MONTH_TTL`/`_YEAR_TTL`. Every other inconclusive settle in that same sub already
+    uses `PLAYLIST_INCONCLUSIVE_TTL` (no client/services, gate keeps zero, watchdog truncation —
+    that last one was itself a 0.9.117 review fix); the empty branch was the one that slipped
+    through. Now `$settle->($data, 1)`. **The rule this belongs to: an empty result is never a fact.
+    It is the shape a transient failure takes** — and the further up the pipeline the failure
+    happens, the more it looks like a legitimate "nothing to show".
+  - **`lbf:trending:albums:6:`→`:7:`, NOT a shape change** — purely to abandon the empties already
+    pinned on users' servers. Worth knowing: the key carries the calendar period, so This Month
+    would have self-healed at the month rollover and only **This Year was stuck until January**.
+  - **The empty view now renders the Refresh row** (`_refreshItem('trending_albums', $range)`; no
+    sort toggle — nothing to sort). It previously emitted the message ALONE, which made a bad build
+    a **dead end**: the aggregate cache is the only way back and the user had no way to drop it.
+    **Any "nothing here" view that is served from a cache must carry its own Refresh** — check this
+    when adding one.
+  - **`tools/t_trending_empty.pl`** (18 assertions, real sub bodies via the `grab` trick): empty →
+    1h on BOTH ranges, healthy → still 7d/30d (the fix must not become a blanket downgrade),
+    gate-keeps-zero unchanged, the empty view's Refresh row present AND its tap dropping *that*
+    range's key only, and the `:7:` bump. `LBF_BROWSE=` points it at a mutated copy —
+    anti-tested against a pre-fix Browse.pm: **7 failures**.
+  - **Test-writing trap worth remembering, since it bit this suite:** `ok($k =~ /…/, "msg")` — a
+    bare `m//` or `grep` in a LIST-context argument returns the match list, so on failure the args
+    shift, the message becomes the condition, and the assertion PASSES on any truthy label. Three
+    assertions here did exactly that and the anti-test run is what exposed them (`5. PASS` with a
+    blank label against a `:6:` key). Wrap every match/grep in `scalar()`.
 - **0.9.148** — **…and that strip belongs to BANDCAMP ALONE — correcting 0.9.147, which applied it
   to all four services.** Qobuz/Tidal/Deezer hand back a bare `title` in the raw album hash 0.9.146
   moved to; only Bandcamp's search PASSTHROUGH joins the artist on. On the other three the strip had
