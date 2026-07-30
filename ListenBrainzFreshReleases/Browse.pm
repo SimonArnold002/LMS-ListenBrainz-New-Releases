@@ -4281,7 +4281,32 @@ sub _streamKey {
     # `favorites_url` is part of the CACHED item (_cacheStream stores everything but
     # `url`), so without this bump every already-resolved album would keep handing LL
     # a favurl with no type on it and the handshake would look broken for weeks.
-    my $key = 'lbf:stream:21:' . $svcOrder . ':' . ($idPart // '');
+    # :21→:22 (0.9.142): the favurl gained '&tc=' and items gained `_tracks`. **0.9.143 removed
+    # both again** (the count is absent from every service's SEARCH response — see _attachFavUrl),
+    # and the key deliberately STAYS at :22: rather than going back to :21: or on to :23:.
+    # Reverting the key would resurrect pre-0.9.142 entries and bumping it would force a third
+    # needless re-resolve; dropping a field from the cached item needs neither, since an orphaned
+    # `_tracks` key on an existing entry is simply never read. Bump only when a cached item gains
+    # something a reader depends on. (Contrast _bcMatchKey below: it does NOT re-populate itself
+    # and is therefore never bumped for a favurl change at all.)
+    # :22→:23 (0.9.144): the favurl GAINED '&al=' (the album title). Same rule as :20→:21
+    # and the opposite of the :22 no-op above — this ADDS a field a reader depends on, so
+    # every already-resolved album must re-resolve once or it keeps handing LL the old
+    # favurl for the whole 7-day TTL.
+    # :23→:24 (0.9.145): 0.9.144 SHIPPED '&al=' carrying the MUSICBRAINZ release name; 0.9.145
+    # moved it to the matched service's naming.
+    # :24→:25 (0.9.146): ...but 0.9.145 SHIPPED TOO, reading the service's RENDERED ROW LABEL
+    # (`name`/`line1`), which bakes the artist in — Qobuz artist-first, Bandcamp artist-last.
+    # Now the raw album title (`_svctitle`). THREE consecutive builds have put a different
+    # wrong string in this one field, each one silently un-matchable at playback, so the rule
+    # is worth stating plainly: **a favurl value that LL matches on cannot be left to age out
+    # of a 7d cache.** Bump this key on ANY change to what '&al=' carries, even when the field
+    # keeps its shape — the cost is one re-resolve, the alternative is a week of silent misses.
+    # :25→:26 (0.9.147): ...and a FOURTH, because Bandcamp's raw passthrough title turned out
+    # to carry "<album> - <artist>" too, so :25: cached that. Now _stripArtistAffix'd.
+    # :26→:27 (0.9.148): 0.9.147 applied that strip on ALL FOUR services, so :26: can hold a
+    # Qobuz/Tidal/Deezer title truncated at a dash the service really does use. Bandcamp-only now.
+    my $key = 'lbf:stream:27:' . $svcOrder . ':' . ($idPart // '');
     utf8::encode($key) if utf8::is_utf8($key);   # octet key — non-Latin fallback can't crash md5
     return $key;
 }
@@ -4324,6 +4349,15 @@ sub _bcMatchKey {
     # STILL :6: for the 0.9.141 '&rt=' favurl, for the reason above — 0.9.141 briefly
     # bumped it to :7: "same reason _streamKey bumped", which is exactly the 0.9.42
     # mistake 0.9.47 reverted: _streamKey re-resolves itself, this key does not.
+    # STILL :6: through the whole 0.9.144–0.9.148 '&al=' sequence too, and that one has a
+    # visible cost: an ALREADY-PINNED Bandcamp match replays its cached favorites_url verbatim
+    # (_bcMatchItems), so Listen Later goes on being sent whichever wrong album name was current
+    # when the pin was made — the "Title (Album)" row label under 0.9.144, the artist-affixed
+    # "Title - Artist" under 0.9.145–0.9.147 — and that release keeps failing to reach Played.
+    # NOTE THE REMEDY IS NOT THE USUAL ONE: removing and re-adding the entry in Listen Later
+    # re-sends the same stale favurl. Only a manual "Re-search Bandcamp" on the release rewrites
+    # the pin. Accepted deliberately — the alternative is deleting every hand-curated pin, which
+    # is the strictly worse trade (the pin is often the album's ONLY playable entry).
     my $key = 'lbf:bcmatch:6:' . ($idPart // '');
     utf8::encode($key) if utf8::is_utf8($key);
     return $key;
@@ -4485,7 +4519,15 @@ sub _findPlayable {
                 $it->{_svc}  = $svc;             # for cache rebuild
                 # $tnorm is the release's OWN MusicBrainz primary type (the same value
                 # the single-drop above keys on) — pass it to Listen Later as '&rt='.
-                _attachFavUrl($it, $svc, $art, $artist, $year, _llRelType($tnorm));  # qobuz://album:<id>?cover=<art>&a=<artist>&y=<year>&rt=<type>
+                # The album name we send is THE MATCHED SERVICE'S OWN TITLE — `_svctitle`,
+                # stashed from the RAW album hash at match time. NOT $album (the MB/LB
+                # release name; see '&al=' in _attachFavUrl) and NOT `name`/`line1`, which
+                # are the plugin's rendered LABEL with the artist baked in. No fallback: if
+                # a service ever yields no title we send nothing and LL reads Material's
+                # label, which is what happened before 0.9.144 and is merely imperfect —
+                # whereas either wrong string here is silently destructive.
+                _attachFavUrl($it, $svc, $art, $artist, $year, _llRelType($tnorm),
+                              $it->{_svctitle});  # qobuz://album:<id>?cover=<art>&a=<artist>&al=<svc title>&y=<year>&rt=<type>
             }
             $result[$i] = \@matched;
             $resolve->();
@@ -4561,8 +4603,62 @@ sub _llRelType {
     return undef;
 }
 
+# Strip an artist affix a service has joined onto its own album title, for '&al='.
+#
+# BANDCAMP ONLY (0.9.148). _searchBandcamp is the single caller: Bandcamp's search
+# passthrough returns "<album> - <artist>" (confirmed live: a Bandcamp add stored "Radio:
+# Journey Beat (Original Music from Big Walk) - aksfx"), whereas Qobuz/Tidal/Deezer hand back a
+# bare title in the raw album hash 0.9.146 moved to. 0.9.147 ran all four through here, which
+# was wrong: with no wart to remove on the other three, the strip could only ever misfire —
+# a real catalogue title ending in its own artist ("Goldberg Variations - Glenn Gould" by Glenn
+# Gould) clears both guards below and reaches LL truncated. Do NOT widen this back out to a
+# service without live evidence that it joins the artist on.
+#
+# WHY IT IS NEEDED AT ALL, having already moved to the raw album hash: the MATCHER never
+# noticed the wart, because _albumMatches accepts a candidate that STARTS WITH our album, so a
+# trailing " - artist" passes straight through — right for matching, wrong for a title.
+#
+# Deliberately conservative, following the same reasoning as LL's own 0.1.72 hardening:
+#   • the separator must be SPACE-PADDED, so a hyphenated title ("Jay-Z", "Sunn O)))-Monoliths")
+#     is never mistaken for a join;
+#   • the discarded side must EQUAL the artist under _norm — not merely contain or start with
+#     it — so "Album - aksfx remixes" survives intact even when the artist IS aksfx, and an
+#     album genuinely named after a dash phrase is untouched. Note the gate is about the
+#     DISCARDED side only: "Live - Throwing Copper" by the band Live does strip, to "Throwing
+#     Copper", and that is correct — there the artist really is joined on the front;
+#   • anything that doesn't match both tests is returned VERBATIM. A missed strip is a cosmetic
+#     wart; a wrong strip corrupts the title LL matches and dedupes on. That asymmetry is also
+#     why the sub stays where the wart is, rather than being applied defensively everywhere.
+# Prefix is tested at the FIRST separator and suffix at the LAST, so a title that itself
+# contains " - " still resolves whichever end the artist is on.
+#
+# LBF-ONLY, outside the shared matcher — it is presentation logic for the handshake, not
+# matching. Do NOT confuse it with `_stripArtistPrefix` below, which IS a shared-engine sub
+# (fleet-synced across DSC/LBF/PFR); this one does not trip matcher_sync_check.
+sub _stripArtistAffix {
+    my ($title, $artist) = @_;
+    return $title unless defined $title  && !ref $title  && length $title;
+    return $title unless defined $artist && !ref $artist && length $artist;
+
+    my $an = _norm($artist);
+    return $title unless length $an;
+
+    # Hyphen-minus, the Unicode dash family (figure/en/em/horizontal bar) and minus sign.
+    my $dash = qr/\s+[-\x{2010}\x{2011}\x{2012}\x{2013}\x{2014}\x{2015}\x{2212}]\s+/;
+
+    if ($title =~ /^(.*?)$dash(.*)$/s) {          # first separator → "<artist> - <album>"
+        my ($lhs, $rhs) = ($1, $2);
+        return $rhs if length $rhs && _norm($lhs) eq $an;
+    }
+    if ($title =~ /^(.*)$dash(.*?)$/s) {          # last separator  → "<album> - <artist>"
+        my ($lhs, $rhs) = ($1, $2);
+        return $lhs if length $lhs && _norm($rhs) eq $an;
+    }
+    return $title;
+}
+
 sub _attachFavUrl {
-    my ($it, $svc, $art, $artist, $year, $relType) = @_;
+    my ($it, $svc, $art, $artist, $year, $relType, $album) = @_;
     my $id = $it->{_albumid};
     return unless defined $id && length $id;
     my $fav = lc($svc) . '://album:' . $id;   # scheme = ListenLater's qobuz/tidal/bandcamp source tag
@@ -4598,6 +4694,39 @@ sub _attachFavUrl {
         push @params, 'a=' . URI::Escape::uri_escape_utf8($artist);
     }
 
+    # The MATCHED SERVICE'S album title as '&al=' (0.9.144), the symmetric partner of '&a='.
+    # ListenLater has no structured album name for an online row: Material substitutes
+    # $ALBUMNAME/$TITLE with the row's DISPLAY LABEL verbatim, which is whatever that
+    # streaming plugin's renderer printed — Bandcamp's search rows read "Title (Album)".
+    # Sending the service's own title makes the album name independent of that plumbing.
+    #
+    # SEND THE SERVICE'S NAME, NEVER MUSICBRAINZ'S — this is the whole rule, and 0.9.144
+    # SHIPPED IT BACKWARDS (fixed in 0.9.145). By the time we build a favurl we have RESOLVED
+    # this release to a specific service album, and from that point the service's spelling is
+    # the only one that matters downstream:
+    #   • LL's Played auto-detection matches the PLAYING track's album title, which the
+    #     service reports — so a record stored under MB's spelling is never recognised while
+    #     it plays and never leaves the list. Silent: the album plays perfectly.
+    #   • LL's dedupe key is artist|album|year, so the same album added DIRECTLY from that
+    #     service must produce the same key — it will only if we use the service's name.
+    # The two disagree constantly, and not just over edition qualifiers: ListenBrainz has
+    # aksfx – "Radio: Fourth Space (Original Music from Big Walk)" where Qobuz has
+    # "…(Original Music from the Game \"Big Walk\")". MusicBrainz also keeps a release's
+    # distinguisher OUT of the title (all four American Football LPs are titled "American
+    # Football"; "LP2"/"LP3" live in MB's `disambiguation`), which the services put IN it.
+    # Sending MB's name loses on both.
+    #
+    # Same idiom (and the same defined/ref/length guard) as '&a='; Pitchfork Reviews sends the
+    # identical param — but for a DIFFERENT reason worth keeping straight: its rows are
+    # labelled "Artist - Album", so its '&al=' undoes ITS OWN renderer's prefix. That is not
+    # licence to substitute a different naming authority, which is exactly the mistake here.
+    # NB [?&]a= on LL's side cannot match '&al=' — it needs '=' right after the 'a' — so the
+    # two params can't collide whatever order they arrive in.
+    if (defined $album && !ref $album && length $album) {
+        require URI::Escape;
+        push @params, 'al=' . URI::Escape::uri_escape_utf8($album);
+    }
+
     # And the release year, so ListenLater's dedupe key (artist|album|year) tells two
     # same-titled releases from different years apart — otherwise the second one added
     # is silently dropped as a duplicate. Bare 4-digit, no escaping needed.
@@ -4611,6 +4740,15 @@ sub _attachFavUrl {
         push @params, 'rt=' . $relType;
     }
 
+    # NO '&tc=' (the service track count) — 0.9.142 added one and 0.9.143 removed it again as
+    # measurably dead. The count fields (Qobuz tracks_count / Deezer nb_tracks / TIDAL
+    # numberOfTracks) are real, but they live on each service's per-ALBUM endpoint and are
+    # ABSENT from the SEARCH responses these matches come from, so nothing was ever sent.
+    # Verified live rather than assumed: adding a 3-track MusicBrainz Single from a match row
+    # logged `rel=single` at insert on all three services, then LL's own check corrected it to
+    # `ep` (Qobuz 1.5 ms, Tidal 150 ms, Deezer 2-277 ms) — i.e. LL always did the work. Don't
+    # re-add this without ONE real end-to-end observation of a count arriving: every test
+    # written for it supplied the field itself, which is exactly how it shipped inert.
     $fav .= '?' . join('&', @params) if @params;
     $it->{favorites_url} = $fav;
 }
@@ -4802,6 +4940,19 @@ sub _searchQobuz {
             $item->{_albumid} = $album->{id};   # native id → ListenLater favurl (album:<id>)
             $item->{_ctype}   = _candReleaseType($album);   # album/single/ep — for the type filter
             $item->{_year}    = _svcYear($album);           # service release year (trending date fallback)
+            # The service's own ALBUM TITLE, for Listen Later's '&al=' (see _attachFavUrl).
+            # Taken from the RAW album hash, never from the rendered node: `name`/`line1` are
+            # each plugin's DISPLAY LABEL and they bake the artist in — Qobuz renders it
+            # artist-first, Bandcamp artist-last — which lands in LL's stored title and its
+            # dedupe key, and never matches at playback. This is the same field _albumMatches
+            # validates against above, so it is the album title alone by construction.
+            # NOT run through _stripArtistAffix (0.9.148, correcting 0.9.147, which applied it
+            # here too): the raw hash title is already bare on this path — only Bandcamp's
+            # PASSTHROUGH is evidenced to join the artist on — while a catalogue title that
+            # genuinely ends in its artist ("Goldberg Variations - Glenn Gould" by Glenn Gould)
+            # clears both of the sub's guards and would be truncated to a name the service never
+            # reports at playback: the exact failure this handshake exists to prevent, in reverse.
+            $item->{_svctitle} = $album->{title};
             push @out, $item;
         }
         # Matched the album but the renderer produced nothing usable → inconclusive
@@ -4832,6 +4983,17 @@ sub _searchBandcamp {
             next unless _albumMatches($artistNorm, $albumNorm, $pt->{artist}, $pt->{title}, $albumRaw);
             $it->{_albumid}  = $pt->{album_id};               # native id → ListenLater favurl (album:<id>)
             $it->{_albumurl} = $pt->{album_url} || $pt->{url}; # album PAGE url → packed into the favurl ?b= blob (exact Bandcamp replay key)
+            # Bandcamp's own ALBUM TITLE for '&al=' — from the PASSTHROUGH, not the rendered
+            # row, whose label is "<album> - <artist>". Same field _albumMatches validates
+            # against above. Serves BOTH Bandcamp paths: the manual picker calls this sub
+            # through the adapter's `run`, so the stash flows through to it.
+            # Bandcamp joins the artist ON: its passthrough title is "<album> - <artist>"
+            # (confirmed live — an add stored "Radio: Journey Beat (…) - aksfx", while
+            # playback reports the bare title, so the two could never match). Strip it.
+            # THE ONLY CALLER of _stripArtistAffix (0.9.148): Bandcamp is the one service
+            # evidenced to join, and the strip carries a real false-positive cost, so it is
+            # spent only where the wart is known to exist. See the sub's own header.
+            $it->{_svctitle} = _stripArtistAffix($pt->{title}, $pt->{artist});
             push @out, $it;
         }
         $collect->(\@out);
@@ -4954,8 +5116,14 @@ sub _searchBandcampOnly {
             my $name = $cand->{name} // $cand->{line1} // $album;
             $cand->{image} = $bc->{icon} if $bc->{icon};        # service logo (as inline detail rows)
             $cand->{_svc}  = 'Bandcamp';
+            # BANDCAMP'S OWN title from `_svctitle` (the passthrough title stashed in
+            # _searchBandcamp), like every other service. NOT $album (the MB/LB release
+            # name) and NOT $name/`line1` — Bandcamp's row label is "<album> - <artist>",
+            # so using it bakes the artist into LL's stored title and dedupe key and can
+            # never match at playback. See '&al=' in _attachFavUrl.
             _attachFavUrl($cand, 'Bandcamp', $art, $artist, $year,
-                          _llRelType($rel->{release_group_primary_type}));  # …&rt=<type>
+                          _llRelType($rel->{release_group_primary_type}),
+                          $cand->{_svctitle});  # …&al=<svc title>&rt=<type>
             push @rows, {
                 name        => $name,
                 line2       => $artist,
@@ -5048,6 +5216,19 @@ sub _searchTidal {
             $item->{_albumid} = $album->{id};   # native id → ListenLater favurl (album:<id>)
             $item->{_ctype}   = _candReleaseType($album);   # album/single/ep — for the type filter
             $item->{_year}    = _svcYear($album);           # service release year (trending date fallback)
+            # The service's own ALBUM TITLE, for Listen Later's '&al=' (see _attachFavUrl).
+            # Taken from the RAW album hash, never from the rendered node: `name`/`line1` are
+            # each plugin's DISPLAY LABEL and they bake the artist in — Qobuz renders it
+            # artist-first, Bandcamp artist-last — which lands in LL's stored title and its
+            # dedupe key, and never matches at playback. This is the same field _albumMatches
+            # validates against above, so it is the album title alone by construction.
+            # NOT run through _stripArtistAffix (0.9.148, correcting 0.9.147, which applied it
+            # here too): the raw hash title is already bare on this path — only Bandcamp's
+            # PASSTHROUGH is evidenced to join the artist on — while a catalogue title that
+            # genuinely ends in its artist ("Goldberg Variations - Glenn Gould" by Glenn Gould)
+            # clears both of the sub's guards and would be truncated to a name the service never
+            # reports at playback: the exact failure this handshake exists to prevent, in reverse.
+            $item->{_svctitle} = $album->{title};
             push @out, $item;
         }
         # Matched the album but the renderer produced nothing usable → inconclusive
@@ -5100,6 +5281,19 @@ sub _searchDeezer {
             $item->{_albumid} = $album->{id};   # native id → ListenLater favurl (album:<id>)
             $item->{_ctype}   = _candReleaseType($album);   # album/single/ep — for the type filter
             $item->{_year}    = _svcYear($album);           # service release year (trending date fallback)
+            # The service's own ALBUM TITLE, for Listen Later's '&al=' (see _attachFavUrl).
+            # Taken from the RAW album hash, never from the rendered node: `name`/`line1` are
+            # each plugin's DISPLAY LABEL and they bake the artist in — Qobuz renders it
+            # artist-first, Bandcamp artist-last — which lands in LL's stored title and its
+            # dedupe key, and never matches at playback. This is the same field _albumMatches
+            # validates against above, so it is the album title alone by construction.
+            # NOT run through _stripArtistAffix (0.9.148, correcting 0.9.147, which applied it
+            # here too): the raw hash title is already bare on this path — only Bandcamp's
+            # PASSTHROUGH is evidenced to join the artist on — while a catalogue title that
+            # genuinely ends in its artist ("Goldberg Variations - Glenn Gould" by Glenn Gould)
+            # clears both of the sub's guards and would be truncated to a name the service never
+            # reports at playback: the exact failure this handshake exists to prevent, in reverse.
+            $item->{_svctitle} = $album->{title};
             push @out, $item;
         }
         # Matched but the renderer produced nothing usable → inconclusive (see _searchTidal).

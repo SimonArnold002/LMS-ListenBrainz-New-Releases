@@ -3,6 +3,50 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.148
+
+### Fixed
+- **An album whose title really does end in the artist's name is no longer cut short when it's saved to Listen Later.** 0.9.147 removed a trailing artist from the album name, which is right for Bandcamp — it genuinely puts the artist there — but it did so on Qobuz, Tidal and Deezer as well, where the name arrives clean already. On those three the change could only ever do harm: a release actually called "Goldberg Variations - Glenn Gould", by Glenn Gould, was saved as "Goldberg Variations", a name the service never says while playing, so the album sat in Listen Later for ever no matter how often you played it — the very fault 0.9.144–0.9.147 set out to cure, arrived at from the other side. The artist is now removed for Bandcamp only.
+- **Anything added to Listen Later from Qobuz, Tidal or Deezer under 0.9.147 whose title contains a dash** may have been saved short and should be removed and re-added. Matches this plugin had cached are re-fetched by themselves.
+- **Hand-picked Bandcamp matches are the one exception, and removing and re-adding will not fix those**: a match you found with **Search Bandcamp** is kept as you left it — deliberately, since it's often an album's only playable entry — so it goes on sending whichever name was current when you found it. Open the release and tap **Re-search Bandcamp** to bring it up to date. This applies to any Bandcamp match pinned before this release, back to 0.9.144.
+
+## 0.9.147
+
+### Fixed
+- **Bandcamp albums no longer save to Listen Later with the artist stuck on the end of the title.** 0.9.146 took the album name from the release's own entry rather than the browse row, which fixed Qobuz, Tidal and Deezer — but Bandcamp puts the artist there too, so its albums still saved as "Radio: Journey Beat (Original Music from Big Walk) - aksfx" and, with the artist shown alongside, read as though it were there twice. Bandcamp itself reports the plain title while the album plays, so the saved name never matched and the album never moved to *Played*. The artist is now removed from the title whichever end a service puts it, and only when it really is the artist — a title that simply contains a dash, or a band whose name reads like one, is left exactly as it is.
+- **Anything added to Listen Later under 0.9.144–0.9.146 has a wrong name stored** and should be removed and re-added. Matches this plugin had cached are re-fetched by themselves — except hand-picked Bandcamp matches, which need **Re-search Bandcamp** (see 0.9.148).
+- **This went too wide** — it removed a trailing artist on every service, not only the one that adds it. Superseded by 0.9.148; update to that rather than running this.
+
+## 0.9.146
+
+### Fixed
+- **The artist is no longer glued onto the album title of releases added to Listen Later.** 0.9.145 set out to send the streaming service's own name for a release, but took it from the row as the service's plugin draws it — and those rows put the artist in the title. Qobuz writes it in front, Bandcamp behind, so the same album saved as "aksfx - Radio: Fourth Space …" from one and "Radio: Journey Beat … - aksfx" from the other. Listen Later then had a title no service would ever report while playing, so nothing reached *Played*, and the same album added from two services looked like two different records. The name now comes from the release's own title as the service states it, with the artist kept where it belongs — in the artist field.
+- **This fixed Qobuz, Tidal and Deezer but not Bandcamp**, whose album entry carries the artist as well. Superseded by 0.9.147.
+
+## 0.9.145
+
+### Fixed
+- **Releases added to Listen Later from here now save under the name the streaming service uses, so they move to *Played* again.** 0.9.144 started telling Listen Later the album's name — a good idea, spoiled by sending the *MusicBrainz* name instead of the name of the album it had actually matched on Qobuz, Tidal, Deezer or Bandcamp. The two disagree more often than you'd expect: ListenBrainz lists aksfx's "Radio: Fourth Space (Original Music from Big Walk)" where Qobuz has "Radio: Fourth Space (Original Music from the Game "Big Walk")". MusicBrainz also keeps a release's distinguishing part out of the title altogether — all four American Football albums are simply "American Football", where the services print "American Football (LP2)" and so on. Listen Later checks the album name against what's playing to decide whether you've heard a release, so anything saved under a name the service doesn't use was never recognised and stayed in the list no matter how often you played it — silently, because it played perfectly well. It now sends the service's own name, which is also what makes the same album dedupe properly if you later add it straight from that service.
+- **This fix was itself wrong** — it read the service's name off the browse row, which carries the artist. Superseded by 0.9.146; update to that rather than running this.
+
+## 0.9.144
+
+### Changed
+- **Adding a release to Listen Later now sends the album name outright**, rather than leaving Listen Later to read it off the row label — which arrives by way of the skin and depends on how each service's plugin happens to render it (Bandcamp's search rows, for instance, have "(Album)" tacked on the end). Works with Listen Later **0.1.71 or newer**; older versions ignore it and read the label as before.
+- **This shipped sending the wrong name** — MusicBrainz's rather than the matched service's — which stopped affected releases ever moving to *Played*. Fixed in 0.9.145; update to that rather than running this.
+- Stored album matches are re-fetched once so the name is included, which happens by itself next time you open a release page. Nothing to press. Hand-picked Bandcamp matches keep their existing entry until you search Bandcamp for that album again — they're never discarded.
+
+## 0.9.143
+
+### Changed
+- **Removed the track-count groundwork added in 0.9.142, which measurement showed did nothing.** The idea was to tell Listen Later how many tracks a release holds so it needn't look that up itself. The services do publish that number, but only on their per-album pages — not in the search results these matches come from — so in practice nothing was ever sent, on any of Qobuz, Tidal or Deezer. Listen Later was doing the work the whole time, which is why the labels have been correct throughout. The dead code is gone rather than left looking like a working feature, and the test that covers this now fails if it's ever put back without evidence that a count really arrives. **No change to anything you see**, and nothing is re-fetched as a result.
+
+## 0.9.142
+
+### Changed
+- **Groundwork only, with no visible effect today.** 0.9.141 began telling Listen Later what MusicBrainz calls each release, which turned out to be half a story: MusicBrainz calls a release a single even when it holds a lead track plus a couple of B-sides, whereas Listen Later reads *single* as meaning one track and filed the whole thing as heard the moment that track finished. **That is fixed in Listen Later 0.1.88 — nothing here is needed for it.** This release additionally passes on the release's track count *when a service states one while we're finding the album*, which would let Listen Later skip looking it up. In practice none of Qobuz, Tidal or Deezer include it in the data we get at that point, so Listen Later does look it up — the instant after adding, far too quickly to notice. The groundwork costs nothing and starts working by itself if that ever changes.
+- Stored album matches are re-fetched once as a result, which happens by itself next time you open a release page. Nothing to press, and hand-picked Bandcamp matches are untouched.
+
 ## 0.9.141
 
 ### Added

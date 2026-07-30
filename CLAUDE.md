@@ -110,11 +110,12 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-0.9.141
+0.9.148
 
-### State of play (2026-07-29) — read this before starting anything
+### State of play (2026-07-30) — read this before starting anything
 
-**Branches.** `dev` (this one) is the working line at **0.9.141**. `alpha` holds the parked
+**Branches.** `dev` (this one) is the working line at **0.9.148** (uncommitted: the 0.9.147
+`&al=` artist-affix work and the 0.9.148 correction that narrows it to Bandcamp). `alpha` holds the parked
 genre work at 0.9.140 — pushed, see `ALPHA.md` there, do not merge it. `main` is still at
 **0.9.98**: everything from 0.9.99 on (People You Follow, Trending, the matcher fleet sync,
 0.9.126–0.9.128 and 0.9.141) has never been promoted, so "what users have" is far behind
@@ -209,8 +210,27 @@ MuSpy memo on Refresh, empty week under the family lens), `tools/matcher_sync_ch
     bumped alongside it, those albums then read "not found — tap to retry". So the "bump EVERY cache
     layer" rule does NOT extend to this key; the standing rule above wins.
   - **`tools/t_ll_handshake.pl` tests BOTH ENDS** — it extracts LBF's `_attachFavUrl`/`_llRelType` and
-    LL's `relTypeFor`/`_normRelType` from their live source files and checks the round trip, so a
-    change to either repo's half will fail it. Run it after touching either side.
+    LL's `relTypeFor`/`_normRelType`/`_stripPrivateParams` from their live source files and checks the
+    round trip, so a change to either repo's half will fail it. Run it after touching either side. Its
+    three source paths are env-overridable (`LBF_BROWSE`/`LL_SOURCES`/`LL_PLUGIN`) so it can be pointed
+    at a mutated copy and **anti-tested** — do that for any new assertion here.
+
+- **Listen Later album-title handshake — `&al=` on the favurl (0.9.144).** The favurl now also carries
+  the CLEAN album title, because Material hands LL the row's display LABEL as `$ALBUMNAME` and that
+  label is whatever the streaming plugin's renderer printed. Full reasoning, the correction to my first
+  (overstated) justification, the deliberate edition-collapse consequence, the encoding contract and the
+  test/anti-test numbers are in the **0.9.144** Version History entry — read that before touching this.
+  Two things to carry in your head: **LL already strips a known suffix list** (so this is about the
+  qualifiers NOT on it, not about `(Album)`), and **`_streamKey` had to bump** (`:22`→`:23`) because the
+  favurl is part of the cached item — and has bumped on every subsequent change to this value, now
+  `:27:`.
+  - **What `&al=` carries, in one line (0.9.148):** the RAW `title` from the service's own album hash
+    (`_svctitle`), verbatim for Qobuz/Tidal/Deezer, and `_stripArtistAffix`'d for Bandcamp ALONE,
+    whose passthrough joins the artist on. Read 0.9.144→0.9.148 as one sequence: five builds, four of
+    them correcting the previous one, every wrong value silently un-matchable at playback. **Both
+    directions are the same bug** — a title with something extra in it, and a title with something
+    taken out of it — so any future transform here needs live evidence from the service it's applied
+    to, not symmetry with another service.
 
 - **NEVER `$cache->set($key, $a_plain_string)` (0.9.141).** `Slim::Utils::DbCache::set` Storable-freezes
   a value only `if (ref $data)`; a plain scalar goes STRAIGHT to a DBI `SQL_BLOB` bind, and binding a
@@ -1657,6 +1677,271 @@ that cause empty/junk pools:
    ([[mb-mirror-search-index-gotcha]]); test the library with `["artists",…,"search:NAME"]`.
 
 ## Version History
+- **0.9.148** — **…and that strip belongs to BANDCAMP ALONE — correcting 0.9.147, which applied it
+  to all four services.** Qobuz/Tidal/Deezer hand back a bare `title` in the raw album hash 0.9.146
+  moved to; only Bandcamp's search PASSTHROUGH joins the artist on. On the other three the strip had
+  no wart to remove and could therefore only misfire: a catalogue title that genuinely ends in its
+  own artist — `"Goldberg Variations - Glenn Gould"` by Glenn Gould — clears BOTH guards (the
+  separator is space-padded, the discarded side `_norm`-EQUALS the artist) and reaches LL as
+  `"Goldberg Variations"`, a name the service never reports at playback. **That is the identical
+  failure mode 0.9.144–0.9.147 exist to fix, arrived at from the opposite direction**, and it is the
+  general lesson: this handshake's failures are silent (the album plays fine, it just never reaches
+  *Played*), so a defensive transform applied where the defect isn't evidenced is not free — it is a
+  new instance of the same bug. `_searchBandcamp` is now the sub's only caller; the other three
+  assign `$album->{title}` verbatim.
+  **`_streamKey` :26→:27** — a FIFTH bump, same rule as ever: `:26:` can hold a Q/T/D title truncated
+  at a dash the service really uses.
+  **`_bcMatchKey` STILL `:6:`** (a pin is often an album's only playable entry) — but its comment now
+  states the residual cost correctly and, importantly, that **the usual remedy does not apply**:
+  `_bcMatchItems` replays the cached `favorites_url` verbatim, so removing and re-adding in LL just
+  re-sends the stale favurl. Only **Re-search Bandcamp** rewrites a pin. Same wording in the CHANGELOG.
+  **`tools/t_svctitle.pl` grown to 22 checks**: `%FOLD` is now LIFTED from `Browse.pm` (it was
+  hand-copied, so a `%FOLD` edit drifted without failing), the Goldberg case is kept as a live
+  demonstration that the guards CANNOT save it, and the four search subs are pinned at source level —
+  Bandcamp calls the strip, the other three must not and must assign the raw title. Anti-tested:
+  restoring the 0.9.147 call sites fails 6.
+- **0.9.147** — **…and the raw title needs the ARTIST AFFIX stripped, because Bandcamp's carries one
+  too (`_stripArtistAffix`) — but it applied the strip to ALL FOUR services, which 0.9.148 narrows to
+  Bandcamp. Read this entry with that one.** 0.9.146 moved to the raw album hash and fixed
+  Qobuz/Tidal/Deezer, but
+  Bandcamp's search PASSTHROUGH title is itself `"<album> - <artist>"` — confirmed live: an add stored
+  `Radio: Journey Beat (Original Music from Big Walk) - aksfx`, and Simon confirmed Bandcamp's Now
+  Playing reports artist `aksfx` with album `Radio: Journey Beat (Original Music from Big Walk)`, so
+  the stored name could never match at playback.
+  **Why no field is trustworthy here, which is the thing to remember:** `_albumMatches` accepts a
+  candidate that STARTS WITH our album, so a trailing `" - artist"` sails through matching untouched.
+  Every field in the chain therefore looks fine to the matcher while being wrong as a title. There is
+  no field to switch to — the affix has to be removed explicitly.
+  **`_stripArtistAffix` is deliberately conservative**, following LL's own 0.1.72 hardening: the
+  separator must be SPACE-PADDED (so `Jay-Z` is untouched), the discarded side must EQUAL the artist
+  under `_norm` (not contain or start with it, so `Album - aksfx remixes` is left alone), and anything
+  failing either test is returned VERBATIM. Prefix is tested at the FIRST separator, suffix at the
+  LAST, so a title containing its own `" - "` still resolves. Compared against the SERVICE's artist
+  spelling (`$pt->{artist}`; also `$candArtist` until 0.9.148 narrowed the call to Bandcamp) — the
+  value that service would actually have joined. **Conservative is not the same as safe**: the guards
+  stop a wrong strip only where the artist ISN'T what got joined on, and 0.9.148 is what happens when
+  it is.
+  **LBF-ONLY, outside the shared matcher.** Do not confuse it with `_stripArtistPrefix`, which IS a
+  fleet-synced shared-engine sub; this one doesn't trip `matcher_sync_check`.
+  **`_streamKey` :25→:26** — a FOURTH bump for a fourth wrong `&al=` value.
+  **New suite `tools/t_svctitle.pl`**, using the real sub and the real `_norm`/`%FOLD` chain, 14
+  checks split into "must strip" and **"must not strip"** — the second half is the point, since a
+  wrong strip corrupts the title LL matches and dedupes on, which is worse than the wart it removes.
+  Anti-tested: neutering the strip fails 7.
+- **0.9.146** — **`&al=` takes the service's RAW ALBUM TITLE (`_svctitle`), not its rendered row
+  label — correcting 0.9.145, which also shipped. Completed by 0.9.147, which strips the artist affix
+  Bandcamp's raw title turned out to carry.** Reported by Simon from two live rows: rec 207
+  (Qobuz) stored `aksfx - Radio: Fourth Space (…)`, rec 208 (Bandcamp) stored
+  `Radio: Journey Beat (…) - aksfx`. **Artist-first on one service, artist-last on the other** — the
+  unmistakable signature of a DISPLAY LABEL rather than a title, which is exactly what
+  `$it->{name}`/`{line1}` are: each streaming plugin's own renderer composes them, and they differ per
+  plugin. A label can never match at playback, and it poisons LL's `artist|album|year` dedupe key with
+  the artist on both ends. Worse than 0.9.144 in one respect: MB's name was at least a real title.
+  **Fix:** stash the title from the RAW album hash at match time — `$item->{_svctitle} =
+  $album->{title}` for Qobuz/Tidal/Deezer, `$it->{_svctitle} = $pt->{title}` for Bandcamp (which also
+  serves the manual picker, since it calls this sub through the adapter's `run`). That is the SAME
+  field `_albumMatches` already validates against, so it is the album title alone by construction —
+  the artist is a separate argument there. **No fallback at the call site:** if a service ever yields
+  no title we send nothing and LL reads Material's label, which is what happened before 0.9.144 and is
+  merely imperfect, whereas either wrong string is silently destructive.
+  **`_streamKey` :24→:25.** Third consecutive bump of this key for a different wrong `&al=` value.
+  **THE RULE: bump it on ANY change to what `&al=` carries, even when the field keeps its shape** —
+  one re-resolve versus a week of silent misses aged out of a 7d TTL.
+  **THE REAL LESSON, and it is a method failure, not a typo.** Three builds in one session each put a
+  different wrong string in this one field. The first two passed every behavioural check in
+  `t_ll_handshake.pl` because they all SUPPLY the album themselves; section 4 (added in 0.9.145) then
+  caught only the MB-name spelling, because I wrote the assertion to accept `{name}` — encoding my own
+  assumption that the rendered node held a title. **I never verified what `name` actually contains for
+  any service; Simon's two live rows did.** The assertion now accepts ONLY `_svctitle` and names all
+  three known-wrong forms, anti-tested against each. When a field feeds another plugin's matching,
+  read a REAL value out of a REAL row before believing what it holds.
+- **0.9.145** — **`&al=` carries the MATCHED SERVICE'S naming, not MusicBrainz's — correcting 0.9.144,
+  which SHIPPED and was installed. SUPERSEDED BY 0.9.146 — this build read the service's rendered ROW
+  LABEL, which bakes the artist in; the principle below is right, the field it used was not.** Reported by Simon, from a real row: LB has aksfx
+  `Radio: Fourth Space (Original Music from Big Walk)` where Qobuz has
+  `…(Original Music from the Game "Big Walk")`, and the release never reached Played.
+  **THE RULE: once a favurl exists the release has been RESOLVED to a specific service album, and from
+  that point the SERVICE's spelling is the only one that works.** Two independent consumers demand it,
+  both title-keyed: LL's Played auto-detection matches the PLAYING track's album title (reported by the
+  service), and LL's `artist|album|year` dedupe key must agree with a direct add from that same
+  service. MB and the services disagree constantly, and NOT only over edition qualifiers — see the
+  aksfx case above. MB additionally keeps a release's distinguisher OUT of the title (all four American
+  Football LPs are titled `American Football`, with `LP2`/`LP3` in `disambiguation`) where the services
+  put it IN. Sending MB's name loses on both counts, **silently**: the album plays perfectly and just
+  never leaves the list.
+  **Why 0.9.144 got it wrong** — it reasoned that an "authoritative" catalogue title beat a renderer's
+  display label. That mistakes WHICH QUESTION the param answers. It is not "what is this release
+  really called", it is "what will the thing playing call itself".
+  **Contrast PFR, which sends the same param for a different reason:** its rows read "Artist - Album",
+  so its `&al=` undoes ITS OWN renderer's prefix. That is not licence to substitute a different naming
+  authority. Do not "improve" this back to MB's name.
+  **Changes:** both call sites now pass the service candidate's own title (`$it->{name} //
+  $it->{line1}`); at the Bandcamp site deliberately NOT the `$name` local, whose `// $album` fallback
+  would smuggle the MB name back in. **`_streamKey` :23→:24** — the field didn't change shape, only its
+  value, and a `:23:` entry cached by the installed 0.9.144 would keep handing LL the MB name for the
+  full 7d TTL.
+  **THE TEST LESSON, and it is the same one as `&tc=` below.** `t_ll_handshake.pl` passed throughout
+  0.9.144 because every case SUPPLIES the album itself — it proved the param is built and parsed
+  correctly and could not say a word about WHICH NAME the plugin chooses. New **section 4** asserts on
+  the CALL SITES in source (crude, but there is no return value to inspect); anti-tested by reverting a
+  site to `$album`, which fails it. **A behavioural test of a handshake cannot check the choice of what
+  goes into it — test the call site too.**
+  **Rows added under 0.9.144 keep the wrong stored name**; only a remove + re-add fixes those.
+- **0.9.144** — **`&al=` — an ALBUM TITLE joins the Listen Later handshake.** Material gives a plugin no
+  structured album name for an online row: `$ALBUMNAME`/`$TITLE` is the row's DISPLAY LABEL verbatim,
+  and these rows are labelled by each streaming plugin's own renderer, qualifier and all. So the album
+  name reaching LL depended on skin plumbing. `_attachFavUrl` takes the name as a 7th arg
+  (`uri_escape_utf8`, pushed next to `&a=`).
+  **SHIPPED WITH THE WRONG NAME — see 0.9.145 above; it sent the MB/LB release name.** The reasoning
+  below is kept for its method notes only; **where it describes sending the MB name it is describing
+  the bug.** Both call sites pass it —
+  the `_findPlayable` settle loop and the manual Bandcamp pin. Receiver has existed since **LL 0.1.71**
+  (`Plugin.pm::_stripPrivateParams`; 0.1.72 hardened its migration, which is why the user-facing floor
+  was quoted as 0.1.72), so older LLs simply ignore it. Idiom copied from **PFR**, which
+  has sent the identical param since its own "Artist - Album" labels needed it.
+  **REAL FLOOR IS LL 0.1.92 — see the Played trade-off below.**
+  - **THE OTHER CONSEQUENCE, missed on the first pass and found by code review: this BREAKS Played
+    on LL 0.1.72–0.1.91.** MB deliberately keeps a release's distinguisher OUTSIDE the title — all four
+    American Football LPs are titled exactly `American Football`, with `LP2`/`LP3` in MB's
+    `disambiguation` (verified against the MB API and Simon's mirror), while the service prints
+    `American Football (LP2)`. `Played::_matchRecord`'s streaming branch matches on the album TITLE
+    alone (no album-id anchor), and LL's `DB::_norm` deliberately KEEPS the qualifier — so the bare
+    name we now send never matches the qualified name the playing track reports, and the row never
+    leaves the list. Silent: it plays perfectly. **Replay is NOT affected** — LL prefers the captured
+    album id (`hasDirectAlbumRef`), which our favurl always carries, so its `(LP4)`-preserving
+    `_bestMatches` ranking never runs for our rows. Display degrades (rows reading `American Football`
+    separated only by year) — accepted, not fixed.
+    **Fixed on the LL side in 0.1.92**, which keeps the service's label as `ref.svc_title` and matches
+    on either. Nothing to change here: the name we send is the right one, LL just needed to stop
+    throwing the other one away.
+    **Do NOT "fix" this by appending MB's `disambiguation`** — that was the first plan and it is wrong.
+    Sampling 120 release-groups from a live LB fresh-releases feed: exactly ONE has a disambiguation,
+    and it reads `The Vampire Lestat OST` — editorial prose, not a service-style qualifier, so
+    appending it would match nothing anywhere. The LB feed carries no such field either (12 keys, none
+    of them disambiguation), so it would need one MB lookup per release-group — and the trending path
+    resolves in bulk. `LP2` happening to be exactly Qobuz's spelling is a coincidence.
+  - **BE PRECISE ABOUT THE GAIN — I overstated it first time and the verification caught it.** I cited
+    two live rows (*Fruit Bats – The Landfill (Album)*, *Walrus Ghost – … (Album)*) as proof of a
+    current bug. They are NOT: LL has stripped a trailing `(Album)`/`(Track)`/`(Hi-Res …)`/`(Explicit)`/
+    `(Mono)`/`(Stereo)` and a trailing `(YYYY)` since **0.1.35** (2026-06-27), so a Bandcamp add TODAY
+    already stores the clean title without this param. Those rows are residue from before that. What
+    `&al=` actually replaces is **the blocklist itself**: anything not on that fixed list —
+    `(Deluxe Edition)`, `(Bonus Track Version)`, `(Remastered)` — still reaches the stored title and the
+    dedupe key. Authoritative name instead of a guess at what to strip. **Method note:** the first cut
+    of the test modelled LL's fallback as the row label ALONE, which made the `(Album)` cases look like
+    they proved something; the anti-test passed them either way and exposed it. Model the FULL fallback
+    or a suite flatters the feature.
+  - **DELIBERATE BEHAVIOUR CHANGE, not pure cleanup:** an edition qualifier that is genuinely part of
+    the service's album title is replaced by MB's plain release name, so a deluxe edition and the
+    standard one now key alike and collapse into ONE row. Correct here (LBF matched both to the SAME MB
+    release), but it is a change — pinned in LL's `tools/t_addpath.pl` with that reasoning attached.
+  - **`_streamKey` :22→:23.** `favorites_url` is part of the cached item, so without it every
+    already-resolved album keeps handing LL the old favurl for the 7d TTL. Note this is the OPPOSITE
+    case to the 0.9.143 no-op: that DROPPED a field (orphan, never read → no bump); this ADDS one a
+    reader depends on. **`_bcMatchKey` stays `:6:`** per the standing rule — with a cost stated in the
+    comment: an already-pinned Bandcamp match keeps its old favurl until re-searched by hand. Accepted;
+    bumping would delete every hand-curated pin, which is strictly worse.
+  - **Encoding contract, verified not assumed:** `uri_escape_utf8` out, `uri_unescape` back = **OCTETS**,
+    never a utf8-flagged string. Identical to `&a=` since 0.9.58 and consistent all the way through LL,
+    so the round trip is lossless. `t_ll_handshake.pl` asserts the octet-ness explicitly so a future
+    change on either side fails loudly rather than quietly re-keying LL's rows.
+  - **Tests: `tools/t_ll_handshake.pl` gained section 3**, driving LL's REAL `_stripPrivateParams`
+    (grabbed from `ListenLater/Plugin.pm`) over what `_attachFavUrl` actually emitted — clean case,
+    on/off-blocklist qualifiers, punctuation-only `( )`, a title full of `&`/`=`/`?`, wide chars, empty
+    album, and `al=` as the LONE param (the ordering case: each strip takes its own leading delimiter,
+    so the residue must still be a bare `scheme://album:<id>`). The file paths are now env-overridable
+    (`LBF_BROWSE`/`LL_SOURCES`/`LL_PLUGIN`) **so it can be anti-tested** — 13 failures with the sender's
+    `al=` push deleted, 13 with the receiver's strip deleted. LL's `tools/t_addpath.pl` gained the
+    DB-level half: the verbatim favurl this version emits for Qobuz and Bandcamp, asserted on the
+    stored row, its dedupe key, and that a later plain-labelled add of the same record now dedupes
+    (5 failures without the receiver).
+- **0.9.143** — **`&tc=` REMOVED — 0.9.142's plumbing was measurably inert, so it's gone.** Read the
+  0.9.142 entry below for the full trace and the verification that killed it. Summary: the count
+  fields are real but live on each service's per-ALBUM endpoint and are ABSENT from the SEARCH
+  responses `_searchQobuz`/`_searchTidal`/`_searchDeezer` iterate, so `_candTrackCount` returned undef
+  every time and no `tc=` was ever emitted, on any service. **Removed:** `_candTrackCount`, the three
+  `$item->{_tracks}` stashes, and the `tc=` block in `_attachFavUrl` (which now carries a comment
+  saying why, and what evidence would be needed to re-add it).
+  **`_streamKey` deliberately STAYS at `:22:`** — reverting it to `:21:` would resurrect pre-0.9.142
+  entries and bumping to `:23:` would force a third pointless re-resolve, whereas DROPPING a field
+  from the cached item needs neither: an orphaned `_tracks` key is simply never read. (Earlier in that
+  session I argued a revert would cost a `:22→:23` bump; that was wrong, and it was the main reason I
+  recommended keeping dead code — a sunk-cost argument, not a technical one.)
+  **Version goes FORWARD to 0.9.143, not back to 0.9.141:** 0.9.142 was already installed, and LMS
+  offers no update for a same-or-lower version. **`tools/t_ll_handshake.pl` rewritten again** — it now
+  tests the `&rt=` wire (including that an unmappable MB type asserts nothing) and LL's own
+  type×count decision, and **asserts no count param is emitted**, so re-adding one fails the test.
+  It also lost a reference to a non-existent `LL verify_favurl_params.pl` that I had invented.
+- **0.9.142** — **`&tc=` — the release's TRACK COUNT joins the Listen Later handshake, completing
+  0.9.141.** 0.9.141 sent MB's primary type as `&rt=` and asserted it as authoritative; but LL reads
+  `single` as "exactly ONE track" (`Played::_totalTracks` returns 1 → its played-through mark), so a
+  MB Single with B-sides was marked Played after track one. The count that disproves it was **already
+  on the same item**: `_candReleaseType` has read it off the service's album hash since 0.9.89 (for
+  the single-drop filter) — computed ~11 lines before `_attachFavUrl` builds the favurl, and unused
+  by it. Fixed properly in LL 0.1.88 (it resolves the release to check); this sends the number so LL
+  needs no lookup at all and the row is right at INSERT time. **Changes:** new `_candTrackCount`
+  (same three verified fields: Qobuz `tracks_count`, Deezer `nb_tracks`, TIDAL `numberOfTracks`;
+  1-3 digits, non-zero) — DELIBERATELY a separate sub, NOT a refactor of `_candReleaseType`, which
+  treats a count of 0 as 'single' (`$tc <= 2`) and feeds the single-drop filter: folding them would
+  silently change which candidates that filter drops. Stashed as `_tracks` in `_searchQobuz` /
+  `_searchTidal` / `_searchDeezer` beside `_ctype`/`_year` (plain scalar → survives the Storable
+  stream cache). `_attachFavUrl` reads `$it->{_tracks}` rather than taking a new arg, so the OTHER
+  call site (the manual Bandcamp picker, ~4958, which has no album hash) sends nothing and needs no
+  change — Bandcamp has no count before its page is fetched, so LL resolves there as before.
+  **Cache: `_streamKey` :21→:22** for the same reason as :20→:21 — `favorites_url` is part of the
+  cached item, so without it every already-resolved album would keep handing LL a favurl with no
+  count. `_bcMatchKey` **stays at :6:** (no auto-repopulation — bumping it discards hand-curated
+  Bandcamp-only matches; the 0.9.42 mistake reverted in 0.9.47 and re-attempted in 0.9.141).
+  **Ordering rule: LL 0.1.89 (the receiver) MUST ship first** — an LL that can't strip `tc=` leaves
+  it in the favurl. **`tools/t_ll_handshake.pl` rewritten** (it had FAILED after LL 0.1.88 added
+  `singleIsWrong`, which it didn't grab — and it encoded the bug as expected behaviour, asserting
+  Single+3 tracks → 'single'). It now evals the real subs from both repos and covers 13 type/count
+  combinations plus sender-side validation; `t_cache_widechar.pl`, `t_review_fixes.pl` and
+  `matcher_sync_check.py` all still pass unchanged.
+  **VERIFIED LIVE 2026-07-29 — and the optimisation does NOT pay off where it was expected.**
+  Adding *3OH!3 – MY FRIENDS* (MB **Single**, 3 tracks) from LBF match rows, per service, from
+  `curl http://plex:9000/log.txt`:
+  - **Tidal** (rec 199): `add -> tidal … rel=single` then `reclassified as ep` **150 ms** later.
+  - **Deezer** (recs 198, 200): `rel=single` then `reclassified as ep` after **277 ms** / **2 ms**
+    (the 2 ms one hit an already-cached tracklist).
+  - **Qobuz** (rec 201): `rel=single` then `reclassified as ep` **1.5 ms** later — SAME as the others.
+
+  **So `&tc=` delivers on NO service. 0.9.142 is inert plumbing.** The count is absent from all three
+  SEARCH payloads, which is where LBF gets its album hashes.
+
+  `rel=single` on the INSERT line is the proof: had `&tc=3` arrived, `relTypeFor(service=>'single',
+  count=>3)` would have settled it to `ep` at insert with no correction line at all. So **neither
+  Tidal's `numberOfTracks` nor Deezer's `nb_tracks` is present in their SEARCH responses** — those
+  fields exist on the per-album endpoint (which is what the earlier probe recorded), not on search
+  results. The count LBF sends is therefore absent for both, and LL's background `_verifyRelease`
+  does the work — invisibly, in 2–150 ms, which is why it LOOKS instant to the user (Simon reported
+  "showed up straight away, no delay" for both services; that observation and the log agree — the
+  fallback is imperceptible, not absent).
+
+  **Consequence for `_candReleaseType` (PRE-EXISTING, since 0.9.89, worth its own look):** its
+  count fallback reads the same absent fields, so for Tidal and Deezer it can only ever answer from
+  `record_type`/`type`. If those are absent from search results too, `_ctype` is always `''` there
+  and the single-drop filter has never dropped a Tidal or Deezer candidate. Untested — but this
+  finding makes it likely.
+
+  **DO NOT conflate this with LL's own Qobuz shortcut.** `Sources::classifyRelType` reads
+  `tracks_count` off `getAPIHandler->getAlbum` — the per-album ENDPOINT, which is exactly where these
+  fields are documented to live, and a different call from the search LBF uses. The Qobuz result
+  above says nothing about it either way: the correction line appears whether the count came from the
+  album object or from the tracklist. Still unverified — don't credit it, don't dismiss it. (Its 1.5 ms
+  turnaround is suggestive but proves nothing; a cached tracklist is equally fast.)
+
+  **Keep or revert?** KEEP, purely on cost: the `:21→:22` bump has already taken its one re-resolve,
+  and reverting needs `:22→:23` — a SECOND re-resolve — to buy back nothing. The plumbing is inert
+  where the field is missing and would start working with no code change if a payload ever carried it.
+
+  **The lesson worth more than the feature:** every test written for this (`t_ll_handshake.pl`,
+  LL's `verify_qobuz_path.pl`) SUPPLIED the field itself — a stubbed `{tracks_count=>4}` — so they
+  could only ever confirm that our code reads a count when one is present, never that one IS present.
+  The "field names verified per plugin" comment was verified against PLUGIN SOURCE (where the fields
+  appear in album-endpoint handling); that true statement about NAMES silently became an assumed
+  statement about AVAILABILITY in a different payload. A sender-side handshake needs one real
+  end-to-end observation before it is believed, not a synthetic round trip.
 - **0.9.96** — **alias-field fallback in `getArtistMbidByName` (ported from Discography 0.32.0).** The
   fielded query `artist:"<name>"` searches the artist NAME only, so a name existing solely as an MB
   **alias** ("The Oh Sees" → Osees `194272cc-…`) returned 0 results and cached a miss — verified live on
