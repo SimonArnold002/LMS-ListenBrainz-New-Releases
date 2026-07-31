@@ -3393,6 +3393,29 @@ sub _pageSection {
     return ([ @$tiles[ 0 .. $shown - 1 ] ], \@rows);
 }
 
+# Sibling of _pageRow for a BOOLEAN in-place reveal (the artist bio on the release
+# detail page). Same mechanism and the same %pageState store, so there is exactly one
+# place per player where transient view state lives. Expanding writes the flag;
+# collapsing DELETES it, so a bio that was never expanded leaves no residue — the
+# same convention as _pageRow collapsing back to PAGE_SIZE.
+sub _bioToggleRow {
+    my ($client, $key, $on, $name, $image) = @_;
+    return {
+        name        => $name,
+        type        => 'link',
+        image       => $image,
+        nextWindow  => 'refresh',
+        passthrough => [{ key => $key, on => $on }],
+        url         => sub {
+            my ($c, $cb, $a, $p) = @_;
+            my $ctx = $pageState{ _cid($c) } ||= {};
+            if ($p->{on}) { $ctx->{ $p->{key} } = 1 }
+            else          { delete $ctx->{ $p->{key} } }
+            $cb->({ items => [] });
+        },
+    };
+}
+
 sub _pageRow {
     my ($client, $key, $target, $name, $image) = @_;
     return {
@@ -3976,31 +3999,47 @@ sub _artistRows {
         ($img ? (image => $img) : ()),
     });
 
-    # Biography: a short (~2 line) preview as plain text on the page, then a
-    # "Read more" link that drills in to the FULL bio (all paragraphs, no cap).
-    # Material renders text rows in full, so the preview must be pre-trimmed; the
-    # complete bio lives behind the drill. A short bio shows inline with no link.
-    # Live feed node, so the url coderef is fine (page is returned, never cached).
+    # Biography: expands IN PLACE rather than drilling into a separate view (the
+    # Discography idiom — which is itself this plugin's old full-bio recipe, improved).
+    # Collapsed = a ~2-line preview + "Read more"; expanded = the full bio, one text
+    # row per PARAGRAPH, + "Show less". Material renders a text row in full and has no
+    # auto-collapse, so the preview must still be pre-trimmed; what changed is only
+    # WHERE the rest appears. A short bio shows inline with no toggle at all.
+    #
+    # The toggle rows reuse the All Releases paging mechanism verbatim
+    # (_bioToggleRow, sibling of _pageRow): nextWindow=>'refresh' plus an EMPTY
+    # response, the only shape Material acts on, which pops the toggle's own window
+    # and re-renders THIS page with the bio's new shape.
+    #
+    # ROW-COUNT SAFETY: _releaseDetail emits the Streaming section BEFORE this one,
+    # so expanding only shifts the non-playable rows that follow (the rest of the
+    # artist block, album metadata, genres, tracklist text and the MB weblink). The
+    # playable streaming rows keep their item_ids, so deep play is unaffected — the
+    # 0.6.11 rule. Do not reorder the sections without revisiting this.
     if (defined $bio && length $bio) {
+        my $bkey = 'bio:' . lc $artist;
         (my $oneLine = $bio) =~ s/\s+/ /g;   # collapse to one line for the preview
-        if (length $oneLine > BIO_PREVIEW) {
+
+        if (length $oneLine <= BIO_PREVIEW) {
+            push @rows, { name => $bio, type => 'text' };   # short enough to show inline
+        }
+        elsif ($pageState{ _cid($client) }{$bkey}) {
+            # Split on BLANK lines only (paragraph breaks are what _cleanBio keeps),
+            # then collapse the single newlines inside each paragraph so Material
+            # wraps the row cleanly instead of honouring the source's hard breaks.
+            push @rows,
+                map  { (my $t = $_) =~ s/\s+/ /g; { name => $t, type => 'text' } }
+                grep { /\S/ } split /\n{2,}/, $bio;
+            push @rows, _bioToggleRow($client, $bkey, 0,
+                cstring($client, 'PLUGIN_LBF_SHOW_LESS'), PAGE_LESS);
+        }
+        else {
             my $short = substr($oneLine, 0, BIO_PREVIEW);
             $short =~ s/\s+\S*$//;           # back off to a word boundary
             $short .= "\x{2026}";
             push @rows, { name => $short, type => 'text' };
-
-            my @paras = map { { name => $_, type => 'text' } } split /\n{2,}/, $bio;
-            push @rows, {
-                name => cstring($client, 'PLUGIN_LBF_READ_MORE'),
-                type => 'link',
-                url  => sub {
-                    my ($c, $cb) = @_;
-                    $cb->({ items => \@paras });
-                },
-            };
-        }
-        else {
-            push @rows, { name => $bio, type => 'text' };   # short enough to show inline
+            push @rows, _bioToggleRow($client, $bkey, 1,
+                cstring($client, 'PLUGIN_LBF_READ_MORE'), PAGE_MORE);
         }
     }
 

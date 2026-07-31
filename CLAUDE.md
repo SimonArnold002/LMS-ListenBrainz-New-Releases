@@ -110,7 +110,7 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-0.9.149
+0.9.150
 
 ### State of play (2026-07-30) — read this before starting anything
 
@@ -1371,11 +1371,32 @@ callback (never serialised), so `url` coderefs (Read-more, Block, Refresh) are s
   Last.fm's FULL `content` (not the short `summary`), strips HTML/"Read more"/CC boilerplate, keeps
   paragraph breaks; capped only by `BIO_MAX`=20000 (DoS guard, never visibly trims). Bio cache key
   `lbf:bio:2:*`.
-- **Bio display — KEY Material fact.** A `type=>'text'` row renders its `name` IN FULL; Material has
-  NO auto-collapse / "more" for plain text. So "compact preview + expand" MUST be a drill-in: the
-  Artist section shows a `BIO_PREVIEW`=150-char text preview, then a **Read more** (`PLUGIN_LBF_READ_MORE`)
-  link whose `url` coderef returns the full bio split into paragraph rows. (Don't "fix" this by
-  putting the whole bio in a text row — it dominates the page, which is the bug this replaced.)
+- **Bio display — KEY Material fact, and the 0.9.150 correction.** A `type=>'text'` row renders its
+  `name` IN FULL; Material has NO auto-collapse / "more" for plain text. So the preview must be
+  **pre-trimmed** (`BIO_PREVIEW`=150 chars) — that part still stands, and don't "fix" it by putting
+  the whole bio in one text row, which is the bug the preview replaced.
+  - **What was WRONG here until 0.9.150:** this section used to claim "compact preview + expand MUST
+    be a drill-in". It doesn't. **`nextWindow => 'refresh'` + an EMPTY response re-renders the
+    current level**, which is all an in-place expand needs — the same mechanism the All Releases
+    paging rows have used since 0.9.86, and which Discography uses for both its bio and its review.
+    The drill-in was a limitation of the first implementation, not of Material.
+  - **Now:** collapsed = preview + **Read more**; expanded = the full bio, one text row per
+    PARAGRAPH (split on blank lines, single newlines collapsed so rows wrap), + **Show less**. Both
+    toggles are `_bioToggleRow`, a boolean sibling of `_pageRow` sharing the same `%pageState` store
+    (key `bio:<lc artist>`; expanding writes the flag, collapsing DELETES it so nothing is left
+    behind). Reuses `PLUGIN_LBF_READ_MORE` / `PLUGIN_LBF_SHOW_LESS` and the `PAGE_MORE`/`PAGE_LESS`
+    unfold icons — no new strings or assets.
+  - **ROW-COUNT SAFETY (read before reordering the detail page).** Expanding changes the number of
+    rows, which shifts every item_id below it. This is only safe because `_releaseDetail` emits the
+    **Streaming section FIRST** — so the playable rows keep their ids and deep play is unaffected
+    (the 0.6.11 quantity/id rule). Everything the expand shifts is non-playable: the rest of the
+    artist block, album metadata, genres, the tracklist text rows and the MB weblink.
+  - The flag is keyed on the **ARTIST**, not the release (matching Discography), so another release
+    by the same artist opens with the bio already expanded. Deliberate. Per-player, in-memory, lost
+    on restart. Note `%pageState` never clears — a pre-existing deferred cleanup item that this
+    feature adds a few more keys to.
+  - Tested by **`tools/t_bioreveal.pl`** (29 assertions against the real subs; anti-tested three
+    ways — non-empty toggle payload, collapse-without-delete, expanded branch disabled).
 
 ## Branded cover images (`tools/make_covers.py`)
 
@@ -1707,6 +1728,32 @@ that cause empty/junk pools:
    ([[mb-mirror-search-index-gotcha]]); test the library with `["artists",…,"search:NAME"]`.
 
 ## Version History
+- **0.9.150** — **the artist bio expands IN PLACE; the "Read more" drill-in is gone — and the
+  CLAUDE.md rule that said it had to be a drill-in was simply wrong.** Tapping Read more opened a
+  separate view containing only the bio, which you then had to back out of to reach the tracklist or
+  the streaming matches. Discography has done this inline for both its bio and its review all along
+  — and its own comment credits "LBF's full-bio recipe", so this is that recipe coming home improved.
+  - **The mechanism was already in this file.** `nextWindow => 'refresh'` plus an **EMPTY** response
+    (the only shape `browseHandleNextWindow` acts on — 0.9.137) pops the toggle's own window and
+    re-renders the level beneath it. The All Releases paging rows have used it since 0.9.86. So
+    **no Material limitation ever required the drill-in**; the old "MUST be a drill-in" note has been
+    corrected in place rather than deleted, since it would otherwise keep being believed.
+  - `_bioToggleRow` is a BOOLEAN sibling of `_pageRow` sharing `%pageState` — one store per player
+    for transient view state. Key `bio:<lc artist>`; expand writes the flag, collapse **deletes** it,
+    so a never-expanded bio leaves no residue (the `_pageRow` convention).
+  - Expanded text is one row per **PARAGRAPH** (split on blank lines, empty chunks dropped, single
+    newlines collapsed so Material wraps the row instead of honouring the source's hard breaks) —
+    the old drill-in did none of that and could emit blank rows.
+  - **Keyed on the ARTIST, not the release** (matching Discography), so another release by the same
+    artist opens already expanded. Deliberate.
+  - **ROW-COUNT SAFETY:** expanding shifts item_ids, and that is only safe because `_releaseDetail`
+    emits the **Streaming section first** — the playable rows keep their ids (0.6.11). Commented at
+    the call site; revisit if the sections are ever reordered.
+  - **No new strings, no new assets, NO CACHE BUMPS** — pure view state, nothing cached changed shape.
+  - `tools/t_bioreveal.pl`: 29 assertions against the real `_artistRows`/`_bioToggleRow` lifted from
+    source, with the real `strings.txt` values. **Anti-tested three ways** (`LBF_BROWSE=` at a mutated
+    copy): toggle returning a non-empty payload → 2 fail, collapse storing 0 instead of deleting →
+    1 fail, expanded branch disabled → multiple fail.
 - **0.9.149** — **a transient LB blip pinned "No trending data yet" on Trending Albums for a WEEK
   (This Month) or a MONTH (This Year) — the empty-aggregate cache-poison class, one the rest of this
   file already gets right.** Field report: both album lists empty, "all ok until recently".

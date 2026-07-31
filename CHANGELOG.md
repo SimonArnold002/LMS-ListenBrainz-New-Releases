@@ -3,6 +3,12 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.150
+
+### Changed
+- **The artist biography now opens on the page itself, instead of sending you to a separate screen.** On a release's detail page the biography still starts as a short preview, but tapping **Read more** now expands it right there, in place, with everything below it moving down — and a **Show less** to fold it back. Previously "Read more" opened a whole new screen containing nothing but the biography, which you then had to back out of to get to the tracklist or the streaming matches. The full text is also laid out better now: one paragraph per row, so it reads as paragraphs rather than one long run of text. Matches how the Discography plugin already handles artist biographies and reviews.
+- A biography short enough to fit is still shown in full straight away, with no Read more at all.
+
 ## 0.9.149
 
 ### Fixed
