@@ -52,7 +52,24 @@ $prefs->init({
     # every week view). Replaced the old global `sort` pref in 0.9.97.
     foryou_sort          => 'release_date',
     all_sort             => 'release_date',
+    # Per-view release-family filter, flipped in place by the "Showing …" toggle in
+    # each view's Options section (NOT on the settings page — like the sort toggles).
+    # Two states: 'albums' (everything that ISN'T a single/EP) or 'singles_eps'
+    # (primary type Single or EP). Applied AFTER the settings type-checkbox filter,
+    # so it only narrows within the types the user has ticked (nothing ticked is
+    # lost — Broadcast/Other/compilations fall into the 'albums' bucket). Default
+    # 'albums' so the feeds look as before out of the box. `foryou_view` = New
+    # Releases for You; `all_view` = All Releases (shared across every week view).
+    foryou_view          => 'albums',
+    all_view             => 'albums',
     play_via             => 1,
+    # Master on/off for the whole "People You Follow" browse section (trending
+    # tracks + both trending-albums lists + the Recommended list). Default ON
+    # (preserves existing behaviour — the pref is new, so this default applies to
+    # every install on update). When OFF the section, its warm pre-build and its
+    # unmatched-debug entry are ALL skipped — no following/stats/feed calls, no
+    # caching, no warming for it at all.
+    people_follow        => 1,
     # People You Follow list ordering: 'date' (day dividers, newest first) or
     # 'recommender' (grouped by the follower who recommended each track). Flipped
     # in place by the inline toggle at the top of that list.

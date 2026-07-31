@@ -7,7 +7,27 @@ A plugin for Lyrion Music Server (LMS) that browses ListenBrainz Fresh Releases.
 
 **Maintain this section.** Two living artefacts for announcing the plugin:
 1. **Overall feature summary** (below) — the social-media / GitHub Pages "drop page" copy. **Update it whenever a key feature is added, changed or removed** (not for bug fixes). Keep it key-features-only, user-facing, no internals.
-2. **Per-release post** — when cutting a release, generate a short social post from the new **CHANGELOG.md** entries since the last main release: lead with new **features**, then a short "Fixes & polish" line for the notable bug fixes. Install line is the Pages repo URL. Hashtags: `#LyrionMusicServer #ListenBrainz #Squeezebox #SelfHosted`.
+2. **Per-release "What's new" post** — when cutting a release, generate a social post in the fleet **house layout** — the *same structure* as the launch/"Introducing" post, just scoped to what changed since the last main release (NOT a blockquote, NOT a "Fixes & polish" list). Build the bullet list from the new **CHANGELOG.md** entries. Reproduce this structure:
+
+   ```
+   🎵 What's new in <Plugin Name> — for Lyrion Music Server (LMS)
+
+   <Paragraph 1: conversational hook leading with the headline new feature.>
+
+   <Paragraph 2: second angle covering the rest of the changes, in prose.>
+
+   ✨ What's new
+   • <Short label> — <plain-English description of a new/changed feature>
+   • … (one bullet per notable feature; a single "smarter/tougher matching" bullet may fold in the notable bug fixes)
+
+   Works on LMS 9.x, best with the Material Skin. <optional playback line.> Free and open source.
+
+   👉 Full details & install: https://simonarnold002.github.io/<Repo>/
+
+   #LyrionMusicServer lms squeezebox <space-separated plain service/keyword tags>
+   ```
+
+   Key elements: the `🎵 What's new in … (LMS)` header (NOT "Introducing", NO version number in it), TWO prose paragraphs (not bullets), the `✨ What's new` header with `•` bullets scoped to this release, the "Free and open source" line, the `👉 Full details & install:` link to the **bare Pages root** (NOT repo.xml), and the final tag line where ONLY `#LyrionMusicServer` is a hashtag and the rest are plain words.
 
 ### Overall feature summary (keep current)
 
@@ -16,13 +36,15 @@ A plugin for Lyrion Music Server (LMS) that browses ListenBrainz Fresh Releases.
 - **New Releases for You** — personalised feed of fresh releases from artists in your ListenBrainz history (needs username + token). Newest-first, grouped by week, tap-through detail pages. **Optional MuSpy** — add a MuSpy user ID (public, no password) to fold in releases from the artists you follow there; more tailored since you pick the artists, and overlaps with ListenBrainz are shown once. MuSpy is upcoming-heavy, so it has its own **upcoming** switch (on by default, independent of the feed's Include-Upcoming) and a **how-far-ahead** limit (default 12 months).
 - **All Releases** — the global ListenBrainz fresh-releases feed (no account). By-week landing page to jump to any week.
 - **Created-for-You Playlists** — your **Weekly Jams / Weekly Exploration / Daily Jams** as fully-streaming **Play-all** lists; every track matched **library-first**, then streaming.
-- **Recommended by People You Follow** — the tracks the people you follow **recommend/pin** on ListenBrainz, gathered into **one Play-all list**, newest-first, with **day dividers** so new additions are easy to spot. **New-music-only:** anything already in your library is filtered out, so it's purely music you don't have yet. Accumulates so recs aren't lost as the feed rolls; refreshes daily.
+- **People You Follow** *(optional; toggle in Settings → General, default on)* — a whole section built from what the people you follow **actually play** (public listen-stats — username only; **one-vote-per-follower** breadth ranking). **Trending Tracks** (weekly, Play-all, owned-excluded, album-level so a full-album play can't flood it) + **Trending Albums · This Month / · This Year** (tap-through album pages with art/date/type). Plus **Recommended** — the tracks they **recommend/pin** (needs a token; the feed is private), one newest-first **new-music-only** Play-all list with **day dividers**, accumulating so recs aren't lost as the feed rolls. Off = nothing here is fetched, cached or warmed.
 - **Don't Stop The Music — two auto-DJ mixers** — **ListenBrainz Radio** (seeds from what's playing and evolves through similar artists) + **Recommended for You** (personalised CF picks, shuffled). Owned copies first, no per-session repeats, varied artists.
 - **Rich release detail pages** — artist **photo + biography**, **tracklist** with durations, **genres**, tags, **View on MusicBrainz**, and inline **one-tap streaming matches**.
 - **Direct streaming playback** — matched albums/tracks play from **Qobuz / Tidal / Bandcamp / Deezer**; you choose the per-service search order.
 - **Block artists** — one tap hides an artist from every feed.
 - **Material home shelves** — optional New Releases for You / Playlists / All Releases home rows.
+- **Albums or Singles & EPs, from the list** — a "Showing Albums (tap for Singles & EPs)" row flips either feed between the two and back, with the icon changing to match, so singles and EPs can stay switched on without burying the albums. Sticks across visits and restarts; only appears when a section has both kinds ticked.
 - **Your taste** — filter by type / artwork-only / Various Artists; **per-view sort** (a "Sorted by…" toggle in each list's Options section — Release Date / Artist / Album Title, kept within the weekly W/C headers); release-window; cached & pre-warmed (instant), **no extra server software**.
+- **Plays nicely with Listen Later** — adding a release passes the real MusicBrainz release type (album / EP / single) across, which the streaming services mostly don't expose, so the saved row is labelled and play-tracked correctly rather than guessed from a track count.
 
 **Requirements:** LMS 9.0.0+ (Material Skin); ListenBrainz account + token for personalised features (All Releases needs nothing); optional Qobuz/Tidal/Bandcamp/Deezer (playback), MAI plugin (artist photos+bios), free Last.fm key (genre/bio fallbacks). Every optional add-on degrades gracefully.
 
@@ -88,7 +110,781 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-0.9.98
+0.9.149
+
+### State of play (2026-07-30) — read this before starting anything
+
+**Branches.** `dev` (this one) is the working line at **0.9.149**, committed and pushed
+(0.9.147–0.9.148 landed as `a7e1ac4`; 0.9.149 is the Trending Albums empty-cache fix, tagged
+`v0.9.149`). `alpha` holds the parked
+genre work at 0.9.140 — pushed, see `ALPHA.md` there, do not merge it. `main` is still at
+**0.9.98**: everything from 0.9.99 on (People You Follow, Trending, the matcher fleet sync,
+0.9.126–0.9.128 and 0.9.141) has never been promoted, so "what users have" is far behind
+`dev`. `beta` is untouched and stale.
+
+**Fleet holds — both deliberate, don't try to tidy them up:**
+- **Matcher sync is ON HOLD** until Discography's rework lands. `matcher_sync_check.py`
+  exits 1 by design; see the banner on the Shared Matching Engine rule below.
+- **Search Hub is ON HOLD.** No work on `LMS-Search-Hub` and nothing here should start
+  depending on it.
+
+**Known open items on this repo, none of them started:**
+- **CHANGELOG has no entries for 0.9.120–0.9.125.** 0.9.120 shipped as a commit (the fleet
+  matcher sync) with no changelog block; 121–125 have none at all. Not reconstructed — the
+  record is genuinely missing, so don't invent it, and don't be surprised by the gap.
+- **Discography carries the same wide-character cache bug fixed here in 0.9.141**, in FOUR
+  places: `Discography/Browse.pm` ~1159 (`$text`, artist bio), ~3240 (`$desc`, review
+  description), ~3270 (`$text`, MAI album review) and `Discography/API.pm` ~705
+  (`$canonName`, MB canonical artist name). All bare-string `$cache->set` calls. Port
+  `API::_setText`/`_getText` — it is NOT the shared matcher, so the hold above doesn't apply.
+- **0.9.141 VERIFIED ON THE REAL SERVER (2026-07-29).** Installed build fingerprinted via the log's
+  `Sub::Name (LINE)` numbers (`_fetchArtistInfo (4074)`, MAI bio `(4108)`). Confirmed live:
+  - **The `&rt=` handshake works through Material.** Added *3OH!3 – MY FRIENDS* (MB **Single**, 3
+    tracks — so LL's count fallback would say **EP**) from a Qobuz match row. Log:
+    `LL: add -> qobuz / MY FRIENDS (id=189, already=0, list=later, rel=single)`, reached via
+    **`_finishAlbumAdd` 2.3 ms after** `LL: addctx params ->`. That path is only taken when
+    `$relType` is already set, which for a non-library source can ONLY come from `&rt=` — without it
+    LL would have gone through `_classifyThenAdd` + a Qobuz `getAlbum` round trip. The list row
+    renders `♪` (GLYPH_SINGLE) vs `♫` on every other row. **`&a=` and `&y=` proved too**: Material
+    sent `artist=` empty and `year=(undef)`, yet the stored row shows `3OH!3 … (2026)`.
+    (NB the log prints the favurl AFTER LL strips its private params in place, so a bare
+    `favurl=qobuz://album:<id>` there is expected and proves nothing either way.)
+  - **The Albums / Singles & EPs selector** renders on the real server once both families are ticked
+    (`Showing Singles & EPs (tap for Albums)`), and is correctly ABSENT under the default
+    Album+Compilation types.
+  - **The `lbf:bcmatch:` revert matters in the field**: two For You releases (*Phoebe Bridgers – Lost
+    Weekend*, *The Mountain Goats – Days*) resolve to **Bandcamp only** from pinned `:6:` matches —
+    the `:7:` bump would have left both with no playable entry.
+- **`_effectiveView`'s clamp is DRILL-IN ONLY** (noticed live): it runs inside the `_buildAllLanding`
+  week coderef, so a bad stored `all_view` is only corrected when a week is actually opened. Simon's
+  `all_view` was sitting at `singles_eps` and surfaced the moment Single/EP were ticked — the exact
+  0.9.127 symptom. Residue from before that fix rather than a new bug (the clamp persists correctly
+  once a week is opened), but if it recurs, the fix is to clamp at the landing level too.
+- **THE INDEX IS STALE — `git add` before any commit.** The staging area still holds the
+  **alpha genre snapshot** (staged `Browse.pm` carries the genre subs, staged `install.xml`
+  says 0.9.120) while the working tree is the genre-free 0.9.141 — which is why everything
+  shows `MM`. A plain `git commit` from here would land the parked genre work on `dev`.
+
+**0.9.141 pre-release review (2026-07-29) — three defects found and fixed, no version bump**
+(nothing had shipped; guarded by `tools/t_review_fixes.pl`, which reproduced all three first):
+- `lbf:bcmatch:` had been bumped `:6:`→`:7:` for the `&rt=` favurl — see the rule under the
+  Listen Later section above; reverted to `:6:`.
+- `API::clearFeedCache('user')` dropped MuSpy's cache key but not its **memo**, and
+  `getMuSpyReleases` checks the memo FIRST — so Refresh re-served the very MuSpy copy it was
+  meant to replace whenever the LB re-fetch landed inside `FEED_MEMO_TTL` (5s). Now drops both,
+  like the two feed keys beside it.
+- An All Releases week whose releases are all filtered out by the active family lens opened
+  showing its Options rows and nothing else: the week ROWS are built from the section list
+  *before* `_viewFilter` (the landing can't know the lens — it's re-read per walk inside the
+  coderef). Now emits `PLUGIN_LBF_NO_RESULTS`, like an empty landing.
+
+**Repo test scripts** (all exit 0 on `dev`; run the relevant one after touching that area):
+`tools/bench_walk.pl` (per-walk render cost + the memo assertions), `tools/t_cache_widechar.pl`
+(the DbCache bare-string bug, reproduced against real DBD::SQLite),
+`tools/t_ll_handshake.pl` (the `&rt=` release-type handshake, driven from BOTH repos' live
+source), `tools/t_review_fixes.pl` (the three 0.9.141 pre-release review defects — bcmatch bump,
+MuSpy memo on Refresh, empty week under the family lens), `tools/t_trending_empty.pl` (the
+0.9.149 empty-aggregate TTL + the Refresh row on the empty Trending Albums view;
+`LBF_BROWSE=` points it at a mutated copy for anti-testing), `tools/matcher_sync_check.py`
+(currently exits 1 — see the hold).
+
+- **Listen Later release-type handshake — `&rt=` on the favurl (0.9.141).** LL 0.1.86 stores a
+  release type per row (`album|ep|single`) and drives its glyph, its Played thresholds (single = 1
+  play, EP = 2) and its single-vs-single dedupe off it. LL cannot determine it itself for a streaming
+  add — **only Qobuz exposes a release_type; Tidal and the rest expose none on the track coderefs** —
+  so it falls back to guessing from the resolved TRACK COUNT (1 → single, ≤6 → EP). That guess is
+  wrong for a 3-track album, a 1-track album and an 8-track EP, all of which occur.
+  - We have the authoritative answer (the MusicBrainz release group in the feed), so `_attachFavUrl`
+    now packs it as **`&rt=`**, the channel LL documents for exactly this
+    (`Sources::relTypeFor(service => …)`, which **wins over** the count guess; `Plugin.pm` strips the
+    param like the existing `&a=` / `&y=` / `&al=` handshakes).
+  - `_llRelType` sends ONLY `album|ep|single` and **omits the param** for MusicBrainz primary types
+    Broadcast/Other/blank — better LL's heuristic than a confident wrong answer. Compilations,
+    soundtracks and live albums are primary type Album with a SECONDARY type, so they map to `album`
+    correctly.
+  - **The AUTO cache bumped, `lbf:stream:20:`→`:21:`** — `favorites_url` is part of the cached item
+    (`_cacheStream` stores everything but `url`), so without the bump every already-resolved album
+    would keep serving a typeless favurl and the handshake would look broken for weeks.
+  - **`lbf:bcmatch:` stays at `:6:`.** 0.9.141 first bumped it to `:7:` "same reason `_streamKey`
+    bumped" — which is the 0.9.42 mistake 0.9.47 reverted, caught in the pre-release review and
+    reverted again. `_streamKey` re-resolves itself so bumping it is free; a pinned Bandcamp match
+    comes back ONLY from a manual "Search Bandcamp" tap, so a bump silently deletes every
+    hand-curated Bandcamp-only match (its sole playable entry) — and because `lbf:bcdone:6:` is NOT
+    bumped alongside it, those albums then read "not found — tap to retry". So the "bump EVERY cache
+    layer" rule does NOT extend to this key; the standing rule above wins.
+  - **`tools/t_ll_handshake.pl` tests BOTH ENDS** — it extracts LBF's `_attachFavUrl`/`_llRelType` and
+    LL's `relTypeFor`/`_normRelType`/`_stripPrivateParams` from their live source files and checks the
+    round trip, so a change to either repo's half will fail it. Run it after touching either side. Its
+    three source paths are env-overridable (`LBF_BROWSE`/`LL_SOURCES`/`LL_PLUGIN`) so it can be pointed
+    at a mutated copy and **anti-tested** — do that for any new assertion here.
+
+- **Listen Later album-title handshake — `&al=` on the favurl (0.9.144).** The favurl now also carries
+  the CLEAN album title, because Material hands LL the row's display LABEL as `$ALBUMNAME` and that
+  label is whatever the streaming plugin's renderer printed. Full reasoning, the correction to my first
+  (overstated) justification, the deliberate edition-collapse consequence, the encoding contract and the
+  test/anti-test numbers are in the **0.9.144** Version History entry — read that before touching this.
+  Two things to carry in your head: **LL already strips a known suffix list** (so this is about the
+  qualifiers NOT on it, not about `(Album)`), and **`_streamKey` had to bump** (`:22`→`:23`) because the
+  favurl is part of the cached item — and has bumped on every subsequent change to this value, now
+  `:27:`.
+  - **What `&al=` carries, in one line (0.9.148):** the RAW `title` from the service's own album hash
+    (`_svctitle`), verbatim for Qobuz/Tidal/Deezer, and `_stripArtistAffix`'d for Bandcamp ALONE,
+    whose passthrough joins the artist on. Read 0.9.144→0.9.148 as one sequence: five builds, four of
+    them correcting the previous one, every wrong value silently un-matchable at playback. **Both
+    directions are the same bug** — a title with something extra in it, and a title with something
+    taken out of it — so any future transform here needs live evidence from the service it's applied
+    to, not symmetry with another service.
+
+- **NEVER `$cache->set($key, $a_plain_string)` (0.9.141).** `Slim::Utils::DbCache::set` Storable-freezes
+  a value only `if (ref $data)`; a plain scalar goes STRAIGHT to a DBI `SQL_BLOB` bind, and binding a
+  Perl string with any codepoint above 255 dies **"Wide character in subroutine entry at
+  .../Slim/Utils/DbCache.pm line 78"**. Reproduced against real DBD::SQLite in
+  `tools/t_cache_widechar.pl` (run it — 3 of its 5 cases die before the fix, 0 after).
+  - Every OTHER cache write in this plugin has always been safe by accident: they all store
+    hashrefs/arrayrefs, so `freeze` does the encoding. The only two that stored a BARE string were
+    `warmArtistSorts` (the MB sort-name — the `artist-sort cache set failed` spam in live logs, once
+    per non-Latin artist) and `getArtistBio` (a Last.fm bio, where **one curly quote or em-dash is
+    enough**, so almost no bio was ever cached and every release-page open re-fetched it).
+  - Fixed at the boundary with **`API::_setText` / `_getText`**, which wrap in a hashref so Storable
+    handles any codepoint and hands the string back with its utf8 flag intact. Chosen over
+    encode-on-write/decode-on-read: one place to get right, no mojibake risk, and `_getText` reads a
+    legacy bare string unchanged so **no cache prefix needed bumping**.
+  - **Distinct from the 0.6.15 bug**, which was the same die from the KEY side (`_key` md5's the key).
+    Keys built from free text are encoded to octets at the point of use — see `getLastfmTags` /
+    `getArtistBio`. Both halves have now bitten; check both when adding a cache.
+  - **FLEET (audited 2026-07-29, NOT fixed):** Discography has the same latent bug in two places —
+    `Discography/Browse.pm` (~3270, the MAI album-review `$text`, free prose so it fails routinely)
+    and `Discography/API.pm` (~705, `$canonName`, the MB canonical artist name, fails for non-Latin
+    artists). PFR, Listen Later, Search Hub and Album Booklet are clean (all ref-valued).
+
+- **BRANCH SPLIT (2026-07-29) — genre work lives on `alpha`, not here.** The genre-labels feature
+  (0.9.129–0.9.140: list-row genres, the family rollup table, the genre picker, the mirror-first
+  artist-genre fetcher) is **parked on the `alpha` branch** pending a decision on whether the plugin
+  adopts a Lyrion API server as a metadata backend. **Read `ALPHA.md` on that branch before reviving
+  any of it.** Short version of why: genre labels need a genre source for every release in a feed, and
+  the only source available without a local MusicBrainz mirror is ListenBrainz's metadata endpoint,
+  which answers a 50-release batch in **anywhere from 0.25s to 24s** (not rate limiting —
+  `x-ratelimit-remaining` was 26–29 of 30 throughout), 502s above ~90 mbids, and took a measured
+  **125s** to fill one 381-release feed. `dev` therefore keeps the pre-0.9.129 genre behaviour: list
+  rows show the feed's own `release_tags`, and the release detail page does its own per-album
+  `release-group?inc=genres` lookup (mirror-aware) with Last.fm as the fallback.
+  - **`dev` DOES carry the non-genre work built alongside it** — the Albums / Singles & EPs view
+    toggle (0.9.126–0.9.128) and the whole per-walk performance pass (below). A fix made here will
+    need re-applying to `alpha` whenever that branch is unparked.
+  - Versions **0.9.129–0.9.140 are burned** — they exist only on `alpha` and were never released.
+    `dev` continues at **0.9.141** so a version number never means two different things.
+
+- **Per-walk work elimination (shipped as 0.9.141; developed as 0.9.139) — the sequel to 0.9.138, and the half that memo left
+  undone.** `%FEED_MEMO` stopped the re-walks RE-READING the feed; they were still RE-DERIVING it.
+  Measured, don't guess: `tools/bench_walk.pl` extracts the real sub bodies from `Browse.pm` (the
+  `matcher_sync_check.py` trick) and runs them against a live feed with no LMS. On 2902 raw releases
+  (14-day default window) on a dev Mac, one walk of the All Releases pipeline was **1.1ms filter +
+  3.7ms dedupe/sort + 2.8ms week grouping ≈ 7.6ms**, ×3+ walks per tap, ×2 sections — and a Pi is an
+  order of magnitude slower. Rerun the script after any change to that pipeline.
+  - **`%SECTION_MEMO` + `_allSection`/`_forYouSection`** — the derived (filtered, deduped, sorted)
+    list per section, held `SECTION_MEMO_TTL`=5s. Validity is by **IDENTITY of the source
+    arrayref(s)**, not a content hash: the feed memo returns the same ref for its TTL, and a Refresh
+    (`clearFeedCache` → `_memoDrop`) necessarily produces a NEW ref, so a refresh can't be masked.
+    The memo holds those refs itself, which is what makes `==` sound (an address can't be recycled
+    while we point at it). Everything else that shapes the result is prefs → `_sectionSig`. **For You
+    needs TWO sources** (`_mergeMuSpy` builds a fresh arrayref every call), which is why
+    `getMuSpyReleases` is memoed too — not for its own cache read, but to make its ref stable.
+    Callers must keep treating the returned list as READ-ONLY; it is shared across walks (as the raw
+    feed already was).
+  - **`_weekStart` memoed** — pure function of a date string, called once per release by BOTH
+    `_buildAllLanding` and `_buildWeekly`, resolving to ~15 distinct dates. 2.7ms → 0.2ms. Never
+    expires: the answer for a date can't change and the key space is what the feed carries.
+  - **`_stashSummary` / `_stashPlaylistSummary` write elision** (`_summaryChanged`) — these were
+    SQLite WRITES on every walk of every render path, storing bytes identical to what was there.
+    Watch the trap: a skipped write is a skipped TTL RENEWAL, so it rewrites unconditionally every
+    `SUMMARY_REWRITE`=6h, well inside the 25h TTL. `_stashSummary` also scans for min/max instead of
+    sorting the whole list.
+  - **`_orderedAdapters` memoed** (`ADAPTER_MEMO_TTL`=5s) — ~10 `->can` probes + a `_pluginDataFor`
+    icon lookup per service, built TWICE per root walk by `_trendingTile` alone (once inside
+    `_trendingResolvedKey`) and on the per-item path via `_cachedSvcUsable`. Adapters are read-only
+    to every consumer (checked), so sharing the hashrefs is safe.
+  - **`_trendingTile` count memoed** — it deserialised the whole resolved track list out of SQLite on
+    every root walk purely to count what survives the service filter. Keyed on the resolved key (so a
+    user/service-order change re-counts), dropped by the Refresh row via `_dropTrendingCount`.
+- **Picker scope + the feed memo (0.9.138) — two fixes to one report ("counts don't match, and it's
+  sluggish").**
+  - **Scope.** `genrePicker` called `_feedFor` and counted the WHOLE feed, so an All Releases week
+    showed feed-wide counts. `_genresRow($client, $prefix, $rels)` now hands the picker the level's
+    own releases via `passthrough` (rebuilt every walk, so never stale); `_feedFor` survives only as a
+    defensive fallback. This is also most of the speed-up: no second full-feed decode, and the genre
+    fill covers one week instead of up to `GENRE_WARM_MAX` across all of them. The apply row can now
+    count honestly (`Show 12 releases`), which it couldn't at feed scope.
+  - **`API::%FEED_MEMO`** — the last decoded copy of each feed key, held `FEED_MEMO_TTL`=5s.
+    `Slim::Utils::Cache` is SQLite: a feed "cache hit" is a disk read plus a full deserialise of
+    thousands of releases, and **XMLBrowser re-walks from the ROOT on every drill-in, in-place refresh
+    and paging tap** — the root builds both sections, so one tap decoded the same feeds 3+ times and a
+    genre tick (toggle request + `refreshList`) did it twice over. Confirmed in the live log: bursts of
+    `All + ForYou + ForYou` repeating every ~0.5s. 5s covers one interaction and nothing more;
+    `clearFeedCache` calls `_memoDrop` so Refresh can't be masked, and every pref that shapes a feed is
+    already in the cache key so a settings change can't be served a stale copy. `our`, not `my`, so
+    `t_memo.pl` can age it.
+  - **If browsing feels slow again, look here first**: the cost is almost never the network (feeds are
+    cached) — it's re-walk × deserialise × per-release work. Measure by counting `$cache->get` calls,
+    not by timing HTTP. Since 0.9.139 the per-release half of that has a harness:
+    `perl tools/bench_walk.pl`.
+
+- **Genre picker needs an explicit apply row — plain Back can NEVER work (0.9.137).** 0.9.136 shipped
+  the picker with immediate apply and no return path; the ticks saved fine (verified live: the pref
+  held `["Electronic"]`) but Back showed the unfiltered list. **Verified in Material's own bundle**
+  (`http://plex:9000/material/html/js/material-deferred.min.js` — fetch and grep it, it's the fastest
+  way to settle a navigation question):
+  - `browseGoBack()` **restores the history entry's cached `items`** (`a.items=g.items; a.listSize=…`).
+    It re-fetches ONLY if `b || g.needsRefresh`.
+  - `needsRefresh` is set **exclusively by Material's own internals** — podcasts `addshow`/`delshow`,
+    search, playlist drag-moves. **There is no server-driven way to mark a parent level stale.** So a
+    plugin can never make plain Back re-render. Any "change a setting on a drill-in level" flow needs
+    an explicit apply row.
+  - `browseHandleNextWindow(a,b,c,e,d,g)` runs only when the response has **0 items**, and from the
+    normal drill-in path is called as `(…,d=false,g=true)`. With those args:
+    **`refresh`** → `browseGoBack(a,true)` = pop the empty window, restore the row's OWN level, refresh it.
+    **`parent`** → `a.history.pop(); browseGoBack(a,true)` = pop this level too, land one BELOW, refresh it.
+    Both also `bus.$emit("showMessage", <row title>)`, so every tap toasts its own label.
+  - So: ticks use `refresh` (flip in place), the apply row uses **`parent`** (return + rebuild).
+  The apply row **names the selection** ("Show Rock, Electronic", `GENRE_APPLY_NAMES`=2 then "+N more")
+  rather than counting results — the picker is opened from an All Releases **week** but reads the whole
+  feed, so any count would be feed-wide and wouldn't match the week it returns to. (The per-genre counts
+  are feed-wide for the same reason; there they're wanted, as a view of the feed's shape.)
+
+- **Genre picker — multi-select filter (0.9.136).** Modelled on the genre-selection menu in
+  **SvenInNdh's Qobuz fork** (`https://github.com/Sveninndh/SqueezeboxRepo`, `Qobuz-30.7.3.6`,
+  `Plugin.pm::QobuzGenreSelection/QobuzGenreToggle/QobuzGenreStore`) — worth reading if this area is
+  revisited. **Taken:** checkbox rows + a Select-all row + the count on the entry row
+  ("Genres (3)" / "Genres (All)"). **Deliberately diverged, three ways:**
+  1. **IMMEDIATE APPLY — no staging buffer, no Store row.** Sven's stages toggles in memory and commits
+     on save, which forces a `refreshing` flag plus a `$params->{index} eq 0` heuristic to tell an
+     internal refresh from a fresh entry. Our picker is its own drill-in level rendering off cached
+     data, so the pref is written directly and all that state disappears.
+  2. **Material's own `_MTL_icon_check_box` / `_check_box_outline_blank`** font icons — no custom
+     checkbox artwork (Sven ships `checkbox-checked_svg.png`).
+  3. **ARRAYREF pref**, not a `#id#id#` delimited string — no regex membership tests, and a family name
+     can't corrupt the separator. Matches the existing `blocked_artists` shape.
+  - Prefs `foryou_genres` / `all_genres` (arrayrefs, EMPTY = show everything — same convention as the
+    release-type checkboxes). `_bucketFor` is the FILING key: a real family only, or `GENRE_NONE`
+    (`_none`) — distinct from `_familyFor`, which is for DISPLAY and falls back to the raw genre.
+    Without that split an obscure genre would sprout its own singleton bucket in the picker.
+  - Picker lists **only families present in the feed**, busiest first, `Other` forced last.
+  - **ORDERING CONSTRAINT:** the genre filter must be applied BEFORE `_pageSection`, or a 30-row page
+    is mostly filtered away and the "Show more (N)" counts lie. That needs genres for the WHOLE week,
+    so the All Releases week coderef does the wider `GENRE_WARM_MAX` fill **only when a filter is
+    actually set**; unfiltered keeps the cheap one-request-per-page path.
+  - **COMPILE-TIME GOTCHA:** `use constant` is BEGIN-time, so a constant must appear EARLIER IN THE FILE
+    than any use of it. `GENRE_WARM_MAX` was defined next to `_warmGenres` (line ~5800) but is now used
+    by the picker and the week coderef (line ~3360) → "Bareword not allowed while strict subs". Moved up
+    with the other constants. Subs don't have this problem, only constants.
+
+- **PHASE 3 DONE — gated Last.fm tier (0.9.135). 49% → ~71% coverage.**
+  - **THE TIER LADDER now lives entirely in `_genresFor`** — one source of genres, one producer of a
+    row label: **(1)** the album's own LB genres → **(2)** the artist's LB genres → **(3)** the feed
+    payload's inline `release_tags` (free, release-specific, proven independent of LB's tag block) →
+    **(4)** Last.fm, gated. Nothing may append a source anywhere else; that was the 0.9.132 bug.
+  - **The gate is MusicBrainz's vocabulary.** `genre-families.txt` now carries the WHOLE 2177-name
+    vocabulary (2216 rows: 855 in 21 families, 27 modifiers `-`, 1334 family-less `?`), so it is both
+    the rollup table AND the "is this actually a genre?" list. `_genreKnown` = in the vocabulary AND not
+    a modifier. Measured raw Last.fm noise it rejects: japanese, Colombia, anime, Dreamy, zzz, brainrot,
+    seen live, 90s. **`?` vs `-` matters:** a family-less genre is still shown; a modifier never is.
+  - **The render path NEVER fetches.** Last.fm is per-ARTIST, not bulk — filling on render would be
+    ~15 HTTP calls per 30-row page, the exact opposite of phase 1. `API::peekLastfmTags` is a
+    cache-ONLY read (mirrors `peekArtistSort`); `_lastfmGenres` uses only that. Asserted by test.
+  - **`_warmLastfm` does the filling**, chained inside `_warmGenres` after each feed's bulk pass:
+    only releases no cheaper tier answered, **deduped by ARTIST** (the tags are artist-level anyway),
+    hard-capped at `LFM_WARM_MAX`=40 per tick, ONE call in flight behind a 1s idle tick (paced for
+    Last.fm, never holds the event loop). 30-day cache, so a small nightly allowance converges over a
+    few days. No API key → the whole tier is inert.
+  - Side benefit: because tier 3 moved into `_genresFor`, the detail page's Genres line now shows inline
+    `release_tags` too — closing the "sub-genres appear under Tags: not Genres:" gap noted in 0.9.132.
+
+- **PHASE 1b DONE — `_warmGenres` (0.9.134).** Chained LAST in `warmCache` (after playlists, follow and
+  trending): it's the cheapest stage and the least urgent, so it queues behind the streaming resolves
+  rather than competing with them. Warms **For You first, then All Releases, strictly chained** so the
+  two never fan out together. Filters each feed through `_filterForYou`/`_filterAll` first — no point
+  warming genres for releases the user's own type/artwork/VA settings would hide. All Releases needs no
+  account so it's warmed for everyone; For You is skipped without username+token.
+  `_withGenres` gained an optional `$max` (default `GENRE_FETCH_MAX`=150 for a render);
+  the warm passes **`GENRE_WARM_MAX`=600** (~12 bulk requests). Entries live 90 days, so a steady-state
+  tick only fetches what's newly released. Reuses the same batched idle-tick `_withGenres`, so the warm
+  is no more able to hold the event loop than a render is.
+  - **Why it matters beyond convenience:** without it the first open of a week renders before the fill
+    lands and labels only show on the second visit. It's also the prerequisite that makes the phase-3
+    Last.fm tier affordable — that one is per-artist, not bulk.
+  - Test note: `t_warm` must `require Plugins::…::Plugin` — `Browse::_dbg` calls `Plugin::dbg` directly
+    and Browse never requires it (the real plugin loads it at init), so a suite that reaches a `_dbg`
+    call dies without the stub.
+
+- **List label is now `Family (sub, genres)` (0.9.133).** Spec: *"we have the group shown as it is and
+  next to it in brackets the sub genres if we have them; sorting is by the main genre as planned."*
+  `_familyFor` returns `($family, @subs)`; `_buildReleaseItem` renders
+  `Album · Funk (funk rock, funk soul)`. `GENRE_SUBS_MAX`=2. Sorting (phase 4) keys on the family only,
+  so brackets are display-only.
+- **TWO wrong cuts at "what goes in the brackets" — don't repeat either:**
+  1. **Same-family only.** Emptied the brackets on the very release that prompted the feature:
+     `funk rock`/`funk soul` roll up to **Rock**/**Soul** under the whole-word suffix rule, not Funk.
+     The brackets mean "what else this release is tagged", NOT a claim of descent.
+  2. **Must be a known genre (`_genreFamily($g)` true).** Dropped `funk soul`, which isn't in MB's
+     vocabulary at all — it reached us as a free tag in the feed's `release_tags`.
+  The correct test is **"not a MODIFIER"**: unknown genre = still worth showing; known modifier =
+  never. That distinction is why `genre-families.txt` now ships modifiers explicitly as `name<TAB>-`
+  instead of just omitting them, and why `Browse` keeps `%_GENRE_MODIFIER` separate from
+  `%_GENRE_FAMILY` (`_genreModifier`). Regenerate with `tools/make_genre_families.py`.
+- Verified across the real genre sets: `Funk (funk rock, funk soul)`, `Electronic (downtempo,
+  chillwave)`, `Hip Hop (lo-fi hip hop, boom bap)`, `Electronic (jazz, experimental)`, plain `Rock`
+  (genre only restates the family → no brackets), `Rock (alternative rock)`, `yakousei` (nothing
+  rolls up → strongest genre, no brackets).
+
+- **Inline `release_tags` now go through the rollup too (0.9.132).** Field report: *André Cymone – "The
+  Resurrection of Funk"* rendered `Album · funk, funk rock, funk soul` instead of `Album · Funk`.
+  `_buildReleaseItem` had TWO paths to a row label — `_familyFor` (rolled up) and a separate
+  `@tags = _releaseTags($rel) unless @tags` fallback that joined up to 3 RAW tags. The fallback was the
+  one path bypassing the rollup. Fixed by giving `_familyFor` ownership of **every** source
+  (`push @g, _releaseTags($rel) unless @g`) and reducing the caller to a single scalar
+  `my ($family) = _familyFor(...)`. **RULE: a list row's genre label has exactly ONE producer —
+  `_familyFor`. Never join a genre source onto `line2` directly.**
+  - Verified live for that release: LB returns **no tags at all** for its release group AND its artist,
+    so the inline `release_tags` are a genuinely INDEPENDENT source, not a duplicate of the `tag` block
+    — worth keeping as the last tier, not deleting.
+  - **Known gap (not fixed):** `_releaseDetail`'s Genres line comes from `_genresFor`, which is empty
+    for exactly these releases, so their sub-genres appear on the detail page's separate **Tags:** line
+    (`_albumRows` → `_releaseTags`) rather than under Genres. Visible, but inconsistent — fold inline
+    tags into the detail Genres line as a fallback in a later pass.
+
+- **PHASE 2 DONE — genre rollup + the list/detail split (0.9.131).** Spec from Simon: *"downtempo rolls
+  into electronic. On front page we keep it to top levels where possible and when we drill in give more
+  of the sub genre details."*
+  - **`tools/make_genre_families.py` → `ListenBrainzFreshReleases/genre-families.txt`** (857 lines,
+    `genre<TAB>Family`, 21 families). Pulls MB's whole `genre/all` vocabulary (2177), assigns a family
+    by whole-word suffix/prefix rule, then a curated OVERRIDES table for names that are a genre in their
+    own right (boom bap, chillwave, shoegaze…). **Rerun the script to regenerate; never hand-edit the
+    .txt.** Coverage on real feed occurrences: **88% mapped, 10% modifiers, 2% unmapped tail.**
+  - **MODIFIERS get NO family ON PURPOSE.** "instrumental" was the 5th most common genre in the live
+    sample; "lo-fi" the 2nd. They describe a treatment, not a family, so they're omitted from the table
+    and `_familyFor` falls through to the next genre — "instrumental, lo-fi hip hop" → **Hip Hop**.
+  - **Perl side:** `_loadGenreFamilies` (lazy, one read, path derived from `%INC` so manual and repo
+    installs both work; a missing file is NOT an error — genres just show unrolled), `_genreKey`
+    (same normalisation as the generator — flattens hyphens so `synth-pop` finds `synth pop`),
+    `_genreFamily`, `_familyFor` (first genre that resolves to a family; else the strongest genre as-is).
+  - **`_buildReleaseItem` shows `_familyFor` (ONE label); `_releaseDetail` shows the full `_genresFor`
+    list.** That's the whole list/detail split — don't "fix" a list row to show sub-genres.
+  - **GENERATOR GOTCHA (cost a regenerate):** OVERRIDES/MODIFIERS are written the way humans spell
+    genres ("lo-fi", "post-rock") but every lookup goes through `norm()`, which flattens hyphens — so
+    the hyphenated keys silently never matched. The tables are now normalised once at import. Symptom
+    was "lo-fi" (52 occurrences) appearing in the UNMAPPED report despite being listed as a MODIFIER.
+- **Detail page consolidated onto the shared bulk data (0.9.131).** `_releaseDetail` no longer calls
+  `API::getReleaseGroupGenres` (~5% coverage) and no longer falls through to raw, ungated Last.fm for
+  the other 95% — a row reading "post-punk" could open a page reading "japanese, 90s, seen live". It now
+  calls `_withGenres([$rel])`, normally a pure cache hit filled by the list that got you there, so the
+  page makes **one MB call FEWER** than before and the two views cannot disagree.
+  **`API::getReleaseGroupGenres` now has NO callers** — dead code, left in place for now; remove it in
+  the next cleanup pass along with its comment references.
+
+- **Genre fill moved OFF the render path (0.9.130) — event-loop safety.** `_withGenres` collected mbids
+  then called `getReleaseGroupMetadata` INLINE in the browse callback. That sub opens with a
+  SYNCHRONOUS cache scan (one `$cache->get` per mbid) and writes one `$cache->set` per fetched entry —
+  up to `GENRE_FETCH_MAX`(150) blocking SQLite round-trips per render, on EVERY feed render including
+  every sort/view tap, and all of them misses right after the `:2:` prefix bump. Same hazard class that
+  got Bandcamp pulled from the auto-search and moved the library probe behind an idle tick in 0.9.48.
+  Now the collect loop touches no cache, then the work is handed to `Slim::Utils::Timers` and run
+  `GENRE_BATCH`(50) at a time with a **yield between batches** — the yield is required, not cosmetic:
+  a fully-cached batch calls back synchronously, so without it the whole fill would still collapse into
+  one uninterrupted block. `$step` is passed to ITSELF as a timer arg, never captured in its own
+  closure — that's the uncollectable reference cycle fixed in `getArtistMbidByName` in 0.9.95.
+  Verified: zero cache reads before the first yield, callback not fired on the render path, 120 mbids =
+  3 batches, bound still holds at 150, and no timer scheduled at all when there's nothing to fill.
+  **Triggered by a field report** ("changing sort stopped playback") whose log timeline actually showed
+  a server restart from the install, with the player's Tidal stream failing to reopen 4s later and the
+  first browse 23s after that — i.e. not proven to be this code, but the hazard was real and latent.
+
+## GENRES — measured coverage & the plan (0.9.129 = phase 1 of 4)
+
+**Measured 2026-07-26** over 400 releases of the LIVE All Releases feed, with the plugin's own
+type/artwork filters applied. Don't re-derive these:
+
+| source | coverage |
+|---|---|
+| MB **release-group** genres (`getReleaseGroupGenres`, detail page) | **5%** |
+| inline `release_tags` in the feed payload | 8% |
+| MB **artist** genres | **47%** |
+| release-group ∪ artist | **49%** |
+| + Last.fm artist tags on the remainder (44% of the 51% miss) | **~71%** |
+
+- **`inc=tag` is THE source.** `/1/metadata/release_group/` accepts `inc=release_group tag` and returns
+  BOTH `tag.release_group[]` and `tag.artist[]`. Each tag has a **`genre_mbid` iff it is a real MB
+  genre** — that flag is the quality gate (drops "seen live"/country/mood noise). Bulk, ≤50 per request.
+- **DO NOT add a per-artist MB lookup.** Tested `artist/<mbid>?inc=genres` against the mirror on the 206
+  releases LB had no genre for: **0/80**. LB's artist tag block IS that same MB data. A fan-out would be
+  pure cost for zero gain.
+- **MB has NO genre hierarchy.** `genre/<mbid>?inc=genre-rels` → *Not Found*; genre search → *"hasn't
+  been implemented"*. `genre/all` DOES return the full curated vocabulary (**2177** names) — that's the
+  gate list for Last.fm and the seed for the rollup table. Rollup must be a table WE ship.
+- **Rollup is tractable:** a plain suffix/prefix rule (`… hip hop` → Hip Hop) covers **52% of real
+  occurrences**; only 244 distinct genres appeared across 400 releases, top 100 = 84% of occurrences,
+  top 200 = 96%. So rule + ~150–200 curated overrides ≈ complete.
+- **Streaming-service genre is a DETAIL-PAGE enricher only, never a list source.** List-level would be
+  ~3 searches × N releases (≈860 requests for one week, ≈10,500 for the feed) vs 1-per-50 here; and its
+  coverage correlates with MB's (obscure releases are missing from both). Deezer's album *search*
+  response already carries `genre_id` (free, but only **23** broad buckets); Qobuz's genre is
+  **hierarchical** (`genre.path`) and is the one genuinely useful extra — harvest opportunistically on
+  albums the user opens. Tidal album objects carry no genre.
+
+**Phase 1 (0.9.129) — DONE.** `API::_genreTags` (the `genre_mbid` gate) + `genres`/`agenres` on every
+`getReleaseGroupMetadata` entry; `RGMETA_PFX` `:1:`→`:2:`. `Browse::_withGenres` (bounded
+`GENRE_FETCH_MAX`=150, cache-first so a warm feed makes NO request) + `Browse::_genresFor` (album's own
+genres preferred; artist genres are only a PROXY fallback — a jazz artist's ambient side project would
+otherwise inherit "jazz"). `_buildReleaseItem` takes an optional `$meta` and shows genres on line2,
+falling back to `_releaseTags`. Threaded through `_buildItems`/`_buildWeekly`. **The All Releases week
+coderef now pages on RELEASES, not finished tiles** (`_pageSection` only slices/counts, so it's
+equivalent) so the genre fill covers only the visible 30.
+- **Ordering lesson:** `_genreTags` sorts by `count` DESC **only**, no name tie-break. Most real tags
+  tie at count 1, so an alphabetical tie-break silently becomes "show the alphabetically first genres" —
+  it labelled a drum-and-bass artist "ambient, breakcore". Perl's stable sort keeps LB's own order on
+  ties, which tracks the primary genre. Caught by a test against a real captured response.
+
+**Still outstanding on phase 1's cost story:** the detail page still makes its own per-album
+`getReleaseGroupGenres` MB call ([Browse.pm](ListenBrainzFreshReleases/Browse.pm) `_releaseDetail`) — it
+should read the bulk data instead, making that path one call cheaper; and `warmCache` should pre-fill
+the feed's genre cache so a browse is always a pure cache hit.
+**Phases 2–4 not started:** rollup table (`tools/` generator + shipped data file), Last.fm gated by the
+MB vocabulary, and "Group by genre" as a fourth mode on the per-view sort toggle.
+
+- **Family selector collapsed back to ONE cycling row — `_viewToggle` (0.9.128).** Replaces
+  `_viewRows` (the 0.9.125–0.9.127 two-row radio pair). Same signature
+  (`$client,$pref,$mode,$hasAlbums,$hasSingles`), still returns a LIST so the call sites spread it,
+  still EMPTY when only one family is available. Label = `PLUGIN_LBF_SHOWING`
+  ("Showing %s (tap for %s)") built from `PLUGIN_LBF_VIEW_ALBUMS`/`_SINGLES`, mirroring
+  `_sortToggle`'s state+hint wording. **The icon reflects the CURRENT family** —
+  `lbf-view-albums_MTL_icon_album.png` / `lbf-view-singles_MTL_icon_music_note.png` (Material renders
+  its own themed `album`/`music_note` font-icons) — which is what carries the at-a-glance state the
+  radio marks used to. Retired `VIEW_ON`/`VIEW_OFF` + the two `lbf-radio-*` PNGs. Flips from the LIVE
+  pref, not the render-time `$mode` (the `_sortToggle` rule).
+- **WHY NOT TWO BUTTONS SIDE BY SIDE — asked twice now, don't re-derive.** A plugin feed has NO way to
+  lay rows out horizontally in Material. Re-verified 2026-07-26 against the server's own
+  `material-deferred.min.js`: the header toolbar's `currentActions` is filled by `browseActions(...)`
+  from native-library `stdItem` shapes or `getCustomActions(...)` keyed on a media item's
+  `favorites_url`; rows flagged `isListItemInMenu` are pushed to `d.actionItems` (the ⋮ overflow) and
+  that flag is only set on those same native-menu paths. A plain OPML `type=>'link'` row always lands
+  in `d.items` as a full-width `v-list-tile`. `"choice"` in the bundle is `lms-choice-dialog`, not a
+  browse item type. Grid view is the only horizontal layout and applies to the WHOLE list. **One row is
+  the floor** — that's why this is a cycling toggle, not buttons.
+- Render-only; **no cache bumps**, matcher untouched. `perl -c` clean; 40 behavioural assertions
+  (label text from the REAL strings.txt in both states, correct icon per state, flip both directions,
+  flip-from-live-pref, hidden on each single-family case, exactly one row when both, and the in-situ
+  All Releases week Options block = header / Showing / Sorted by / Refresh).
+
+- **All Releases Refresh restored to the week drill (0.9.127).** `_refreshItem($c,'all')` is now the
+  third Options row in the per-week coderef in `_buildAllLanding`, after `_viewRows` + `_sortToggle`.
+  **The regression:** `_refreshItem($client,'all')` lives only in `fetchAll`, and since the top-level
+  menu began inlining the weeks (0.9.99–0.9.119) `fetchAll` is reached ONLY via the `TOPLEVEL_ALL_WAIT`
+  watchdog / `onError` fallback tile — so in normal browsing the All Releases feed had **no reachable
+  Refresh at all**. Diagnosed while chasing a "feed is stuck / showing very little" report that turned
+  out to be `all_past=0` (see below), but the missing row was real and independent. `topLevel`'s "each
+  week drill has its own controls" comment was true of sort, not refresh — corrected.
+- **`_effectiveView` now PERSISTS its clamp (0.9.127).** It clamped the applied view to an available
+  family but left the pref alone. Since `_viewRows` HIDES the selector when only one family is ticked,
+  a stored value the section can't show is unreachable from the UI — it sits invisible and then bites
+  the moment the user ticks the other family in Settings (verified live: `foryou_view` was stored
+  `singles_eps` on a For You section with Single/EP unticked). `$prefs->set` is guarded on an actual
+  change, so it's a no-op in the normal case.
+- **`_stashSummary('user', …)` moved ABOVE `_viewFilter` (0.9.127).** 0.9.126 stashed the summary from
+  the view-filtered list, so the New Releases for You tile's "*span · N releases*" described the active
+  lens and changed when the user switched families. The tile describes the section; the list follows
+  the lens. (All Releases was already correct — `fetchAll`/`homeAllReleases`/`topLevel` stash pre-filter,
+  since its filter runs inside the per-week coderef.)
+- Render/pref-state only — **no API change, no cache-version bumps** (`lbf:summary:*` is rewritten on
+  every fetch at a 25h TTL, so it self-heals immediately); matcher untouched (`matcher_sync_check` N/A).
+  `perl -c` clean; 36 behavioural assertions against the real subs (clamp persistence both directions,
+  nothing-ticked case, `_viewFilter` partition, week-drill row order + Refresh wiring + `which=>'all'`,
+  selector hidden on default prefs with Refresh still present, summary unaffected by the lens).
+
+- **FIELD DIAGNOSIS (0.9.127 session) — "All Releases is stuck / showing very little" was `all_past=0`,
+  not a cache.** Live prefs read over JSON-RPC showed `all_past=0`/`all_future=1`, and the log showed
+  `Fetching all releases: …past=false&future=true…` → **342 releases** where `past=true` returns 4502.
+  Root cause is the 0.9.122 `@CHECKBOX_PREFS` coercion finally making a long-unticked box bite (it had
+  been overridden by the `// 1` default). **The tell:** with `past=false` the feed only ever holds
+  today→+21d, so the *This Week* bucket **decays through the week** — the full week on Monday (90+
+  albums), only that day's releases by Sunday (7) — which reads exactly like a cache that stopped
+  updating. `lbf:feed:all:` keys on `sort|past|future|days|TODAY`, so it cannot serve stale data; check
+  the pref and the fetch URL first. See [[material-bare-checkbox-invisible]].
+
+- **Selector shown only when both families are available (0.9.126).** `_viewRows` now returns an
+  EMPTY list unless the section has BOTH album-family AND single/EP types ticked — so the default
+  (Album + Compilation) shows NO selector, and a Singles & EPs row never appears for a section that
+  can't populate it. Backed by **`_familyAvail($prefix)`** (→ `($hasAlbums,$hasSingles)` from
+  `_allowedTypes`; empty allowed-set = all types = both true) and **`_effectiveView($prefix,$pref)`**,
+  which also CLAMPS the applied view to an available family — fixing a latent bug where a section with
+  only Single/EP ticked would render EMPTY under the default `albums` view (and vice versa). Both call
+  sites (For You top of `fetchForYou`; All Releases inside the per-week coderef) now take
+  `($view,$hasAlb,$hasSing) = _effectiveView(...)` and pass the flags to `_viewRows`. Verified across
+  all cases (default→no selector, both→both rows, single-only→clamped+no selector, all→both rows).
+
+- **In-view "Albums / Singles & EPs" family selector (0.9.124 cycling toggle → 0.9.125 two-row).**
+  New Releases for You and each All Releases week show a release-family selector in their Options
+  section (next to the sort toggle), backed by durable prefs **`foryou_view`** / **`all_view`**
+  (default `'albums'`; selector-only, NOT on the settings page — like `foryou_sort`/`all_sort`).
+  **`_viewFilter`** partitions by PRIMARY type — `singles_eps` keeps primary Single/EP, `albums`
+  keeps everything else (Album, Broadcast, Other + the secondary-typed album variants
+  Compilation/Soundtrack/Live/…). Applied **AFTER** `_filterSection`, so it only narrows WITHIN the
+  user's ticked type checkboxes (nothing ticked is lost — non-single/EP types all fall into the
+  `albums` bucket); to see anything in the Singles & EPs view the section must have Single/EP ticked
+  in Settings.
+  - **UI = two rows, not header lozenges (0.9.125).** Simon asked for two Material "lozenge"
+    buttons (Albums / Singles) like the Play/Append pills on a drilled-in album. **Not possible from
+    a plugin feed** — verified against the server's `material-deferred.min.js`: the header toolbar
+    (`currentActions`) is filled only from items flagged `isListItemInMenu`, and that flag is set
+    ONLY for native-library menu shapes (`metadata`/`STD_ITEM_*`, or a level whose `items[0].menu[0]
+    ==PLAY_ACTION` with trailing `itemNoAction` rows) or `getCustomActions(...favorites_url)`; a plain
+    OPML `type=>'link'` row always lands in `d.items` (the list), never in `currentActions`. So the
+    closest plugin-owned "two buttons" is **`_viewRows`** — two always-visible rows (**Albums** /
+    **Singles & EPs**) with the active one carrying a filled radio icon (`VIEW_ON`) and the other an
+    empty one (`VIEW_OFF`); tapping a row sets the pref and refreshes in place. Replaced the 0.9.124
+    single cycling `_viewToggle` row.
+  - **Wiring.** For You: `_viewFilter` in the `$render` sub after `_filterForYou`; `_viewRows`
+    spread into `@opt`. All Releases: `_viewFilter` + `_viewRows` INSIDE the per-week coderef
+    (`_buildAllLanding`), re-read from the pref each walk so `nextWindow=>'refresh'` re-filters —
+    same mechanism as `all_sort`; the shared coderef also serves the top-level inlined weeks. Home
+    shelves (`homeForYou`/`homeAllReleases`) deliberately left UNFILTERED (no selector there,
+    glanceable carousel). Strings `PLUGIN_LBF_VIEW_ALBUMS`/`_SINGLES`; icons
+    `lbf-radio-on_MTL_icon_radio_button_checked.png` / `lbf-radio-off_MTL_icon_radio_button_unchecked.png`
+    (Material renders its own radio font-icons; PNGs are placeholder copies of the sort icon).
+  - Render-only — **no API calls, no cache-version bumps, no matcher change** (`matcher_sync_check`
+    N/A). `perl -c` clean (Browse via scratchpad stublib; Plugin's only error is the LMS
+    `main::WEBUI` constant, past the edit).
+
+- **FLEET MATCHER SYNC: a decorative `!` is punctuation, not the letter i; `&`/`+` fold to "and" (0.9.120).**
+  Ported from Discography 0.44.19/0.44.23, where the bug was found in the field. Landed across
+  **DSC / LBF / PFR / SH in one session**; `matcher_sync_check.py` exits **0**. LL untouched (its `_norm`
+  is the pinned legacy ASCII variant and carries none of these substitutions).
+  - **`!` folds to a letter only when TOKEN-INTERNAL** (`s/(?<=\w)!(?=\w)/i/g`): `P!nk` -> `pink`, while
+    `Wham!`, `Panic! At The Disco` and `Godspeed You! Black Emperor` shed the mark. Previously the
+    unconditional fold made a name spelled WITH the mark disagree with the same name spelled WITHOUT
+    it, and `_albumMatches`' artist gate is MANDATORY — so on Discography every streaming candidate was
+    rejected and the page read "No releases found" for a correctly resolved artist.
+  - **`$` and `@` stay UNCONDITIONAL, deliberately.** Scoping them too broke `$uicideboy$` -> `suicideboy`
+    (that trailing `$` is an *s*). Caught by a cross-repo BEHAVIOURAL harness, not by the sync check —
+    which compares text and would have reported four identical copies of the bug.
+  - **A name of nothing but marks keeps the old fold**, so `!!!` still keys `iii`. Letting it empty would
+    make `_artistMatch` (which returns 0 on an empty side) reject every candidate — the same bug again.
+  - **`&` and `+` -> "and"**, the same "symbol becomes the word it stands for" family as `$`->s. Without it
+    one act arriving from two services as "X & Y" and "X and Y" became two rows.
+- **ALL match-decision caches bumped** — `lbf:stream` 19->20, `lbf:track` 7->8, `lbf:pl:resolved` 7->8.
+  The keys are only partly `_norm`-derived, but every one of them stores a DECISION computed with the old
+  normaliser, and the outer `lbf:pl:resolved` wraps the inner `lbf:track` — bumping the inner alone does
+  nothing, because an outer hit never reaches it.
+
+- **Code-review fixes: two transient-failure cache-poison paths (0.9.119) — no cache-version bump.**
+  Pre-commit review of the People You Follow / DSTM work. Both are the "never cache a network
+  failure" class; logic-only, `perl -c` clean (Browse + API + DSTM via scratchpad stublib), matcher
+  untouched (`matcher_sync_check.py` N/A). Verified in-process against the REAL subs with a driveable
+  HTTP/cache/prefs harness (all cases pass).
+  - **`DSTM::_recommendedFill` no longer caches an EMPTY recommended pool.** `getRecordingMetadata`
+    is onDone-ALWAYS (0.9.113/0.9.117), so a transient metadata outage resolves onDone with `{}` →
+    empty `@pool`. That empty pool was cached at `RECS_TTL` (1d), pinning the Recommended DSTM mixer
+    empty for a day. Now `$cache->set` is guarded on `@pool`; an empty result is still SERVED (so the
+    mixer falls through / retries next top-up) but not persisted. **This completes the 0.9.117
+    "dropped the dead `$onError` call-site args" refactor** — that pass claimed "no behaviour change"
+    but MISSED this DSTM call site (it still passed a 4th arg, which the new onDone-always signature
+    silently ignored, routing failures through onDone → the poisoned cache). The dead 4th arg is now
+    removed too.
+  - **`API::getLatestListenTs` caches ONLY a genuine answer.** The success handler unconditionally
+    cached `$ts` (24h) even on a 204 No Content / empty / odd-shape 2xx — which reaches the SUCCESS
+    callback (as `_getUserStats`' explicit 204 handling proves), pinning a follower as `ts=0`/unknown
+    for a day. A `$got` flag now gates the `$cache->set` on a valid `payload`; a real `0` is still
+    cached, but 204/empty/parse-error/network-error are treated as transient-unknown and not cached
+    (unknown keeps the follower active — the stale-filter's safe default). Error-callback comment
+    corrected (204 lands in the success path, not the error path).
+  - **Stale-comment fix in `_findPlayableTrack`** (comment-only): the note claimed the outer
+    `lbf:pl:resolved` key is "deliberately NOT bumped" and "playlists don't render years", but since
+    0.9.114 playlists ARE year-enriched and that key WAS bumped to `:7:`. Rewritten to match reality.
+
+- **"People You Follow" section is now optional (0.9.118).** New boolean pref `people_follow`
+  (default **1** — the pref is new, so ON applies to every install on update; no behaviour change
+  unless switched off). ONE master switch gating THREE places, so a disabled section does zero
+  work: (1) `topLevel` — the `@people` block is built only `if ($username && $prefs->get('people_follow'))`,
+  so the section header + all four tiles are absent and their resolve coderefs (`resolveTrending`/
+  `resolveTrendingAlbums`/`resolveFollowFeed`) are unreachable; (2) `warmCache` — `_warmFollow` +
+  `_warmTrending` are skipped, so no following/stats/feed calls, resolves or cache writes on the
+  startup/daily/forced warm; (3) `fetchUnmatchedPlaylists` — the token-gated follow-feed append is
+  also gated on the pref (no `getFollowFeed` for it). Settings: General checkbox
+  `pref_people_follow` (`PLUGIN_LBF_PEOPLE_FOLLOW_SETTING`), added to `Settings::prefs()` and
+  `Plugin.pm` init. No cache-version bump (pure gating; nothing about the cached shapes changed).
+  `perl -c` clean (Browse + Settings; Plugin's only stub-env error is the LMS `main::WEBUI`
+  constant, past the edit).
+
+- **Code-review fixes on the People You Follow build (0.9.117) — no cache-version bump.** Pre-commit
+  review of the 0.9.99–0.9.116 trending work. All logic-only; `matcher_sync_check.py` still exits 0
+  (nothing touched the shared matcher); `perl -c` clean on Browse + API (scratchpad stublib).
+  - **Trending Albums streaming gate: watchdog-truncated build now caches SHORT.** The gate's
+    `$finish` called `$settle(\@keep, 0)` (full 7d/30d TTL) whether it fired from normal completion
+    OR the `PLAYLIST_TIMEOUT` watchdog — so a cold build that timed out mid-gate pinned a partial
+    album list for weeks. Added a `$timedOut` flag the watchdog sets before `$finish`; a timed-out
+    finish now settles at `PLAYLIST_INCONCLUSIVE_TTL` (1h) so a healthy build replaces it soon.
+  - **`_resolveTrending` `$empty` now caches the "no data" outcome SHORT.** The success path already
+    caches an empty resolve, but the `$empty` short-circuits (not following anyone / all stale / no
+    candidates) rendered text and returned without writing `$rkey` — so every browse re-ran the whole
+    follower aggregation. `$empty` gained a `$cacheEmpty` flag: the three genuine no-data callers pass
+    it (writes `{items=>[],total=>0}` at 1h TTL); the network-error `onError` caller does NOT (a
+    transient failure must never pin the list empty).
+  - **`topLevel` no longer holds the whole menu on the All Releases fetch.** The menu inlines the
+    All Releases weeks from `getFreshReleasesAll` (usually a synchronous cache hit); on a cold miss a
+    slow LB delayed the ENTIRE menu incl. Settings until `FEED_TIMEOUT` (10s). Added a
+    `TOPLEVEL_ALL_WAIT`(5s) local watchdog + idempotent `$finish` (guard + `killSpecific`): if the
+    feed is slow the menu renders with the drill-tile fallback first, inlined weeks appear next open.
+  - **`_fanFollowers` re-entrancy guard.** With warm-cached per-user stats `$fetch` calls back
+    synchronously, so the completion's `$pump->()` recursed one level per follower (≤FOLLOWER_MAX
+    deep, whole downstream build on that stack). A `$pumping` flag makes a synchronous re-entry a
+    no-op and lets the outer `while` keep launching iteratively — same work, flat stack.
+  - **Dead `$onError` removed from `getRecordingMetadata`/`getReleaseGroupMetadata`.** Both are
+    onDone-ALWAYS (best-effort enrichment: chunk failures fall through to onDone with whatever was
+    gathered, cached soft-hits included). The `$onError` default was never invoked and callers'
+    error subs were dead (onDone already continues the chain) — param + the 5 dead call-site args
+    dropped. No behaviour change.
+
+- **Stale-follower filter (0.9.116).** `_activeFollowers` (reuses `_fanFollowers`) drops followers
+  whose `API::getLatestListenTs` (GET /1/user/<u>/listens?count=1 → `payload.latest_listen_ts`,
+  cached `lbf:lastlisten:1:` 24h; errors NOT cached) is older than `FOLLOWER_STALE_DAYS`(183) —
+  wired into `_resolveTrending` + `_buildAlbumsData` between getFollowing and the stats fan-out.
+  Unknown activity (0) always KEEPS the follower (private feed/transient error can't empty the
+  lists). Bumps: trending resolved `:8:`, albums `:6:`. Tile-label pass was 0.9.115 (covers retitled
+  Trending Tracks/Recommended Tracks via make_covers.py, row texts Weekly/Your Followers, follow
+  tile's matched-count line2 removed; PLUGIN_LBF_FOLLOW_TILE new).
+
+- **Playlist years (0.9.114).** The Created-for-You playlists now show " (YYYY)" — `resolvePlaylist`
+  AND the warm both run `_enrichYears` before `_resolveTracks` (same pass as the follow feed).
+  **`_enrichYears` is now the year GATE:** every enriched track leaves with a `year` KEY (possibly
+  ''), which is what lets `_resolveTracks` apply the item-`_year` fallbacks; un-enriched sources
+  (DSTM pools, unmatched-debug) still have no key → no years (DSTM unaffected). Library items now
+  carry `_year` from the LMS tag year (`_localItemHash` 6th arg, `_titlesSearch` tags `ulay` — the
+  piece parked in 0.9.110; no lbf:track bump needed, library entries live 1d). `lbf:pl:resolved:7:`
+  (years bake into cached names; tiles show no count until the warm/open re-resolve — transient).
+
+- **Yearless metadata = SOFT cache hit (0.9.113) — the poisoned-cache class.** `getRecordingMetadata`
+  and `getReleaseGroupMetadata` cached whatever LB/MB returned for 90d "immutable" — but a missing
+  date is NOT immutable (LB backfills first_release_date; MB RG dates land post-release), so a lag-
+  window fetch pinned `year=''` for 3 months and defeated the whole date ladder (proven live: the
+  server rebuilt through ALL the 0.9.112 code — line-number-fingerprinted — and still served dateless
+  Rennicks/Suede rows while the API returned their dates). Both subs now treat a cached entry without
+  a year as a soft hit (kept as fallback, mbid refetched) and write yearless results at
+  `RECMETA_YEARLESS_TTL` (1d). Self-heals existing poisoned entries — no key bump; dated entries keep
+  90d (no extra traffic in the normal case). Trending resolved key `:7:` (rebake names on install).
+  **Repro/testing lessons:** scratchpad stublib now has STATEFUL Cache (get/set/TTL recorded) + Prefs;
+  `rlib/` overlays REAL curl-backed SimpleAsyncHTTP + REAL JSON::PP `from_json` — the stub's no-op
+  `from_json` produced a false "plugin code broken" repro. Fingerprint the deployed build via the
+  log's `Sub::Name (LINE)` numbers vs the local source.
+
+- **Targeted candidate metadata fill (0.9.112).** The pre-grouping recording→album map is capped at
+  TREND_MAP_CAP(250) by breadth and breadth-1 ties fall outside it ARBITRARILY — a chosen candidate
+  could reach the final 50 with NO metadata (year/rg never fetched; the Stephen Rennicks case — its
+  `first_release_date` existed all along). `_resolveTrending` now runs `$fillMeta` after candidate
+  selection: getRecordingMetadata for exactly the chosen candidates missing year/rg (≤80 mbids,
+  recmeta-cached, 0–2 requests), then `$fillDates` (RG pass, moved into a sub since fillMeta can add
+  rg mbids) → name-search → resolve. Trending resolved key `:6:`.
+
+## People You Follow — 0.9.100–0.9.111 addenda (supplements the 0.9.99 section below)
+
+- **Blocked artists apply to the whole section (0.9.111).** `_trendBlocked($artist,$ambid,$set)`
+  shims a row into the shared `_isBlocked`. Applied BOTH at build (trending candidates +
+  album aggregate — no wasted resolves/gate searches) and at RENDER (`_trendingResult`,
+  `_trendingAlbumsResult`, `_followResult` — immediate effect, the NRFY render-time rule).
+  Resolved items are tagged `_artist`/`_amb` in `_resolveTracks` (like `_created`) so cached
+  lists filter too; keys bumped `lbf:trending:resolved:5:` / `lbf:follow:resolved:5:` to bake
+  the tags (pre-tag cached items pass through unfiltered until re-resolve — deliberate). This
+  is THE answer to unblockable functional-audio uploads ("10 Hours of Ocean Waves…"): they're
+  on streaming (gate keeps them) and NOT in MB (no genre/mood data exists to filter on) — so
+  the user blocks the uploader once from the album's detail page (name-only block works).
+
+- **Service-year fallback (0.9.110) — the LAST date source.** Unmapped-on-LB + absent-from-MB items
+  can still get a date from the STREAMING catalogue: every matched item is tagged `_year` by the six
+  adapters via `_svcYear` (probes Qobuz `release_date_original`/`released_at`, Tidal `releaseDate`,
+  Deezer `release_date` — field names VERIFIED against lms-plugin-tidal/lms-deezer sources; plain
+  scalar, survives `_cacheStream`/track caches). Consumers: `_resolveTracks`' year-append (gated on
+  `exists $tr->{year}` — since 0.9.114 the playlists are enriched too, so the gate now distinguishes
+  enriched lists from DSTM pools rather than keeping playlists dateless) and the albums gate (fills
+  `$a->{year}` from the first match). Date-source ladder is
+  now: LB stats/recording metadata → MB release-group date → MB name-search → **service catalogue**.
+  Bumps: `lbf:stream:19`, `lbf:track:7`, trending resolved `:4:`, albums `:5:`; `lbf:pl:resolved:6:`
+  deliberately NOT bumped (playlists render no years — avoid a pointless 250-track re-match).
+
+- **Streaming gate on Trending Albums (0.9.109).** `_buildAlbumsData` (now takes `$client`) resolves
+  each ranked album via `_findPlayable` (same call + cache as the detail page — gated albums open
+  instantly) and DROPS albums with no streaming match anywhere (Simon: "any without streaming matches
+  should be ignored" — kills 10-hour-noise/off-catalogue rows). Pool = TRENDING_MAX+10 head-room;
+  slots keep rank order; early-stop at 50 kept; conc 5; PLAYLIST_TIMEOUT watchdog. Degrades safely:
+  no client/adapters OR gate-keeps-zero → UNGATED result at PLAYLIST_INCONCLUSIVE_TTL (1h). Key
+  `lbf:trending:albums:4:` now carries the service order.
+- **Collab credits & MB search (0.9.109).** MB fielded artist search returns 0 for a JOINED credit
+  ("Julianna Barwick & Mary Lattimore") while either name alone scores 100 (verified live) — and some
+  collabs are entered in MB as ONE unique artist. `getReleaseGroupByName` tries the full credit, then
+  each collaborator (≤3 terms). **`API::splitArtistCredits` is THE one collab splitter**
+  (& + , ; x vs feat ft featuring with; deliberately NOT bare "and" — real band names);
+  `Browse::_bandcampArtists` (the original 0.9.56 Panda Bear & Sonic Boom fix) now delegates to it.
+  LBF-local, not in the fleet matcher-sync set — but a port candidate for Discography's artist-first
+  fetch if collab discographies ever miss there.
+
+- **Refresh = the shared `_refreshItem` ONLY** (0.9.107). The bespoke `refreshTrending`/`refreshTrendingAlbums`
+  subs (drilled into a new page — no `nextWindow`) are GONE; `_refreshItem` gained `$which` values
+  `trending` (clears `_trendingResolvedKey`) and `trending_albums` (clears `_albumsDataKey($range)`),
+  reloading in place like every other feed. **Rule: never hand-roll a per-feature refresh row.**
+- **Unmapped-listen gap — THE key data lesson (0.9.108).** LB listen-stats rows are only as good as
+  each follower's LISTEN MAPPING: unmapped listens return `release_group_mbid`/`caa_id` = null (the
+  same album can arrive both mapped and unmapped from different followers). NRFY never sees this (its
+  feed is MB-derived). Fixes: `_aggregateAlbums` merges mapped+unmapped rows of one album (two-pass
+  text-key index + per-field `||=` backfill); rows still mbid-less after aggregation are resolved via
+  **`API::getReleaseGroupByName`** (fielded ws/2 release-group search, `_mbBase()` mirror-aware,
+  score≥90, mirror-0-results→public retry, cache `lbf:rgbyname:1:` 30d/1d) → mbid+date+type;
+  artwork falls back to `coverartarchive.org/release-group/<mbid>/front-250` when there's no
+  caa_release_mbid; Weekly Tracks candidates missing a year get the same name-lookup (bounded 25/build).
+  Track years also read `recording.first_release_date` (0.9.107 — the `release` object in LB recording
+  metadata is often EMPTY).
+- **Trending Albums sort (0.9.108):** NRFY-style Options section on both album lists —
+  `_trendingSortToggle`, durable `trending_sort` pref shared by month/year, modes
+  Trending (breadth, default) / Release Date / Artist / Album Title, `nextWindow=>'refresh'`.
+- **Cache keys current:** `lbf:trending:resolved:3:`, `lbf:trending:albums:3:` (bump BOTH the shape
+  and the baked-name layers when year/date sources change — the 0.9.106 miss), `lbf:recmeta:2:`,
+  `lbf:rgmeta:1:`, `lbf:rgbyname:1:`.
+
+## People You Follow — Trending (0.9.99)
+
+A new top-level **"People You Follow"** browse section (`Browse::topLevel`) built from what the
+users you follow **actually PLAY** (public listen-stats) — distinct from *Recommended by People You
+Follow* (the social FEED). The Recommended tile is **relocated into this section**. Gated on
+**`username` only** (all endpoints public — no token).
+
+- **API** (`API.pm`): `getFollowing` (`GET /1/user/<u>/following` → bare username strings, cached
+  `lbf:following:` 12h); `getUserTopRecordings`/`getUserTopReleaseGroups` (shared `_getUserStats` →
+  `GET /1/stats/user/<u>/{recordings,release-groups}?range=…` — **`release-groups` is HYPHEN, NO
+  trailing slash**; **204 = empty/private**, cached-empty, never an error; per-user cache
+  `lbf:userstats:{rec,rg}:<range>:<user>` 24h ≈ LB's recompute cadence). `getRecordingMetadata`
+  extended to `inc=artist release` so it returns `release_group_mbid` (the track→album join,
+  editions collapsed) — additive, older callers unaffected.
+- **What's Trending (this week)** — a Play-all playlist tile (`_trendingTile` → `resolveTrending` →
+  `_resolveTrending`). Fans out each follower's weekly top recordings (`_fanFollowers`, bounded
+  `FOLLOWER_FANOUT`=6, `FOLLOWER_MAX`=250 cap, `FANOUT_DEADLINE`=30s watchdog so a slow LB never
+  hangs the browse), maps recordings→albums, then `_buildTrendingCandidates` ranks. **Ranking is
+  one-follower-one-vote / equal weight:** every signal is *distinct-follower breadth*, never play
+  volume — a repeat/heavy or single-track-spammer listener counts once per album. Trends at the
+  **release-group (album)** level and represents each album by its **highest-follower-breadth
+  track** (so a full-album play doesn't flood the list; singles/EPs are 1-track albums). Candidates
+  ordered unique-artist-first then repeats (lean-week fallback), owned tracks dropped via
+  `_resolveTracks(…, 'exclude')`, capped `TRENDING_MAX`=50. Resolved cache
+  `lbf:trending:resolved:1:<user>|<svc-order>` (`TREND_RESOLVED_TTL` 24h; svc-order re-keys on a
+  service change; refreshed by the daily warm). **LESSON:** never name a lexical `my $a`/`$b` in a
+  scope containing a `sort` block — it shadows sort's package `$a`/`$b` and silently broke the
+  representative-track pick (caught by a unit test, `tools/` prototype below).
+- **Trending Albums · This Month / This Year** — two browse lists (`_trendingAlbumsTile` →
+  `resolveTrendingAlbums` → `_buildAlbumsData`/`_aggregateAlbums`), same breadth ranking straight
+  from `release-groups` stats (`range=this_month`/`this_year`). **Show-all** (owned NOT filtered —
+  trending is about popularity). Rows (`_trendingAlbumRow`) reuse `_releaseDetail`, which resolves an
+  album to streaming from just its `release_group_mbid` (no tracklist needed) — so no pre-resolution;
+  each album resolves on tap like a fresh release. Ranked aggregate cached `lbf:trending:albums:1:…`
+  (`TREND_ALBUMS_TTL` 6h; plain hashes only — rows with their coderef `url` are rebuilt each open).
+- **Warm**: `_warmTrending` (chained in `warmCache` after `_warmFollow`) pre-resolves the tracks
+  list (needs a player) and pre-builds both album aggregates (no player needed).
+- **Covers**: `menu-trending.png` (FIRE) + `menu-trending-albums.png` (MAGENTA) via
+  `tools/make_covers.py`. **Debug/prototype tool**: `tools/fetch_trending.py` implements the identical
+  breadth algorithm against the live public API (username [range] [max]) — the reference for the
+  aggregation, runnable without LMS.
 
 ## Recommended by People You Follow (0.9.65; **new-music-only + single day-divided list in 0.9.71–0.9.72**)
 
@@ -652,7 +1448,13 @@ belongs in `handler`, before `SUPER::handler`. Fleet-wide rule — LBF, PFR and 
   - **All Releases** per-week views each carry the toggle, backed by a **single durable `all_sort` pref shared across every week** — set it once and every week honours it, and it survives restarts. (0.9.97 first shipped this as per-week module state; that was changed because opening a *different* week always started at the default, which read as "the sort keeps resetting".) Paging stays per-week module state (`%pageState`); only the sort is a pref now.
   - Feeds are always fetched with `sort=release_date` (stable cache key); all ordering is client-side (`_sortReleases` pre-sorts by date for week-bucketing, `_sortWithin` applies the per-view mode within each week). `group_by_artist`'s collapse was effectively dead anyway (the weekly branch always outranked it) — see the 0.9.97 changelog.
   - **Artist sort keys on the MusicBrainz sort-name** ("White, Jack"; a stage name like "Panda Bear" keeps its natural order), not the display credit. The LB feed sends only the display credit, so the sort-name comes from MB by artist MBID: `API::warmArtistSorts(\@mbids)` fetches `artist/<mbid>` → `sort-name` serially (MB courtesy gap on public, none on a mirror; capped `SORT_WARM_MAX`=100/pass, in-flight-guarded), cached `lbf:artistsort:1:<mbid>` (30d found / 1d none); `API::peekArtistSort($mbid)` is the sync render-path read. `Browse::_artistSortKey` = `artist_sort_name` (MuSpy supplies it inline) → `peekArtistSort` → display credit. The warm fires **only from the Artist-sort code paths** (`_warmArtistSorts`, gated on `$mode eq 'artist'` in `fetchForYou` and the All-Releases week coderef), so a user who never picks Artist sort triggers no MB traffic; a cold artist sorts by display credit on the first Artist-sorted render and corrects on re-entry (second-load, like bios/emblems).
+- **Release-family view is per-view too (0.9.124–0.9.128).** Each list has an **Albums / Singles & EPs toggle** — ONE cycling row, "Showing Albums (tap for Singles & EPs)", icon reflecting the current family (`_viewToggle`) — in its Options section (next to Sorted-by), backed by a durable pref set only via the in-view toggle (not on the settings page — like `foryou_sort`):
+  - **For You** → `foryou_view`; **All Releases** per-week views → shared `all_view`. Both default `albums`.
+  - `_viewFilter` partitions by PRIMARY type: `singles_eps` = primary Single/EP; `albums` = everything else. Applied AFTER `_filterSection`, so it NARROWS within the ticked type checkboxes. Nothing ticked is lost (non-single/EP types fall into `albums`). Home shelves are deliberately unfiltered.
+  - **The toggle row appears only when the section has BOTH families ticked** (`_familyAvail`/`_effectiveView`, 0.9.126) — default Album+Compilation shows no toggle; a single-only section is clamped so it never renders empty, and since 0.9.127 the clamp is PERSISTED so a hidden pref can't lie in wait.
+  - **One cycling row, not two rows and not header lozenges:** Material gives plugin feeds no way to lay rows out horizontally OR to add pill buttons to the header toolbar (`currentActions`/`isListItemInMenu` is native-library-menu or favorites_url-custom-action only — re-verified in `material-deferred.min.js` 2026-07-26). Two stacked rows cost a line of screen, so 0.9.128 collapsed them into one. See the Current Version note — **don't re-derive this**.
 - `play_via` — show inline playable streaming matches on the detail page (default ON)
+- `people_follow` — master on/off for the whole **People You Follow** browse section (What's Trending, both Trending Albums lists, Recommended); default ON (0.9.118). When off the section is absent AND its warm pre-build + unmatched-debug entry are skipped, so nothing there is fetched/cached/warmed
 - `follow_sort` — People You Follow list ordering: `date` (day dividers, newest first) or `recommender` (grouped by the follower who recommended each track); default `date`. Flipped in place by the inline toggle at the top of that list, not shown on the settings page (0.9.88; toggle label made state+hint "Sorted by … (tap for …)" in 0.9.91)
 - `prefer_library` — when building a Created-for-You playlist, use a track from the user's own LMS library (matched by MusicBrainz ID, then artist + title) before searching streaming services (default ON; see "Prefer local library")
 - `debug_log` — opt-in dedicated warm/resolve debug log (default OFF, 0.9.54). When on, `Plugin::dbg` appends the playlist warm/match timeline — incl. the per-playlist **library-match count** and scan-defers — to `lbf-debug.log` in the LMS log dir (`Slim::Utils::OSDetect::dirsFor('log')`, cachedir fallback), size-capped ~1 MB with one `.old` rotation. The same lines always also go to `server.log` at INFO. Turn on to diagnose a match/caching problem, off after.
@@ -664,7 +1466,7 @@ Grouped separately from the ListenBrainz prefs so the two aren't confused. All t
 - `muspy_future_months` — how far ahead the MuSpy upcoming side reaches (1-24 months, default 12; 0.9.80). Kept separate from the LB feed's narrow `days` window; `_mergeMuSpy` caps the future side at `months * 30` days, clamped by `MUSPY_FUTURE_MONTHS_DEFAULT`/`_MAX` so a garbage pref can't blow the window open. Only applies when `muspy_future` is on
 
 ### Blocked Artists Settings
-- `blocked_artists` — arrayref of `{ mbid, name }`. Releases by these artists are hidden from EVERY feed (For You / All Releases / home shelves) by `Browse::_filterSection` → `_isBlocked` (matches any blocked `artist_mbids` OR normalised credit name). No ListenBrainz API exists for this — the `fresh_releases` endpoint takes only date/sort params and the feedback API is per-recording (love/hate, `score 1/-1`) and isn't consumed by the feed — so it's a purely local, render-time filter (takes effect on next browse; no feed-cache clear). Added from a release detail page's **"Block this artist"** link (`Browse::_blockArtist`); VA is never offered (would hide unrelated compilations). The settings section lists each blocked artist with an Unblock checkbox (`lbf_unblock_<i>`); `Settings::handler` removes ticked entries on save (the pref is NOT in the `prefs()` list, so it's mutated directly).
+- `blocked_artists` — arrayref of `{ mbid, name }`. Releases by these artists are hidden from EVERY feed (For You / All Releases / home shelves via `Browse::_filterSection`, and since 0.9.111 the whole People You Follow section via `_trendBlocked`) by `_isBlocked` (matches any blocked `artist_mbids` OR normalised credit name). No ListenBrainz API exists for this — the `fresh_releases` endpoint takes only date/sort params and the feedback API is per-recording (love/hate, `score 1/-1`) and isn't consumed by the feed — so it's a purely local, render-time filter (takes effect on next browse; no feed-cache clear). Added from a release detail page's **"Block this artist"** link (`Browse::_blockArtist`); VA is never offered (would hide unrelated compilations). The settings section lists each blocked artist with an Unblock checkbox (`lbf_unblock_<i>`); `Settings::handler` removes ticked entries on save (the pref is NOT in the `prefs()` list, so it's mutated directly).
 
 ### Streaming Services Settings
 - `svc_priority_<qobuz|bandcamp|tidal>` — search priority per service (number 0–9; lower = searched first, **0 = never search it**). Search stops at the first service that matches. Drives BOTH album play-via and playlist track matching. The page lists each known service as detected/not installed via `Browse::serviceStatus`.
@@ -691,6 +1493,7 @@ ListenBrainz Fresh Releases
 ├── ── Created for You ──                      ← Material section header
 │   ├── <date span> · N releases               ← New Releases for You tile (title is on the cover)
 │   │   ├── ── Options ──                        ← Material section header
+│   │   │   ├── Showing <family> (tap for <other>) ← ONE cycling row, icon = current family (foryou_view pref, default albums)
 │   │   │   ├── Sorted by <mode> (tap to change) ← cycles Release Date / Artist / Album Title (foryou_sort pref)
 │   │   │   └── Refresh (force update now)       ← clears the feed cache, reloads in place
 │   │   └── … For You feed (ALWAYS weekly W/C headers; releases sorted within each week per the toggle)
@@ -703,7 +1506,7 @@ ListenBrainz Fresh Releases
 ├── ── All Releases ──                         ← Material section header
 │   └── <date span> · N releases               ← All Releases tile
 │       ├── Refresh (force update now)
-│       ├── W/C <date>  [This/Last/Earlier badge]  ← that week's releases (Options: Sorted-by toggle, shared+durable all_sort; first 30, then "Show more" / "Show all")
+│       ├── W/C <date>  [This/Last/Earlier badge]  ← that week's releases (Options: Showing-family toggle (all_view) + Sorted-by toggle (all_sort), both shared+durable, + Refresh (0.9.127); first 30, then "Show more" / "Show all")
 │       └── …                                  ← one entry per week-commencing
 └── ── Settings ──                             ← Material section header
     ├── Plugin Settings                         ← weblink to settings.html
@@ -799,6 +1602,26 @@ Detected in `_isVariousArtists()`:
 
 ## Shared Matching Engine — FLEET SYNC RULE (2026-07-10)
 
+> ### ⏸ SYNC IS ON HOLD (2026-07-29) — `matcher_sync_check.py` exits 1 BY DESIGN
+>
+> **Discography's matcher is mid-rework and very much WIP, so nothing is being pushed across
+> the fleet until DSC settles.** Right now the check reports drift on `_norm`: DSC carries an
+> apostrophe / `'n'` fold (`rock 'n' roll` → `rock n roll`, and a bare apostrophe strip) that
+> LBF, PFR and Search Hub do not.
+>
+> **This is expected. Do NOT "fix" it by porting DSC's `_norm` outward**, and do not treat a
+> non-zero exit as a blocker on unrelated work — it is currently the normal state. What the
+> rule below still means while the hold is on:
+> - Do not make the drift WORSE. A new matching change of your own still has to land in every
+>   repo that carries the affected sub, in the same session, exactly as written below.
+> - When DSC lands, the apostrophe rule (and anything else DSC has grown meanwhile) gets
+>   synced outward in ONE dedicated session, and the check must exit 0 again before that
+>   session is called done.
+> - The separate, older `_norm` "!"-fold gap (a decorative "!" makes *Panic! At The Disco* /
+>   *Godspeed You!* unfindable when typed without it — Search Hub patched at its own gate in
+>   0.2.1) is ALSO waiting on that session. Don't do it piecemeal.
+
+
 The artist/album/track matcher (`_norm`, `%FOLD`, `_artistMatch`, `_albumMatches`,
 fallback helpers `_stripFmt`/`_asciiNorm`/`_punctNorm`/`_stripArtistPrefix`; LBF also
 `_trackMatches`) is ONE engine with a copy in each of these four repos:
@@ -857,6 +1680,305 @@ that cause empty/junk pools:
    ([[mb-mirror-search-index-gotcha]]); test the library with `["artists",…,"search:NAME"]`.
 
 ## Version History
+- **0.9.149** — **a transient LB blip pinned "No trending data yet" on Trending Albums for a WEEK
+  (This Month) or a MONTH (This Year) — the empty-aggregate cache-poison class, one the rest of this
+  file already gets right.** Field report: both album lists empty, "all ok until recently".
+  **Diagnosed without touching the box:** replayed the plugin's own pipeline against the live API
+  (following → 13 users, all with listens that day, `stats/user/<u>/release-groups` 200 for every one
+  of them, **650 rows / 558 distinct albums** for `this_month`, same for `this_year`), then opened
+  This Month over the CLI (`listenbrainzfreshreleases items 0 10 item_id:5`) and read `log.txt`: the
+  message came back with **zero new log lines**. No build ran → `_buildAlbumsData` was serving a
+  cache hit, and **`$cache->get` is truthy for an empty arrayref**, which is the whole bug.
+  - **`_buildAlbumsData`'s gate settled an EMPTY aggregate with `$short = 0`** — full
+    `TREND_ALBUMS_MONTH_TTL`/`_YEAR_TTL`. Every other inconclusive settle in that same sub already
+    uses `PLAYLIST_INCONCLUSIVE_TTL` (no client/services, gate keeps zero, watchdog truncation —
+    that last one was itself a 0.9.117 review fix); the empty branch was the one that slipped
+    through. Now `$settle->($data, 1)`. **The rule this belongs to: an empty result is never a fact.
+    It is the shape a transient failure takes** — and the further up the pipeline the failure
+    happens, the more it looks like a legitimate "nothing to show".
+  - **`lbf:trending:albums:6:`→`:7:`, NOT a shape change** — purely to abandon the empties already
+    pinned on users' servers. Worth knowing: the key carries the calendar period, so This Month
+    would have self-healed at the month rollover and only **This Year was stuck until January**.
+  - **The empty view now renders the Refresh row** (`_refreshItem('trending_albums', $range)`; no
+    sort toggle — nothing to sort). It previously emitted the message ALONE, which made a bad build
+    a **dead end**: the aggregate cache is the only way back and the user had no way to drop it.
+    **Any "nothing here" view that is served from a cache must carry its own Refresh** — check this
+    when adding one.
+  - **`tools/t_trending_empty.pl`** (18 assertions, real sub bodies via the `grab` trick): empty →
+    1h on BOTH ranges, healthy → still 7d/30d (the fix must not become a blanket downgrade),
+    gate-keeps-zero unchanged, the empty view's Refresh row present AND its tap dropping *that*
+    range's key only, and the `:7:` bump. `LBF_BROWSE=` points it at a mutated copy —
+    anti-tested against a pre-fix Browse.pm: **7 failures**.
+  - **Test-writing trap worth remembering, since it bit this suite:** `ok($k =~ /…/, "msg")` — a
+    bare `m//` or `grep` in a LIST-context argument returns the match list, so on failure the args
+    shift, the message becomes the condition, and the assertion PASSES on any truthy label. Three
+    assertions here did exactly that and the anti-test run is what exposed them (`5. PASS` with a
+    blank label against a `:6:` key). Wrap every match/grep in `scalar()`.
+- **0.9.148** — **…and that strip belongs to BANDCAMP ALONE — correcting 0.9.147, which applied it
+  to all four services.** Qobuz/Tidal/Deezer hand back a bare `title` in the raw album hash 0.9.146
+  moved to; only Bandcamp's search PASSTHROUGH joins the artist on. On the other three the strip had
+  no wart to remove and could therefore only misfire: a catalogue title that genuinely ends in its
+  own artist — `"Goldberg Variations - Glenn Gould"` by Glenn Gould — clears BOTH guards (the
+  separator is space-padded, the discarded side `_norm`-EQUALS the artist) and reaches LL as
+  `"Goldberg Variations"`, a name the service never reports at playback. **That is the identical
+  failure mode 0.9.144–0.9.147 exist to fix, arrived at from the opposite direction**, and it is the
+  general lesson: this handshake's failures are silent (the album plays fine, it just never reaches
+  *Played*), so a defensive transform applied where the defect isn't evidenced is not free — it is a
+  new instance of the same bug. `_searchBandcamp` is now the sub's only caller; the other three
+  assign `$album->{title}` verbatim.
+  **`_streamKey` :26→:27** — a FIFTH bump, same rule as ever: `:26:` can hold a Q/T/D title truncated
+  at a dash the service really uses.
+  **`_bcMatchKey` STILL `:6:`** (a pin is often an album's only playable entry) — but its comment now
+  states the residual cost correctly and, importantly, that **the usual remedy does not apply**:
+  `_bcMatchItems` replays the cached `favorites_url` verbatim, so removing and re-adding in LL just
+  re-sends the stale favurl. Only **Re-search Bandcamp** rewrites a pin. Same wording in the CHANGELOG.
+  **`tools/t_svctitle.pl` grown to 22 checks**: `%FOLD` is now LIFTED from `Browse.pm` (it was
+  hand-copied, so a `%FOLD` edit drifted without failing), the Goldberg case is kept as a live
+  demonstration that the guards CANNOT save it, and the four search subs are pinned at source level —
+  Bandcamp calls the strip, the other three must not and must assign the raw title. Anti-tested:
+  restoring the 0.9.147 call sites fails 6.
+- **0.9.147** — **…and the raw title needs the ARTIST AFFIX stripped, because Bandcamp's carries one
+  too (`_stripArtistAffix`) — but it applied the strip to ALL FOUR services, which 0.9.148 narrows to
+  Bandcamp. Read this entry with that one.** 0.9.146 moved to the raw album hash and fixed
+  Qobuz/Tidal/Deezer, but
+  Bandcamp's search PASSTHROUGH title is itself `"<album> - <artist>"` — confirmed live: an add stored
+  `Radio: Journey Beat (Original Music from Big Walk) - aksfx`, and Simon confirmed Bandcamp's Now
+  Playing reports artist `aksfx` with album `Radio: Journey Beat (Original Music from Big Walk)`, so
+  the stored name could never match at playback.
+  **Why no field is trustworthy here, which is the thing to remember:** `_albumMatches` accepts a
+  candidate that STARTS WITH our album, so a trailing `" - artist"` sails through matching untouched.
+  Every field in the chain therefore looks fine to the matcher while being wrong as a title. There is
+  no field to switch to — the affix has to be removed explicitly.
+  **`_stripArtistAffix` is deliberately conservative**, following LL's own 0.1.72 hardening: the
+  separator must be SPACE-PADDED (so `Jay-Z` is untouched), the discarded side must EQUAL the artist
+  under `_norm` (not contain or start with it, so `Album - aksfx remixes` is left alone), and anything
+  failing either test is returned VERBATIM. Prefix is tested at the FIRST separator, suffix at the
+  LAST, so a title containing its own `" - "` still resolves. Compared against the SERVICE's artist
+  spelling (`$pt->{artist}`; also `$candArtist` until 0.9.148 narrowed the call to Bandcamp) — the
+  value that service would actually have joined. **Conservative is not the same as safe**: the guards
+  stop a wrong strip only where the artist ISN'T what got joined on, and 0.9.148 is what happens when
+  it is.
+  **LBF-ONLY, outside the shared matcher.** Do not confuse it with `_stripArtistPrefix`, which IS a
+  fleet-synced shared-engine sub; this one doesn't trip `matcher_sync_check`.
+  **`_streamKey` :25→:26** — a FOURTH bump for a fourth wrong `&al=` value.
+  **New suite `tools/t_svctitle.pl`**, using the real sub and the real `_norm`/`%FOLD` chain, 14
+  checks split into "must strip" and **"must not strip"** — the second half is the point, since a
+  wrong strip corrupts the title LL matches and dedupes on, which is worse than the wart it removes.
+  Anti-tested: neutering the strip fails 7.
+- **0.9.146** — **`&al=` takes the service's RAW ALBUM TITLE (`_svctitle`), not its rendered row
+  label — correcting 0.9.145, which also shipped. Completed by 0.9.147, which strips the artist affix
+  Bandcamp's raw title turned out to carry.** Reported by Simon from two live rows: rec 207
+  (Qobuz) stored `aksfx - Radio: Fourth Space (…)`, rec 208 (Bandcamp) stored
+  `Radio: Journey Beat (…) - aksfx`. **Artist-first on one service, artist-last on the other** — the
+  unmistakable signature of a DISPLAY LABEL rather than a title, which is exactly what
+  `$it->{name}`/`{line1}` are: each streaming plugin's own renderer composes them, and they differ per
+  plugin. A label can never match at playback, and it poisons LL's `artist|album|year` dedupe key with
+  the artist on both ends. Worse than 0.9.144 in one respect: MB's name was at least a real title.
+  **Fix:** stash the title from the RAW album hash at match time — `$item->{_svctitle} =
+  $album->{title}` for Qobuz/Tidal/Deezer, `$it->{_svctitle} = $pt->{title}` for Bandcamp (which also
+  serves the manual picker, since it calls this sub through the adapter's `run`). That is the SAME
+  field `_albumMatches` already validates against, so it is the album title alone by construction —
+  the artist is a separate argument there. **No fallback at the call site:** if a service ever yields
+  no title we send nothing and LL reads Material's label, which is what happened before 0.9.144 and is
+  merely imperfect, whereas either wrong string is silently destructive.
+  **`_streamKey` :24→:25.** Third consecutive bump of this key for a different wrong `&al=` value.
+  **THE RULE: bump it on ANY change to what `&al=` carries, even when the field keeps its shape** —
+  one re-resolve versus a week of silent misses aged out of a 7d TTL.
+  **THE REAL LESSON, and it is a method failure, not a typo.** Three builds in one session each put a
+  different wrong string in this one field. The first two passed every behavioural check in
+  `t_ll_handshake.pl` because they all SUPPLY the album themselves; section 4 (added in 0.9.145) then
+  caught only the MB-name spelling, because I wrote the assertion to accept `{name}` — encoding my own
+  assumption that the rendered node held a title. **I never verified what `name` actually contains for
+  any service; Simon's two live rows did.** The assertion now accepts ONLY `_svctitle` and names all
+  three known-wrong forms, anti-tested against each. When a field feeds another plugin's matching,
+  read a REAL value out of a REAL row before believing what it holds.
+- **0.9.145** — **`&al=` carries the MATCHED SERVICE'S naming, not MusicBrainz's — correcting 0.9.144,
+  which SHIPPED and was installed. SUPERSEDED BY 0.9.146 — this build read the service's rendered ROW
+  LABEL, which bakes the artist in; the principle below is right, the field it used was not.** Reported by Simon, from a real row: LB has aksfx
+  `Radio: Fourth Space (Original Music from Big Walk)` where Qobuz has
+  `…(Original Music from the Game "Big Walk")`, and the release never reached Played.
+  **THE RULE: once a favurl exists the release has been RESOLVED to a specific service album, and from
+  that point the SERVICE's spelling is the only one that works.** Two independent consumers demand it,
+  both title-keyed: LL's Played auto-detection matches the PLAYING track's album title (reported by the
+  service), and LL's `artist|album|year` dedupe key must agree with a direct add from that same
+  service. MB and the services disagree constantly, and NOT only over edition qualifiers — see the
+  aksfx case above. MB additionally keeps a release's distinguisher OUT of the title (all four American
+  Football LPs are titled `American Football`, with `LP2`/`LP3` in `disambiguation`) where the services
+  put it IN. Sending MB's name loses on both counts, **silently**: the album plays perfectly and just
+  never leaves the list.
+  **Why 0.9.144 got it wrong** — it reasoned that an "authoritative" catalogue title beat a renderer's
+  display label. That mistakes WHICH QUESTION the param answers. It is not "what is this release
+  really called", it is "what will the thing playing call itself".
+  **Contrast PFR, which sends the same param for a different reason:** its rows read "Artist - Album",
+  so its `&al=` undoes ITS OWN renderer's prefix. That is not licence to substitute a different naming
+  authority. Do not "improve" this back to MB's name.
+  **Changes:** both call sites now pass the service candidate's own title (`$it->{name} //
+  $it->{line1}`); at the Bandcamp site deliberately NOT the `$name` local, whose `// $album` fallback
+  would smuggle the MB name back in. **`_streamKey` :23→:24** — the field didn't change shape, only its
+  value, and a `:23:` entry cached by the installed 0.9.144 would keep handing LL the MB name for the
+  full 7d TTL.
+  **THE TEST LESSON, and it is the same one as `&tc=` below.** `t_ll_handshake.pl` passed throughout
+  0.9.144 because every case SUPPLIES the album itself — it proved the param is built and parsed
+  correctly and could not say a word about WHICH NAME the plugin chooses. New **section 4** asserts on
+  the CALL SITES in source (crude, but there is no return value to inspect); anti-tested by reverting a
+  site to `$album`, which fails it. **A behavioural test of a handshake cannot check the choice of what
+  goes into it — test the call site too.**
+  **Rows added under 0.9.144 keep the wrong stored name**; only a remove + re-add fixes those.
+- **0.9.144** — **`&al=` — an ALBUM TITLE joins the Listen Later handshake.** Material gives a plugin no
+  structured album name for an online row: `$ALBUMNAME`/`$TITLE` is the row's DISPLAY LABEL verbatim,
+  and these rows are labelled by each streaming plugin's own renderer, qualifier and all. So the album
+  name reaching LL depended on skin plumbing. `_attachFavUrl` takes the name as a 7th arg
+  (`uri_escape_utf8`, pushed next to `&a=`).
+  **SHIPPED WITH THE WRONG NAME — see 0.9.145 above; it sent the MB/LB release name.** The reasoning
+  below is kept for its method notes only; **where it describes sending the MB name it is describing
+  the bug.** Both call sites pass it —
+  the `_findPlayable` settle loop and the manual Bandcamp pin. Receiver has existed since **LL 0.1.71**
+  (`Plugin.pm::_stripPrivateParams`; 0.1.72 hardened its migration, which is why the user-facing floor
+  was quoted as 0.1.72), so older LLs simply ignore it. Idiom copied from **PFR**, which
+  has sent the identical param since its own "Artist - Album" labels needed it.
+  **REAL FLOOR IS LL 0.1.92 — see the Played trade-off below.**
+  - **THE OTHER CONSEQUENCE, missed on the first pass and found by code review: this BREAKS Played
+    on LL 0.1.72–0.1.91.** MB deliberately keeps a release's distinguisher OUTSIDE the title — all four
+    American Football LPs are titled exactly `American Football`, with `LP2`/`LP3` in MB's
+    `disambiguation` (verified against the MB API and Simon's mirror), while the service prints
+    `American Football (LP2)`. `Played::_matchRecord`'s streaming branch matches on the album TITLE
+    alone (no album-id anchor), and LL's `DB::_norm` deliberately KEEPS the qualifier — so the bare
+    name we now send never matches the qualified name the playing track reports, and the row never
+    leaves the list. Silent: it plays perfectly. **Replay is NOT affected** — LL prefers the captured
+    album id (`hasDirectAlbumRef`), which our favurl always carries, so its `(LP4)`-preserving
+    `_bestMatches` ranking never runs for our rows. Display degrades (rows reading `American Football`
+    separated only by year) — accepted, not fixed.
+    **Fixed on the LL side in 0.1.92**, which keeps the service's label as `ref.svc_title` and matches
+    on either. Nothing to change here: the name we send is the right one, LL just needed to stop
+    throwing the other one away.
+    **Do NOT "fix" this by appending MB's `disambiguation`** — that was the first plan and it is wrong.
+    Sampling 120 release-groups from a live LB fresh-releases feed: exactly ONE has a disambiguation,
+    and it reads `The Vampire Lestat OST` — editorial prose, not a service-style qualifier, so
+    appending it would match nothing anywhere. The LB feed carries no such field either (12 keys, none
+    of them disambiguation), so it would need one MB lookup per release-group — and the trending path
+    resolves in bulk. `LP2` happening to be exactly Qobuz's spelling is a coincidence.
+  - **BE PRECISE ABOUT THE GAIN — I overstated it first time and the verification caught it.** I cited
+    two live rows (*Fruit Bats – The Landfill (Album)*, *Walrus Ghost – … (Album)*) as proof of a
+    current bug. They are NOT: LL has stripped a trailing `(Album)`/`(Track)`/`(Hi-Res …)`/`(Explicit)`/
+    `(Mono)`/`(Stereo)` and a trailing `(YYYY)` since **0.1.35** (2026-06-27), so a Bandcamp add TODAY
+    already stores the clean title without this param. Those rows are residue from before that. What
+    `&al=` actually replaces is **the blocklist itself**: anything not on that fixed list —
+    `(Deluxe Edition)`, `(Bonus Track Version)`, `(Remastered)` — still reaches the stored title and the
+    dedupe key. Authoritative name instead of a guess at what to strip. **Method note:** the first cut
+    of the test modelled LL's fallback as the row label ALONE, which made the `(Album)` cases look like
+    they proved something; the anti-test passed them either way and exposed it. Model the FULL fallback
+    or a suite flatters the feature.
+  - **DELIBERATE BEHAVIOUR CHANGE, not pure cleanup:** an edition qualifier that is genuinely part of
+    the service's album title is replaced by MB's plain release name, so a deluxe edition and the
+    standard one now key alike and collapse into ONE row. Correct here (LBF matched both to the SAME MB
+    release), but it is a change — pinned in LL's `tools/t_addpath.pl` with that reasoning attached.
+  - **`_streamKey` :22→:23.** `favorites_url` is part of the cached item, so without it every
+    already-resolved album keeps handing LL the old favurl for the 7d TTL. Note this is the OPPOSITE
+    case to the 0.9.143 no-op: that DROPPED a field (orphan, never read → no bump); this ADDS one a
+    reader depends on. **`_bcMatchKey` stays `:6:`** per the standing rule — with a cost stated in the
+    comment: an already-pinned Bandcamp match keeps its old favurl until re-searched by hand. Accepted;
+    bumping would delete every hand-curated pin, which is strictly worse.
+  - **Encoding contract, verified not assumed:** `uri_escape_utf8` out, `uri_unescape` back = **OCTETS**,
+    never a utf8-flagged string. Identical to `&a=` since 0.9.58 and consistent all the way through LL,
+    so the round trip is lossless. `t_ll_handshake.pl` asserts the octet-ness explicitly so a future
+    change on either side fails loudly rather than quietly re-keying LL's rows.
+  - **Tests: `tools/t_ll_handshake.pl` gained section 3**, driving LL's REAL `_stripPrivateParams`
+    (grabbed from `ListenLater/Plugin.pm`) over what `_attachFavUrl` actually emitted — clean case,
+    on/off-blocklist qualifiers, punctuation-only `( )`, a title full of `&`/`=`/`?`, wide chars, empty
+    album, and `al=` as the LONE param (the ordering case: each strip takes its own leading delimiter,
+    so the residue must still be a bare `scheme://album:<id>`). The file paths are now env-overridable
+    (`LBF_BROWSE`/`LL_SOURCES`/`LL_PLUGIN`) **so it can be anti-tested** — 13 failures with the sender's
+    `al=` push deleted, 13 with the receiver's strip deleted. LL's `tools/t_addpath.pl` gained the
+    DB-level half: the verbatim favurl this version emits for Qobuz and Bandcamp, asserted on the
+    stored row, its dedupe key, and that a later plain-labelled add of the same record now dedupes
+    (5 failures without the receiver).
+- **0.9.143** — **`&tc=` REMOVED — 0.9.142's plumbing was measurably inert, so it's gone.** Read the
+  0.9.142 entry below for the full trace and the verification that killed it. Summary: the count
+  fields are real but live on each service's per-ALBUM endpoint and are ABSENT from the SEARCH
+  responses `_searchQobuz`/`_searchTidal`/`_searchDeezer` iterate, so `_candTrackCount` returned undef
+  every time and no `tc=` was ever emitted, on any service. **Removed:** `_candTrackCount`, the three
+  `$item->{_tracks}` stashes, and the `tc=` block in `_attachFavUrl` (which now carries a comment
+  saying why, and what evidence would be needed to re-add it).
+  **`_streamKey` deliberately STAYS at `:22:`** — reverting it to `:21:` would resurrect pre-0.9.142
+  entries and bumping to `:23:` would force a third pointless re-resolve, whereas DROPPING a field
+  from the cached item needs neither: an orphaned `_tracks` key is simply never read. (Earlier in that
+  session I argued a revert would cost a `:22→:23` bump; that was wrong, and it was the main reason I
+  recommended keeping dead code — a sunk-cost argument, not a technical one.)
+  **Version goes FORWARD to 0.9.143, not back to 0.9.141:** 0.9.142 was already installed, and LMS
+  offers no update for a same-or-lower version. **`tools/t_ll_handshake.pl` rewritten again** — it now
+  tests the `&rt=` wire (including that an unmappable MB type asserts nothing) and LL's own
+  type×count decision, and **asserts no count param is emitted**, so re-adding one fails the test.
+  It also lost a reference to a non-existent `LL verify_favurl_params.pl` that I had invented.
+- **0.9.142** — **`&tc=` — the release's TRACK COUNT joins the Listen Later handshake, completing
+  0.9.141.** 0.9.141 sent MB's primary type as `&rt=` and asserted it as authoritative; but LL reads
+  `single` as "exactly ONE track" (`Played::_totalTracks` returns 1 → its played-through mark), so a
+  MB Single with B-sides was marked Played after track one. The count that disproves it was **already
+  on the same item**: `_candReleaseType` has read it off the service's album hash since 0.9.89 (for
+  the single-drop filter) — computed ~11 lines before `_attachFavUrl` builds the favurl, and unused
+  by it. Fixed properly in LL 0.1.88 (it resolves the release to check); this sends the number so LL
+  needs no lookup at all and the row is right at INSERT time. **Changes:** new `_candTrackCount`
+  (same three verified fields: Qobuz `tracks_count`, Deezer `nb_tracks`, TIDAL `numberOfTracks`;
+  1-3 digits, non-zero) — DELIBERATELY a separate sub, NOT a refactor of `_candReleaseType`, which
+  treats a count of 0 as 'single' (`$tc <= 2`) and feeds the single-drop filter: folding them would
+  silently change which candidates that filter drops. Stashed as `_tracks` in `_searchQobuz` /
+  `_searchTidal` / `_searchDeezer` beside `_ctype`/`_year` (plain scalar → survives the Storable
+  stream cache). `_attachFavUrl` reads `$it->{_tracks}` rather than taking a new arg, so the OTHER
+  call site (the manual Bandcamp picker, ~4958, which has no album hash) sends nothing and needs no
+  change — Bandcamp has no count before its page is fetched, so LL resolves there as before.
+  **Cache: `_streamKey` :21→:22** for the same reason as :20→:21 — `favorites_url` is part of the
+  cached item, so without it every already-resolved album would keep handing LL a favurl with no
+  count. `_bcMatchKey` **stays at :6:** (no auto-repopulation — bumping it discards hand-curated
+  Bandcamp-only matches; the 0.9.42 mistake reverted in 0.9.47 and re-attempted in 0.9.141).
+  **Ordering rule: LL 0.1.89 (the receiver) MUST ship first** — an LL that can't strip `tc=` leaves
+  it in the favurl. **`tools/t_ll_handshake.pl` rewritten** (it had FAILED after LL 0.1.88 added
+  `singleIsWrong`, which it didn't grab — and it encoded the bug as expected behaviour, asserting
+  Single+3 tracks → 'single'). It now evals the real subs from both repos and covers 13 type/count
+  combinations plus sender-side validation; `t_cache_widechar.pl`, `t_review_fixes.pl` and
+  `matcher_sync_check.py` all still pass unchanged.
+  **VERIFIED LIVE 2026-07-29 — and the optimisation does NOT pay off where it was expected.**
+  Adding *3OH!3 – MY FRIENDS* (MB **Single**, 3 tracks) from LBF match rows, per service, from
+  `curl http://plex:9000/log.txt`:
+  - **Tidal** (rec 199): `add -> tidal … rel=single` then `reclassified as ep` **150 ms** later.
+  - **Deezer** (recs 198, 200): `rel=single` then `reclassified as ep` after **277 ms** / **2 ms**
+    (the 2 ms one hit an already-cached tracklist).
+  - **Qobuz** (rec 201): `rel=single` then `reclassified as ep` **1.5 ms** later — SAME as the others.
+
+  **So `&tc=` delivers on NO service. 0.9.142 is inert plumbing.** The count is absent from all three
+  SEARCH payloads, which is where LBF gets its album hashes.
+
+  `rel=single` on the INSERT line is the proof: had `&tc=3` arrived, `relTypeFor(service=>'single',
+  count=>3)` would have settled it to `ep` at insert with no correction line at all. So **neither
+  Tidal's `numberOfTracks` nor Deezer's `nb_tracks` is present in their SEARCH responses** — those
+  fields exist on the per-album endpoint (which is what the earlier probe recorded), not on search
+  results. The count LBF sends is therefore absent for both, and LL's background `_verifyRelease`
+  does the work — invisibly, in 2–150 ms, which is why it LOOKS instant to the user (Simon reported
+  "showed up straight away, no delay" for both services; that observation and the log agree — the
+  fallback is imperceptible, not absent).
+
+  **Consequence for `_candReleaseType` (PRE-EXISTING, since 0.9.89, worth its own look):** its
+  count fallback reads the same absent fields, so for Tidal and Deezer it can only ever answer from
+  `record_type`/`type`. If those are absent from search results too, `_ctype` is always `''` there
+  and the single-drop filter has never dropped a Tidal or Deezer candidate. Untested — but this
+  finding makes it likely.
+
+  **DO NOT conflate this with LL's own Qobuz shortcut.** `Sources::classifyRelType` reads
+  `tracks_count` off `getAPIHandler->getAlbum` — the per-album ENDPOINT, which is exactly where these
+  fields are documented to live, and a different call from the search LBF uses. The Qobuz result
+  above says nothing about it either way: the correction line appears whether the count came from the
+  album object or from the tracklist. Still unverified — don't credit it, don't dismiss it. (Its 1.5 ms
+  turnaround is suggestive but proves nothing; a cached tracklist is equally fast.)
+
+  **Keep or revert?** KEEP, purely on cost: the `:21→:22` bump has already taken its one re-resolve,
+  and reverting needs `:22→:23` — a SECOND re-resolve — to buy back nothing. The plumbing is inert
+  where the field is missing and would start working with no code change if a payload ever carried it.
+
+  **The lesson worth more than the feature:** every test written for this (`t_ll_handshake.pl`,
+  LL's `verify_qobuz_path.pl`) SUPPLIED the field itself — a stubbed `{tracks_count=>4}` — so they
+  could only ever confirm that our code reads a count when one is present, never that one IS present.
+  The "field names verified per plugin" comment was verified against PLUGIN SOURCE (where the fields
+  appear in album-endpoint handling); that true statement about NAMES silently became an assumed
+  statement about AVAILABILITY in a different payload. A sender-side handshake needs one real
+  end-to-end observation before it is believed, not a synthetic round trip.
 - **0.9.96** — **alias-field fallback in `getArtistMbidByName` (ported from Discography 0.32.0).** The
   fielded query `artist:"<name>"` searches the artist NAME only, so a name existing solely as an MB
   **alias** ("The Oh Sees" → Osees `194272cc-…`) returned 0 results and cached a miss — verified live on

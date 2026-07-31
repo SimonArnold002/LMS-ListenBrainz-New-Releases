@@ -43,6 +43,18 @@ REPOS = {
     'PFR': 'LMS-Pitchfork-Reviews/PitchforkReviews/Browse.pm',
     'DSC': 'LMS-Discography/Discography/Sources.pm',
     'LL':  'LMS-Listen-to-Later/ListenLater/Sources.pm',
+    # Search Hub (added 2026-07-18) carries ONLY the normaliser subs — _norm,
+    # %FOLD, _artistMatch, _asciiNorm, _punctNorm — and none of the
+    # match-verification ones (_albumMatches/_trackMatches/_stripFmt/
+    # _stripArtistPrefix). Those belong to the matcher's "is THIS the right
+    # release?" job; Search Hub only ranks what a search returned. Subs it
+    # does not carry are simply absent from its file and drop out of the
+    # comparison, which this script already handles.
+    #
+    # It is in the rule because search and the matcher MUST agree on what "the
+    # same name" means: if they diverge, search hands a consumer an artist the
+    # matcher then refuses to match.
+    'SH':  'LMS-Search-Hub/SearchHub/Text.pm',
 }
 
 # The engine's parts. Order = report order. %FOLD is the diacritic map used

@@ -3,6 +3,235 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.149
+
+### Fixed
+- **Trending Albums · This Month and · This Year no longer get stuck on "No trending data yet".** If a build happened to catch ListenBrainz at a bad moment — the listening stats briefly unavailable, or every request timing out at once — the empty result it produced was stored as though it were the answer, for a week (This Month) or a **month** (This Year). Both lists then said there was nothing to show without asking ListenBrainz again, even though the people you follow had been listening all along. An empty result is now treated as a bad moment rather than a fact, and kept for an hour at most, so the next visit rebuilds. A list that really does have albums in it is cached exactly as long as before.
+- **The empty view now has a Refresh row.** Previously it showed nothing but the message, so there was no way to make it try again — you had to wait out the week, or, for This Year, wait until January. Refresh rebuilds that list on the spot.
+- **Existing stuck lists clear themselves on update** — this release stops reading anything the old code stored, so both lists rebuild the first time you open them.
+
+## 0.9.148
+
+### Fixed
+- **An album whose title really does end in the artist's name is no longer cut short when it's saved to Listen Later.** 0.9.147 removed a trailing artist from the album name, which is right for Bandcamp — it genuinely puts the artist there — but it did so on Qobuz, Tidal and Deezer as well, where the name arrives clean already. On those three the change could only ever do harm: a release actually called "Goldberg Variations - Glenn Gould", by Glenn Gould, was saved as "Goldberg Variations", a name the service never says while playing, so the album sat in Listen Later for ever no matter how often you played it — the very fault 0.9.144–0.9.147 set out to cure, arrived at from the other side. The artist is now removed for Bandcamp only.
+- **Anything added to Listen Later from Qobuz, Tidal or Deezer under 0.9.147 whose title contains a dash** may have been saved short and should be removed and re-added. Matches this plugin had cached are re-fetched by themselves.
+- **Hand-picked Bandcamp matches are the one exception, and removing and re-adding will not fix those**: a match you found with **Search Bandcamp** is kept as you left it — deliberately, since it's often an album's only playable entry — so it goes on sending whichever name was current when you found it. Open the release and tap **Re-search Bandcamp** to bring it up to date. This applies to any Bandcamp match pinned before this release, back to 0.9.144.
+
+## 0.9.147
+
+### Fixed
+- **Bandcamp albums no longer save to Listen Later with the artist stuck on the end of the title.** 0.9.146 took the album name from the release's own entry rather than the browse row, which fixed Qobuz, Tidal and Deezer — but Bandcamp puts the artist there too, so its albums still saved as "Radio: Journey Beat (Original Music from Big Walk) - aksfx" and, with the artist shown alongside, read as though it were there twice. Bandcamp itself reports the plain title while the album plays, so the saved name never matched and the album never moved to *Played*. The artist is now removed from the title whichever end a service puts it, and only when it really is the artist — a title that simply contains a dash, or a band whose name reads like one, is left exactly as it is.
+- **Anything added to Listen Later under 0.9.144–0.9.146 has a wrong name stored** and should be removed and re-added. Matches this plugin had cached are re-fetched by themselves — except hand-picked Bandcamp matches, which need **Re-search Bandcamp** (see 0.9.148).
+- **This went too wide** — it removed a trailing artist on every service, not only the one that adds it. Superseded by 0.9.148; update to that rather than running this.
+
+## 0.9.146
+
+### Fixed
+- **The artist is no longer glued onto the album title of releases added to Listen Later.** 0.9.145 set out to send the streaming service's own name for a release, but took it from the row as the service's plugin draws it — and those rows put the artist in the title. Qobuz writes it in front, Bandcamp behind, so the same album saved as "aksfx - Radio: Fourth Space …" from one and "Radio: Journey Beat … - aksfx" from the other. Listen Later then had a title no service would ever report while playing, so nothing reached *Played*, and the same album added from two services looked like two different records. The name now comes from the release's own title as the service states it, with the artist kept where it belongs — in the artist field.
+- **This fixed Qobuz, Tidal and Deezer but not Bandcamp**, whose album entry carries the artist as well. Superseded by 0.9.147.
+
+## 0.9.145
+
+### Fixed
+- **Releases added to Listen Later from here now save under the name the streaming service uses, so they move to *Played* again.** 0.9.144 started telling Listen Later the album's name — a good idea, spoiled by sending the *MusicBrainz* name instead of the name of the album it had actually matched on Qobuz, Tidal, Deezer or Bandcamp. The two disagree more often than you'd expect: ListenBrainz lists aksfx's "Radio: Fourth Space (Original Music from Big Walk)" where Qobuz has "Radio: Fourth Space (Original Music from the Game "Big Walk")". MusicBrainz also keeps a release's distinguishing part out of the title altogether — all four American Football albums are simply "American Football", where the services print "American Football (LP2)" and so on. Listen Later checks the album name against what's playing to decide whether you've heard a release, so anything saved under a name the service doesn't use was never recognised and stayed in the list no matter how often you played it — silently, because it played perfectly well. It now sends the service's own name, which is also what makes the same album dedupe properly if you later add it straight from that service.
+- **This fix was itself wrong** — it read the service's name off the browse row, which carries the artist. Superseded by 0.9.146; update to that rather than running this.
+
+## 0.9.144
+
+### Changed
+- **Adding a release to Listen Later now sends the album name outright**, rather than leaving Listen Later to read it off the row label — which arrives by way of the skin and depends on how each service's plugin happens to render it (Bandcamp's search rows, for instance, have "(Album)" tacked on the end). Works with Listen Later **0.1.71 or newer**; older versions ignore it and read the label as before.
+- **This shipped sending the wrong name** — MusicBrainz's rather than the matched service's — which stopped affected releases ever moving to *Played*. Fixed in 0.9.145; update to that rather than running this.
+- Stored album matches are re-fetched once so the name is included, which happens by itself next time you open a release page. Nothing to press. Hand-picked Bandcamp matches keep their existing entry until you search Bandcamp for that album again — they're never discarded.
+
+## 0.9.143
+
+### Changed
+- **Removed the track-count groundwork added in 0.9.142, which measurement showed did nothing.** The idea was to tell Listen Later how many tracks a release holds so it needn't look that up itself. The services do publish that number, but only on their per-album pages — not in the search results these matches come from — so in practice nothing was ever sent, on any of Qobuz, Tidal or Deezer. Listen Later was doing the work the whole time, which is why the labels have been correct throughout. The dead code is gone rather than left looking like a working feature, and the test that covers this now fails if it's ever put back without evidence that a count really arrives. **No change to anything you see**, and nothing is re-fetched as a result.
+
+## 0.9.142
+
+### Changed
+- **Groundwork only, with no visible effect today.** 0.9.141 began telling Listen Later what MusicBrainz calls each release, which turned out to be half a story: MusicBrainz calls a release a single even when it holds a lead track plus a couple of B-sides, whereas Listen Later reads *single* as meaning one track and filed the whole thing as heard the moment that track finished. **That is fixed in Listen Later 0.1.88 — nothing here is needed for it.** This release additionally passes on the release's track count *when a service states one while we're finding the album*, which would let Listen Later skip looking it up. In practice none of Qobuz, Tidal or Deezer include it in the data we get at that point, so Listen Later does look it up — the instant after adding, far too quickly to notice. The groundwork costs nothing and starts working by itself if that ever changes.
+- Stored album matches are re-fetched once as a result, which happens by itself next time you open a release page. Nothing to press, and hand-picked Bandcamp matches are untouched.
+
+## 0.9.141
+
+### Added
+- **Albums added to Listen Later are now labelled correctly as an album, EP or single.** Listen Later can't tell them apart on its own — most streaming services don't say — so it has been guessing from how many tracks it managed to resolve, which gets a short album wrong, a long EP wrong, and a single-track album wrong. This plugin knows the real answer from MusicBrainz, so it now passes it across when you add a release. That fixes the icon on the row, and it fixes Listen Later's "played" detection, which expects one play for a single and two for an EP. Releases MusicBrainz classes as something else entirely (a broadcast, say) are left for Listen Later to work out as before, rather than being asserted wrongly.
+
+### Fixed
+- **Artists with non-Latin names, and most artist biographies, were never being remembered.** Anything the plugin stores as plain text — a MusicBrainz artist sort-name, a Last.fm biography — was failing to save whenever it contained a character outside the Western European set. For sort-names that meant every Japanese, Korean, Cyrillic or Greek artist was looked up again on every refresh and never sorted by their proper sort-name. For biographies it was worse: a single curly apostrophe or dash is enough to trigger it, so almost no biography was ever stored and each one was re-fetched from Last.fm every time you opened a release page. Both now save correctly, first time, whatever the alphabet. Nothing already stored is lost, and no re-fetch is forced.
+
+### Changed
+- **Browsing does noticeably less work per tap, which matters most on a Raspberry Pi.** Every drill-in, refresh and "Show more" makes the server rebuild the menu from the top, and each rebuild was re-loading the feed from its database *and* filtering, de-duplicating and sorting it again from scratch — several thousand releases, three or more times per tap. Both the loaded feed and the finished list are now held for a few seconds and reused, which is all one tap needs. Change a setting and it rebuilds immediately; **Refresh** always fetches and rebuilds from scratch.
+- **Working out which week a release belongs to was being done once per release**, on every screen, when a fortnight of releases only spans a handful of dates. Those answers are now remembered, taking that part of drawing a list to roughly a tenth of what it was.
+- **Three smaller pieces of housekeeping that were quietly repeating on every screen**: the tile subtitles ("14–28 July · 726 releases") were being written back to the database on every rebuild even when nothing had changed; the "What's Trending" row was re-reading the whole resolved track list just to count it; and the list of installed streaming services was being re-detected several times per tap. All three now do the work once and reuse the answer.
+- None of this changes what you see. Everything held in memory lasts a few seconds at most, every setting that shapes a list is accounted for, and **Refresh** and a server restart both clear it.
+
+### Note on version numbers
+- Versions **0.9.129–0.9.140** are not missing: they are genre-labels work, parked on the `alpha` branch pending a decision on the metadata backend. They were never released. This release carries the non-genre work developed alongside them (the Albums / Singles & EPs toggle in 0.9.126–0.9.128, and the performance work above), and continues from a number above them so no version ever means two different things.
+
+## 0.9.128
+
+### Changed
+- **The Albums / Singles & EPs choice is now a single row instead of two.** It reads **"Showing Albums (tap for Singles & EPs)"** and flips when you tap it — exactly like the "Sorted by…" row beneath it. The two separate rows took a line of screen each above the releases you actually came to see; this gives the same choice back in half the space. Its icon now changes with the list: a record sleeve while you're on Albums, a music note while you're on Singles & EPs, so you can still tell at a glance which one you're looking at. As before, the row only appears when that section has both album-type and single/EP types ticked in Settings.
+
+## 0.9.127
+
+### Fixed
+- **The "Refresh (force update now)" row is back on All Releases.** Each week now carries it in its **Options** section, under the sort toggle. It had become unreachable: once the top-level menu started listing the weeks directly, the only page holding an All Releases Refresh was one you no longer passed through — so there was no way to force the feed to re-fetch short of waiting for its daily update. It's the same Refresh every other section uses: one tap drops the cached feed and reloads the list in place.
+- **The Albums / Singles & EPs choice can no longer sit hidden on a feed that isn't showing it.** If a feed only includes one of the two families, the selector is hidden — but the stored choice stayed as it was, so ticking **Single**/**EP** in Settings later could drop you straight into a Singles & EPs list you never asked for. The stored choice is now corrected to match what's actually on screen, so what you see and what's saved always agree.
+- **The New Releases for You tile counts the whole feed again.** Its "*date span · N releases*" line was being taken from the list *after* the Albums / Singles & EPs filter, so tapping between the two changed the tile's count and dates. The tile now always describes the whole section, while the list itself still follows your choice.
+
+## 0.9.126
+
+### Added
+- **Switch each feed between albums and singles/EPs, right from the list.** New Releases for You and each All Releases week now show two choices — **Albums** and **Singles & EPs** — in their **Options** section, next to "Sorted by…", with the active one marked. Tap the other to switch the whole list between full-length releases and singles & EPs, so you no longer see them all mixed together. The choice sticks across visits and restarts. It works within the release types you've ticked in Settings, so it only shows types you've chosen to include. Feeds default to **Albums**, so they look as they did before until you switch.
+- **The selector only appears when it's useful.** The two choices show up **only when that section has both album-type and single/EP types ticked in Settings** — so with the default types (Album + Compilation) you won't see them at all, and a section that only includes singles/EPs won't show an empty list. Tick **Single**/**EP** (alongside album types) for a section to get the switch.
+
+> **0.9.120–0.9.125 have no entries.** 0.9.120 was released (a shared-matcher fix across the plugin family) but never got a changelog entry, and 0.9.121–0.9.125 were never written up. Rather than invent them after the fact, the gap is left as it is.
+>
+> **0.9.129–0.9.140 are absent for a different reason:** they are genre-labelling work that was never released. It needs a metadata source fast enough to be usable, and is parked pending that decision.
+
+## 0.9.119
+
+### Fixed
+- **A brief ListenBrainz hiccup can no longer leave "Recommended for You" (Don't Stop The Music) empty for a day.** When the metadata lookup that turns your recommendations into playable tracks came back empty because of a transient outage, that empty pool was being cached for 24 hours — so the mixer stayed empty until it expired. It's now only cached when it actually has tracks; an empty result is served once and retried on the next top-up. (This completes the 0.9.117 error-path cleanup, which had left this one call site behind.)
+- **A follower whose "last listen" briefly comes back blank is no longer treated as inactive for a day.** The stale-follower check (which drops people you follow who haven't listened in ~6 months) cached a "no data" answer even when the response was empty/private/transient — pinning that person as unknown for 24 hours. It now caches only a genuine answer, so a momentary blank is retried rather than stored.
+- Corrected a stale internal code comment about how playlist year-labels are cached (no behaviour change).
+
+## 0.9.118
+
+### Added
+- **"People You Follow" is now optional.** A new **Show "People You Follow" section** toggle in Settings → General turns the whole section on or off (default **on**, so nothing changes unless you switch it off). When it's off the section — What's Trending, both Trending Albums lists and Recommended — is completely absent from the menu **and** nothing behind it runs: no `following` / listen-stats / social-feed calls, no metadata or streaming resolves, no caching, and it's skipped by the background warm too. So if you don't use it, it costs you nothing. Turning it back on repopulates everything on the next browse / warm as before.
+
+## 0.9.117
+
+### Fixed
+- **Pre-commit code-review fixes on the People You Follow build (no cache-version bump).**
+  - **A slow Trending Albums build no longer pins a half-finished list for weeks.** The streaming gate has a watchdog so a cold build can never hang; if that watchdog fired mid-build it kept the albums matched so far but cached them at the *full* 7-day/30-day TTL, freezing a truncated list. A timed-out build now caches **short** (1 hour), so the next healthy build replaces it.
+  - **An empty Weekly Tracks result no longer re-runs the whole build on every open.** When the people you follow have no computable trending yet (nobody followed, all inactive, or no candidates), that outcome is now cached briefly instead of re-fanning-out over your followers each time you open the menu — while a genuine network error is still never cached.
+  - **The top-level menu no longer waits on the All Releases fetch.** The menu inlines the All Releases weeks from a feed fetch; on a cold cache a slow ListenBrainz could delay the *whole* menu (including Settings) until that fetch's 10-second timeout. A short local watchdog now renders the menu with the drill-in tile first, so navigation is never held up by the network (the inlined weeks appear on the next open).
+  - **Internal robustness:** the follower fan-out no longer recurses per follower when stats are warm-cached (flat call stack regardless of how many people you follow), and the recording/release-group metadata helpers had their dead error-callback path removed (they were already onDone-always, best-effort). No behaviour change from these two.
+
+## 0.9.116
+
+### Changed
+- **Inactive followed users are filtered out of the trending builds.** Anyone you follow whose **last listen is older than ~6 months** at build time is skipped when Weekly Tracks and both Trending Albums lists are assembled — so accounts that stopped using ListenBrainz can't keep seeding This Year with stale plays (the week/month windows already self-clean; a year of history doesn't). One tiny last-listen check per follower, cached for a day. Deliberately cautious: a follower whose activity **can't be determined** (private feed, momentary API error) is always kept — only a confirmed months-old last listen drops anyone, so an API hiccup can never empty your lists.
+
+## 0.9.115
+
+### Changed
+- **People You Follow tile labels tidied.** The tracks tile's cover now reads **"Trending Tracks"** (was "What's Trending") with just **"Weekly"** underneath, and its opened page is titled "Trending Tracks" to match. The Recommended tile's cover now reads **"Recommended Tracks"** with **"Your Followers"** underneath, and its "Matched N/M" line was dropped from the tile (the count still shows in the opened list's title).
+
+## 0.9.114
+
+### Added
+- **Release years on the Created-for-You playlist tracks.** Weekly Jams / Weekly Exploration / Daily Jams rows now show " (YYYY)" like the rest of the plugin, using the same date ladder as the People You Follow section: ListenBrainz recording metadata (one cached, chunked call per playlist) → the matched streaming item's own catalogue date → and, new, a **library-matched track's own tag year** from your LMS database. Display-only — matching, ordering, Play-all and deep playback are untouched. The Recommended list also picks up the service/library date fallbacks (a few more of its rows gain years). Resolved-playlist cache bumped so years appear after one background re-resolve instead of at the weekly rollover.
+
+## 0.9.113
+
+### Fixed
+- **Dateless tracks that stayed dateless through every fallback — root cause found and proven.** The metadata caches stored "no year" results for the full 90-day immutable window, but "no date yet" isn't immutable: ListenBrainz backfills a recording's first-release-date over time (and MusicBrainz release-group dates land after release). An entry cached during that lag window pinned an empty year for 3 months, silently defeating the whole date ladder — verified live against the installed build: the server rebuilt Weekly Tracks through all the new code and still served the poisoned entries (Stephen Rennicks – *I Really Love You*, whose date the API returns today). Now a cached entry **without** a year is only a soft hit — kept as a fallback but refetched — and yearless results cache for 1 day instead of 90. Existing poisoned entries self-heal on the next build, no cache reset needed; dated entries keep the long TTL (no extra traffic for the normal case). Applies to both the recording and release-group metadata caches.
+
+## 0.9.112
+
+### Fixed
+- **The remaining Weekly Tracks year gaps** (e.g. Stephen Rennicks – *I Really Love You*, whose MusicBrainz date existed all along). Root cause traced live: the recording→album metadata pass is capped at the 250 highest-breadth recordings, and one-listener tracks tie **arbitrarily** — so a track could reach the final list without its metadata ever being fetched, then also fall past the name-search bound. The build now runs a **targeted second metadata fill for exactly the chosen candidates** that missed the cap (a couple of cached, chunked requests at most), feeding the whole existing date ladder (recording date → release-group date → name-search → service catalogue).
+
+## 0.9.111
+
+### Fixed
+- **"Block this artist" now works across the whole People You Follow section.** Blocking was honoured by For You / All Releases but never by the trending lists — so functional-audio uploads (e.g. *10 Hours of Continuous Ocean Waves Sound for Sleeping*, which IS on streaming so the playability gate rightly keeps it, and has no MusicBrainz entry so genre/mood data doesn't exist to filter on) could sit in Trending permanently. Now: open the album → Artist Details → **Block this artist** (works with or without a MusicBrainz id) and that uploader disappears from **Weekly Tracks, both Trending Albums lists and the Recommended list** — immediately (render-time, like the other feeds), and their albums no longer waste ranking slots or lookups on the next build. Managed/unblocked from the settings page as before.
+
+## 0.9.110
+
+### Fixed
+- **The last date gaps: the streaming catalogue is now the final date fallback.** A track or album that is unmapped on ListenBrainz *and* absent from MusicBrainz previously had no possible date source — but the matched streaming item itself knows its release date (Qobuz `release_date_original`, Tidal `releaseDate`, Deezer `release_date` — all verified against the service plugins' sources). Every matched item is now tagged with its service release year, and the People You Follow views use it whenever ListenBrainz/MusicBrainz couldn't supply one: Weekly Tracks rows, and Trending Albums rows via the streaming gate (which was already touching every album). The Created-for-You playlists deliberately keep their no-year look — the fallback only applies to sources that show years.
+- Cache versions bumped (`lbf:stream 18→19`, `lbf:track 6→7`, trending resolved/albums) so already-matched items re-resolve once and gain the year; the resolved-playlist cache is deliberately untouched (playlists don't render years, so no forced re-match).
+
+## 0.9.109
+
+### Fixed
+- **Collaboration albums now resolve on MusicBrainz** (e.g. Julianna Barwick & Mary Lattimore – *Tragic Magic*, which matched streaming but showed no artwork or date). MusicBrainz's exact-artist search returns nothing for a joined credit ("A & B") even though either name alone scores 100 — verified live. The name-resolver now tries the full credit first (some collaborations are entered as one artist), then each collaborator. The collab splitter is now ONE shared helper (`API::splitArtistCredits`) used by both this resolver and the manual Bandcamp search — the same fix class as the Panda Bear & Sonic Boom Bandcamp gap (0.9.56), in one place.
+
+### Changed
+- **Trending Albums only list albums you can actually play.** Each ranked album is now checked against your streaming services during the build (through the same search/cache the album page uses, so gated albums open instantly) — anything with no streaming match anywhere (10-hour noise uploads, private rips, off-catalogue items like *10 Hours of Continuous Ocean Waves…*) is dropped instead of taking a slot. The candidate pool gets head-room (60) so the list stays near 50 after attrition. Degrades safely: if streaming is unavailable (no player / services not ready) the list falls back to showing everything on a short cache so a healthy build replaces it soon. The album caches now also re-key when you change your streaming services.
+
+## 0.9.108
+
+### Fixed
+- **Trending albums with no artwork, no date and a bare detail page now render fully** (e.g. Daniel Lanois – *Belladonna Nocturne*, The Veils – *Fragile World*, Luke Haines – *Izzy Wizzy Let's Get Busy*). Root cause found live: ListenBrainz listen-stats rows are only as good as each follower's **listen mapping** — unmapped listens come back with **no MusicBrainz id and no cover ids at all** (New Releases never sees this; its feed is MusicBrainz-derived). Those albums are now resolved by artist + album name against MusicBrainz (uses your local mirror when configured; results cached), which restores the id, release date, type — and with them the cover (from the Cover Art Archive's release-group image), the year and the full detail page.
+- **The same album no longer splits into two rows** when one follower's plays are mapped and another's aren't — they merge into one entry with the combined "Played by N" count (this was silently deflating the ranking).
+- **Weekly Tracks years:** tracks from unmapped listens (no recording id → no metadata at all) now get their year the same way, via the album-name lookup.
+- **Stale album lists after 0.9.106:** the month/year album caches (which live 7 and 30 days) were still serving the old date-less data shape — cache keys bumped so both lists rebuild correctly at once.
+
+### Added
+- **Sort options on both Trending Albums lists**, exactly like New Releases for You: an Options section with a "Sorted by … (tap to change)" toggle cycling **Trending / Release Date / Artist / Album Title** (a durable preference shared by the This Month and This Year lists), with the Refresh row alongside it.
+
+## 0.9.107
+
+### Fixed
+- **People You Follow Refresh now works exactly like every other section's.** The Weekly Tracks and both Trending Albums lists had their own bespoke Refresh that pushed a new page instead of reloading in place; they now use the **same shared Refresh** as New Releases / All Releases (`_refreshItem` — clears that list's cache and reloads the current view). One refresh mechanism across the whole plugin.
+- **Track release years are far more complete.** The year now reads from the recording's own first-release-date — the same authoritative date New Releases takes from the feed — instead of only the album's release-group date, which is often missing for very recent music. Tracks that showed no year (e.g. Luluc – *Honeyeater*, Twisted Teens – *Why Did You Miss It*) now show one.
+
+### Internal
+- Removed the parallel `refreshTrending` / `refreshTrendingAlbums` code paths (the whole point of the fix above). Bumped the recording-metadata cache (`lbf:recmeta:1→2`) and the Weekly Tracks resolved cache (`lbf:trending:resolved:1→2`) so the improved years take effect immediately rather than on cache expiry.
+
+## 0.9.106
+
+### Changed
+- **Trending Albums now render exactly like the New Releases rows.** They go through the same builder, so the release year, the type line, cover art, tap-through and streaming matching all behave identically to New Releases — with the album's release date and type pulled from MusicBrainz the same way. Fixes most missing years and inconsistent album behaviour in the People You Follow section.
+
+## 0.9.105
+
+### Changed
+- **Weekly Tracks builds much faster.** It now stops matching as soon as it has a full list instead of working through the whole candidate pool, and matches more tracks in parallel — cutting the slowest step (finding each track on your streaming services) roughly in half.
+- **Release years are more complete.** A year now also comes from the album's release date (more reliably available than a single track's), so far fewer rows are missing one.
+- **Each People You Follow list has its own Refresh.** Both Trending Albums lists (This Month / This Year) now have a "Refresh (rebuild now)" row like Weekly Tracks; the All Releases refresh was removed from the main menu.
+
+### Fixed
+- **Trending Albums with no direct play-through now open properly** instead of appearing as plain, un-tappable text — they resolve to your streaming services from the artist and album name.
+
+## 0.9.104
+
+### Changed
+- **Weekly Tracks builds faster.** The plugin now remembers which recordings belong to which album instead of re-looking-that-up every time, and only checks the most widely-shared tracks — so the first build does noticeably less work.
+- **More tracks show a release year** — when a single track has no year of its own, it falls back to its album's year.
+
+## 0.9.103
+
+### Changed
+- **The People You Follow lists now show the release year**, just like the New Releases rows — on Weekly Tracks, both Trending Albums lists, and Recommended.
+- **All Releases opens straight from the main menu.** Its weeks now sit directly under the "All Releases" heading instead of behind an extra tap into a folder.
+- **Trending lists refresh at a sensible pace.** Weekly Tracks rebuilds roughly every couple of days, This Month weekly, and This Year monthly — matching how slowly each actually changes. A new month or year still refreshes right away.
+
+### Fixed
+- **Weekly Tracks now groups by album correctly.** A popular album is represented by its standout track instead of scattering several of its tracks through the list — the album-level trending working as intended.
+
+## 0.9.102
+
+### Added
+- **A "Refresh (rebuild now)" row on What's Trending.** Rebuilds the list from scratch — re-checking what everyone you follow has played and re-matching to your services — instead of showing the copy the plugin cached earlier. Handy right after installing, or any time you want the very latest.
+
+## 0.9.101
+
+### Changed
+- **Clearer labels in the People You Follow section.** Each tile's cover already names the feature, so the row underneath now just says what it covers: **Weekly Tracks**, **This Month**, **This Year**. The Trending Albums · This Year tile also gets its own colour so the two album lists are easy to tell apart at a glance.
+
+## 0.9.100
+
+### Changed
+- **"What's Trending" appears faster the first time you open it.** The very first (uncached) open now does noticeably less work — it pulls fewer tracks per person, resolves a tighter pool of candidates to streaming, and fetches everyone's stats more in parallel — so the list builds sooner. Every open after that was already instant (served from the list the plugin rebuilds for you daily in the background).
+
+## 0.9.99
+
+### Added
+- **New "People You Follow" section — see what everyone you follow is actually into.** A new menu section built from the listening of the people you follow on ListenBrainz (needs your username only — no token):
+  - **What's Trending** — a weekly, ready-to-play list of the tracks the people you follow have been playing most **this week**, up to 50. It ranks by **how many of them are into something, not how many times one person played it** — so a friend spinning one track on repeat can't take over the list; it's a genuine picture of what your circle is listening to. It trends at the **album** level and surfaces the standout track from each, so a hot album shows up as one great track rather than flooding the list, and different artists get a look in. Anything already **in your library is left out**, so it's pure discovery.
+  - **Trending Albums — This Month / This Year** — two browse lists of the albums your circle is playing most over the current month and the current year, again ranked by how many of the people you follow are listening. Tap any album to play it, matched to Qobuz / Tidal / Deezer like the rest of the plugin.
+- **"Recommended by People You Follow" now lives in this section too**, alongside the new lists, so everything driven by the people you follow sits together.
+
 ## 0.9.98
 
 ### Fixed
