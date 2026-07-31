@@ -114,6 +114,31 @@ part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ### State of play (2026-07-30) — read this before starting anything
 
+**PLANNED WORK — scoped 2026-07-31, none of it started. Read the doc before opening the code:**
+- **`docs/token-free-refactor.md`** — the plugin can drop the ListenBrainz token AND the Last.fm key
+  entirely. Verified against LB server source + live anon calls: **the token is needed for exactly one
+  thing**, `recording_recommendation` events. `fresh_releases` (the flagship feed!) is public and is
+  gated on a token it never needed. Public replacements found for the rest (loved tracks, pins). Scope,
+  code changes, cache bumps and the one open design question (volume) are all in the doc.
+- **`docs/year-in-music.md`** — Spotify-Wrapped-style yearly review from LB's public Year in Music
+  endpoint. One request, 20 pre-computed sections, most of it reuses existing machinery. Cheapest big
+  feature on the board. Needs a tester with a longer listening history.
+- **`docs/recommended-listening-row.md`** — Material **home-row-only** "Recommended Listening": ≤30
+  most-regarded albums the user *doesn't* own, from library artists + similar artists, monthly, one
+  album per artist. Regard signal is deliberately multi-source; **LB popularity is excluded** (verified
+  500/disabled again 2026-07-31, same outage as 0.9.77). Key findings: the primary-Album/no-secondary
+  type filter does most of the work (Radiohead 100 RGs → 10), a **raw MB rating sort is actively wrong**
+  (1-vote bootlegs outrank *OK Computer*), and the regard signal is a 6-tier blend whose spine is a
+  **shipped acclaim data file** (3,476 albums × 58 critic lists, zero API calls). Ownership filtering
+  **adapts the existing `'exclude'` libMode** — verified the `albums` CLI takes `search:` like
+  `titles` — but there is **no album MBID tier** (not in `albums_loop`, and our MBIDs are
+  release-GROUP vs LMS's release), so it's text-matching only: bias uncertain toward "owned".
+- **`docs/genre-sources-investigation.md`** — investigated MAI / the hosted LMS-community API as a
+  genre backend. **Conclusion: not for list rows** (16% coverage on real fresh releases vs our
+  existing 49%, per-album not bulk, non-MB vocabulary, and **no artist-genre route to fall back to** —
+  `/artist/<n>/genres` silently returns the *picture* payload with a 200, it never 404s). Good
+  detail-page enricher. **Does not change why the genre work is parked on `alpha`.**
+
 **Branches.** `dev` (this one) is the working line at **0.9.149**, committed and pushed
 (0.9.147–0.9.148 landed as `a7e1ac4`; 0.9.149 is the Trending Albums empty-cache fix, tagged
 `v0.9.149`). `alpha` holds the parked
@@ -160,10 +185,12 @@ genre work at 0.9.140 — pushed, see `ALPHA.md` there, do not merge it. `main` 
   `all_view` was sitting at `singles_eps` and surfaced the moment Single/EP were ticked — the exact
   0.9.127 symptom. Residue from before that fix rather than a new bug (the clamp persists correctly
   once a week is opened), but if it recurs, the fix is to clamp at the landing level too.
-- **THE INDEX IS STALE — `git add` before any commit.** The staging area still holds the
-  **alpha genre snapshot** (staged `Browse.pm` carries the genre subs, staged `install.xml`
-  says 0.9.120) while the working tree is the genre-free 0.9.141 — which is why everything
-  shows `MM`. A plain `git commit` from here would land the parked genre work on `dev`.
+- ~~**THE INDEX IS STALE — `git add` before any commit.**~~ **RESOLVED — verified clean 2026-07-31**
+  (`git status --porcelain` on `dev` reports nothing but untracked files). The staging area had held
+  the **alpha genre snapshot** (staged `Browse.pm` with the genre subs, staged `install.xml` saying
+  0.9.120) against a genre-free 0.9.141 working tree, so a plain `git commit` would have landed the
+  parked genre work on `dev`. It no longer does. Kept here because the failure mode is worth
+  recognising — see [[git-selective-restore-poisons-index]].
 
 **0.9.141 pre-release review (2026-07-29) — three defects found and fixed, no version bump**
 (nothing had shipped; guarded by `tools/t_review_fixes.pl`, which reproduced all three first):
