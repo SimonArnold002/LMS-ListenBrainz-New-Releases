@@ -3,6 +3,12 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.151
+
+### Fixed
+- **The expanded biography read as one solid block of text.** Two things caused it, both now fixed. Paragraph breaks were only recognised where the source left a blank line — but the biographies we get use a plain single line break far more often, and those were being ignored, so several paragraphs ran together into one. And where breaks *were* found, the resulting paragraphs sat flush against each other with no space between them. Paragraphs now have a gap beneath them, and a single line break counts as a paragraph break.
+- **Biographies that arrive with no paragraph breaks at all** — some are several hundred words in one unbroken run — are now broken up at sentence boundaries instead of being shown as one wall of text. The wording is untouched; only the spacing changes.
+
 ## 0.9.150
 
 ### Changed

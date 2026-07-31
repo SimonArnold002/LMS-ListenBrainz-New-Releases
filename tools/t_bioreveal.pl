@@ -80,6 +80,17 @@ my $src = slurp($BROWSE);
     sub PAGE_MORE         { 'MORE_ICON' }
     sub PAGE_LESS         { 'LESS_ICON' }
     sub BIO_PREVIEW       { $BIO_PREVIEW }
+    sub PROSE_GAP         { '0.7em' }
+    sub BIO_SENTENCES_PER_PARA { 3 }
+}
+
+# Strip _proseRow's wrapper so assertions can talk about the text itself.
+sub prose_text {
+    my ($n) = @_;
+    return $n unless defined $n;
+    $n =~ s{^<div[^>]*>}{};
+    $n =~ s{</div>$}{};
+    return $n;
 }
 
 # Real strings, so a renamed/removed string fails the suite.
@@ -90,7 +101,7 @@ my $src = slurp($BROWSE);
     }
 }
 
-for my $sub (qw(_bioToggleRow _artistRows)) {
+for my $sub (qw(_escHtml _proseRow _bioParagraphs _bioToggleRow _artistRows)) {
     my $code = grab($src, $sub);
     # %pageState is a file-scoped `my` in Browse.pm, so the lifted body refers to it
     # unqualified; re-declare it inside the eval so it aliases %T::pageState.
@@ -98,10 +109,13 @@ for my $sub (qw(_bioToggleRow _artistRows)) {
 }
 
 # ---------------------------------------------------------------------------
+# Three paragraphs plus a blank chunk. NB single newlines are deliberately NOT used
+# here — they are paragraph breaks too (see section 7), so putting one inside a
+# paragraph would make this fixture claim the opposite of the intended behaviour.
 my $LONG = join("\n\n",
     'Alpha paragraph that is quite long indeed and runs well past the preview cap so '
   . 'the collapsed view has to trim it back to a word boundary and append an ellipsis.',
-    "Beta paragraph with a\nsingle newline inside it.",
+    'Beta paragraph, the second one.',
     '',                                   # blank chunk — must be dropped
     'Gamma paragraph.');
 my $SHORT = 'A short bio.';
@@ -113,6 +127,7 @@ sub rows_for {
     return T::_artistRows($REL, $CLIENT, undef, $_[1]);
 }
 sub names { return map { $_->{name} // '' } @_ }
+sub texts { return map { prose_text($_->{name} // '') } @_ }
 
 print "\n1. COLLAPSED (default)\n";
 {
@@ -155,14 +170,16 @@ print "\n3. EXPANDED\n";
 
     my @r = rows_for($state, $LONG);
     my @n = names(@r);
+    my @t = texts(@r);
     ok(scalar(grep { $_ eq $T::STR{PLUGIN_LBF_SHOW_LESS} } @n) == 1, 'exactly one "Show less" row');
     ok(scalar(grep { $_ eq $T::STR{PLUGIN_LBF_READ_MORE} } @n) == 0, 'no "Read more" row');
-    ok(scalar(grep { /Gamma paragraph/ } @n) == 1,                   'full text present');
-    ok(scalar(grep { /\x{2026}$/ } @n) == 0,                         'preview replaced, not appended');
+    ok(scalar(grep { /Gamma paragraph/ } @t) == 1,                   'full text present');
+    ok(scalar(grep { /\x{2026}$/ } @t) == 0,                         'preview replaced, not appended');
     # One row per paragraph, blank chunks dropped.
-    my @prose = grep { /paragraph/i } @n;
+    my @prose = grep { /paragraph/i } @t;
     ok(scalar(@prose) == 3,                                          'one row per paragraph (blank chunk dropped)');
-    ok(scalar(grep { /\n/ } @n) == 0,                                'single newlines collapsed inside a paragraph');
+    ok(scalar(grep { /\n/ } @t) == 0,                                'no newline survives into a rendered row');
+    ok(scalar(grep { m{^<div style='margin-bottom:} } @n) == 3,      'each paragraph carries a bottom gap');
     my ($tog) = grep { ($_->{name} // '') eq $T::STR{PLUGIN_LBF_SHOW_LESS} } @r;
     ok(($tog->{image} // '') eq 'LESS_ICON',                         'collapse row carries the unfold_less icon');
 
@@ -202,6 +219,46 @@ print "\n6. STATE STORE IS SHARED WITH PAGING\n";
     my ($tog) = grep { ($_->{name} // '') eq $T::STR{PLUGIN_LBF_READ_MORE} } @r;
     ok(scalar($tog->{passthrough}[0]{key} !~ /^arweek:/), 'bio key cannot collide with a paging key');
     ok(defined $tog->{passthrough}[0]{on},                'toggle carries an explicit on/off flag');
+}
+
+print "\n7. PARAGRAPH SPLITTING — the shapes real Last.fm bios actually arrive in\n";
+{
+    # Measured on the live API: no <p> tags anywhere, so _cleanBio's </p><p> rule
+    # almost never fires and the breaks are whatever the text happens to carry.
+    my @blank  = T::_bioParagraphs("One para.\n\nTwo para.\n\nThree para.");
+    ok(scalar(@blank) == 3, 'blank-line breaks split (Sigur Ros shape)');
+
+    # The regression this section exists for: splitting on /\n{2,}/ alone threw away
+    # every single-newline break, and Radiohead's bio has 9 of them to 4 blank ones.
+    my @mixed = T::_bioParagraphs("One para.\n\nTwo para.\nThree para.\nFour para.");
+    ok(scalar(@mixed) == 4, 'single newlines ALSO split (Radiohead shape)');
+
+    ok(scalar(grep { /\n/ } @mixed) == 0, 'no newline survives into a paragraph');
+
+    # Mildlife: 685 chars, not one newline in the whole thing. Nothing to split on,
+    # so sentences are grouped rather than rendering one wall of text.
+    my $blob = join(' ', map { "Sentence number $_ about the band." } 1 .. 9);
+    my @grp  = T::_bioParagraphs($blob);
+    ok(scalar(@grp) == 3,                        'break-less bio grouped into paragraphs (Mildlife shape)');
+    ok(join(' ', @grp) eq $blob,                 'grouping does not alter a single character of the text');
+    ok(scalar(grep { !/\S/ } @grp) == 0,         'no empty paragraph produced');
+
+    # A short break-less bio is left alone — nothing to gain from chopping it up.
+    my @short = T::_bioParagraphs('Just one short sentence about them.');
+    ok(scalar(@short) == 1, 'short break-less bio stays a single paragraph');
+}
+
+print "\n8. HTML SAFETY\n";
+{
+    # _cleanBio DECODES entities, so raw & and < reach us and would break the markup.
+    ok(T::_escHtml('Simon & Garfunkel') eq 'Simon &amp; Garfunkel', 'ampersand escaped');
+    ok(T::_escHtml('a <b> c') eq 'a &lt;b&gt; c',                   'angle brackets escaped');
+    ok(T::_escHtml('say "hi"') eq 'say &quot;hi&quot;',             'double quotes escaped');
+    my $row = T::_proseRow('AC/DC & <friends>');
+    ok(scalar($row->{name} =~ /&amp;/ && $row->{name} =~ /&lt;friends&gt;/),
+       'prose row escapes its text');
+    ok(scalar($row->{name} !~ /<friends>/),      'no raw tag can leak into the row');
+    ok(($row->{type} // '') eq 'text',           'prose row is still a text row');
 }
 
 printf "\n%d passed, %d failed\n", $pass, $fail;

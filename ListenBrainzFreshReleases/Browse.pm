@@ -3393,6 +3393,74 @@ sub _pageSection {
     return ([ @$tiles[ 0 .. $shown - 1 ] ], \@rows);
 }
 
+# Escape for the HTML that _proseRow emits. REQUIRED, not defensive: API::_cleanBio
+# DECODES entities (&amp; -> &, &lt; -> <), so a bio quoting a band name with an
+# ampersand or an angle bracket arrives as raw markup characters and would other-
+# wise break the row. This is the only place in the plugin that builds HTML.
+sub _escHtml {
+    my ($s) = @_;
+    return '' unless defined $s;
+    $s =~ s/&/&amp;/g;
+    $s =~ s/</&lt;/g;
+    $s =~ s/>/&gt;/g;
+    $s =~ s/"/&quot;/g;
+    return $s;
+}
+
+# One paragraph of prose with real space beneath it. Material renders consecutive
+# type=>'text' rows flush against each other, so a multi-paragraph bio reads as one
+# block without this. Same technique as Discography's _proseRow (inline style in the
+# row name), which is proven to render through the OPML feed path.
+use constant PROSE_GAP => '0.7em';
+sub _proseRow {
+    my ($text) = @_;
+    return {
+        name => "<div style='margin-bottom:" . PROSE_GAP . "'>" . _escHtml($text) . '</div>',
+        type => 'text',
+    };
+}
+
+# Split a bio into display paragraphs.
+#
+# MEASURED against the live Last.fm bios that actually reach us (they are the only
+# source: API::_cleanBio handles both the MAI and the direct path). They are wildly
+# inconsistent, and NONE of them carry <p> tags, so _cleanBio's </p><p> -> "\n\n"
+# rule almost never fires:
+#     Sigur Ros  15 blank-line breaks + 3 single newlines
+#     Radiohead   4 blank-line breaks + 9 single newlines
+#     Mildlife    NO newlines whatsoever — 685 characters in one unbroken run
+# Hence two rules:
+#   1. ANY run of newlines is a paragraph break. A lone "\n" in a Last.fm bio is a
+#      deliberate break, not a hard wrap — they are not column-wrapped. Splitting on
+#      blank lines alone threw away 9 of Radiohead's 13 breaks.
+#   2. If that still yields ONE long chunk, the source genuinely has no paragraph
+#      structure and no split can recover it, so group sentences instead. This is a
+#      PRESENTATION decision — the text is unchanged, only where it is broken.
+use constant BIO_SENTENCES_PER_PARA => 3;
+sub _bioParagraphs {
+    my ($bio) = @_;
+
+    my @paras = grep { length }
+                map  { my $t = $_; $t =~ s/\s+/ /g; $t =~ s/^\s+|\s+$//g; $t }
+                split /\n+/, ($bio // '');
+
+    return @paras if @paras != 1 || length $paras[0] <= BIO_PREVIEW;
+
+    # Rule 2. Break after . ! ? when the next sentence opens like one (capital or an
+    # opening quote), which leaves abbreviations mid-sentence alone. A stray split
+    # (e.g. "St. John") is harmless: sentences are regrouped in fixed-size blocks, so
+    # it shifts a boundary rather than producing a wrong-looking paragraph.
+    my @sent = split /(?<=[.!?])\s+(?=["'\x{201C}\x{2018}(]?[A-Z\x{00C0}-\x{00DE}])/, $paras[0];
+    return @paras if @sent < 2;
+
+    my @out;
+    while (@sent) {
+        my @chunk = splice(@sent, 0, BIO_SENTENCES_PER_PARA);
+        push @out, join(' ', @chunk);
+    }
+    return @out;
+}
+
 # Sibling of _pageRow for a BOOLEAN in-place reveal (the artist bio on the release
 # detail page). Same mechanism and the same %pageState store, so there is exactly one
 # place per player where transient view state lives. Expanding writes the flag;
@@ -4024,12 +4092,10 @@ sub _artistRows {
             push @rows, { name => $bio, type => 'text' };   # short enough to show inline
         }
         elsif ($pageState{ _cid($client) }{$bkey}) {
-            # Split on BLANK lines only (paragraph breaks are what _cleanBio keeps),
-            # then collapse the single newlines inside each paragraph so Material
-            # wraps the row cleanly instead of honouring the source's hard breaks.
-            push @rows,
-                map  { (my $t = $_) =~ s/\s+/ /g; { name => $t, type => 'text' } }
-                grep { /\S/ } split /\n{2,}/, $bio;
+            # One row per paragraph, each with a gap beneath it — see _bioParagraphs
+            # for why the split is what it is, and _proseRow for why plain text rows
+            # aren't enough on their own.
+            push @rows, map { _proseRow($_) } _bioParagraphs($bio);
             push @rows, _bioToggleRow($client, $bkey, 0,
                 cstring($client, 'PLUGIN_LBF_SHOW_LESS'), PAGE_LESS);
         }

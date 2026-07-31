@@ -110,7 +110,7 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-0.9.150
+0.9.151
 
 ### State of play (2026-07-30) — read this before starting anything
 
@@ -1380,8 +1380,9 @@ callback (never serialised), so `url` coderefs (Read-more, Block, Refresh) are s
     current level**, which is all an in-place expand needs — the same mechanism the All Releases
     paging rows have used since 0.9.86, and which Discography uses for both its bio and its review.
     The drill-in was a limitation of the first implementation, not of Material.
-  - **Now:** collapsed = preview + **Read more**; expanded = the full bio, one text row per
-    PARAGRAPH (split on blank lines, single newlines collapsed so rows wrap), + **Show less**. Both
+  - **Now:** collapsed = preview + **Read more**; expanded = the full bio, one `_proseRow` per
+    PARAGRAPH (see 0.9.151 for how paragraphs are actually derived — the source has far less
+    structure than it looks), + **Show less**. Both
     toggles are `_bioToggleRow`, a boolean sibling of `_pageRow` sharing the same `%pageState` store
     (key `bio:<lc artist>`; expanding writes the flag, collapsing DELETES it so nothing is left
     behind). Reuses `PLUGIN_LBF_READ_MORE` / `PLUGIN_LBF_SHOW_LESS` and the `PAGE_MORE`/`PAGE_LESS`
@@ -1728,6 +1729,42 @@ that cause empty/junk pools:
    ([[mb-mirror-search-index-gotcha]]); test the library with `["artists",…,"search:NAME"]`.
 
 ## Version History
+- **0.9.151** — **the expanded bio rendered as one blob. Two causes, and the interesting one is that
+  the paragraph data we assumed exists mostly doesn't.**
+  - **MEASURE THE SOURCE BEFORE TRUSTING A FORMAT.** 0.9.150 split on `/\n{2,}/` because
+    `API::_cleanBio` converts `</p><p>` to a blank line. Checked against the live Last.fm bios that
+    actually reach us — **none of them contain a single `<p>` tag**, so that rule almost never fires
+    and the breaks are whatever the prose happens to carry:
+    | | blank-line breaks | single newlines |
+    |---|---|---|
+    | Sigur Rós | 15 | 3 |
+    | Radiohead | 4 | **9** |
+    | Mildlife | **0** | **0** — 685 chars, one unbroken run |
+    So blank-line-only splitting threw away **9 of Radiohead's 13** breaks, and for a Mildlife-shaped
+    bio there is nothing to split on at all. `_cleanBio` is the ONLY path (both the MAI and the direct
+    Last.fm branch go through it), so this applies to every bio the plugin shows.
+  - **`_bioParagraphs`** now applies two rules: (1) **any run of newlines is a break** — a lone `\n`
+    in a Last.fm bio is deliberate, they are not column-wrapped; (2) if that still yields ONE long
+    chunk the source genuinely has no structure, so sentences are grouped
+    `BIO_SENTENCES_PER_PARA`=3 at a time. Rule 2 is a **presentation** decision — asserted in the
+    tests to not alter a single character of the text. Sentence boundary is `.!?` followed by a
+    capital or opening quote, so abbreviations mid-sentence survive; a stray split shifts a group
+    boundary rather than producing a visibly wrong paragraph.
+  - **Rows also needed real spacing.** Consecutive `type=>'text'` rows render flush in Material, so
+    even correctly split paragraphs ran together. New **`_proseRow`** wraps each in
+    `<div style='margin-bottom:0.7em'>` — the same inline-style-in-a-row-name technique Discography
+    uses and which is proven to render through the OPML feed path.
+  - **`_escHtml` is REQUIRED, not defensive.** This is the plugin's first HTML-emitting row, and
+    `_cleanBio` **decodes** entities (`&amp;`→`&`, `&lt;`→`<`), so a bio quoting a band name with an
+    ampersand arrives as raw markup and would break the row. Escaping is asserted, including that no
+    raw tag can leak.
+  - Still **no cache bumps** (view state only). `tools/t_bioreveal.pl` grew to **43 assertions**;
+    anti-tested three more ways — blank-line-only split (the 0.9.150 bug) → 1 fail, no escaping →
+    3 fails, no sentence grouping → 1 fail.
+  - **Test-fixture lesson:** the section-3 fixture had a single newline *inside* a paragraph, which
+    under the new rule is a break — so the fixture was asserting the opposite of the intended
+    behaviour and failed. Fixtures encode assumptions; when a rule changes, re-read them rather than
+    "fixing" the count.
 - **0.9.150** — **the artist bio expands IN PLACE; the "Read more" drill-in is gone — and the
   CLAUDE.md rule that said it had to be a drill-in was simply wrong.** Tapping Read more opened a
   separate view containing only the bio, which you then had to back out of to reach the tracklist or
