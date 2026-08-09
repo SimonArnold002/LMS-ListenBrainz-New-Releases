@@ -129,7 +129,24 @@ sub _mbThrottled {
 # :5000 (macOS AirPlay, a Flask app, ...) — so a false positive is effectively
 # impossible. A manually-set base always wins and skips the probe; the LAN is
 # NEVER scanned (localhost only — a mirror on another host is typed in by hand).
-use constant MB_PROBE_MBID => 'a74b1b7f-06a0-4672-a641-eb3353aa608d';   # Radiohead
+#
+# THE PROBE MBID MUST BE A REAL ARTIST, AND IT WAS NOT. 0.9.94 shipped
+# `a74b1b7f-06a0-4672-a641-eb3353aa608d` — a mangled copy of Radiohead's id that
+# shares only the first block and 404s on the mirror AND on musicbrainz.org.
+# Since a candidate is validated by fetching this artist and comparing the name,
+# the probe could never validate, so NO MIRROR WAS EVER ADOPTED: every install
+# with a blank mb_base_url and a same-host mirror has run against the public API
+# at 1 req/s since 0.9.94, re-probing daily, forever.
+#
+# WHY IT SURVIVED, and why the fix is not just the constant: the failure is
+# INVISIBLE BY CONSTRUCTION. A 404 on the probe artist is indistinguishable from
+# "nothing is running on :5000", which is the correct and silent outcome for most
+# users. No runtime log, no stubbed unit test and no amount of code reading can
+# separate the two — only MusicBrainz can be asked. tools/t_diag.pl does exactly
+# that (section 7, skipped when offline). Found by the connectivity diagnostic in
+# 0.9.158, reporting a 404 against Simon's own working mirror; identical bug and
+# fix to Discography 0.30.2.
+use constant MB_PROBE_MBID => 'a74b1b7f-71a5-4011-9441-d0b5e4122711';   # Radiohead
 use constant MB_PROBE_NAME => 'Radiohead';
 my @MB_AUTO_CANDIDATES = (
     'http://localhost:5000/ws/2/',
@@ -2068,7 +2085,11 @@ sub getArtistBio {
     # Octets, so the md5 cache key and per-byte URL encoding are safe for CJK/emoji.
     utf8::encode($artist) if utf8::is_utf8($artist);
 
-    my $cacheKey = 'lbf:bio:2:' . lc $artist;   # :2: = full-content bio (was the short summary)
+    # :3: (0.9.157) — the cache stores the CLEANED text, and _cleanBio's output shape
+    # changed: MAI's <h2> headings now survive as their own blocks instead of being
+    # flattened into the body. A :2: entry holds the broken text and would keep
+    # serving it for the full 30d TTL, so the fix would look like it had not shipped.
+    my $cacheKey = 'lbf:bio:3:' . lc $artist;   # :2: = full-content bio (was the short summary)
     if (defined(my $c = _getText($cacheKey))) {
         $onDone->($c || undef);   # '' = cached "no bio"
         return;
@@ -2113,10 +2134,32 @@ sub _cleanBio {
     my ($s) = @_;
     return '' unless defined $s && length $s;
     $s =~ s{<a\b[^>]*>.*?</a>}{}gis;   # drop the "Read more on Last.fm" link
+    # …which leaves MAI's "More online sources" list as a run of EMPTY <li>s. Drop
+    # any element the link removal emptied, before it can become a bare bullet.
+    $s =~ s{<(li|p)[^>]*>\s*</\1>}{}gis;
     $s =~ s/\s*\.?\s*User-contributed text is available.*$//is;  # Last.fm CC licence boilerplate
-    $s =~ s{</p>\s*<p[^>]*>}{\n\n}gis; # paragraph breaks -> blank lines
+    # STRUCTURE FIRST, TAGS SECOND. At runtime MAI hands us HTML, not the plain
+    # text the CLI shows: its isWebBrowser() test is true for a Material client, so
+    # the bio arrives as <p>/<h2>/<b> markup (verified live —
+    # `musicartistinfo biography html:1 artist:<n>`). Until 0.9.157 the only break
+    # rule here was </p><p> ADJACENCY, so a `</p><h2>Description and history</h2><p>`
+    # never matched and the heading was flattened to a space in the middle of the
+    # body. That is why no section titles ever appeared, however they were styled.
+    #
+    # A heading becomes a SETEXT block ("title\n------"), which is exactly the shape
+    # Browse::_bioBlocks already detects and is tested for — one code path for MAI's
+    # HTML and for the plain-text renders that carry real underlines.
+    $s =~ s{<h[1-6][^>]*>\s*(.*?)\s*</h[1-6]>}{"\n\n$1\n" . ('-' x 10) . "\n\n"}gise;
+    # \b IS LOAD-BEARING: without it `<li[^>]*>` also matches the `<link rel=…>`
+    # stylesheet MAI prepends to its HTML bio, turning it into a stray bullet that
+    # then swallowed the opening paragraph.
+    $s =~ s{<li\b[^>]*>}{\n* }gis;     # list items -> the bullet _bioBullet knows
+    $s =~ s{</(?:p|div|ul|ol|li|tr|blockquote|section)>}{\n\n}gis;
     $s =~ s{<br\s*/?>}{\n}gis;
-    $s =~ s/<[^>]+>/ /g;               # any other tags
+    # Remaining tags are INLINE (<b>, <i>, <span>, the <link> MAI prepends), so they
+    # vanish rather than becoming a space — a space here is what produced the
+    # "Lambchop , originally Posterchild ," spacing in the field screenshots.
+    $s =~ s/<[^>]+>//g;
     $s =~ s/&amp;/&/gi;
     $s =~ s/&lt;/</gi;
     $s =~ s/&gt;/>/gi;
@@ -2125,6 +2168,7 @@ sub _cleanBio {
     $s =~ s/&[a-z]+;/ /gi;             # any remaining named entity
     $s =~ s/[ \t]+/ /g;                # collapse spaces/tabs, but keep newlines
     $s =~ s/ *\n */\n/g;
+    $s =~ s/^[*\x{2022}]\s*$//gm;      # a marker whose item emptied above
     $s =~ s/\n{3,}/\n\n/g;             # at most one blank line between paragraphs
     $s =~ s/^\s+|\s+$//g;
     if (length $s > BIO_MAX) {
@@ -2436,5 +2480,29 @@ sub _handleError {
     $log->error("API error: $msg");
     $onError->($msg) if ref $onError eq 'CODE';
 }
+
+# ---------------------------------------------------------------------------
+# Read-only accessors for the connectivity diagnostic (Diag.pm).
+#
+# The point is that Diag probes the SAME endpoints this module actually uses,
+# resolved by the SAME rules — mbBase in particular hides whether the user is on
+# the public API, a hand-configured mirror or an auto-detected one, and a
+# diagnostic that duplicated any of that could report on a base the plugin does
+# not use. So Diag asks here rather than reading prefs or restating constants.
+#
+# These MUST stay below every `use constant` above: constants are installed at
+# BEGIN time, so a bareword referenced earlier in the file than its declaration
+# fails to compile under strict subs.
+# ---------------------------------------------------------------------------
+sub baseUrl     { BASE_URL }
+sub labsUrl     { LABS_URL }
+sub caaBaseUrl  { CAA_BASE_URL }
+sub lastfmUrl   { LASTFM_BASE_URL }
+sub muspyUrl    { MUSPY_BASE_URL }
+sub similarAlgo { SIMILAR_ALGO }
+sub mbProbeMbid { MB_PROBE_MBID }
+sub mbProbeName { MB_PROBE_NAME }
+sub mbBase      { _mbBase() }
+sub mbIsPublic  { _mbThrottled() }
 
 1;

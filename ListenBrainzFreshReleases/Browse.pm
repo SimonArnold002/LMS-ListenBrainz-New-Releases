@@ -3393,7 +3393,7 @@ sub _pageSection {
     return ([ @$tiles[ 0 .. $shown - 1 ] ], \@rows);
 }
 
-# Escape for the HTML that _proseRow emits. REQUIRED, not defensive: API::_cleanBio
+# Escape for the HTML that _proseBlock emits. REQUIRED, not defensive: API::_cleanBio
 # DECODES entities (&amp; -> &, &lt; -> <), so a bio quoting a band name with an
 # ampersand or an angle bracket arrives as raw markup characters and would other-
 # wise break the row. This is the only place in the plugin that builds HTML.
@@ -3407,56 +3407,261 @@ sub _escHtml {
     return $s;
 }
 
-# One paragraph of prose with real space beneath it. Material renders consecutive
-# type=>'text' rows flush against each other, so a multi-paragraph bio reads as one
-# block without this. Same technique as Discography's _proseRow (inline style in the
-# row name), which is proven to render through the OPML feed path.
-use constant PROSE_GAP => '0.7em';
-sub _proseRow {
-    my ($text) = @_;
-    return {
-        name => "<div style='margin-bottom:" . PROSE_GAP . "'>" . _escHtml($text) . '</div>',
-        type => 'text',
+# Prose rows for the artist bio: one row per paragraph, Discography's markup.
+#
+# Material's list layout still sets the constraints, verified against the live 6.4.5
+# bundle, and they are why the PARSING has to be right:
+#
+#   1. Every prose row's title carries `min-height: var(--list-elem-height)` (48px in
+#      6.4.5), so each row occupies a full row height however short its text. A dozen
+#      paragraphs is fine; ninety-two one-line fragments is the 0.9.152 field report
+#      ("empty space on iPad landscape").
+#   2. `browse-page.js: useRecyclerForLists` switches a level to a virtual scroller
+#      above LMS_MAX_NON_SCROLLER_ITEMS (100) items, with a FIXED `item-size` of
+#      LMS_LIST_ELEMENT_SIZE (48) and every row `position:absolute`. There text rows
+#      get `browse-text-inrecycler`, which — unlike `browse-text` — has NO
+#      `height:unset`, so a row taller than 48px is DRAWN OVER the one below it
+#      ("renders over itself on iOS").
+#
+# Both are governed by ROW COUNT, and row count is governed by _bioBlocks. A correctly
+# parsed bio is ~10-20 rows and never approaches the threshold on its own.
+#
+# ONE ROW PER PARAGRAPH, AND THE MARKUP IS DISCOGRAPHY'S — copied deliberately,
+# because that plugin's bio renders correctly on desktop AND iOS and ours did not.
+# Compare the two over the same MAI bio before changing anything here; the difference
+# was not subtle and cost several builds to see.
+#
+#   Discography (Browse.pm `_proseRow`, ~257): one `type=>'text'` row per paragraph,
+#     each `<div style='margin-left:72px'>escaped text</div>`. 72px is Material's list
+#     AVATAR column, so prose lines up with the icon rows above and below it instead
+#     of sitting flush to the viewport edge. Bold comes from a plain `<b>`, the idiom
+#     its meta-title row (~3396) has always used.
+#
+# 0.9.152 collapsed the whole bio into ONE row to stop the iPad overlap. That was
+# treating the symptom: the overlap came from **92 rows**, and those came from the
+# broken paragraph detection (a hard-wrapped MAI bio split at every wrapped LINE), not
+# from having one row per paragraph. With _bioBlocks parsing correctly the same bio is
+# ~10 rows — the same count Discography emits, nowhere near the 100-item scroller
+# threshold. So the row-per-paragraph layout is not the hazard; bad parsing was.
+#
+# Do NOT reintroduce a single-row wrapper with its own typography (max-width,
+# line-height, font-weight). It was tried in 0.9.154 and, whatever it computes in
+# isolation, it did not render as intended on every client — whereas this shape
+# demonstrably does.
+#
+# A bare string is accepted in place of a { text, heading, bullet } entry so the sub
+# stays usable for prose that has no structure to preserve.
+use constant PROSE_INDENT     => '72px';    # Material's list avatar column
+use constant PROSE_BULLET_IND => '1.2em';   # hanging indent for a wrapped bullet
+sub _proseBlock {
+    my (@paras) = @_;
+    return () unless @paras;
+
+    my @rows;
+    for my $p (map { ref $_ ? $_ : { text => $_, heading => 0, bullet => 0 } } @paras) {
+        my $text  = _escHtml($p->{text});
+        my $style = 'margin-left:' . PROSE_INDENT;
+
+        if ($p->{heading}) {
+            # EXPLICIT WEIGHT, NEVER A BARE <b>. Measured in headless Chrome inside
+            # Material's own row: the title element carries `font-weight:200
+            # !important`, and CSS `bolder` (all a <b> gets from the UA stylesheet)
+            # resolves RELATIVE to the inherited weight — from 200 it lands on 400,
+            # not 700. On iOS, where the font has a real 200 thin face, 400 against
+            # 200 reads as bold; in a desktop browser whose font stack has no 200
+            # face the body ALREADY renders at 400, so the heading is identical to
+            # it and the bold vanishes. That is the 0.9.155 field report exactly.
+            # `font-weight:bold` is what Discography uses and it computes to 700
+            # regardless of what is inherited.
+            $style .= ';font-weight:bold';
+        }
+        elsif ($p->{bullet}) {
+            $style .= ';padding-left:' . PROSE_BULLET_IND
+                    . ';text-indent:-'  . PROSE_BULLET_IND;
+            $text   = "\x{2022}\x{00A0}$text";
+        }
+        push @rows, { name => "<div style='$style'>$text</div>", type => 'text' };
+    }
+    return @rows;
+}
+
+# Is this text HARD-WRAPPED at a fixed column, rather than carrying deliberate
+# line breaks? The two sources disagree completely and _bioParagraphs cannot treat
+# a newline the same way in both:
+#     Last.fm  — prose, never column-wrapped, so a lone "\n" IS a break (0.9.151).
+#     MAI      — a plain-text render (Wikipedia-derived): hard-wrapped at ~72
+#                columns, with setext headings ("Early life" / "----------").
+# MEASURED on the live server, Tyondai Braxton via MAI (5799 chars): 92 lines,
+# max 78 chars, 74 of them 60-78. Under 0.9.151's rule that became 92 one-line
+# "paragraphs" — the field bug.
+#
+# TWO signals, BOTH required, because either alone has a real false positive:
+#   * no line exceeds BIO_WRAP_MAX_COL. A wrap column is by definition a ceiling;
+#     genuine paragraphs run well past it. On its own this admits any bio made of
+#     short deliberate lines (a discography list).
+#   * more than half the non-final lines END MID-SENTENCE. A wrap cuts wherever
+#     the column falls; a deliberate break lands on a full stop. On its own this
+#     admits a long unpunctuated run.
+# Plus a floor of BIO_WRAP_MIN_LINES, since two or three short lines prove nothing.
+#
+# A false positive costs one joined paragraph — never a broken render — which is
+# why the gates are stated as a preference for leaving 0.9.151's behaviour alone.
+use constant BIO_WRAP_MAX_COL   => 100;
+use constant BIO_WRAP_MIN_LINES => 4;
+sub _bioHardWrapped {
+    my ($lines) = @_;
+    my @l = grep { length } @$lines;
+    return 0 if @l < BIO_WRAP_MIN_LINES;
+
+    my $mid = 0;
+    for my $i (0 .. $#l) {
+        return 0 if length($l[$i]) > BIO_WRAP_MAX_COL;
+        # $#l is the count of NON-FINAL lines; the last one ends where the text does
+        # and says nothing either way.
+        $mid++ if $i < $#l && $l[$i] !~ /[.!?:;\x{2026}]$/;
+    }
+    return $mid * 2 > $#l ? 1 : 0;
+}
+
+# A SECTION HEADING THAT CARRIES NO UNDERLINE. MEASURED in the same MAI bio: the
+# top-level titles are setext-underlined ("Early life" / "----------") but the
+# sub-headings are not — "Early solo work and Battles (2000-2009)" is a bare line
+# with a blank line either side. So the underline cannot be the only signal.
+#
+# The test is: the paragraph is ONE source line, it stops well short of the wrap
+# column, and it does not end on sentence punctuation. In a hard-wrapped document a
+# body paragraph is by construction several lines long AND ends on a full stop, so
+# it is the PAIR that does the work; the column cap is belt and braces. Note ':' is
+# deliberately not disqualifying — "Discography:" is a heading.
+#
+# ONLY SOUND ON A HARD-WRAPPED SOURCE, which is why _bioBlocks gates it on that. Where
+# a lone newline is a real break, "a block of one short line" describes a perfectly
+# ordinary sentence, and this would promote prose to headings wholesale. Bullets are
+# excluded by the caller, which knows the marker it stripped.
+use constant BIO_HEADING_MAX_COL => 80;
+sub _bioLooksLikeHeading {
+    my ($lines) = @_;
+    return 0 unless @$lines == 1;
+    return 0 if length($lines->[0]) > BIO_HEADING_MAX_COL;
+    return $lines->[0] =~ /[.!?;,]$/ ? 0 : 1;
+}
+
+# A LIST ITEM. MAI's plain-text render indents them and marks them with "*"; other
+# sources use a dash or a real bullet. The marker must be followed by whitespace, so a
+# hyphenated word cannot open a list. Returns the text with the marker removed, else
+# undef.
+sub _bioBullet {
+    my ($line) = @_;
+    return undef unless $line =~ /^([*\x{2022}\x{00B7}\-\x{2013}])\s+(\S.*)$/;
+    return $2;
+}
+
+# THE ONE STRUCTURE PARSER, for BOTH bio shapes. Returns { text, heading, bullet }
+# per block.
+#
+# $wrapped (from _bioHardWrapped) changes exactly two things, and NOTHING else may be
+# made conditional on it:
+#   * how a lone newline is read — a wrap artefact to rejoin, or a real break;
+#   * whether a bare short line may be promoted to a heading (see
+#     _bioLooksLikeHeading for why that test is unsound otherwise).
+#
+# 0.9.152 got this wrong by running the whole parser only when $wrapped was true, so a
+# MAI bio that failed the wrap test lost every heading AND rendered its setext
+# underlines as rows of literal dashes. A SETEXT UNDERLINE IS UNAMBIGUOUS IN ANY
+# SOURCE — it must always be consumed, and it must always mark what it underlines.
+# That is why $underlined can reach BACKWARDS to the last block already pushed: when a
+# lone newline is a break, the heading was closed before its underline was read.
+sub _bioBlocks {
+    my ($bio, $wrapped) = @_;
+    my (@out, @cur, $bullet);
+    my $flush = sub {
+        my ($underlined) = @_;
+        if (!@cur) {
+            # An underline with nothing pending marks the block it followed.
+            $out[-1]{heading} = 1 if $underlined && @out && !$out[-1]{bullet};
+            return;
+        }
+        my $text = join(' ', @cur);
+        $text =~ s/\s+/ /g;
+        $text =~ s/^\s+|\s+$//g;
+        push @out, {
+            text    => $text,
+            bullet  => $bullet ? 1 : 0,
+            heading => (!$bullet
+                        && ($underlined || ($wrapped && _bioLooksLikeHeading(\@cur))))
+                       ? 1 : 0,
+        } if length $text;
+        @cur    = ();
+        $bullet = 0;
     };
+    for my $line (split /\n/, ($bio // ''), -1) {
+        $line =~ s/^\s+|\s+$//g;
+        if ($line =~ /^[-=_~*]{3,}$/) { $flush->(1); next }
+        if (!length $line)            { $flush->(0); next }
+
+        if (defined(my $item = _bioBullet($line))) {
+            $flush->(0);          # a marker always opens a new block
+            $bullet = 1;
+            $line   = $item;
+        }
+        push @cur, $line;
+        # Unwrapped: the newline that ends this line is the author's, so close here.
+        # Wrapped: it is the renderer's, so the next line joins on.
+        $flush->(0) unless $wrapped;
+    }
+    $flush->(0);
+    return @out;
 }
 
 # Split a bio into display paragraphs.
 #
-# MEASURED against the live Last.fm bios that actually reach us (they are the only
-# source: API::_cleanBio handles both the MAI and the direct path). They are wildly
-# inconsistent, and NONE of them carry <p> tags, so _cleanBio's </p><p> -> "\n\n"
-# rule almost never fires:
-#     Sigur Ros  15 blank-line breaks + 3 single newlines
-#     Radiohead   4 blank-line breaks + 9 single newlines
+# MEASURED against the live bios that actually reach us. NONE of them carry <p>
+# tags, so API::_cleanBio's </p><p> -> "\n\n" rule almost never fires and the
+# breaks are whatever the prose happens to carry:
+#     Sigur Ros  15 blank-line breaks + 3 single newlines   (Last.fm)
+#     Radiohead   4 blank-line breaks + 9 single newlines   (Last.fm)
 #     Mildlife    NO newlines whatsoever — 685 characters in one unbroken run
-# Hence two rules:
-#   1. ANY run of newlines is a paragraph break. A lone "\n" in a Last.fm bio is a
-#      deliberate break, not a hard wrap — they are not column-wrapped. Splitting on
-#      blank lines alone threw away 9 of Radiohead's 13 breaks.
-#   2. If that still yields ONE long chunk, the source genuinely has no paragraph
-#      structure and no split can recover it, so group sentences instead. This is a
-#      PRESENTATION decision — the text is unchanged, only where it is broken.
+#     T. Braxton  92 hard-wrapped lines at <=78 columns     (MAI)
+# Hence three rules, in order:
+#   0. Structure — headings and bullets — is parsed from EVERY bio by _bioBlocks,
+#      which also decides whether a lone "\n" is a wrap artefact to rejoin (MAI) or a
+#      real paragraph break (Last.fm: splitting on blank lines alone threw away 9 of
+#      Radiohead's 13 breaks).
+#   1. Do NOT gate the parse on the wrap test. It was gated in 0.9.152's first cut,
+#      which cost every heading in any bio the test happened to reject.
+#   2. If that yields ONE long chunk the source genuinely has no paragraph structure
+#      and no split can recover it, so group sentences instead. This is a PRESENTATION
+#      decision — the text is unchanged, only where it is broken.
 use constant BIO_SENTENCES_PER_PARA => 3;
 sub _bioParagraphs {
     my ($bio) = @_;
+    $bio //= '';
 
-    my @paras = grep { length }
-                map  { my $t = $_; $t =~ s/\s+/ /g; $t =~ s/^\s+|\s+$//g; $t }
-                split /\n+/, ($bio // '');
+    my @lines = map { my $t = $_; $t =~ s/^\s+|\s+$//g; $t } split /\n/, $bio, -1;
+    my @paras = _bioBlocks($bio, _bioHardWrapped(\@lines));
 
-    return @paras if @paras != 1 || length $paras[0] <= BIO_PREVIEW;
+    # A heading with nothing under it is not a section. MAI ends its HTML bio with a
+    # "More online sources" heading over a list of links, and _cleanBio drops the
+    # links — so without this the bio ends on a bold title introducing nothing.
+    pop @paras while @paras && $paras[-1]{heading};
+
+    # Rule 2 regroups prose, so it must not touch a lone heading or bullet.
+    return @paras if @paras != 1
+                  || $paras[0]{heading}
+                  || $paras[0]{bullet}
+                  || length $paras[0]{text} <= BIO_PREVIEW;
 
     # Rule 2. Break after . ! ? when the next sentence opens like one (capital or an
     # opening quote), which leaves abbreviations mid-sentence alone. A stray split
     # (e.g. "St. John") is harmless: sentences are regrouped in fixed-size blocks, so
     # it shifts a boundary rather than producing a wrong-looking paragraph.
-    my @sent = split /(?<=[.!?])\s+(?=["'\x{201C}\x{2018}(]?[A-Z\x{00C0}-\x{00DE}])/, $paras[0];
+    my @sent = split /(?<=[.!?])\s+(?=["'\x{201C}\x{2018}(]?[A-Z\x{00C0}-\x{00DE}])/, $paras[0]{text};
     return @paras if @sent < 2;
 
     my @out;
     while (@sent) {
         my @chunk = splice(@sent, 0, BIO_SENTENCES_PER_PARA);
-        push @out, join(' ', @chunk);
+        push @out, { text => join(' ', @chunk), heading => 0, bullet => 0 };
     }
     return @out;
 }
@@ -4092,10 +4297,9 @@ sub _artistRows {
             push @rows, { name => $bio, type => 'text' };   # short enough to show inline
         }
         elsif ($pageState{ _cid($client) }{$bkey}) {
-            # One row per paragraph, each with a gap beneath it — see _bioParagraphs
-            # for why the split is what it is, and _proseRow for why plain text rows
-            # aren't enough on their own.
-            push @rows, map { _proseRow($_) } _bioParagraphs($bio);
+            # ONE row holding every paragraph — see _bioParagraphs for why the split
+            # is what it is, and _proseBlock for why this must not be a row each.
+            push @rows, _proseBlock(_bioParagraphs($bio));
             push @rows, _bioToggleRow($client, $bkey, 0,
                 cstring($client, 'PLUGIN_LBF_SHOW_LESS'), PAGE_LESS);
         }

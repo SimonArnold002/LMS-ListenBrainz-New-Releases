@@ -3,6 +3,7 @@ package Plugins::ListenBrainzFreshReleases::Plugin;
 use strict;
 use base qw(Slim::Plugin::OPMLBased);
 
+use Slim::Control::Request;
 use Slim::Utils::Log;
 use Slim::Utils::Prefs;
 use Slim::Utils::PluginManager;
@@ -189,6 +190,60 @@ sub initPlugin {
         menu   => 'radios',
         weight => 10,
     );
+
+    # Connectivity diagnostic. Two jobs, and the second is why it is a CLI
+    # command rather than a private handler for the settings page: it is the only
+    # surface a remote user (or a headless verification run) can reach —
+    #     ["lbf","diag"]
+    # over jsonrpc.js returns the whole report as data, so "paste this" replaces
+    # "send me log.txt". Flags [0,1,1]: no player needed, it is a query, and it
+    # runs async.
+    Slim::Control::Request::addDispatch(
+        ['lbf', 'diag'], [0, 1, 1, \&_cliDiag]);
+
+    return;
+}
+
+# CLI: run the probes and flatten the report into one loop plus scalar context.
+#
+# The `status` field carries ok/warn/fail/skip rather than a boolean, because a
+# host that answers with the wrong answer (rejected token, empty search index) is
+# neither reachable-and-fine nor unreachable, and flattening that distinction is
+# the reporting bug this whole feature replaces.
+sub _cliDiag {
+    my $request = shift;
+
+    $request->setStatusProcessing();
+
+    require Plugins::ListenBrainzFreshReleases::Diag;
+    Plugins::ListenBrainzFreshReleases::Diag->run(sub {
+        my ($rows, $ctx) = @_;
+
+        my $i = 0;
+        for my $r (@$rows) {
+            $request->addResultLoop('targets_loop', $i, $_, $r->{$_})
+                for qw(key name url status http ms note);
+            $i++;
+        }
+        $request->addResult('count', scalar @$rows);
+        $request->addResult('failed', scalar grep { $_->{status} eq 'fail' } @$rows);
+        $request->addResult('warned', scalar grep { $_->{status} eq 'warn' } @$rows);
+
+        # Presence only for credentials — see Diag::_context. This output is
+        # meant to be pasted into a support thread.
+        $request->addResult('username', $ctx->{username});
+        $request->addResult('token',    $ctx->{token});
+        $request->addResult('proxy',    $ctx->{proxy});
+
+        my $j = 0;
+        for my $s (@{ $ctx->{services} || [] }) {
+            $request->addResultLoop('services_loop', $j, $_, $s->{$_})
+                for qw(name installed priority);
+            $j++;
+        }
+
+        $request->setStatusDone();
+    });
 
     return;
 }

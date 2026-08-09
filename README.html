@@ -116,7 +116,7 @@
   <h1>ListenBrainz Fresh Releases — LMS Plugin</h1>
   <p class="tagline">A plugin for <strong>Lyrion Music Server (LMS)</strong> built around <a href="https://listenbrainz.org">ListenBrainz</a>. It browses newly released albums (a personalised feed plus the global feed), turns your ListenBrainz playlists and recommendations into playable music, and adds rich release detail pages with artist bios and one-tap streaming.</p>
   <div class="badges">
-    <span class="badge accent">v0.9.149</span>
+    <span class="badge accent">v0.9.159</span>
     <span class="badge">LMS 9.0.0+</span>
     <span class="badge">Material Skin</span>
     <span class="badge">Powered by ListenBrainz</span>
@@ -143,6 +143,7 @@
 <div class="card"><h4>Albums / Singles &amp; EPs</h4><p>Flip either feed between full releases and singles/EPs, from the list itself</p></div>
 <div class="card"><h4>Block artists</h4><p>Hide an artist from every feed</p></div>
 <div class="card"><h4>Material home shelves</h4><p>Three home-screen rows</p><span class="needs">Needs: Material Skin</span></div>
+<div class="card"><h4>Connection check</h4><p>Tests every service the plugin uses, from the server, and gives you a report you can copy</p></div>
 </div>
 </section>
 <section id="requirements">
@@ -248,6 +249,10 @@
 <p><strong>Block this artist</strong> on any detail page hides every release by that artist from all feeds. Manage and <strong>Unblock</strong> them in the <strong>Blocked Artists</strong> settings section. (It's a local filter — no ListenBrainz account needed, and it takes effect on the next browse.)</p>
 <h3>Material home shelves</h3>
 <p>The plugin adds <strong>New Releases for You</strong>, <strong>Playlists</strong> and <strong>All Releases</strong> rows to the Material home screen. Enable them via Material's <strong>Customize home menu</strong>. <em>(Material caches the available rows in your browser — if a new one doesn't show, hard-refresh with Ctrl/Cmd-Shift-R.)</em></p>
+<h3>Connection check</h3>
+<p>If a feed is empty or your token doesn't seem to work, open <strong>Settings → Connection Check</strong> and press <strong>Run connection check</strong>. It tries every service the plugin depends on — ListenBrainz, MusicBrainz (or your own mirror), the Cover Art Archive, and Last.fm and MuSpy if you use them — <strong>from the machine running Lyrion</strong>, and reports each one with how long it took and what came back.</p>
+<p>That matters because it tests the connection the plugin actually uses. A check running in your web browser can fail for reasons that have nothing to do with the server — an ad-blocker, a Pi-hole, a proxy, a guest-network sign-in page — and tell you nothing useful.</p>
+<p>Use <strong>Copy report</strong> if you're asking for help; it never contains your token or your Last.fm key. The check reads your <strong>saved</strong> settings, so save the page first if you've just edited one.</p>
 </section>
 <section id="settings-reference">
 <h2>Settings reference</h2>

@@ -173,82 +173,204 @@
 
 </div>
 
-[%# Inline credential checks. Material loads plugin settings in an iframe and does %]
-[%# NOT surface the server-side "warning" message, so validate the ListenBrainz token %]
-[%# AND the Last.fm key directly from the browser (both APIs send Allow-Origin: *) and %]
-[%# show the result inline. Each runs on page load (if populated), on field blur, and %]
-[%# on its Check button. The server-side validateToken on save still runs for the %]
-[%# classic skin; this is what makes the result visible in Material. %]
+[%# Connection check. Kept LAST and holding no prefs of its own, so it doesn't %]
+[%# come between the MuSpy settings and the ListenBrainz ones above them. %]
+<div class="prefHead collapsableSection" id="lbf_diag_Header">[% 'PLUGIN_LBF_SECTION_DIAG' | string %]</div>
+<div id="lbf_diag">
+
+[% WRAPPER setting title="PLUGIN_LBF_DIAG_RUN" desc="PLUGIN_LBF_DIAG_DESC" %]
+<button type="button" id="lbf_diag_run">[% 'PLUGIN_LBF_DIAG_RUN' | string %]</button>
+<button type="button" id="lbf_diag_copy" style="margin-left:6px;display:none;">[% 'PLUGIN_LBF_DIAG_COPY' | string %]</button>
+<div id="lbf_diag_status" style="margin-top:6px;font-weight:bold;"></div>
+<div id="lbf_diag_out" style="margin-top:8px;"></div>
+[% END %]
+
+</div>
+
+[%# Connectivity check. Every probe runs ON THE LMS SERVER (Diag.pm) and this page %]
+[%# only calls ["lbf","diag"] over /jsonrpc.js, which is SAME-ORIGIN — so no CORS, %]
+[%# no reverse-proxy connect-src CSP, and no ad-blocker sits between the check and %]
+[%# its answer. %]
+[%# %]
+[%# THAT IS THE WHOLE POINT, so do not "simplify" this back to a direct fetch() of %]
+[%# api.listenbrainz.org. The previous version did exactly that, and it reported %]
+[%# "could not reach ListenBrainz" for a Pi-hole rule, a hardened proxy, or a %]
+[%# captive portal returning HTML (which rejects r.json() into the same catch) — %]
+[%# none of which tell you anything about the machine that actually makes the %]
+[%# requests, and none of which leave a trace in log.txt. %]
+[%# %]
+[%# Material loads plugin settings in an iframe and never surfaces the server-side %]
+[%# `warning` message, so results are rendered here rather than left to the save. %]
 <script type="text/javascript">
 (function() {
-    var LB = {
-        VALID:      "[% 'PLUGIN_LBF_TOKEN_VALID'      | string %]",
-        VALID_USER: "[% 'PLUGIN_LBF_TOKEN_VALID_USER' | string %]",
-        INVALID:    "[% 'PLUGIN_LBF_TOKEN_INVALID'    | string %]",
-        CHECKING:   "[% 'PLUGIN_LBF_TOKEN_CHECKING'   | string %]",
-        EMPTY:      "[% 'PLUGIN_LBF_TOKEN_EMPTY'      | string %]",
-        NETERR:     "[% 'PLUGIN_LBF_TOKEN_NET_ERROR'  | string %]"
+    var S = {
+        RUN:      "[% 'PLUGIN_LBF_DIAG_RUN'      | string %]",
+        RUNNING:  "[% 'PLUGIN_LBF_DIAG_RUNNING'  | string %]",
+        FAILED:   "[% 'PLUGIN_LBF_DIAG_FAILED'   | string %]",
+        AUTH:     "[% 'PLUGIN_LBF_DIAG_AUTH'     | string %]",
+        UNSAVED:  "[% 'PLUGIN_LBF_DIAG_UNSAVED'  | string %]",
+        COPIED:   "[% 'PLUGIN_LBF_DIAG_COPIED'   | string %]",
+        SUMMARY:  "[% 'PLUGIN_LBF_DIAG_SUMMARY'  | string %]",
+        ALL_OK:   "[% 'PLUGIN_LBF_DIAG_ALL_OK'   | string %]",
+        PROXY:    "[% 'PLUGIN_LBF_DIAG_PROXY'    | string %]",
+        SERVICES: "[% 'PLUGIN_LBF_DIAG_SERVICES' | string %]",
+        OK:       "[% 'PLUGIN_LBF_DIAG_OK'       | string %]",
+        WARN:     "[% 'PLUGIN_LBF_DIAG_WARN'     | string %]",
+        FAIL:     "[% 'PLUGIN_LBF_DIAG_FAIL'     | string %]",
+        SKIP:     "[% 'PLUGIN_LBF_DIAG_SKIP'     | string %]"
     };
-    var LF = {
-        VALID:    "[% 'PLUGIN_LBF_LASTFM_VALID'     | string %]",
-        INVALID:  "[% 'PLUGIN_LBF_LASTFM_INVALID'   | string %]",
-        CHECKING: "[% 'PLUGIN_LBF_LASTFM_CHECKING'  | string %]",
-        EMPTY:    "[% 'PLUGIN_LBF_LASTFM_EMPTY'     | string %]",
-        NETERR:   "[% 'PLUGIN_LBF_LASTFM_NET_ERROR' | string %]"
-    };
+    var COLOUR = { ok: '#2e7d32', warn: '#e65100', fail: '#b00', skip: '#888' };
+    var LABEL  = { ok: S.OK, warn: S.WARN, fail: S.FAIL, skip: S.SKIP };
 
     function el(id) { return document.getElementById(id); }
-    function val(id) { var f = el(id); return f ? (f.value || '').replace(/^\s+|\s+$/g, '') : ''; }
-    function setStatus(id, text, color) {
+    function setStatus(id, text, colour) {
         var s = el(id);
-        if (s) { s.textContent = text; s.style.color = color; }
+        if (s) { s.textContent = text; s.style.color = colour || ''; }
     }
 
-    function checkToken() {
-        var tok = val('lbf_token');
-        if (!tok) { setStatus('lbf_token_status', LB.EMPTY, '#b00'); return; }
-        setStatus('lbf_token_status', LB.CHECKING, '#888');
-        fetch('https://api.listenbrainz.org/1/validate-token?token=' + encodeURIComponent(tok),
-              { headers: { 'Accept': 'application/json' } })
-            .then(function(r) { return r.json(); })
-            .then(function(d) {
-                if (d && d.valid) {
-                    setStatus('lbf_token_status', d.user_name ? LB.VALID_USER.replace('%s', d.user_name) : LB.VALID, '#2e7d32');
-                } else {
-                    setStatus('lbf_token_status', LB.INVALID, '#b00');
-                }
-            })
-            .catch(function() { setStatus('lbf_token_status', LB.NETERR, '#e65100'); });
+    // The saved values, captured at render time. The server checks what is
+    // STORED, so a field edited but not yet saved would be checked as its old
+    // value — say so rather than reporting a stale result as current.
+    var saved = {};
+    ['lbf_token', 'lbf_lastfm'].forEach(function(id) {
+        var f = el(id);
+        saved[id] = f ? f.value : '';
+    });
+    function isUnsaved(id) {
+        var f = el(id);
+        return f ? f.value !== saved[id] : false;
     }
 
-    function checkLastfm() {
-        var key = val('lbf_lastfm');
-        if (!key) { setStatus('lbf_lastfm_status', LF.EMPTY, '#888'); return; }   // optional, so not an error
-        setStatus('lbf_lastfm_status', LF.CHECKING, '#888');
-        fetch('https://ws.audioscrobbler.com/2.0/?method=auth.gettoken&format=json&api_key=' + encodeURIComponent(key))
-            .then(function(r) { return r.json(); })
-            .then(function(d) {
-                if (d && !d.error && d.token) {
-                    setStatus('lbf_lastfm_status', LF.VALID, '#2e7d32');
-                } else {
-                    setStatus('lbf_lastfm_status', LF.INVALID, '#b00');
-                }
-            })
-            .catch(function() { setStatus('lbf_lastfm_status', LF.NETERR, '#e65100'); });
+    var lastReport = '';
+
+    function render(res) {
+        var rows = res['targets_loop'] || [], out = el('lbf_diag_out');
+
+        var html = '<table style="border-collapse:collapse;font-size:0.95em;">';
+        var text = [];
+        rows.forEach(function(r) {
+            var c = COLOUR[r.status] || '';
+            html += '<tr>'
+                 +  '<td style="padding:2px 10px 2px 0;white-space:nowrap;">' + esc(r.name) + '</td>'
+                 +  '<td style="padding:2px 10px 2px 0;font-weight:bold;color:' + c + ';">'
+                 +      esc(LABEL[r.status] || r.status) + '</td>'
+                 +  '<td style="padding:2px 10px 2px 0;white-space:nowrap;">'
+                 +      (r.status === 'skip' ? '' : esc(r.ms + ' ms')) + '</td>'
+                 +  '<td style="padding:2px 0;">' + esc(r.note || '') + '</td>'
+                 +  '</tr>';
+            text.push(pad(r.name, 28) + pad(LABEL[r.status] || r.status, 8)
+                    + pad(r.status === 'skip' ? '' : r.ms + ' ms', 9) + (r.note || ''));
+            text.push('    ' + r.url);
+        });
+        html += '</table>';
+
+        var extra = [];
+        if (res.proxy) { extra.push(S.PROXY + ' ' + res.proxy); }
+        var svc = [];
+        (res['services_loop'] || []).forEach(function(s) {
+            svc.push(s.name + (s.installed ? ' (' + s.priority + ')' : ' -'));
+        });
+        if (svc.length) { extra.push(S.SERVICES + ' ' + svc.join(', ')); }
+        if (extra.length) {
+            html += '<div style="margin-top:8px;color:#666;">' + esc(extra.join(' | ')) + '</div>';
+            text.push('');
+            extra.forEach(function(e) { text.push(e); });
+        }
+
+        out.innerHTML = html;
+        lastReport = text.join('\n');
+        el('lbf_diag_copy').style.display = '';
+
+        var bad = (res.failed || 0) + (res.warned || 0);
+        setStatus('lbf_diag_status',
+            bad ? S.SUMMARY.replace('%s', bad) : S.ALL_OK,
+            bad ? (res.failed ? COLOUR.fail : COLOUR.warn) : COLOUR.ok);
+
+        // Feed the two per-credential rows back into their own fields, so the
+        // answer appears where the question was asked.
+        fieldStatus('lbf_token_status',  'lbf_token',  pick(rows, 'listenbrainz'));
+        fieldStatus('lbf_lastfm_status', 'lbf_lastfm', pick(rows, 'lastfm'));
     }
 
-    function wire(fieldId, btnId, fn) {
-        var b = el(btnId);
-        if (b) b.addEventListener('click', fn);
-        var f = el(fieldId);
-        if (f) {
-            f.addEventListener('blur', function() { if ((f.value || '').trim()) fn(); });
-            if ((f.value || '').trim()) fn();   // show current status on open
+    function pick(rows, key) {
+        for (var i = 0; i < rows.length; i++) { if (rows[i].key === key) { return rows[i]; } }
+        return null;
+    }
+    function fieldStatus(statusId, fieldId, row) {
+        if (!row) { return; }
+        if (isUnsaved(fieldId)) { setStatus(statusId, S.UNSAVED, COLOUR.warn); return; }
+        setStatus(statusId, row.note || (LABEL[row.status] || row.status), COLOUR[row.status]);
+    }
+
+    function esc(s) {
+        return String(s === undefined || s === null ? '' : s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+    function pad(s, n) {
+        s = String(s === undefined || s === null ? '' : s);
+        while (s.length < n) { s += ' '; }
+        return s;
+    }
+
+    function run() {
+        setStatus('lbf_diag_status', S.RUNNING, '#888');
+        el('lbf_diag_copy').style.display = 'none';
+        el('lbf_diag_out').innerHTML = '';
+
+        fetch('/jsonrpc.js', {
+            method:      'POST',
+            credentials: 'same-origin',
+            headers:     { 'Content-Type': 'application/json' },
+            body:        JSON.stringify({ id: 1, method: 'slim.request', params: ['', ['lbf', 'diag']] })
+        })
+        .then(function(r) {
+            // A 401 here is LMS's own password protection, not a network
+            // problem. Naming it is the difference between a two-second fix and
+            // the misdiagnosis this whole feature replaces.
+            if (r.status === 401 || r.status === 403) { throw { auth: true }; }
+            return r.json();
+        })
+        .then(function(d) {
+            if (!d || !d.result) { throw {}; }
+            render(d.result);
+        })
+        .catch(function(e) {
+            setStatus('lbf_diag_status', (e && e.auth) ? S.AUTH : S.FAILED, COLOUR.fail);
+        });
+    }
+
+    function copyReport() {
+        if (!lastReport) { return; }
+        var done = function() { setStatus('lbf_diag_status', S.COPIED, COLOUR.ok); };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(lastReport).then(done, fallbackCopy);
+        } else {
+            fallbackCopy();
+        }
+        function fallbackCopy() {
+            var ta = document.createElement('textarea');
+            ta.value = lastReport;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            try { document.execCommand('copy'); done(); } catch (err) { /* leave the table to select by hand */ }
+            document.body.removeChild(ta);
         }
     }
+
     function init() {
-        wire('lbf_token',  'lbf_token_check',  checkToken);
-        wire('lbf_lastfm', 'lbf_lastfm_check', checkLastfm);
+        var b = el('lbf_diag_run');
+        if (b) { b.addEventListener('click', run); }
+        var c = el('lbf_diag_copy');
+        if (c) { c.addEventListener('click', copyReport); }
+
+        // The per-credential buttons run the same server-side check; they differ
+        // only in where the answer is shown.
+        ['lbf_token_check', 'lbf_lastfm_check'].forEach(function(id) {
+            var x = el(id);
+            if (x) { x.addEventListener('click', run); }
+        });
     }
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);

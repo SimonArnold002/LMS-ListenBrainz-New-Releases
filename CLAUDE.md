@@ -79,6 +79,7 @@ ListenBrainzFreshReleases/
 ├── HomeExtras.pm                      # Material home-page shelves — three HomeExtraBase subclasses (New Releases for You / Playlists / All Releases)
 ├── DSTM.pm                            # Don't Stop The Music propagators — 2 mixers: Radio (seeds from last-played artist → similar-artists → top-recordings, evolves) + Recommended (CF pool); streaming-first resolution via Browse::_resolveTracks
 ├── Settings.pm                        # CSRF-protected settings page (General / Streaming Services / For You / All Releases)
+├── Diag.pm                            # Server-side connectivity report — probes every upstream host (LB, LB Labs, MusicBrainz via _mbBase, the MB search index, CAA, Last.fm, MuSpy) in parallel and returns ok/warn/fail/skip per target; driven by the ["lbf","diag"] CLI dispatch in Plugin.pm and by the Settings page's Connection Check section
 ├── install.xml                        # <extension> format, icon_svg.png (version in <version>)
 ├── strings.txt                        # All localisation strings (EN)
 └── HTML/EN/plugins/ListenBrainzFreshReleases/
@@ -110,11 +111,19 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-0.9.151
+0.9.159
 
 ### State of play (2026-07-30) — read this before starting anything
 
 **PLANNED WORK — scoped 2026-07-31, none of it started. Read the doc before opening the code:**
+- **`docs/cache-ttl-30-day-boundary.md`** — **BUG, one line to fix.** `RECMETA_TTL` is 90 days, and
+  LMS's `DbCache` reads any TTL **over 2,592,000s (30 days)** as an *absolute Unix timestamp*, not a
+  duration — so it is stored expiring in **1970** and every read returns undef. `set` returns 1 and
+  raises nothing, so it fails silently. Worse, it is the **dated** branch: recordings that resolved a
+  year are the ones discarded, while yearless ones (1d) cache fine. Verified in LMS 9.1 source; found
+  after it cost the Pitchfork plugin five releases of misdiagnosis. Fix is `30 * 86400`, **no
+  `RECMETA_PFX` bump** (nothing under the current prefix is retrievable anyway), plus a test sweep
+  failing any TTL over the boundary. The doc's §5 is worth reading before diagnosing anything similar.
 - **`docs/token-free-refactor.md`** — the plugin can drop the ListenBrainz token AND the Last.fm key
   entirely. Verified against LB server source + live anon calls: **the token is needed for exactly one
   thing**, `recording_recommendation` events. `fresh_releases` (the flagship feed!) is public and is
@@ -133,15 +142,39 @@ part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
   **adapts the existing `'exclude'` libMode** — verified the `albums` CLI takes `search:` like
   `titles` — but there is **no album MBID tier** (not in `albums_loop`, and our MBIDs are
   release-GROUP vs LMS's release), so it's text-matching only: bias uncertain toward "owned".
+- **`docs/album-title-search-leg.md`** — when a service's ALBUM search for the ARTIST comes back
+  empty, re-query that service with the ALBUM TITLE before calling it a miss. **Already shipped in
+  the sibling Pitchfork Reviews plugin (0.7.12) — this is a port, not a design exercise.** Measured
+  on the live server: Qobuz carries *Leo – Cicada Burnt* and returns it FIRST for `cicada burnt`,
+  while its album search for `leo` gives **200 rows without it** (Leo Sayer, Léo Ferré, Leo Dan,
+  Leo Kottke…). A RECALL gap, not a matcher gap, and raising the limit only moves the cliff.
+  **No `lbf:stream` bump** (what is stale is a 1-day no-match, and a found result cannot change);
+  not a matcher sub, so the fleet hold does not block it. **The TRACK path is deliberately out of
+  scope** — generic track titles, and `lbf:track` no-matches sit inside `lbf:pl:resolved` for 14d so
+  they do NOT self-heal, which would force a playlist-wide re-resolve. Doc carries the LBF-specific
+  gotchas (`$dropSingles` ordering, Bandcamp already excluded), the CLI recipe for reproducing the
+  measurement, and the two test traps that bit PFR's suite.
 - **`docs/genre-sources-investigation.md`** — investigated MAI / the hosted LMS-community API as a
   genre backend. **Conclusion: not for list rows** (16% coverage on real fresh releases vs our
   existing 49%, per-album not bulk, non-MB vocabulary, and **no artist-genre route to fall back to** —
   `/artist/<n>/genres` silently returns the *picture* payload with a 200, it never 404s). Good
   detail-page enricher. **Does not change why the genre work is parked on `alpha`.**
+- **`docs/hosted-lms-community-api.md`** — scoped 2026-08-01. Adopt the hosted `mai-api`
+  (`api.lms-community.org`) as a resolver/metadata backend. **Two hard rules first:** every call sends
+  the `X-LMS-Plugin-ID` header, and all calls go through ONE request helper (auth may be added later).
+  **Main win:** a two-tier `getArtistMbidByName` — hosted `/artist/<name>/mbid` first + a **name-fold
+  gate** (replaces `score>=90`) + unconditional public-MB fallback — beats raw public MB for the
+  majority who run no mirror, biggest gain on the DSTM/similar-artist loops. **Secondary:** detail-page
+  genres/cover from the rich `/album/<title>/<artist>` endpoint (now that the dev fixed freshness),
+  **but** the DB rebuilds WEEKLY (daily WIP), so a new-release plugin MUST keep an MB fallback. Partly
+  supersedes `genre-sources-investigation.md`. Not started.
 
-**Branches.** `dev` (this one) is the working line at **0.9.149**, committed and pushed
+**Branches.** `dev` (this one) is the working line. Last commit is `e5c919d` (**0.9.151**, the bio
+blob fix); **0.9.152–0.9.157 are BUILT AND UNCOMMITTED** in the working tree — the prose-row
+layout fix and the bio-structure fixes on top of it, see the Version History entries. 0.9.152 was
+installed and tested; 0.9.153 awaits Simon's install/verify, then a commit if he OKs it.
 (0.9.147–0.9.148 landed as `a7e1ac4`; 0.9.149 is the Trending Albums empty-cache fix, tagged
-`v0.9.149`). `alpha` holds the parked
+`v0.9.149`.) `alpha` holds the parked
 genre work at 0.9.140 — pushed, see `ALPHA.md` there, do not merge it. `main` is still at
 **0.9.98**: everything from 0.9.99 on (People You Follow, Trending, the matcher fleet sync,
 0.9.126–0.9.128 and 0.9.141) has never been promoted, so "what users have" is far behind
@@ -154,9 +187,45 @@ genre work at 0.9.140 — pushed, see `ALPHA.md` there, do not merge it. `main` 
   depending on it.
 
 **Known open items on this repo, none of them started:**
+- **Detail-page tracklist paging — OPEN, deliberately deferred (Simon, 2026-08-05: "leave it open,
+  may address later").** The release detail page emits one text row per TRACK, so a release with
+  roughly **85+ tracks** crosses Material's 100-item threshold on its own and enters the fixed-48px
+  virtual scroller, where the tall bio row (and any other row that wraps past one line) is drawn over
+  the rows below. Fix = page the tracklist with the existing `_pageSection`/`_pageRow`. Full reasoning
+  and the item_id caveat are in the **0.9.152** Version History entry; the Material mechanics are in
+  [[material-prose-row-layout]]. Not a regression — 0.9.152 removed the bio's ability to cause this,
+  leaving only genuinely huge releases.
 - **CHANGELOG has no entries for 0.9.120–0.9.125.** 0.9.120 shipped as a commit (the fleet
   matcher sync) with no changelog block; 121–125 have none at all. Not reconstructed — the
   record is genuinely missing, so don't invent it, and don't be surprised by the gap.
+- **ACTION — the Cover Art Archive image-proxy handler asks for the SMALLEST image when the
+  skin asks for the LARGEST.** Found 2026-08-05 while doing the Pitchfork Reviews optimisation
+  pass; verified against `Slim/Web/ImageProxy.pm` and Material's `material.min.js`, not inferred.
+  `Plugin::initPlugin`'s handler maps the requested spec to a CAA size with
+  `getRightSize($spec, { 50 => '250', 100 => '250', 250 => '250', 500 => '500' }) || '250'`.
+  `getRightSize` returns the value of the smallest key **>=** the requested dimension, and
+  **undef when nothing is big enough** — so the `|| '250'` fallback fires precisely on the
+  BIGGEST requests and serves the SMALLEST file. Material asks for `_<n>x<n>_f`, where n is
+  `IS_HIGH_DPI ? 600 : 300` for a grid tile and `IS_HIGH_DPI ? 300 : 150` for a list row, so:
+  - list 150 → front-250 ✓ ; grid 300 → front-500 ✓ ; hi-dpi list 300 → front-500 ✓
+  - **hi-dpi grid 600 → front-250, upscaled 2.4× — visibly soft cover art on exactly the
+    surface that shows artwork biggest, on every retina/HiDPI client.**
+  CAA serves `front-250` (8.8KB), `front-500` (18KB) and `front-1200` (77KB) — measured live.
+  **Fix:** add a `1200 => '1200'` bucket (or `600 => '1200'`) and make the fallback the
+  LARGEST option, not the smallest — a fallback of `'250'` is only correct if the table's
+  ceiling can never be exceeded, which is the assumption that broke. One-line change in
+  `Plugin.pm`, no cache bump (the image URL is regenerated per render and the proxy keys its
+  cache on the ORIGINAL url + spec, so nothing stale survives).
+  **While in there, tidy the registration gate but do NOT expect it to change behaviour:**
+  the block ends `} if preferences('server')->get('useLocalImageproxy');`, which reads as
+  "only when local proxying is on". That pref is not a boolean — it is the image-proxy
+  SELECTOR behind Settings → Performance (`1` = local, `2` = helper, or an external proxy's
+  id; `Slim/Utils/Prefs.pm` defaults it to `main::ISWINDOWS ? 1 : 2`), and a registered
+  `match` handler is consulted regardless of it (`ImageProxy::getImage` → `getHandlerFor`;
+  the pref is read only at line ~172, to pick an EXTERNAL proxy). So the gate is truthy on
+  every default install and the handler does run — it is misleading, not broken. **The
+  sibling Pitchfork Reviews plugin registers its `media.pitchfork.com` handler
+  unconditionally and its size table falls back to the ORIGINAL width — copy that shape.**
 - **Discography carries the same wide-character cache bug fixed here in 0.9.141**, in FOUR
   places: `Discography/Browse.pm` ~1159 (`$text`, artist bio), ~3240 (`$desc`, review
   description), ~3270 (`$text`, MAI album review) and `Discography/API.pm` ~705
@@ -212,7 +281,9 @@ genre work at 0.9.140 — pushed, see `ALPHA.md` there, do not merge it. `main` 
 source), `tools/t_review_fixes.pl` (the three 0.9.141 pre-release review defects — bcmatch bump,
 MuSpy memo on Refresh, empty week under the family lens), `tools/t_trending_empty.pl` (the
 0.9.149 empty-aggregate TTL + the Refresh row on the empty Trending Albums view;
-`LBF_BROWSE=` points it at a mutated copy for anti-testing), `tools/matcher_sync_check.py`
+`LBF_BROWSE=` points it at a mutated copy for anti-testing), `tools/t_diag.pl` (the connectivity
+diagnostic — probe coverage, answered-vs-unreachable, the semantic checks, redaction and the
+deadline; `LBF_DIAG=` points it at a mutated copy), `tools/matcher_sync_check.py`
 (currently exits 1 — see the hold).
 
 - **Listen Later release-type handshake — `&rt=` on the favurl (0.9.141).** LL 0.1.86 stores a
@@ -1380,9 +1451,14 @@ callback (never serialised), so `url` coderefs (Read-more, Block, Refresh) are s
     current level**, which is all an in-place expand needs — the same mechanism the All Releases
     paging rows have used since 0.9.86, and which Discography uses for both its bio and its review.
     The drill-in was a limitation of the first implementation, not of Material.
-  - **Now:** collapsed = preview + **Read more**; expanded = the full bio, one `_proseRow` per
-    PARAGRAPH (see 0.9.151 for how paragraphs are actually derived — the source has far less
-    structure than it looks), + **Show less**. Both
+  - **Now:** collapsed = preview + **Read more**; expanded = the full bio as **ONE `_proseBlock` row**
+    with a `<div>` per block, + **Show less**. Read **0.9.152** for why it must be one row, not a row
+    each — N prose rows each pay Material's 48px row-height floor AND can tip the level past
+    `LMS_MAX_NON_SCROLLER_ITEMS`, into a fixed-height scroller that draws tall rows over each other.
+    Read **0.9.153** for the block parser (`_bioBlocks`) — headings, bullets, and the ONE flag
+    (`$wrapped`) any of it may depend on. **Before changing either, read the LIVE row and the LIVE
+    source over JSON-RPC** — that is what found both 0.9.153 bugs after reasoning about the CSS did
+    not. Both
     toggles are `_bioToggleRow`, a boolean sibling of `_pageRow` sharing the same `%pageState` store
     (key `bio:<lc artist>`; expanding writes the flag, collapsing DELETES it so nothing is left
     behind). Reuses `PLUGIN_LBF_READ_MORE` / `PLUGIN_LBF_SHOW_LESS` and the `PAGE_MORE`/`PAGE_LESS`
@@ -1468,7 +1544,7 @@ convention documented under "Icon System".
 
 ## Settings Structure
 
-Six sections in the settings page (General / Blocked Artists / Streaming Services / For You / All Releases / MuSpy). MuSpy is kept LAST, in its own section, so its prefs aren't confused with the ListenBrainz ones (0.9.81). Each is a
+Seven sections in the settings page (General / Blocked Artists / Streaming Services / For You / All Releases / MuSpy / Connection Check). MuSpy is kept LAST **of the pref-bearing sections**, in its own section, so its prefs aren't confused with the ListenBrainz ones (0.9.81); Connection Check sits after it and holds NO prefs at all (0.9.158), so it doesn't reopen that confusion. Each is a
 proper Material settings section (0.8.24): the header is `<div class="prefHead collapsableSection"
 id="lbf_<section>_Header">` and the section's settings are wrapped in a matching `<div
 id="lbf_<section>">` panel. Material's `addExpanders` (iframe-dialog.js) finds `.collapsableSection`
@@ -1729,8 +1805,365 @@ that cause empty/junk pools:
    ([[mb-mirror-search-index-gotcha]]); test the library with `["artists",…,"search:NAME"]`.
 
 ## Version History
+- **0.9.159** — **`MB_PROBE_MBID` was never a real artist, so `autodetectMirror` has NEVER adopted a
+  mirror since 0.9.94. Found by 0.9.158's diagnostic on its FIRST real run — which is the whole
+  argument for having built it.**
+  - **THE REPORT:** Simon's own box, a working mirror at `plex:5000`, returned
+    `MusicBrainz (local mirror)  Check  HTTP 404` while the row beneath it,
+    `artist/?query=Radiohead` against the SAME base, returned 29 results. Browse dead + search alive
+    is the inverse of the usual mirror gotcha, which is what made it obviously not a mirror problem.
+  - **VERIFIED against public MusicBrainz before changing anything** (the mirror was never the
+    suspect once both ids were checked):
+    ```
+    a74b1b7f-06a0-4672-a641-eb3353aa608d -> 404   (mirror AND musicbrainz.org)
+    a74b1b7f-71a5-4011-9441-d0b5e4122711 -> 200   Radiohead
+    ```
+    A fabricated UUID that copies Radiohead's FIRST BLOCK and diverges — which is exactly why it
+    survives review: it looks like a real id, and it looks like the right one.
+  - **THE IMPACT is not the diagnostic row, it is the feature.** `autodetectMirror` validates a
+    candidate by fetching this artist and comparing `name`. It could never validate, so no mirror was
+    ever adopted and **every install with a blank `mb_base_url` and a same-host mirror has run the
+    whole plugin against the public API at 1 req/s since 0.9.94**, re-probing daily. Simon's own box
+    is unaffected — his base is set by hand, which is also why nobody noticed.
+  - **WHY NO EXISTING TEST COULD HAVE CAUGHT IT: the failure is INVISIBLE BY CONSTRUCTION.** A 404 on
+    the probe artist is indistinguishable from "nothing is running on :5000" — the correct, silent,
+    overwhelmingly common outcome. Every stubbed test passes with a bogus id because the stub supplies
+    the reply. Only MusicBrainz can be asked.
+  - **`tools/t_diag.pl` section 7 asks it**, and fails the suite unless `MB_PROBE_MBID` really is
+    `MB_PROBE_NAME`. **Skipped cleanly when offline.** **Its first cut was itself broken and the
+    anti-test is what exposed it:** it keyed "offline" on an EMPTY BODY, and MusicBrainz answers a 404
+    with an empty body — so the bogus id SKIPPED rather than failing, making the gate decorative
+    against the one bug it exists to catch. It now reads `%{http_code}` separately: `000` = skip,
+    non-200 = fail, 200 = compare the name. **Anti-tested both directions** (old constant -> 1 red,
+    new -> green). Don't collapse the status and the body again.
+  - **FLEET: this is a PORT, not a discovery — Discography hit the identical bug and fixed it in
+    0.30.2**, with the same reasoning and a live gate in its `tools/syntax_check.sh`. LBF carried the
+    bad constant the whole time because the fix was never ported. `MB_PROBE_MBID` is NOT part of the
+    shared matcher, so `matcher_sync_check.py` says nothing about it — worth remembering that the sync
+    rule covers the matcher and nothing else, and constants like this can drift indefinitely.
+  - **No cache bump.** `lbf:mbmirror:v1` holds `''` (probed, none found) at a 1-day TTL, so every
+    poisoned entry self-heals within 24h of the update.
+  - Also: the CAA row's note no longer quotes "HTTP 404" back at the user. The 404 is the deliberate,
+    data-independent design of that probe (an ARTIST mbid on a RELEASE endpoint, so no album's art can
+    ever be removed and turn the row red for everyone); it now says so. Prompted by the same report
+    asking whether the 404s were expected — one was, one very much was not.
+- **0.9.158** — **the credential check moved OFF the user's browser and became a server-side
+  connectivity report (`Diag.pm`). The bug report that prompted it is worth keeping, because the
+  message was accurate about its own failure and useless about the plugin's.**
+  - **THE REPORT (0.9.149, from the field):** *"Could not reach ListenBrainz to check the token."*
+    **THE FACT THAT SETTLED IT:** that string is `PLUGIN_LBF_TOKEN_NET_ERROR`, painted by the
+    `.catch()` of a `fetch()` in `settings.html` — **running in the USER'S BROWSER**, straight to
+    `api.listenbrainz.org`. **The LMS server never made a request**, so there was nothing in log.txt
+    to ask for, and the message said nothing whatsoever about whether the plugin worked. Verified
+    byte-identical in `v0.9.149` and dev, so it was never a regression.
+  - **What that catch actually catches**, none of which involves the server: a Pi-hole/NextDNS/uBlock
+    rule on the browsing DEVICE (a cross-origin request to a third-party domain from an intranet page
+    is exactly the shape blockers kill); a `connect-src` CSP from a reverse proxy (nginx/Caddy/
+    Cloudflare Tunnel/HA ingress with hardened headers); and — the one that looks least like a network
+    problem — **a captive portal or intercepting proxy returning HTML, because `r.json()` rejecting
+    lands in the same `.catch()` as a dead socket**. Ruled OUT and not worth chasing: mixed content
+    (an http page fetching https is allowed), and a missing `fetch` (that throws before the promise
+    chain, so the status would stick on "Checking token…", not show this).
+  - **THE SCOPE DECISION, and it is the reason this is not dead code under the token-free work.**
+    A better token check would have been thrown away by `docs/token-free-refactor.md`. What survives
+    the token going away is "the feed is empty and I cannot tell which of seven upstream dependencies
+    is unreachable" — so the token became ONE ROW of a connectivity report covering ListenBrainz, LB
+    Labs, MusicBrainz **via `_mbBase` so it tests the user's mirror**, the MB **search index**, the
+    Cover Art Archive, and Last.fm/MuSpy when configured, plus the server proxy pref and
+    `serviceStatus()`.
+  - **THREE OUTCOMES, NOT TWO — the actual design content.** `fail` = nothing answered (DNS/TLS/
+    network). `warn` = **the host ANSWERED and the answer is wrong** (rejected token, HTTP 500,
+    something that is not MusicBrainz on :5000, a search index returning 0). `skip` = not configured.
+    Collapsing `warn` into `fail` re-creates the exact ambiguity this replaces, silently — which is
+    why `_httpCode` digs a status out of the error STRING when `$resp->code` is unset, rather than
+    misreporting an answered request as a network failure, and why anti-test 1 of the suite is that
+    collapse.
+  - **The MB search-index row earns its place on its own.** A musicbrainz-docker mirror serves browses
+    from Postgres and SEARCH from Solr; an unbuilt index returns 0 for everything while every browse
+    passes. Both rows come from the same `_mbBase`, so the identity row goes green and the search row
+    goes amber — previously diagnosable only by hand ([[mb-mirror-search-index-gotcha]]).
+  - **CAA is probed with an ARTIST mbid on purpose**, so it correctly 404s: an HTTP status proves DNS,
+    TLS and HTTP all reached it, which is the only claim that row makes, and it avoids hardcoding a
+    release mbid whose art could later be removed. Same `answered_ok` flag as the no-token LB probe.
+  - **`["lbf","diag"]` is a CLI dispatch, not a private endpoint for the page**, for one reason: it is
+    the only surface a REMOTE user can reach (settings pages are LAN-only) and the only one a headless
+    run can verify. "Paste this" replaces "send me log.txt".
+  - **The page now calls `/jsonrpc.js` SAME-ORIGIN**, so CORS, proxy CSP and blockers are out of the
+    loop by construction. **Do not "simplify" it back to a direct fetch of api.listenbrainz.org.** A
+    401 renders as "Lyrion is password protected", explicitly — reintroducing a generic unreachable
+    message there would rebuild the original bug one layer down.
+  - **The report is meant to be pasted into a forum thread, so it must be safe to paste.** The probe
+    URL and the DISPLAY url are separate fields (`url` vs `display`); credentials appear only as
+    `set (36 chars)`. Asserted, including that the real token IS still sent — a redaction that also
+    redacted the wire would test nothing.
+  - **Behaviour change worth knowing:** the check reads SAVED prefs, where the browser check read the
+    typed field. The page captures each field's rendered value and says "save first" when it differs,
+    rather than reporting a stale answer as current.
+  - **NO CACHE BUMPS.** Nothing here reads or writes a plugin cache — a diagnostic makes no cached
+    decision — so the standing dev-build "invalidate everything" habit would force a full re-resolve
+    of every album and playlist for zero benefit. Retired strings: `PLUGIN_LBF_TOKEN_NET_ERROR`,
+    `_TOKEN_CHECKING`, `_TOKEN_EMPTY` and the four `_LASTFM_*` browser-check strings (the server-side
+    `_TOKEN_CHECK_FAILED`/`_VALID`/`_INVALID` stay — `Settings::handler` still validates on save for
+    the classic skin).
+  - `tools/t_diag.pl` — **53 assertions** against the REAL `Diag.pm` (loaded, not extracted) over a
+    driveable HTTP stub. **Anti-tested twice:** collapsing warn into fail = 6 red, removing the URL
+    redaction = 2 red. The settings panel was separately driven through a fake DOM with the strings
+    resolved from the real `strings.txt` (27 checks: rendering, the 401 path, note escaping, the
+    unsaved-field guard) — worth redoing that way if it changes, since three "failures" on the first
+    run were the harness stubbing the strings out, not the code.
+- **0.9.157** — **THE ACTUAL CAUSE of "no section titles", found only when Simon sent a screenshot.
+  Everything 0.9.152–0.9.156 changed was downstream of it and could never have fixed it.**
+  - **THE ONE FACT THAT MATTERED, and I had it backwards for five builds: at RUNTIME MAI RETURNS
+    HTML, NOT PLAIN TEXT.** `MusicArtistInfo::Plugin::isWebBrowser` is true for a Material client
+    (`$client->controllerUA`), so `getBiography` yields `$bio->{bio}` — `<p>`/`<h2>`/`<b>` markup with
+    a `<link rel=stylesheet>` prepended. **The same call over the CLI returns `bioText`, the plain
+    hard-wrapped render with setext underlines.** Every fixture I built came from the CLI, so my whole
+    corpus was the wrong string. Reproduce the REAL one with
+    `musicartistinfo biography html:1 artist:<n>` (3200 chars for Lambchop vs 1730 plain).
+  - **THE TELL I SAW AND DISMISSED:** the live log says `MAI bio len=1727` while the CLI returns
+    **1730**. Three characters apart, so I read it as the same string. It was not.
+  - **THE BUG:** `API::_cleanBio` broke paragraphs only on `</p>\s*<p>` ADJACENCY, and replaced every
+    other tag with a SPACE. So `</p><h2>Description and history</h2><p>` matched nothing and the
+    heading dissolved mid-sentence — "…Tennessee. Description and history Initially formed…". **There
+    was never a heading block for Browse to detect, style, or embolden.** The stray "Lambchop ,
+    originally Posterchild ," spacing in the screenshot is the same rule eating `<b>`.
+  - **THE FIX, all in `_cleanBio`, structure BEFORE tag-stripping:** `<h1-6>` becomes a SETEXT block
+    (`title\n----------`) — deliberately reusing the shape `_bioBlocks` already detects and is tested
+    for, so MAI's HTML and plain-text renders share one code path; `<li>` becomes `\n* ` (the marker
+    `_bioBullet` knows); block closers become blank lines; inline tags are removed rather than spaced.
+  - **`<li\b` — the `\b` IS LOAD-BEARING.** Without it `<li[^>]*>` also matches MAI's prepended
+    `<link rel="stylesheet"…>`, which became a stray bullet that swallowed the opening paragraph.
+  - Empty `<li>`/`<p>` left behind by the `<a>` strip are dropped (MAI's "More online sources" link
+    list), and `_bioParagraphs` pops trailing headings so that section's now-empty title is not shown.
+  - **`lbf:bio:2:`→`:3:` — REQUIRED.** The cache stores the CLEANED text, so every existing entry
+    holds the flattened version and would keep serving it for the 30d TTL; without the bump the fix
+    would look like it had not shipped.
+  - **METHOD, and the lesson of the whole episode:** I verified the parser, the CSS cascade, the
+    computed font-weight and the row markup — all correct, all downstream. The defect was in the INPUT,
+    and one screenshot showed it instantly ("Description and history" mid-paragraph, spaces before
+    commas). **When output is wrong and every stage checks out, the fixture is wrong — go get the real
+    input the running code sees, not the one a convenient CLI hands you.**
+  - `tools/t_bioreveal.pl` **106 assertions**; new section 14 drives the REAL MAI HTML shape through
+    `_cleanBio` (now grabbed from API.pm — half the pipeline was previously untested) into the row
+    builder. `LBF_API=` points it at a mutated copy; removing the `<h>` rule = 6 red.
+- **0.9.156** — **NEVER BOLD A PROSE ROW WITH A BARE `<b>`. Use an explicit `font-weight`.** This is
+  the actual cause of "headings bold on iOS, nothing in Chrome", after three builds of wrong theories.
+  - **MEASURED in headless Chrome, inside Material's own row markup:**
+    | markup | computed weight |
+    |---|---|
+    | `.v-list__tile__title` (the parent) | **200** (`font-weight:200!important`) |
+    | body prose div | 200 |
+    | **`<b>` tag** | **400** |
+    | **`font-weight:bold`** | **700** |
+  - **WHY.** A `<b>` gets only the UA stylesheet's `font-weight:bolder`, and CSS resolves `bolder`
+    RELATIVE to the inherited weight — from 200 it lands on **400**, not 700. So the heading is 400
+    against body 200. On iOS, where the font has a genuine 200 thin face, that reads as bold. In a
+    desktop browser whose font stack has NO 200 face, the body already renders at 400 — heading and
+    body become **byte-identical** and the bold vanishes entirely. Same markup, same bytes, opposite
+    result, purely from which font faces the client has.
+  - **This was documented as a hazard in 0.9.152 and then reintroduced in 0.9.155**, when the `<b>`
+    was copied from Discography's meta-title row and the explicit weight dropped at the same time.
+    Discography's rows that actually render bold everywhere use `style='font-weight:bold'`
+    (`Browse.pm` ~2594); its `<b>` sits on a row where the surrounding weight differs. **Copying a tag
+    without copying the declaration that makes it work is what cost the build.**
+  - **METHOD NOTE — the measurement that settled it took two minutes and could have been made on day
+    one:** render the plugin's REAL emitted markup inside the live `style.min.css` in headless Chrome
+    and print `getComputedStyle(...).fontWeight` for each row. `--headless --dump-dom` with a `<pre>`
+    the page fills in. Do that BEFORE reasoning about the cascade; a computed value is evidence, a
+    specificity argument is not.
+  - Live rows verified over the LMS CLI on **port 9090** (`nc plex 9090`) — the JSON-RPC endpoint was
+    closing plugin `items` requests instantly (0.02s, empty body) while core commands answered, so the
+    CLI is the reliable way to read what a plugin actually emits. Worth remembering.
+  - `tools/t_bioreveal.pl` **94 assertions**; the heading test now keys on the explicit weight and
+    asserts the absence of a bare `<b>`. Anti-tested by restoring the 0.9.155 `<b>` = 7 red.
+- **0.9.155** — **the bio renders EXACTLY as Discography's does, because that one works on desktop and
+  iOS and three of my attempts did not. COMPARE THE TWO OUTPUTS BEFORE TOUCHING THIS.**
+  - **The comparison that ended it** (`tools/` has no runner; it was a scratch script running BOTH
+    plugins' real subs over the SAME MAI bio). Discography: `_stripHtml` -> `split /\n{2,}/` ->
+    **one `_proseRow` per paragraph**, each `<div style='margin-left:72px'>text</div>`, bold via a
+    plain `<b>` (its meta-title row, `Browse.pm` ~3396). Ours at 0.9.154: **ONE row** holding a
+    wrapper div with `max-width:1000px;margin:0 auto;line-height:1.5;font-weight:400` and
+    `<h3>`/`<p>`/`<ul>` inside. Same bio, completely different shape.
+  - **THE MISTAKE THAT COST THREE BUILDS.** 0.9.152 collapsed the bio to ONE row to stop the iPad
+    overlap. That treated the symptom. The overlap came from **92 rows**, and those came from the
+    broken paragraph detection (a hard-wrapped MAI bio split at every wrapped LINE) — NOT from having
+    a row per paragraph. Once `_bioBlocks` parses correctly the same bio is **10 rows**, exactly what
+    Discography emits, nowhere near the 100-item scroller threshold. **Row-per-paragraph was never the
+    hazard; bad parsing was.** Verified: LBF and DSC now emit 10 rows for Lambchop and 15 for Dean De
+    Benedictis — identical counts.
+  - **What we keep over Discography** (the parsing, which is genuinely better): setext underlines are
+    consumed instead of being collapsed onto the end of the title — DSC renders
+    `Description and history -----------------------`, we render a bold `Description and history`;
+    bullets are detected and never emboldened; headings survive in bios that fail the wrap test.
+  - **DO NOT reintroduce a single-row wrapper with its own typography.** Measured in headless Chrome it
+    computes perfectly (1000px centred, weight 400, `<h3>` 700) and it still did not render as intended
+    on every client. The lesson is that measuring a component in isolation is not evidence about the
+    app; the only evidence that counted was the side-by-side against a plugin known to work.
+  - No cache bumps (render only). `tools/t_bioreveal.pl` **93 assertions**; anti-tested three ways —
+    backwards underline-marking removed = 3 red, `_bioBullet` disabled = 9 red, the heading `<b>`
+    removed = 6 red.
+- **0.9.154** — **the bio is typeset by US, not by the list row. This is the fix for "bold headings on
+  iOS, nothing on desktop", and the reason the previous three builds missed it is worth reading.**
+  - **WHAT I KEPT GETTING WRONG:** I verified the SERVER output (which blocks are headings) and the
+    CSS cascade, and both were correct — Chrome computes `font-weight:700` on our heading div, measured
+    in headless Chrome against the live stylesheet. So the markup and the styling were never the bug.
+    **The container was.** We render into `.browse-text`, a LIST ROW, whose typography is the skin's
+    and varies by platform; MAI renders into `.browse-html`, a prose renderer.
+  - **WHAT MAI DOES (the answer Simon pointed at).** It emits the bio as ONE `type=>'textarea'` item;
+    Material turns that into a level of exactly one `html` item, and `browse-page.js` renders THAT via
+    `.browse-html`: `line-height:1.5; padding:12px 16px; max-width:var(--dialog-list-max-width)` (=
+    **1000px**) with `margin-left/right:auto`, and no per-row height floor. **That path needs a level
+    of exactly ONE item, so an inline expand can never reach it** — which is why we cannot simply
+    switch to it without giving up the in-place reveal.
+  - **THE FIX: rebuild that typography inside our own wrapper div, in the row.** The row's
+    `font-weight:200!important` / `font-size:…!important` are declarations on the
+    `.v-list__tile__title` ELEMENT — they cannot match elements we create inside it, so our own values
+    win with no `!important` needed. MEASURED in headless Chrome at a 1600px viewport: wrapper width
+    **1000 centred (300px each side)**, computed weight **400**, `<h3>` **700**, `<ul>` markers `disc`,
+    row height 182px (it grows — `.browse-text .v-list__tile` has `height:unset!important`).
+  - **`width:100%` on the wrapper is REQUIRED, not cosmetic.** The title element is `display:flex;
+    flex-direction:column; align-items:flex-start`, so without it the wrapper shrinks to its content
+    and `margin:0 auto` has nothing to centre within.
+  - **Semantic tags, and `<b>` inside the `<h3>`.** `<b>` is the bold idiom Discography has shipped in
+    its meta-title row all along (`Browse.pm` ~3396) and which Simon confirms renders on both desktop
+    and iOS, so it is carried as well as — not instead of — the explicit weight. A `<b>` ALONE is not
+    enough (UA `bolder` against the inherited 200 lands near 400); the two together are.
+  - `<p>` per paragraph, `<ul>`/`<li>` for a run of bullets so the browser supplies the marker and the
+    hanging indent, and the LAST block carries no bottom margin so the row ends flush.
+  - No cache bumps (render only). `tools/t_bioreveal.pl` 93 → **96 assertions**.
+- **0.9.153** — **the bio's STRUCTURE parser, and the two ways 0.9.152's first cut of it was wrong.
+  Both were found by reading the LIVE row off the server, not by reasoning about the code.**
+  - **THE METHOD THAT FOUND BOTH, use it first next time.** Fetch the emitted row over JSON-RPC
+    (`listenbrainzfreshreleases items 0 12 item_id:<rel>`, expanding the bio by hitting the toggle's
+    item_id first) and read the `name` field, then fetch the SOURCE the same way
+    (`musicartistinfo biography html:0 artist:<n>`). That took minutes and settled what several rounds
+    of reasoning about Material's CSS could not: the server was emitting exactly the markup intended,
+    the client was rendering it faithfully, and **the defects were in which blocks we had classified**.
+    `tools/` has no runner for this; the recipe is in [[lms-server-http-testing]].
+  - **BUG 1 — headings were gated on the WRAP TEST, so most bios had none.** 0.9.152 ran the whole
+    structure parser only inside the `_bioHardWrapped` branch. That test is a WRAP detector; it says
+    nothing about whether a document has sections, and it correctly returns false for any bio whose
+    lines end on full stops. In those the headings stayed body text **and the setext underline was
+    never consumed**, so it rendered as a row of literal dashes. **A setext underline is unambiguous
+    in ANY source** — it must always be consumed and must always mark what it underlines.
+    - `_bioUnwrap` is now **`_bioBlocks($bio, $wrapped)`**, the single parser for both shapes.
+      `$wrapped` changes EXACTLY TWO things and nothing else may be made conditional on it: whether a
+      lone newline is a wrap artefact to rejoin or a real break, and whether `_bioLooksLikeHeading`
+      (the BARE-line test) may run at all. That test stays gated because it is only sound on a wrapped
+      document, where a body paragraph is multi-line by construction — ungated it would promote
+      ordinary short sentences wholesale.
+    - `$underlined` can now reach BACKWARDS to `$out[-1]`, because when a lone newline is a break the
+      heading has already been closed by the time its underline is read.
+  - **BUG 2 — every BULLET was rendered as a heading.** A list entry (`  * Dean De Benedictis`) is one
+    short line with no terminal punctuation — precisely the bare-heading signature. Measured on the
+    live row: the Dean De Benedictis bio emitted **8 bold divs**, of which 5 were roster entries, which
+    is what buried the 3 real titles and is what Simon meant by "showing no title/headers".
+    New `_bioBullet` (marker + REQUIRED whitespace, so a hyphenated word can't open a list) tags those
+    blocks `bullet`; a bullet is never a heading, keeps its marker, and gets a hanging indent.
+  - **`_proseBlock` now gives a heading THREE cues, deliberately.** `font-weight:700` does the work
+    (Material's `font-weight:200!important` is on `.v-list__tile__title`, so a declaration on our child
+    div wins). A `<b>` INSIDE it is semantics plus a floor if the inline style is ever lost — note
+    `<b>` ALONE still doesn't work, for the reason 0.9.152 recorded (UA `bolder` resolves relative to
+    the inherited 200 → ~400), so this is belt AND braces, not a replacement. `font-size:1.08em` is the
+    third cue, for where a bold face is unavailable and the browser won't synthesise one.
+  - **VERIFIED on five real live bios through the real subs:** Dean De Benedictis 3 headings + 5
+    bullets (was 8 bold), Radiohead **21** headings all genuine Wikipedia sections, Becky G 17 likewise,
+    Tyondai Braxton 5, Brama 0 (a 3-paragraph Last.fm bio, correctly left alone).
+  - No cache bumps — `lbf:bio:2:` stores the RAW bio and the parse happens per render, so nothing
+    cached can serve stale structure.
+  - `tools/t_bioreveal.pl` 75 → **93 assertions**; new sections 12 (a setext heading in a NOT-wrapped
+    bio) and 13 (bullets). **Anti-tested per defect**, and the split is the point: removing the
+    backwards underline-marking fails ONLY section 12's 3 assertions, disabling `_bioBullet` fails ONLY
+    section 13's 7 — so the two fixes are independently covered rather than jointly.
+- **0.9.152** — **prose rows and Material's list layout: the field report was "empty space on iPad
+  landscape, renders over itself on iOS, fine on PC/Mac". Both symptoms are ONE cause of ours, and
+  0.9.151's measurement is what missed it.**
+  - **MEASURE THE SOURCE — AGAIN, AND THIS TIME ALL OF IT.** 0.9.151's table was built from **Last.fm**
+    bios and concluded "a lone `\n` is a deliberate break, they are not column-wrapped". True of
+    Last.fm. **The MAI path was never sampled**, and MAI hands us a plain-text render (Wikipedia-derived)
+    that is **hard-wrapped at ~72 columns with setext headings**. Measured live on the server
+    (`musicartistinfo biography html:0 artist:Tyondai Braxton`, 5805 chars, 113 lines): max line **78**
+    chars, 74 of the 92 non-blank lines between 60 and 78, `Early life` followed by `----------`.
+    Under rule 1 that became **92 one-line "paragraphs"**. Both sources go through `API::_cleanBio`,
+    which is exactly why 0.9.151 believed one measurement covered both.
+  - **WHY IT LOOKED LIKE A RESPONSIVE/PWA BUG AND ISN'T.** Verified against the LIVE Material 6.4.5
+    `material.min.js` + `style.min.css` (not the 6.4.4 source copy):
+    - every prose row's title carries `min-height: var(--list-elem-height)` = **48px**. A fragment that
+      wraps to ONE display line on a wide screen still occupies a full row → **the iPad-landscape gaps**;
+    - `useRecyclerForLists(){return !this.isTop && this.items.length>LMS_MAX_NON_SCROLLER_ITEMS && ...}`
+      with `LMS_MAX_NON_SCROLLER_ITEMS=100`. **The expanded detail page measured 122 items**, so it
+      crossed into the virtual scroller: `:item-size="LMS_LIST_ELEMENT_SIZE"` (**fixed 48**) and every
+      row `position:absolute` (vue-virtual-scroller). In that path text rows get `browse-text-inrecycler`,
+      which — unlike `browse-text` — has **NO `height:unset`** rule, so a row taller than 48px is
+      **drawn over the row below**. On a narrow column those 72-char fragments wrap to 2-3 lines →
+      **the iOS overlap**. On a wide desktop they fit inside 48px, which is why PC/Mac looked merely loose.
+    So Material's limit is real, but we were the ones feeding it 92 rows and tipping it past 100.
+  - **FIX 1 — `_bioHardWrapped` + `_bioUnwrap`, a rule 0 ahead of 0.9.151's rules.** Detection needs
+    **TWO signals, both required**, because each alone has a real false positive: (a) no line exceeds
+    `BIO_WRAP_MAX_COL`=100 — a wrap column is a ceiling, real paragraphs run past it; alone it admits
+    any bio of short deliberate lines; (b) **more than half the non-final lines end MID-SENTENCE** — a
+    wrap cuts where the column falls, a deliberate break lands on a full stop; alone it admits a long
+    unpunctuated run. Plus a `BIO_WRAP_MIN_LINES`=4 floor. A false positive costs one joined paragraph,
+    never a broken render, which is why the gates are set to prefer leaving 0.9.151 alone.
+    Setext underlines (`^[-=_~*]{3,}$`) are dropped AND **close the current paragraph**, so a heading
+    cannot run into the body beneath it.
+  - **FIX 2 — `_proseRow` -> `_proseBlock`: the whole bio is ONE row, paragraphs as inner `<div>`s.**
+    One 48px floor instead of N, spacing from `PROSE_GAP` (a typographic measure, not a row height),
+    trailing paragraph deliberately gap-less, and an item count that **cannot** tip the page into the
+    scroller. Deliberately NOT width-capped: Material's own `browse-html` centres at
+    `--dialog-list-max-width`, but that path needs a level holding exactly ONE item, and centring just
+    this row would misalign it against the tracklist and metadata rows beside it.
+  - **FIX 3 — SECTION HEADINGS ARE KEPT AND RENDERED AS HEADINGS** (Simon's follow-up: they survived
+    0.9.152's first cut but looked identical to body text). **TWO shapes in the SAME document, which
+    is why the underline cannot be the only signal** — measured in the Braxton bio: `Early life` and
+    `Career` are setext-underlined, while `Early solo work and Battles (2000-2009)` and two more are
+    BARE short lines with a blank line either side. So:
+    - the underline is consumed by `_bioUnwrap` but taken as EVIDENCE (`$underlined` closes the block
+      AND marks it a heading, whatever it looks like);
+    - `_bioLooksLikeHeading` catches the bare ones: a block that is ONE source line, under
+      `BIO_HEADING_MAX_COL`(80), not ending in `.!?;,`. In a hard-wrapped document a body paragraph is
+      by construction multi-line and ends on a full stop, so it is the PAIR that does the work. `:` is
+      deliberately not disqualifying ("Discography:").
+    - **`_bioParagraphs` now returns `{ text, heading }` entries on every path** — the structure is
+      carried rather than re-derived in the renderer, because the underline is gone by then.
+    - `_proseBlock` renders a heading `font-weight:700` + `margin-top:`PROSE_HEAD_ABOVE +
+      `margin-bottom:`PROSE_HEAD_BELOW (more air above than below, so a title binds to its body).
+      **`font-weight:700`, NOT a `<b>` tag** — Material sets `font-weight:200!important` on the row's
+      title element and `<b>` only gets the UA `bolder`, which resolves RELATIVE to that inherited 200
+      and lands on a near-invisible 400. An explicit weight is a declaration on the child, so the
+      parent's `!important` never enters into it.
+  - **RESULT, on the real bio through the real subs: 92 rows -> 1 row / 16 paragraphs (5 of them
+    headings, all correctly marked); detail page 122 items -> 31** (16 fixed rows + 15 tracks, for the
+    measured release).
+  - **THE PROPERTY THAT MATTERS MOST, and it is not the row count itself: expanding the bio now costs
+    the SAME two rows as collapsing it** (text + toggle, either way). Before, expanding added 91 rows
+    and did the threshold-crossing itself. **So the bio can no longer push a page into the scroller at
+    all** — page size is now purely a function of tracklist length. Keep that true: anything added to
+    the expanded branch of `_artistRows` must not scale with the length of the text.
+  - **KNOWN RESIDUAL — OPEN, Simon's call 2026-08-05 ("leave it open, may address later"), do NOT
+    silently close it.** The detail page emits one text row per TRACK, so ~16 fixed rows + N tracks
+    means a release needs roughly **85+ tracks** (box set / big compilation) to cross
+    `LMS_MAX_NON_SCROLLER_ITEMS` on its own. Above it every row is pinned to 48px and the tall bio row
+    is drawn over the tracks below — the same field bug, confined to very long releases. Note it is
+    not only the bio: in that mode ANY row wrapping past one line overlaps (a long track title or
+    Genres line on a phone). **Fix when it bites:** page the tracklist with the existing
+    `_pageSection`/`_pageRow` + `%pageState` (as All Releases weeks do), which also caps the page size
+    permanently so nothing added later can drift back over 100. ~1 hour with tests. Deferred because
+    no such release has been reported AND the paging rows shift item_ids — safe only because
+    `_releaseDetail` emits the Streaming section FIRST (the 0.6.11 rule), which is worth re-checking
+    before building it.
+  - **FLEET: Discography has the same class of bug, opposite symptom.** `Browse.pm` ~1806 and ~3432
+    split on `/\n{2,}/` only, so a hard-wrapped source with no blank lines collapses into ONE giant
+    row — harmless in the normal path (`browse-text` has `height:unset`) but DSC artist views routinely
+    exceed 100 items, so it lands in the scroller and clips/overlaps. Its `PROSE_INDENT => '72px'` is
+    also a fixed pixel gutter — a fifth of a 375px phone. Not touched here (LBF first, Simon's call).
+  - No cache bumps (view state only). `tools/t_bioreveal.pl` 43 -> **75 assertions**; **anti-tested
+    both halves separately** against mutated copies via `LBF_BROWSE=` — detection disabled = 5 red,
+    one-row-per-paragraph restored = 8 red, and every control (sections 7 and 10) green in both states.
 - **0.9.151** — **the expanded bio rendered as one blob. Two causes, and the interesting one is that
-  the paragraph data we assumed exists mostly doesn't.**
+  the paragraph data we assumed exists mostly doesn't.** **SUPERSEDED IN PART BY 0.9.152** — its rule
+  "ANY run of newlines is a paragraph break" is right for Last.fm and WRONG for MAI, whose bios are
+  hard-wrapped; the table below is a Last.fm-only measurement. Read 0.9.152 before touching this area.
   - **MEASURE THE SOURCE BEFORE TRUSTING A FORMAT.** 0.9.150 split on `/\n{2,}/` because
     `API::_cleanBio` converts `</p><p>` to a blank line. Checked against the live Last.fm bios that
     actually reach us — **none of them contain a single `<p>` tag**, so that rule almost never fires
@@ -1743,6 +2176,10 @@ that cause empty/junk pools:
     So blank-line-only splitting threw away **9 of Radiohead's 13** breaks, and for a Mildlife-shaped
     bio there is nothing to split on at all. `_cleanBio` is the ONLY path (both the MAI and the direct
     Last.fm branch go through it), so this applies to every bio the plugin shows.
+    **^ THAT LAST SENTENCE IS THE 0.9.152 BUG, IN ONE LINE.** A shared CODE path was taken as proof of
+    a shared DATA shape, and all three rows above are Last.fm bios. MAI's are hard-wrapped at ~72
+    columns, where rule 1 below is exactly wrong. Sampling one source and generalising on "they all go
+    through the same sub" is the mistake to recognise, not the split rule itself.
   - **`_bioParagraphs`** now applies two rules: (1) **any run of newlines is a break** — a lone `\n`
     in a Last.fm bio is deliberate, they are not column-wrapped; (2) if that still yields ONE long
     chunk the source genuinely has no structure, so sentences are grouped

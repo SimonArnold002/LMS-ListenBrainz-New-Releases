@@ -3,6 +3,73 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.159
+
+### Fixed
+- **If you run a MusicBrainz mirror on the same machine as Lyrion, the plugin has never actually found it — it does now.** The plugin checks a candidate mirror is really MusicBrainz by looking up one known artist and confirming the name comes back. The artist ID it looked up was wrong and had never existed, so that confirmation could never succeed and no mirror was ever picked up. Every setup relying on automatic detection has been using the public MusicBrainz service — which is rate-limited to one request a second — since this was introduced in 0.9.94. **If you set the MusicBrainz address by hand in Settings, you were never affected.**
+- The connection check's Cover Art Archive line no longer reads like a fault. It reports "reachable" and explains that its test deliberately asks for something that isn't there, which is how it confirms the service answered without depending on any particular album's artwork still being available.
+
+### Note
+- This was found by the connection check added in 0.9.158, on its first real use — it reported a 404 against a MusicBrainz mirror that was working perfectly.
+
+## 0.9.158
+
+### Added
+- **A connection check in Settings that tests the server, not your browser.** Settings now has a **Connection Check** section with a **Run connection check** button. It tries every service the plugin depends on — ListenBrainz, MusicBrainz (or your own mirror), the Cover Art Archive, and Last.fm and MuSpy if you have set those up — **from the machine running Lyrion**, and shows each one with how long it took and what came back. There is a **Copy report** button, so if you need help you can paste the result instead of hunting through the server log. Nothing in the report contains your token or your Last.fm key.
+- **Two problems that used to be invisible now have their own line in the report.** If something other than MusicBrainz is answering on your mirror's address, the check says so rather than reporting a healthy connection. And if you run a local MusicBrainz mirror whose *search* index was never built — which looks completely healthy until an artist can't be found — that now shows up as its own result.
+- **The same check is available to a script**, as `["lbf","diag"]`, so it can be run without opening the settings page.
+
+### Fixed
+- **"Could not reach ListenBrainz to check the token" no longer appears when ListenBrainz is perfectly reachable.** The old check ran inside *your web browser* and contacted ListenBrainz directly, so it failed whenever anything between your browser and the internet got in the way — an ad-blocker, a Pi-hole or similar DNS filter, a reverse proxy, or a guest network sign-in page. None of those have anything to do with whether Lyrion can reach ListenBrainz, and because your browser did the work, nothing was written to the server log either. The check now runs on the server, over the same connection the plugin really uses.
+- **A rejected token and an unreachable server are no longer the same message.** The report separates "nothing answered" from "answered, but the answer was wrong", so a bad token, a mirror returning nothing, or a server error each say what they are.
+- **If Lyrion itself is password protected, the check says so** instead of blaming ListenBrainz.
+
+### Note
+- The check reads your **saved** settings, so save the page before running it after editing the token or key — it will tell you if you have not.
+
+## 0.9.157
+
+### Fixed
+- **Section titles in artist biographies finally appear — this is the real cause, and it was upstream of everything the last few releases changed.** The biography text arrives from the Music Artist Info plugin as *web markup*, not plain text, and our cleanup step only recognised one kind of paragraph break. A section heading sat in a form it didn't recognise, so the heading was dissolved into a space and ran into the paragraph after it — "…Tennessee. Description and history Initially formed as a three piece…". There was never a heading left to embolden, whatever styling was applied to it. Headings are now recognised and kept as headings, and they render in bold.
+- **Bulleted lists in a biography are kept as bullets**, and list entries whose only content was a link (which we strip) no longer leave stray empty bullets behind.
+- **Stray spaces before commas are gone** — "Lambchop , originally Posterchild ," — caused by inline markup being replaced with a space instead of removed.
+- A trailing heading with nothing underneath it (the "More online sources" list, whose links we strip) is no longer shown.
+
+## 0.9.156
+
+### Fixed
+- **Biography section titles are bold in a desktop browser too, not only on iOS.** The titles were being emboldened with a plain `<b>`, and the browser resolves that *relative to the surrounding text* — which the skin sets very thin. On a phone, where that thin weight really exists in the font, the title looked bold; in a desktop browser, where the text was already falling back to normal weight, the title came out identical to the body and the bold simply disappeared. Titles now set a bold weight outright, the same way the Discography plugin does, so they are bold everywhere.
+
+## 0.9.155
+
+### Fixed
+- **Biography section titles now show in bold, on desktop as well as on iOS.** The biography is now built exactly the way the Discography plugin builds its own — one row per paragraph, indented to line up with the artwork column, and titles emboldened with the same simple markup that plugin has always used and that renders correctly everywhere. The previous attempt put the whole biography into a single row with its own styling, which looked right on a phone and wrong in a desktop browser.
+- **Section titles no longer trail a row of dashes.** In the plain-text biographies these arrive in, a title is underlined with dashes; those are now recognised and removed rather than being run onto the end of the title.
+
+## 0.9.154
+
+### Fixed
+- **Section titles in a biography now show as titles on every device, not just some.** The headings were being styled as list-row text, which each platform lays out differently — the reason it looked right on iOS and wrong in a desktop browser. The biography is now typeset the way the Music Artist Info plugin's own biography pages are: a centred column of a readable width, proper line spacing, real heading tags, and real bulleted lists. That is one layout, produced the same way everywhere, instead of a list row fighting the skin's own styling.
+- **Titles use the same bold markup the Discography plugin uses** for its headings, which is known to render correctly on both desktop and iOS.
+- **On a wide screen the text no longer stretches the full width of the window.** It sits in a centred column, so the long empty runs beside short paragraphs are gone.
+
+## 0.9.153
+
+### Fixed
+- **Section titles were missing from most biographies.** 0.9.152 added bold section titles, but only looked for them in biographies it had recognised as pre-wrapped to a fixed width — and plenty aren't, including short ones and any that come from Last.fm. In those, the titles stayed in body type and, worse, the row of dashes that underlines a title in plain text was left in as a line of its own. Titles are now looked for in **every** biography: an underlined title is unmistakable whatever the source, so it is always recognised and the dashes are always removed.
+- **Bulleted lists no longer come out as a run of bold headings.** Where a biography lists things — a label's roster, for instance — each entry is a short line with no full stop, which is exactly what a bare section title looks like, so every entry was being emboldened and the real title was lost in them. List entries are now recognised as list entries: they keep their bullet, get a hanging indent so a long one lines up when it wraps, and are never treated as titles. On the biography this was reported against, that is three real headings and five bullets in place of eight bold lines.
+- **Section titles are easier to pick out**, with a slightly larger size alongside the bold so they still read as titles in the places a bold face wasn't coming through.
+
+## 0.9.152
+
+### Fixed
+- **The expanded biography was badly laid out on phones and tablets — huge gaps on an iPad in landscape, and text drawn over itself on iOS.** Two causes, and the first is the real one. Biographies that come from the **Music Artist Info** plugin arrive pre-wrapped to a fixed width — a line break roughly every seventy characters — and every one of those breaks was being treated as a new paragraph. A single biography therefore became ninety-odd separate list rows, each only a few words long. Because a list row is never shorter than a standard row height, that left a slab of blank space beside every one of them on a wide screen; and it pushed the page past the point where the app switches to a fixed-height fast-scrolling list, where anything taller than a standard row is drawn over the row beneath it. Wrapped lines are now rejoined into the paragraphs they came from, so the same biography renders as sixteen paragraphs instead of ninety-two fragments.
+- **The whole biography is now a single block rather than one row per paragraph**, so paragraph spacing comes from the text rather than from list-row heights. This removes the remaining gaps on wide screens and keeps a release page far below the size at which the fast-scrolling list takes over, so the overlapping can't come back. Section headings within a biography are kept; the row of dashes that used to underline them is not, since it only exists to underline a heading in plain text.
+- Biographies from **Last.fm**, which are not pre-wrapped, are unaffected — their line breaks are still treated as deliberate paragraph breaks exactly as before.
+
+### Added
+- **Section titles inside a biography now show as titles.** A biography that comes with its own sections — *Early life*, *Career*, *Early solo work and Battles* and so on — used to render them in exactly the same type as the body, so there was nothing to tell you a new section had started. They are now **bold**, with a little more space above than below so each title sits with the text it introduces. Both kinds are picked up: the ones the source underlines, and the sub-headings it doesn't.
+
 ## 0.9.151
 
 ### Fixed

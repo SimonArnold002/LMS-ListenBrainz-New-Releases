@@ -67,32 +67,59 @@ PLUGIN_LBF_TOKEN_CHECK_FAILED
 PLUGIN_LBF_TOKEN_CHECK
 	EN	Check token
 
-PLUGIN_LBF_TOKEN_CHECKING
-	EN	Checking token...
-
-PLUGIN_LBF_TOKEN_EMPTY
-	EN	Enter a token, then click Check token.
-
-PLUGIN_LBF_TOKEN_NET_ERROR
-	EN	Could not reach ListenBrainz to check the token.
-
 PLUGIN_LBF_LASTFM_CHECK
 	EN	Check key
 
-PLUGIN_LBF_LASTFM_VALID
-	EN	Last.fm API key is valid.
+PLUGIN_LBF_SECTION_DIAG
+	EN	Connection Check
 
-PLUGIN_LBF_LASTFM_INVALID
-	EN	Last.fm rejected this API key.
+PLUGIN_LBF_DIAG_RUN
+	EN	Run connection check
 
-PLUGIN_LBF_LASTFM_CHECKING
-	EN	Checking key...
+PLUGIN_LBF_DIAG_DESC
+	EN	Tests, from this server, every service the plugin depends on: ListenBrainz, MusicBrainz (or your mirror), the Cover Art Archive, and Last.fm and MuSpy if you have configured them. It checks your saved settings, so save the page first if you have just edited a field. The result is also written to the server log.
 
-PLUGIN_LBF_LASTFM_EMPTY
-	EN	No Last.fm key entered (it is optional).
+PLUGIN_LBF_DIAG_RUNNING
+	EN	Checking...
 
-PLUGIN_LBF_LASTFM_NET_ERROR
-	EN	Could not reach Last.fm to check the key.
+PLUGIN_LBF_DIAG_COPY
+	EN	Copy report
+
+PLUGIN_LBF_DIAG_COPIED
+	EN	Report copied to the clipboard.
+
+PLUGIN_LBF_DIAG_FAILED
+	EN	Could not run the check. The Lyrion server did not answer this page - reload the settings page and try again.
+
+PLUGIN_LBF_DIAG_AUTH
+	EN	Lyrion refused the request because it is password protected. Sign in to the server in this browser, then run the check again.
+
+PLUGIN_LBF_DIAG_UNSAVED
+	EN	Not checked - you have edited this field. Save the page, then run the check again.
+
+PLUGIN_LBF_DIAG_SUMMARY
+	EN	%s of the checks did not pass - see below.
+
+PLUGIN_LBF_DIAG_ALL_OK
+	EN	All checks passed.
+
+PLUGIN_LBF_DIAG_PROXY
+	EN	Server proxy:
+
+PLUGIN_LBF_DIAG_SERVICES
+	EN	Streaming services:
+
+PLUGIN_LBF_DIAG_OK
+	EN	OK
+
+PLUGIN_LBF_DIAG_WARN
+	EN	Check
+
+PLUGIN_LBF_DIAG_FAIL
+	EN	Failed
+
+PLUGIN_LBF_DIAG_SKIP
+	EN	Not set
 
 PLUGIN_LBF_LASTFM_KEY
 	EN	Last.fm API Key (optional)

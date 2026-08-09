@@ -22,6 +22,7 @@ Tested on LMS 9.x with the **Material Skin**.
 | **Albums / Singles & EPs** | Flip either feed between full releases and singles/EPs, from the list itself | — |
 | **Block artists** | Hide an artist from every feed | — |
 | **Material home shelves** | Three home-screen rows | Material Skin |
+| **Connection check** | Tests every service the plugin uses, from the server, and gives you a report you can copy | — |
 
 ---
 
@@ -121,6 +122,13 @@ Both prefer a copy from **your own library** when you have it (otherwise stream)
 
 ### Material home shelves
 The plugin adds **New Releases for You**, **Playlists** and **All Releases** rows to the Material home screen. Enable them via Material's **Customize home menu**. *(Material caches the available rows in your browser — if a new one doesn't show, hard-refresh with Ctrl/Cmd-Shift-R.)*
+
+### Connection check
+If a feed is empty or your token doesn't seem to work, open **Settings → Connection Check** and press **Run connection check**. It tries every service the plugin depends on — ListenBrainz, MusicBrainz (or your own mirror), the Cover Art Archive, and Last.fm and MuSpy if you use them — **from the machine running Lyrion**, and reports each one with how long it took and what came back.
+
+That matters because it tests the connection the plugin actually uses. A check running in your web browser can fail for reasons that have nothing to do with the server — an ad-blocker, a Pi-hole, a proxy, a guest-network sign-in page — and tell you nothing useful.
+
+Use **Copy report** if you're asking for help; it never contains your token or your Last.fm key. The check reads your **saved** settings, so save the page first if you've just edited one.
 
 ---
 
