@@ -3,6 +3,31 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.161
+
+### Fixed
+- **Some artist biographies came out completely blank when you tapped "Read more".** If a biography was mostly a list — a discography, a label roster, anything written as a run of short lines — the plugin mistook every line for a section title, then discarded the lot as titles with nothing underneath them. Tapping Read more opened an empty section. Lists are now recognised as lists, and a biography can never be thrown away wholesale: at worst it shows unstyled, never missing.
+- **Words went missing from the middle of sentences in artist biographies.** Anywhere the source text linked to something — and the Wikipedia-derived biographies are full of inline links — the linked words were being deleted along with the link. "The band signed to Merge Records in 1994" came out as "The band signed to in 1994". The words are kept now. The trailing "Read more on Last.fm" link is still removed, as is the list of external sources at the end.
+- **The short biography preview no longer shows a row of stray dashes.** A section heading falling inside the first couple of lines leaked the underline the plugin uses to mark it, so the preview read "…from Nashville. Description and history ---------- Initially…". The preview is now built from the biography text proper.
+- **A dash inside a sentence is no longer treated as a bullet point.** A phrase set off by dashes could be read as the start of a list, which left the words before it rendered in bold for no reason. Dashes now only start a list when there are several of them together.
+- **The Connection Check no longer reports a fault on a healthy setup.** Both MusicBrainz lines were tested at the same instant, and MusicBrainz allows only about one request a second — so one of them could come back rate-limited and be reported amber. The two checks are now spaced out. This only ever affected people without their own MusicBrainz mirror.
+- The Connection Check could hang with no result at all if it failed to start up. It now reports the error instead.
+- The MuSpy line in the Connection Check hides your user ID, matching the Last.fm line beside it. The report is meant to be safe to paste into a forum thread.
+
+### Note
+- **Artist biographies are re-fetched once after this update** (the fix changes how the text is cleaned up, so the stored copies had to be discarded). Nothing else is re-matched or re-resolved — your streaming matches, playlists and library matches are all untouched.
+- This release also contains everything listed under 0.9.160 below, which was never issued as a download.
+
+## 0.9.160
+
+### Changed
+- **You no longer need a ListenBrainz API token. Your username is enough.** **New Releases for You** — the plugin's main personalised feed — used to refuse to run without a token, even though the ListenBrainz endpoint behind it has never required one. It now works with just your username, as do Created-for-You Playlists, People You Follow (Trending Tracks and both Trending Albums lists) and both Don't Stop The Music mixers. If you already have a token saved, nothing changes — it is still sent, and your feed is identical.
+- **One feature still needs a token: "Recommended" under People You Follow.** That list is built from the recommendations and pins of the people you follow, which ListenBrainz serves only from your own private feed — there is no public way to read it. Without a token that tile simply isn't shown; everything else in the section works as before.
+- The **User Token** setting is now labelled *optional* and says what it actually adds, and the "not set up yet" message asks for a username instead of a username and a token.
+
+### Note
+- Nothing is cached differently, so there is no re-matching or re-resolving after this update, and no need to clear anything.
+
 ## 0.9.159
 
 ### Fixed
