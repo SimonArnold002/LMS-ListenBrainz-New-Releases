@@ -69,8 +69,11 @@ my @SUBS = qw(
     _pickValue _norm _allowedTypes _typeMatches _secondaryType _filterSection
     _filterForYou _filterAll _isVariousArtists _blockedSet _isBlocked
     _dedupeReleases _sortReleases _weekStart _sortWithin _artistSortKey
+    _firstArtistMbids
     _viewFilter _releaseTags _genreKey _genreFamily _genreModifier _genreKnown
-    _loadGenreFamilies _bucketFor _genresFor _lastfmGenres _mergeMuSpy _dateShift
+    _loadGenreFamilies _bucketFor _genresFor _lastfmGenres
+    _hostedArtistKey _lbArtistGenres _lastfmArtistGenres _artistTierGenres
+    _mergeMuSpy _dateShift
     _sectionSig _sectionList _allSection _forYouSection
 );
 
@@ -125,9 +128,36 @@ sub coverArtUrl {
     return $rel ? CAA_BASE_URL . $rel . '/front-250' : undef;
 }
 sub peekArtistSort { undef }
+# PLURAL, and it is the one _sortWithin('artist') actually calls. Its absence made
+# the bench DIE at the _sortWithin bench and skip everything after it — including
+# the `_bucketFor` line, which is the guard that caught the per-release SELECT in
+# 0.9.165. A harness that dies half way through reports a shorter list, not a
+# failure, so the missing guard looked like a guard that had nothing to say.
+sub peekArtistSorts { {} }
 sub peekLastfmTags { [] }
+# The ARTIST-LEVEL genre tiers are read out of the render's own $meta map, so the
+# only thing the render calls here is the key builder. THAT IS THE PROPERTY THIS
+# BENCH EXISTS TO PROTECT: if a future change makes a tier read the store per
+# release again, this stub stops being enough and the _bucketFor line disappears
+# from the output — which is exactly how the per-release SELECT was caught.
+# (0.9.173 removed the hosted rung; the property is unchanged and now guards the
+# ListenBrainz and Last.fm artist tiers, which read the same map the same way.)
+sub artistKeyForName {
+    my ($class, $name) = @_;
+    return '' unless defined $name && length $name;
+    my $n = LBF::_norm($name);
+    return length $n ? 'n:' . $n : '';
+}
 package LBF;
 PRELUDE
+
+# Constants the grabbed subs read. Extracted from the source rather than restated
+# here, so a change to the value cannot silently diverge from what the bench runs.
+for my $const (qw(LB_MARK LFM_MARK)) {
+    $src =~ /^(use constant \Q$const\E\s*=>[^;]+;)/m
+        or die "bench: no `use constant $const` in Browse.pm\n";
+    $code .= "$1\n";
+}
 
 $code .= "$fold\n";
 $code .= "my \$_familiesLoaded = 0; my %_GENRE_FAMILY; my %_GENRE_MODIFIER; my %_GENRE_KNOWN;\n";

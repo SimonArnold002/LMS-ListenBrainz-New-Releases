@@ -3,6 +3,79 @@
 ## Project Overview
 A plugin for Lyrion Music Server (LMS) that browses ListenBrainz Fresh Releases. It provides a personalised "For You" feed and a global "All Releases" feed. Filtering is controlled via settings, and the browse menu stays intentionally simple. The current build targets LMS v9.x and has been tested with Material Skin.
 
+## Review Ledger — READ THIS BEFORE REPORTING ANY FINDING
+
+**Why this exists.** Reviews kept re-reporting things that had already been
+decided — deliberate conventions read as defects, and verdicts that lived only in
+a chat transcript. Review and fix happen in separate sessions, so nothing carries
+a decision forward. Everything below has already been settled; re-raising it costs
+a round trip and teaches the next review nothing.
+
+*Measured 2026-08-26, and worth recording because the obvious explanation is
+WRONG: this is not caused by the uncommitted baseline. Pitchfork Reviews ran five
+review rounds against a single uncommitted tree of 13,227 insertions, with a
+baseline frozen for 13 days, and converged 4 → 4 → 4 → 2 → 1 → clean on one
+commit. Diff size and commit cadence are not the variable. An undecided verdict
+with nowhere to live is.*
+
+**If you are reviewing:** read sections A and B first, and report an item from
+them only if you have genuinely NEW information — a case the recorded reasoning
+does not cover. Say which ledger entry you are challenging and what changed.
+
+### A. NOT FINDINGS — deliberate, fleet-wide
+
+- **The zip is not rebuilt and `repo.xml <sha>` is not recomputed in the working
+  tree.** Both happen at build time, together with the version bump. A stale zip
+  or sha on `dev` is the normal state, not a defect.
+- **`CHANGELOG.md` and `README` are written at the MERGE TO MAIN, not on dev
+  builds.** A CHANGELOG whose newest entry is many versions behind `install.xml`
+  is CORRECT on `dev`. Dev builds update `CLAUDE.md`, `docs/*.md` and the memory
+  notes only. *(This was reported as "docs drift" in the 0.9.174 review; it was
+  never a defect.)*
+- **The large uncommitted working tree is deliberate.** It is the review diff.
+  Do not report it, and do not prompt to commit as a fix for anything.
+- **`install.xml` / `repo.xml` being ahead of the docs on `dev`** follows from the
+  two rules above.
+
+### A2. NOT FINDINGS — LBF-specific
+
+- **The album→single release-type filter is deliberately LBF-only**, outside the
+  shared matcher. It is not matcher drift.
+- **Artist sort names stay on MusicBrainz.** The ListenBrainz `type`-driven local
+  sort key mis-files stage names (Panda Bear → "Bear, Panda"). Settled; the
+  detail tracklist stays on MB for the same reason, probed live.
+- **The hosted API is not a genre backend.** The ARTIST tier was built in 0.9.162
+  and REMOVED in 0.9.173 at ~2% coverage. Only the ALBUM route survives, detail
+  page only. Do not propose reinstating the artist tier.
+- **LB / MB / hosted genre sources are all MB-derived and fail together** (2–4%
+  measured). Only Last.fm is independent (60%). A proposal to "add another
+  source" that is one of the first three is not an improvement.
+- **The bio parser is end-of-life** — the bio path moves to the hosted
+  LMS-community API. Fix narrowly; do NOT re-architect `_bioBlocks` & co., and do
+  not propose heuristics that re-derive structure a source already states.
+
+### B. KNOWN-OPEN AND ACCEPTED — do not re-report as new
+
+- **`matcher_sync_check.py` exits 1.** This is a KNOWN, DELIBERATE hold, not a
+  regression: DSC carries provisional `_albumMatches` (alias pass) and `_norm` /
+  `%FOLD` changes that Simon chose to prove in the field before porting. See
+  LMS-Discography's CLAUDE.md. The port to LBF/PFR/LL is outstanding work with an
+  owner — reporting "the matcher has drifted" adds nothing. Reporting a NEW sub
+  that has drifted does.
+
+### C. CLOSED FINDINGS
+
+Fixed findings are recorded per review in `docs/code-review-<version>.md`, each
+with its mechanism, its guard and its test. Check there before reporting: the
+0.9.174 and 0.9.184 findings are all fixed and verified. Do not re-derive them.
+
+### D. ADDING TO THIS LEDGER
+
+When a finding is declined, or accepted-but-deferred, add it here in the same
+session — one line, with the reason. A decision that lives only in a chat
+transcript will be rediscovered as a finding within days. That is the whole
+mechanism this ledger replaces.
+
 ## Feature Summary & Release Posts (social media)
 
 **Maintain this section.** Two living artefacts for announcing the plugin:
@@ -33,7 +106,7 @@ A plugin for Lyrion Music Server (LMS) that browses ListenBrainz Fresh Releases.
 
 > **ListenBrainz Fresh Releases — for Lyrion Music Server.** Turn your ListenBrainz listening into a living, playable music feed inside LMS.
 
-- **New Releases for You** — personalised feed of fresh releases from artists in your ListenBrainz history (needs username + token). Newest-first, grouped by week, tap-through detail pages. **Optional MuSpy** — add a MuSpy user ID (public, no password) to fold in releases from the artists you follow there; more tailored since you pick the artists, and overlaps with ListenBrainz are shown once. MuSpy is upcoming-heavy, so it has its own **upcoming** switch (on by default, independent of the feed's Include-Upcoming) and a **how-far-ahead** limit (default 12 months).
+- **New Releases for You** — personalised feed of fresh releases from artists in your ListenBrainz history (needs a username; **no token** since 0.9.160). Newest-first, grouped by week, tap-through detail pages. **Optional MuSpy** — add a MuSpy user ID (public, no password) to fold in releases from the artists you follow there; more tailored since you pick the artists, and overlaps with ListenBrainz are shown once. MuSpy is upcoming-heavy, so it has its own **upcoming** switch (on by default, independent of the feed's Include-Upcoming) and a **how-far-ahead** limit (default 12 months).
 - **All Releases** — the global ListenBrainz fresh-releases feed (no account). By-week landing page to jump to any week.
 - **Created-for-You Playlists** — your **Weekly Jams / Weekly Exploration / Daily Jams** as fully-streaming **Play-all** lists; every track matched **library-first**, then streaming.
 - **People You Follow** *(optional; toggle in Settings → General, default on)* — a whole section built from what the people you follow **actually play** (public listen-stats — username only; **one-vote-per-follower** breadth ranking). **Trending Tracks** (weekly, Play-all, owned-excluded, album-level so a full-album play can't flood it) + **Trending Albums · This Month / · This Year** (tap-through album pages with art/date/type). Plus **Recommended** — the tracks they **recommend/pin** (needs a token; the feed is private), one newest-first **new-music-only** Play-all list with **day dividers**, accumulating so recs aren't lost as the feed rolls. Off = nothing here is fetched, cached or warmed.
@@ -46,7 +119,7 @@ A plugin for Lyrion Music Server (LMS) that browses ListenBrainz Fresh Releases.
 - **Your taste** — filter by type / artwork-only / Various Artists; **per-view sort** (a "Sorted by…" toggle in each list's Options section — Release Date / Artist / Album Title, kept within the weekly W/C headers); release-window; cached & pre-warmed (instant), **no extra server software**.
 - **Plays nicely with Listen Later** — adding a release passes the real MusicBrainz release type (album / EP / single) across, which the streaming services mostly don't expose, so the saved row is labelled and play-tracked correctly rather than guessed from a track count.
 
-**Requirements:** LMS 9.0.0+ (Material Skin); ListenBrainz account + token for personalised features (All Releases needs nothing); optional Qobuz/Tidal/Bandcamp/Deezer (playback), MAI plugin (artist photos+bios), free Last.fm key (genre/bio fallbacks). Every optional add-on degrades gracefully.
+**Requirements:** LMS 9.0.0+ (Material Skin); a ListenBrainz **username** for the personalised features — no API token (All Releases needs nothing). A token is **optional** and adds only the *Recommended* list under People You Follow, whose feed is genuinely private. Optional Qobuz/Tidal/Bandcamp/Deezer (playback), MAI plugin (artist photos+bios — **the only bio source since 0.9.186**), free Last.fm key (the genre ladder's tier 5, and DSTM similar artists). Every optional add-on degrades gracefully.
 
 **Install:** add `https://simonarnold002.github.io/LMS-ListenBrainz-New-Releases/repo.xml` in LMS → Settings → Plugins.
 
@@ -79,6 +152,7 @@ ListenBrainzFreshReleases/
 ├── HomeExtras.pm                      # Material home-page shelves — three HomeExtraBase subclasses (New Releases for You / Playlists / All Releases)
 ├── DSTM.pm                            # Don't Stop The Music propagators — 2 mixers: Radio (seeds from last-played artist → similar-artists → top-recordings, evolves) + Recommended (CF pool); streaming-first resolution via Browse::_resolveTracks
 ├── Settings.pm                        # CSRF-protected settings page (General / Streaming Services / For You / All Releases)
+├── SingleFlight.pm                    # SHARED FLEET MODULE (canonical copy — see tools/singleflight_sync_check.py). The one async coalescing registry: claim / park / fan out / watchdog. Replaces the THIRTEEN hand-rolled guards across four repos (LBF %BUILDING/%INFLIGHT/%coverQueued/%sortInFlight/%agenInFlight, LL %counting/%trackPending, PFR %PENDING/%RESOLVING, DSC %nameRefetched/%candWaiting/%bandsInFlight/%officialInFlight) that between them produced the same four review findings, one site at a time, for weeks
 ├── Diag.pm                            # Server-side connectivity report — probes every upstream host (LB, LB Labs, MusicBrainz via _mbBase, the MB search index, CAA, Last.fm, MuSpy) in parallel and returns ok/warn/fail/skip per target; driven by the ["lbf","diag"] CLI dispatch in Plugin.pm and by the Settings page's Connection Check section
 ├── install.xml                        # <extension> format, icon_svg.png (version in <version>)
 ├── strings.txt                        # All localisation strings (EN)
@@ -92,6 +166,8 @@ ListenBrainzFreshReleases/
 tools/
 ├── make_covers.py                     # Pillow generator for ALL branded covers/badges (see "Branded cover images")
 ├── make_readme_html.py                # Zero-dep Markdown→HTML generator: README.md → README.html (styled) + index.html (Pages redirect)
+├── singleflight_sync_check.py         # Cross-repo drift check for SingleFlight.pm — same rule and same shape as matcher_sync_check.py (canonical = LBF; hash-pinned variants; a repo with no copy yet is "not adopted", not drift). Run after ANY edit to the registry
+├── t_singleflight.pl                  # Behavioural suite for SingleFlight.pm (38 assertions): owner-only work, release on success AND failure, the watchdog releasing BY ANSWERING, a dying owner stranding nobody, idempotent landing. Carries its own anti-test — 4/4 mutants caught
 ├── match_check.py                     # Faithful port of _norm/_artistMatch/_trackMatches — paste "LB_artist | LB_title || file_artist | file_title" pairs to see MATCH/MISS + which rule fired; folds diacritics by default (matches shipped 0.9.57 _norm), --fold shows pre-fold vs shipped compare (local-match debug)
 ├── fetch_playlist.py                  # Dumps a user's created-for playlists from the public ListenBrainz API as match_check-ready lines (local-match debug)
 └── fetch_feed.py                      # Dumps a user's SOCIAL FEED (recommendations/pins from followed users) as match_check-ready lines; needs the token (arg 2 or LB_TOKEN) — the follow-feed analogue of fetch_playlist.py
@@ -111,7 +187,968 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-0.9.159
+**0.9.186** — built, not yet installed. **The seven findings of the 0.9.184 code review,
+all fixed** (`docs/code-review-0.9.184.md` — every one carries its mechanism, its guard
+and its anti-test), plus **the removal of the detail page's two remaining Last.fm calls**.
+No schema change and no `BASE_VERSION` bump; `DEV_BUILD` clears the derived store on first
+start as always.
+
+**0.9.186 — THE DETAIL PAGE'S LAST.FM CALLS BOTH GO.** `API::getArtistBio` is deleted,
+along with the `lbf:bio:` key family and the `_setText`/`_getText` pair that existed for
+it; the page's own `getLastfmTags` call is deleted with `$wantLastfm`.
+
+- **The bio.** It was the fallback for users without MAI, and the call was that it is not
+  worth having: **MAI's own bio sources include Last.fm**, so this was a second route to a
+  well MAI had already drawn from, and it bought a bio for a population that has never been
+  offered an artist **photo** either (MAI-only since the Artist section was written). No MAI
+  now means no bio, and the section falls back to the artist name + Block-artist row.
+  `$wantArtist` is gated on the new `Browse::_maiEnabled()`, so the task is **absent** from
+  the render barrier rather than being a slot that resolves to an empty hash.
+- **The genre tags.** 0.9.185 kept this call on the grounds that Last.fm is the one
+  genuinely *independent* source — but that is an argument about the **ladder**, not about
+  this page. **Last.fm IS the ladder's tier 5** (`_genresFor`: artist tags, then
+  `_lastfmGenres`), so the store peek immediately above it has already asked. A second, live
+  `album.gettoptags` here could only repeat the rung that just answered or re-ask the one
+  that just came up empty — while blocking the render barrier behind up to two chained HTTP
+  calls, and rendering tags **ungated by `_genreKnown`** that the lists would have refused
+  ("japanese", "Dreamy", "zzz").
+- **What STAYS, and don't take it with them next time.** `API::getLastfmTags` stays —
+  `_warmLastfm` is the ladder's tier-5 filler and is what puts Last.fm's answer in the store
+  in the first place; what went is *this page's own* call to it. `_cleanBio` and `BIO_MAX`
+  stay — the MAI path runs its bio through them (`Browse::_fetchArtistInfo`), which is also
+  why `_cleanBio`'s HTML handling is tuned for MAI's runtime output rather than Last.fm's
+  ([[mai-bio-is-html-at-runtime]]).
+- **The "caching FREE TEXT" rule in `API.pm` stays too, with its helpers gone.** Nothing in
+  that file writes a bare string to the cache any more (the other `_setText` caller, the
+  MusicBrainz sort-name, moved to `DB::artistPut` when the store landed). The comment is kept
+  because it is about **the next one**: never `$cache->set($key, $some_string)` with text
+  that came from an API — wrap it in a hashref, or put it in the store.
+- **`PLUGIN_LBF_LASTFM_KEY_HINT` was corrected**, because it described the key by the role
+  that just went: *"fill in genres on the release detail page"*. The key's genre role is the
+  **ladder's tier 5**, which fills the LISTS as much as the detail page, and it also feeds the
+  DSTM radio's similar-artist fallback. A settings hint naming a removed feature is how the
+  next person re-adds it.
+- **Guarded by `t_genrefill.pl` §6b/§6c (21 assertions)**, written to the shape §6 already
+  used for the 0.9.185 removal — assert the calls are gone, and assert what must SURVIVE.
+  **That second half is the point**: §6b pins `API::getLastfmTags`/`peekLastfmTags` as still
+  present and still called from `_warmLastfm`, because deleting the tier while deleting the
+  duplicate call is a far worse bug than the one being fixed — it would silently empty the
+  ladder's last rung. §6c pins `_cleanBio` surviving, the `_maiEnabled` gate, and that the
+  bio branch **takes one barrier slot and releases it on BOTH exits** (callback and
+  eval-threw) — the hang a careless deletion produces, the same one §6 guards for genres.
+  **Anti-tested four ways:** restoring the 0.9.185 call = 3 red; renaming `sub getLastfmTags`
+  out of `API.pm` = 1 red; dropping the `_maiEnabled` gate = 1 red; dropping the eval-threw
+  `$pending--` = 2 red. Nothing else moved in any of the four runs.
+
+**0.9.186 — THE 0.9.184 REVIEW FIXES.** In the review's order:
+
+1. **`_cleanBio`'s link-only `<li>` rule ate whole list items — and everything between
+   them.** `.*?` is lazy, but laziness only sets the *order* the engine tries lengths in; on
+   an item that is a link **plus** text (`<li><a>Album One</a> (1994)</li>`) the first `</a>`
+   is not followed by `</li>`, so it backtracked, crossed `</li><li>` under `/s`, and matched
+   a **later** item's `</a>` — deleting every item in between. A Wikipedia-derived discography
+   list collapsed to an empty `<ul>`. Now `[^<]*`, which cannot reach a tag boundary and
+   describes a link-only item exactly. A *pattern* fix, not a parser
+   ([[lbf-keep-bio-rendering-simple]], [[lbf-bio-parser-end-of-life]]).
+2. **`warmCache` returned before `_warmGenres`, so account-less users never got All Releases
+   genres.** `_warmGenres()` sat *below* the username gate while its own no-username branch
+   warmed All Releases for everyone — dead code. It is now hoisted **above** the gate (nothing
+   in the genre path reads `$client`, so running ahead of the `$client ||=` line is safe).
+   This was the genre half of exactly the bug `_warmTick`'s comment describes about feeds: All
+   Releases was fetched and stored by `warmFeeds` — which runs ahead for that very reason —
+   but its genres were never pre-warmed, so the view opened bare and could only fill from the
+   `_kickGenreFill` top-up, a page at a time, 120s apart.
+3. **A die in the first caller's `onDone` parked every later cold open of that feed for
+   ever.** `%INFLIGHT` is released **only** inside `$fanout`, which runs *after* the first
+   caller's own callback — and the waiters were eval'd while the first caller was not. An
+   XMLBrowser render callback that dies therefore left `$ikey` claimed holding an empty
+   arrayref, and every later cold open parked onto a list nothing would ever drain and
+   returned **without rendering**, for the life of the process. **There were TWO such
+   callbacks, not one:** `$done`'s, and `$failed`'s **stored-copy branch**, which calls
+   `$p{onDone}->(_memoSet(...))` ahead of `$fanout` in the same shape. (The error branch below
+   it genuinely is safe — `_handleError` runs no user code before `$fanout`.) Both are now
+   eval'd with a logged error, and **`%INFLIGHT_TIMER`** is armed at claim time for
+   `INFLIGHT_MAX` (3 × `FEED_TIMEOUT`), killed by `$fanout` on every normal exit. It
+   **answers** the parked waiters with an error rather than merely dropping the key — a waiter
+   freed without a callback is still a browse that never renders. Same shape and same
+   reasoning as Browse's `BUILDING_MAX`.
+4. **`_withGenresLB` never called back for a list with no release-group MBIDs.** `$starts` is
+   0 for an empty `@batches`, so `$step` never ran and `$cb` was never called **at all** — the
+   chain just stopped. The all-empty case is guarded upstream; the reachable hole was the
+   **mixed** one the ladder deliberately introduced (`@rels` empty, `@artOnly` non-empty — the
+   Trending shape the `@artOnly` budget exists for). Every *render* caller passes `peek => 1`
+   and the peek branch always calls back, so no browse view could hang on it: the damage was
+   the **warm**, where a For You pass that filtered down to artist-only rows left
+   `genres_foryou` `running` for ever and **All Releases was never warmed for that tick**.
+   Fixed with the guard `_withGenresMirror` has always had.
+5. **`warmstats`' skip list named a stage that does not exist.** `genres_lastfm` is recorded
+   nowhere — the real stages are `genres_lastfm_all` / `genres_lastfm_foryou` — and because
+   `stageEnd` creates a row for any name handed to it, the report showed a phantom line and no
+   line for either real stage. It fell out with finding 2: the genre names came off that list
+   entirely, since `_warmGenres` now records its own outcomes and re-ending a live stage with
+   a wrong outcome would be worse than the missing warm.
+6. **⚠️ MIRROR MODE COULD NOT SEE THE RELEASE-GROUP TIERS AT ALL — and this one is
+   VISIBLE.** `_genresFor` tiers 1 and 1b read the `release_group` row, but `detail_genres`
+   and `genres` reach `$meta` only via `DB::rgGet` — i.e. only on the **ListenBrainz** path.
+   Mirror mode builds `$meta` entirely from artist rows through `_metaFromArtists`, which
+   hard-codes `genres => []` and never touches the release-group row, so **both** record-level
+   tiers were unreachable and the list showed an artist proxy instead. New
+   **`Browse::_mergeRgGenres`**, called from **all three** of `_withGenresMirror`'s exits (the
+   peek branch, the `getArtistGenres` callback, and the `unless (@artists)` branch — that
+   third one was returning `{}`, and the artist rungs having nothing to look up says nothing
+   about whether the record has an answer). It reads through
+   `API::peekReleaseGroupMetadataBulk` rather than `DB::rgGet` directly so the two paths
+   cannot drift on key-casing or row shape, and it is **one bulk read per page, never one per
+   row** — that is the ~2,900 synchronous SELECTs `bench_walk` caught in 0.9.165. It
+   **creates** a `$meta` entry as well as filling one, seeding `genres`/`agenres` empty so the
+   tier walk still falls *through* to the artist rungs below.
+   **Tier 1 was included on evidence, not by symmetry:** `getReleaseGroupMetadata` is called
+   by the Trending Tracks date fill and the Trending Albums release-group pass **regardless of
+   genre mode**, and that request carries `inc=release_group tag` — so a mirror box's store
+   *does* hold album-level genres, written where the genre ladder itself never touches them.
+   A mirror user who had browsed Trending had answers in the store the list refused to read.
+   **`agenres` is deliberately NOT merged** — the artist tiers have their own reader and
+   `_metaFromArtists` has already filled them from the mirror's own artist rows. **Note this
+   is the DEFAULT path on any server with a local MB mirror**, so an existing mirror user will
+   see rows flip from the artist's genre to the album's own. That is the ladder behaving as
+   specified: an answer about the *record* outranks a proxy for it.
+7. **A failed dev-build wipe was recorded as done and never retried.**
+   `$prefs->set('last_build', $version)` sat **outside** the eval, and that pref is what makes
+   `_buildChanged` return early next start — so a wipe that died half way (say `wipeDerived`
+   hit a locked DB during startup) left a partly-wiped store marked handled and never ran
+   again for that version. The one path by which a dev build could silently **not** clear its
+   caches ([[dev-builds-clear-caches]]). Moved inside the eval, beside `last_genre_fact`,
+   which has always been correct for the same reason: the pref means "the version the store
+   was last cleared FOR", not "the version that happened to be running". A permanent failure
+   now retries once per start and logs each time — a symptom you can act on, where a half-wiped
+   store marked complete is exactly the state the rule exists to prevent. The retry is
+   idempotent (`DELETE FROM kv`).
+
+**THE TEST-SUITE LESSON FROM THIS ROUND, and it is a general one.**
+`t_feedsingleflight.pl`'s `Slim::Utils::Timers` stub was a generic no-op AUTOLOAD, so a
+**timer-based guard could be deleted with the suite still fully green**. It now records
+timers and the tests fire them deliberately. Two more of the same class: `t_warmstats.pl` §5
+walked a list of expected stages asking "is each one marked?", which cannot see a mark for a
+stage that does not exist — it now derives both sets from the source and asserts each way
+(a name ended but never started, and a name started but never ended); and `t_genrefill.pl`
+§14 had pinned a guard's exact *source line* and went red on a correct change, so it now
+pins the property. **Two assertions in this round are documentation, not coverage, and are
+recorded as such in the review file** (finding 4's `return`, and finding 6's "an empty
+tier-1 column does not erase the tier-1b answer") — both pin contracts whose damage is not
+reachable on today's call paths. Every fix was anti-tested by reverting it and counting the
+reds; the counts are in `docs/code-review-0.9.184.md`.
+
+**MERGE-GATE ITEMS carried forward** (not done, deliberately —
+[[changelog-only-on-main-merge]]): `CHANGELOG.md` and `README.md` still describe *Days
+window*, *MuSpy upcoming — how far ahead*, and the Last.fm key as a bio/genre fallback.
+All need rewriting at merge to main.
+
+**0.9.185** — superseded by 0.9.186. **The release window is WHOLE MONDAY-TO-SUNDAY
+WEEKS.** See `docs/week-based-release-window.md` (design + an "As built" section recording
+where the implementation diverged from it), and the full pref/behaviour writeup under
+**General Settings** below. Also carries the MusicBrainz 503 backoff on the artist-sort
+warm, and **the removal of both on-demand genre fetches from the album detail page**.
+
+**0.9.185 — THE DETAIL PAGE STOPS RE-ASKING FOR GENRES.** Both fallbacks behind its store
+peek are deleted: hosted `getAlbumGenresHosted` and the `getReleaseGroupGenres` call behind
+it, plus `_hostedGenreNames`, the `HGENRES_*` constants, the `$fileDetail` closure, and the
+`lbf:hgenres:`/`lbf:rggenres:` entries in `KEY_VERSIONS`.
+
+**Why, and it is not a coverage judgement — the calls were structurally redundant.** The
+page's genre step already peeked the store having walked the WHOLE ladder, so both only
+ever ran on the residue where every tier had come up empty. The one population the hosted
+route was kept for in 0.9.173 — established albums on Trending Albums — turns out to be
+covered before the row is even drawn, because that build stores genres itself (its
+rg-metadata pass carries `inc=release_group tag`). And every source involved is
+MusicBrainz-derived, so they fail together. **Measured 2026-08-22: hosted 0 of 40 albums
+off the live fresh-releases feed; the MB tier 0 of 14 on the same residue.** Two blocking
+requests per album open, on the render path, to re-ask a well that had just come up dry.
+
+**What did NOT change** (as of 0.9.185 — **the Last.fm tags and the bio went in 0.9.186**,
+see above): the tracklist (MusicBrainz `release?inc=recordings`), streaming resolution,
+Last.fm tags and the artist photo/bio all still ran — 0.9.185 removed genre fetching only. `release_group.detail_genres` is now write-once history: **still read as
+ladder tier 1b**, never written again. Guarded by `t_genrefill.pl` §6, rewritten from
+driving the removed sub to asserting its absence — including that the render barrier is
+still decremented exactly once, which is the hang a careless deletion produces.
+
+**0.9.185 — WHOLE WEEKS, NOT A ROLLING DAY COUNT.** The window was `days` (1-90, default
+14) measured from today, and it **cut the current week in half**: the UI renders `W/C
+<Monday>` rows, but the window's edges landed on arbitrary days, so with *Include earlier
+weeks* off the current week held only *today onwards* and **Friday's releases — the week's
+main drop — were gone by Saturday**. Turning the past side on was the only workaround, and
+it dragged in a ragged 14 days rather than whole weeks. Now `weeks_past` (0-3, default 1) +
+**the current week always in full** + `weeks_future` (0-3, default 2), clamped to a
+four-week budget.
+
+**IT IS CHEAP BECAUSE OF THE 0.9.166 STORE.** Releases are stored permanently and the
+window is only a filter on the READ, so narrowing costs nothing and invalidates nothing.
+**NO `BASE_VERSION` BUMP** — that would lose every older row for good, because ListenBrainz
+only re-serves releases inside the window it is asked for.
+
+**`API::sectionWeeks($prefix)` IS THE ONLY PLACE THE WEEK PREFS ARE READ.** It replaced ~12
+duplicated `$prefs->get('days') // 14` + past/future sites that **disagreed** —
+`foryou_future` fell back to `// 0` in four of them and `// 1` in `warmFeeds`, so a warm and
+a browse asked ListenBrainz two different questions and stored two different windows. The
+four per-section checkboxes survive as pure ON/OFF **gates** (unticked = zero weeks on that
+side, that section only).
+
+**THE `Settings.pm` TRAP, and it is the one to remember.** `exists $params->{pref_days}` was
+the sentinel that says "this is a real form POST", and it is what makes the checkbox
+coercion run at all. It moved to `pref_weeks_past`. Deleting the field without moving the
+sentinel breaks **every** checkbox on the page at once, silently: unchecked boxes store
+`undef`, which reads back ON through the `// 1` guards, so `all_past`/`foryou_past` become
+impossible to turn off.
+
+**TWO DELIBERATE DIVERGENCES FROM THE DESIGN NOTE**, both recorded in its "As built"
+section: the memo key got ONE builder (`_feedMemoKey`) rather than two `join`s that had to
+stay byte-identical by hand — *that*, not the pref reads, is the actual 0.9.141 Refresh bug;
+and the over-budget clamp rule (unspecified in the doc) honours the PAST side first, future
+takes the remainder.
+
+**THE VERIFICATION LESSON.** The doc's gates were `perl -c` + a called-vs-defined sweep. Both
+ran clean and **both are blind to what actually broke, which was two existing test suites**:
+`t_feedsingleflight.pl` varied `days` purely to get distinct memo keys (`%INFLIGHT` is a
+file-lexical it cannot reset), so with `days` inert every section collapsed onto one key and
+section 2 parked behind section 1's deliberately-outstanding fetch; `t_review_fixes.pl`
+spelled its expected feed key out as a literal `join`. Neither is a papering-over — the key
+shape genuinely changed — but **a plan listing static gates should list "run the suites that
+lift these subs" next to them.**
+
+**MERGE-GATE ITEMS (not done, deliberately):** `CHANGELOG.md` and `README.md` still describe
+*Days window* and *MuSpy upcoming — how far ahead*; both need rewriting at merge to main,
+per the repo convention.
+
+**0.9.184** — single-flight on the cold feed path; superseded.
+See `docs/warm-ordering-and-follower-latency.md` §8.11.
+
+**THE FEEDS DO NOT GET THE BUILDING ROW, deliberately.** They are already
+stale-while-revalidate (any populated store renders instantly, however old), a fetch
+failure degrades to the stored copy, and the only unready case is a completely empty
+store bounded by `FEED_TIMEOUT` (10s). At ≤10s once ever, a building row plus a
+"Check again" tap is WORSE than letting it load — the same threshold argument that
+justified rendering immediately at 52.8s, pointing the other way.
+
+**0.9.184 — SINGLE-FLIGHT ON THE COLD FEED PATH.** `%REVALIDATING` guards
+`if ($bg)`, and `$bg` is `!$p{onDone}`, so an OPEN-path fetch took no flag: on a COLD
+store the three-plus XMLBrowser walks one tap produces each fired their own
+ListenBrainz request. `%FEED_MEMO` cannot help — it caches COMPLETED results. Now
+`%INFLIGHT` parks the rest behind the first. **Both outcomes fan out** (parking and
+then answering only the first would turn a duplicate fetch into a hung browse), each
+waiter inside its own eval, and `onError` waiters get the same STRING `_handleError`
+hands the primary — not the response object.
+
+**The key is the REQUEST, not the feed:** memo key PLUS headers. Without the headers a
+token holder arriving second is parked behind an anonymous fetch and their token is
+never sent, making the request LBF issues depend on which walk arrived first.
+
+**`t_tokenfree.pl` broke on this landing and that was CORRECT** — its harness never
+answered a request, so its later calls were legitimately parked behind its earlier
+ones. It now drains each request after recording it, and snapshots `errors`/`done`
+BEFORE draining. **The repair then hid the header property** (deleting headers from
+the key went 0 red), so it is asserted in `t_feedsingleflight.pl` §6 instead —
+3 red. *A test that stops failing after a harness fix has stopped testing something.*
+
+**0.9.183** — Check again + building row on all four resolve views; superseded. Adds the "Check again" row and puts the
+building row on EVERY unready view. See `docs/warm-ordering-and-follower-latency.md`
+§8.10.
+
+**THERE IS NO SERVER PUSH FOR A BROWSE PAGE — do not look for one.** A plugin cannot
+refresh a page the user is on; `needsRefresh` is client-side only. The building row
+CANNOT turn itself into the real list. What Material honours is `nextWindow` on a row,
+and **only when that row's response is EMPTY** (browse-functions.js:834) — which is
+why `_checkAgainItem` returns `{ items => [] }` and does nothing else. Verified on the
+live server: the existing Refresh / Sorted-by rows emit `nextWindow: "refresh"` and
+are the same mechanism.
+
+Applied to all four unready views: `_resolveTrending`, `_buildAlbumsData`,
+`resolvePlaylist` (~12s cold) and `_resolveFollow`.
+
+**`_resolveFollow` releases via its own closure, NOT by wrapping `$callback` —
+deliberate, and asserted.** It is also on the warm path, where `$callback` is undef
+and the terminal reads `if $callback` to decide whether to build result rows at all;
+wrapping would make that always true and render rows the warm never uses.
+
+**`BUILDING_MAX` (180s) now expires any flag whose release path never runs.** A leaked
+flag is worse than no guard — in-process registry, no TTL, view stuck for ever.
+
+**0.9.182** — field-verified building row; superseded. The building row appears
+immediately on a cold open, repeat opens start no second build, and the real list
+renders when the build completes. Log evidence and the current cost breakdown are in
+`docs/warm-ordering-and-follower-latency.md` §8.9.
+
+**0.9.182 — instrumentation, and the lesson behind it.** 0.9.181's fix was correct but
+UNPROVABLE: it logged the TRACKS cold start and not the ALBUMS one, so when the album
+view span its dots there was no line saying whether the render hook had fired. **The
+only misbehaving path was the only uninstrumented one.** When two paths implement the
+same behaviour, instrument BOTH or neither.
+
+**THE COST HAS MOVED — attack the STREAMING GATE next, nothing else.** Measured
+2026-08-22: `this_year` 41.1s total of which the gate is 32.4s; `this_month` 50.1s of
+which the gate is 27.7s. The ListenBrainz fan-out is now 3.7–6.0s and MusicBrainz is
+largely out of the path. The 429 storm, the serial MB searches and the ingest stall are
+ALL resolved — do not re-investigate them.
+
+**0.9.181** — the first-opener fix, superseded by 0.9.182.
+
+**0.9.181 — 0.9.180's building row NEVER APPEARED, and the reason is worth keeping.**
+The guard was written for the SECOND caller only: on a cold open `_isBuilding` is
+false, so the FIRST opener took the flag and then held `$callback` for the whole
+~50s build — the exact Material spinner the building state exists to replace, in the
+commonest case of all. Reported from the field ("do not get still being built message
+just materials loading for too long") against a correctly-installed 0.9.180.
+
+Fixed by rendering the row the moment a COLD build starts and **clearing `$callback`**,
+which detaches the render from the build: the fan-out is async and carries on into the
+cache (every later render path is already `if $callback`, so nothing fires twice), and
+the next open is instant. `_buildAlbumsData` gained an `$onPending` hook for the same
+reason, since it is data-only and its view renders in the caller; `resolveTrendingAlbums`
+renders at most once. **The warm passes neither** — it wants completions, not placeholders.
+
+**THE TEST LESSON.** `t_buildingstate.pl` was fully green against this. Its 34
+assertions checked the guard's BOOKKEEPING — flag taken, flag released, ownership
+respected — and never asked what the user sees on a cold open. Section 7 now does,
+and reverting to the 0.9.180 code turns it red. *A guard's bookkeeping being correct
+is not evidence that the thing it guards behaves correctly.*
+
+**0.9.180** — built, superseded by 0.9.181. Carries 0.9.178's ingest fix, 0.9.179's
+hosted `/discography` resolver, and **stage 2 of the warm-ordering work**.
+
+**0.9.180 — ORDERED WARM CHAIN, THE BUILDING STATE, AND AN IN-FLIGHT GUARD.**
+Built only once §6 of `docs/warm-ordering-and-follower-latency.md` had the numbers;
+full write-up in §8 of that doc.
+
+- **Ordered feed chain.** `warmFeeds` chains For You → All Releases → MuSpy and
+  calls back when the last lands; `_warmTick` starts `warmCache` from that callback
+  instead of firing both in one turn. **Changes nothing on a warm store** (all three
+  measured at <0.01s, served from the store) — it is for a COLD store, which every
+  dev build and every new user has. Ordering creates a failure concurrency could
+  not: one hung feed strands the rest. So EVERY `onError` advances the chain, and
+  `WARM_FEED_CHAIN_MAX` (120s) bounds the whole thing.
+- **`PLUGIN_LBF_BUILDING`, rendered IMMEDIATELY, not behind a watchdog.** A cold
+  follower open measured **52.8s**, so a watchdog would expire on essentially every
+  one. It is DISTINCT from `PLUGIN_LBF_NO_TRENDING` (an affirmative "nobody you
+  follow has listened") — conflating them is what made a cold open read as broken.
+  `_buildAlbumsData` signals the difference with **undef**, never `[]`.
+- **In-flight guard** (`%BUILDING`). Not a cache and not in `kv` — it answers "is
+  someone building this RIGHT NOW", true only within one process; a stale flag from
+  disk would show the building row for ever. **The flag is released by WRAPPING
+  `$onDone` once**, not at each of `_buildAlbumsData`'s 8 exits, and every release is
+  `if $owns` so a caller that merely FOUND the flag cannot clear someone else's.
+
+**DELIBERATELY NOT BUILT: the genre and cover demotions**, both proposed this session
+and both dropped. `warmCache`'s own comment records genres-first as a measured
+reversal ("the ladder did not start until many minutes into the tick, so every view
+opened bare") and ends *"do not chain them back onto the end"*; demoting the Last.fm
+rung would reintroduce that and contradicts the ladder spec, where a bare view is a
+BUG. Covers are what make artwork appear, and cold-start artwork was one of the
+original complaints. Do not re-propose either without a new measurement.
+
+- **The MusicBrainz 503 backoff — the third network path finally gets one.** LB had
+  `_lbWait` and the hosted API had `_hostedNoteLimit`; `warmArtistSorts` logged a rate
+  limit at info level and moved straight to the next artist. **MB throttles with 503,
+  not the 429 the other two use**, so a backoff copied from the hosted side would never
+  have fired. Now `_mbWait`/`_mbIsRateLimited`/`_mbNoteLimit`/`_mbNoteOk`: shared
+  deadline, 5s→30s, reset on success, outward-only. A limit **ends the pass** and hands
+  the whole `%sortInFlight` reservation back — miss that release and the queued MBIDs
+  stay in flight for the life of the process, which the guard then reads as "MB has no
+  sort-name for these", for ever. **The courtesy gap is not a rate limiter:** measured
+  2026-08-22, two 503s in eight requests paced at 1.2s — *wider* than the 1.1s this code
+  applies. This is the same conclusion §7 reached from the other direction: sort-names
+  stay on MB, so the honest fix was to make that path well-behaved rather than to move
+  it. Guarded by `t_genrefill.pl` §13 (14 assertions, 4 source checks anti-tested red).
+
+Guarded by `tools/t_buildingstate.pl` (34 assertions, five anti-tests).
+
+**0.9.179 — THE RELEASE-GROUP RESOLVER MOVES TO THE HOSTED API.**
+`getReleaseGroupByName` now tries `/artist/<name>/discography` before MusicBrainz:
+one call per ARTIST, folded title → answer, instead of one MB search per ALBUM.
+Measured cause — a cold People You Follow open spent **22,880ms in 12 serial
+MusicBrainz searches**, because `mb_base_url` is unset on the live server so they
+went to public musicbrainz.org at ~1 req/s (one came back 503). Hosted answers in
+195–358ms cold / ~80ms warm. **The deciding argument is other users, not this
+machine**: LBF ships to people with no mirror, whose default is that same 1 req/s.
+
+**DO NOT "simplify" this to `/album/<title>/<artist>` — that route returns a
+RELEASE mbid, not a release-group one**, and it would poison the dedupe key, the
+CAA `release-group/<id>` art URL, the LB genre lookups and the detail page while
+looking like it worked. `/discography` returns release-GROUP ids, verified
+identical to MusicBrainz's own. The limitation is per-ROUTE, not API-wide.
+
+The MB fallback is UNCONDITIONAL — unknown artist, title absent, rate-limited past
+the budget, service down all reach the old path unchanged. **It buys speed, not
+coverage**: the four names public MB missed, the hosted API misses too. `?mbid=` is
+passed when the candidate has one and is part of BOTH cache keys — `artist|title`
+alone let two same-named artists sharing an album title collide, defeating the
+disambiguation one layer below where it was made. New family `lbf:hdisco:` (7d);
+`lbf:rgbyname:` keeps its shape so readers cannot tell which tier answered.
+Matching reuses `Browse::_norm` at runtime but adds nothing to the shared matcher,
+so the four-repo sync rule is NOT triggered. Guarded by `tools/t_rgresolver.pl`
+(37 assertions, five anti-tests). See `docs/hosted-lms-community-api.md` §6.
+
+**AND §7 SETTLES THE REST: the remaining MusicBrainz features STAY on MusicBrainz.**
+**No mirror is assumed anywhere** — Simon's `mb_base_url` was for development only and
+is not going forward, so judge every MB cost against the PUBLIC API at ~1 req/s.
+`warmArtistSorts` (sort names) and `getReleaseDetails` (detail-page tracklist) have
+**no alternative** — probed live: ListenBrainz has no `sort_name` and no
+release-keyed tracklist route, the hosted API has neither field, and **ListenBrainz's
+own website fetches release tracklists from MusicBrainz**. `getArtistGenres` is
+already inert without a mirror. Do not re-propose migrating these; read §7 first.
+
+**0.9.178** — 0.9.177 was verified on the live server:
+`Fetching following` fired ONCE (was three times), zero HTTP 429s, and `warmstats`
+showed the follower builds staggered — `trending_month` 48.63→104.63, `trending_year`
+starting at 104.63. The burst fix works. `dev` is committed at 0.9.161; everything
+from 0.9.162 on lives only in the working tree, deliberately (that diff is Simon's
+code-review artifact — do NOT prompt to commit).
+
+0.9.175/0.9.176 carry the two "fixes on top of 0.9.174" below (the genre wipe's
+release gate and the cover pre-warm), **stage 1 of the warm-ordering work** (the
+warm-stage instrument and `["lbf","warmstats"]` — instrumentation only), and
+**the fix for the event-loop stall that was dropping players** (0.9.176).
+
+**THE STALL IS THE ONE TO KNOW ABOUT.** `DB::ingestFeed` was issuing ~16,000
+statements in ONE transaction inside an async HTTP callback — ~1.85s on a Pi,
+every daily revalidation. Before the caching rework a feed was stored by TWO
+`$cache->set` calls; the store replaced that with a per-release upsert loop, so
+**two statements became sixteen thousand**. That is the whole of "none of this was
+an issue before we switched cache model". It dropped players AND stalled lazily
+loaded artwork, because LMS serves the image proxy from the same loop. Now chunked
+(`INGEST_CHUNK`, 150, set from measurement) with rotation and coverage running only
+on a COMPLETE pass. Longest block 1728ms -> 102ms on a Pi. Read
+`docs/warm-ordering-and-follower-latency.md` §4 before touching `ingestFeed`, and
+`tools/bench_store.pl` is what re-measures it.
+
+**0.9.177 — THE FOLLOWER STATS BURST.** Found by running 0.9.176's own instrument
+against the live server: `warmstats` showed the three People-You-Follow builds
+starting within 50ms of each other, `getFollowing` fetched THREE times 25ms apart
+(none had cached before the next asked), and **39 of 39 stats requests came back
+429 TOO MANY REQUESTS in a 0.88-second burst** — the section rendered empty
+("mapped 0 recordings", "aggregate 0 album(s)"). Arithmetic, not luck: 3 builds ×
+`FOLLOWER_FANOUT` (10) = 30 concurrent requests, which is ListenBrainz's whole
+~30-per-10s budget. Two causes, two fixes, either alone insufficient:
+`API::_getUserStats` now uses the SHARED `_lbWait`/`_lbNoteLimit` backoff built in
+0.9.165 (it had been wired to `getReleaseGroupMetadata` and nothing else, and
+answered a 429 with `[]` — laundering a rate limit into "this follower has no
+listens"), and `_warmTrending` chains the three builds instead of racing them.
+`_resolveTrending` gained a completion hook that fires at ALL FOUR terminal points,
+including the empty one — a chain advancing only on success would stall the section
+on its commonest outcome. Guarded by `tools/t_statsratelimit.pl`.
+
+**0.9.178 — THE CHUNKED INGEST NEVER RAN. A regression introduced by 0.9.176's own
+fix, live for two builds, found on the server 2026-08-22.** `Slim::Utils::Timers::setTimer($obj, $when, $cb, @args)`
+invokes `$cb->($obj, @args)` — **the first argument is handed back, not consumed**.
+The chunk driver read its self-reference as `my ($self) = @_`, i.e. from the `$obj`
+slot. Turn one runs inline (`$step->($step)`) and works under either signature; turn
+two arrives through the timer with `$self` undef, schedules `undef` as the next
+callback, and LMS dies inside its own timer loop — **outside any plugin eval, so
+nothing is logged and the chain simply stops**. Field signature: rows partially
+written, `feed_day` coverage never stamped (`0/15 days`), `ok_at` never set, no
+`store: ingested` line, and the feed reads `(revalidating)` on EVERY open for ever —
+the feed store doing no work at all. Fixed to `my (undef, $self) = @_` /
+`$step->(undef, $step)`, matching the three steppers in `Browse.pm` (which document
+the convention at the genre-batch pump).
+
+**The test stub was the actual defect.** `tools/t_ingestchunk.pl` called
+`$cb->(@args)`, dropping `$obj`, so 33 assertions stayed green against a driver that
+could never work. The stub now replicates LMS's convention, and `step1` counts a
+non-coderef callback (`$BROKEN_CHAIN`) instead of dying, so a recurrence reports a
+red line rather than aborting at exit 255 with no FAIL — which reads like a pass.
+Against the pre-fix driver the suite now goes 16 red, reproducing the field symptom
+exactly: 14 of 60 members stored, 0 day-coverage rows, `ok_at` undef. **Any test
+stub for a host API must replicate that host's calling convention or it cannot catch
+this class of bug.**
+
+No cache shape changed and no cache prefix was bumped by any of this.
+
+**CHANGELOG.md is a MERGE-TO-MAIN artifact.** Do not add an entry for a dev build;
+update THIS file, `docs/*.md` and memory instead, and write the changelog once at
+merge, folding superseded dev versions together. Same for `README.md`/`README.html`.
+
+**AT MERGE-TO-MAIN, TWO LINES ARE RECONCILED, NOT ONE.** The long-standing one is
+`repo.xml`'s `<url>` (dev → main). The second, since 0.9.175, is
+`use constant DEV_BUILD` in `Plugin.pm` — **1 on `dev`, 0 on `main`**. It is the only
+thing in the plugin that knows which branch it came from (the `(dev)` version-tag
+convention is retired and `repo.xml` is not inside the zip), and it decides whether an
+upgrade throws the user's genres away. Shipping a release with `DEV_BUILD => 1` wipes
+the genre store of every user who upgrades. `tools/t_buildwipe.pl` prints its current
+value on every run.
+
+### Fixes on top of 0.9.174 (not yet built, no version bump)
+- **The genre wipe's release gate did not exist** (0.9.174 review, finding 1). See the
+  `_buildChanged` bullet under the caching rework below. New suite
+  `tools/t_buildwipe.pl` (27 assertions), anti-tested against both the pre-fix code
+  (5 red) and a gate written without the dev trigger (2 red).
+
+- **Cover art: the size table, and a cover PRE-WARM — "images take ages on my other device".**
+  Field report, and the diagnosis is the whole of it: **the artwork IS cached, but the proxy's
+  cache key is the WHOLE request path** — escaped source url + the size spec the skin spliced in
+  + the extension (`Slim::Web::ImageProxy::getImage`, `cachekey => $path`) — **and Material picks
+  that spec from the DEVICE.** Read out of the live `material.min.js`: `LMS_LIST_IMAGE_SZ =
+  IS_HIGH_DPI ? 300 : 150` (list rows), `LMS_IMAGE_SZ = IS_HIGH_DPI ? 600 : 300` (grid tiles),
+  `LMS_CURRENT_IMAGE_SZ = IS_HIGH_DPI ? 2048 : 1024` (now playing), each rendered `_<n>x<n>_f`
+  and spliced in before the extension by `resolveImageUrl`. So a cover the desktop warmed is
+  still stone cold on the phone.
+  - **MEASURED on the live server, same cover, varying ONLY the spec:** 150 → **1.80s**,
+    300 → **1.92s**, 400 → **2.05s**, 600 → **2.12s**, then a REPEAT of 150 → **0.03s**. The
+    cache is working perfectly and it is per-size. `_400x400_f` was cold at 2.0s even though it
+    maps to the same CAA file as `_300x300_f` — **the proxy re-downloads the origin per spec.**
+  - **The origin is the cost:** `coverartarchive.org/.../front-250` 307s to archive.org and then
+    to an `ia*.us.archive.org` node — 0.11s + 0.63s + ~0.85s, no CDN. Not fixable from here.
+  - **FIX 1 — the size table** (the long-open ACTION item below, now closed). `getRightSize`
+    returns undef above the table's ceiling, so `|| '250'` served the SMALLEST file on the
+    BIGGEST request. Proof from the same run: `_600x600_f` came back **38,248 bytes, smaller
+    than the `_400x400_f` beside it at 72,764** — a 250px thumbnail upscaled 2.4× on every
+    retina grid tile. Table now reaches `1200 => '1200'` and the fallback is the LARGEST entry.
+  - **FIX 2 — `Browse::_warmCovers`**, chained off each feed's `warmFeeds` onDone. It walks the
+    feed newest-first, caps at `COVER_WARM_MAX` (150) releases, and fetches the server's OWN
+    `/imageproxy/<esc>/image_<spec>.png` for the three specs Material asks for — one request in
+    flight, `COVER_WARM_GAP` (0.1s) apart. **The path is built by `proxiedImage`, the SAME sub
+    XMLBrowser runs over the row**, so it is byte-identical to what the client will request; a
+    path differing by so much as its extension would fill a key nobody reads and the feature
+    would look like it worked while doing nothing. Warmed paths are marked in the store
+    (`lbf:imgwarm:<path>`, `COVER_WARM_TTL` 25d — deliberately INSIDE the proxy's own 30d life),
+    so steady state only pays for genuinely new releases. A 401/403 from our own request (a
+    password-protected server) abandons the pass with one info line rather than logging the same
+    failure a few hundred times. New pref **`warm_covers`** (default ON, General settings) turns
+    all of it off.
+  - **The now-playing specs (1024/2048) are deliberately NOT warmed** — no LBF row is ever the
+    now-playing artwork and they are the most expensive entries in the table.
+  - **No cache bumps.** Nothing about a stored shape or a cached decision changed.
+  - `tools/t_coverwarm.pl` (36 assertions): the size table driven through `getRightSize`'s REAL
+    algorithm against the table PARSED out of `Plugin.pm`, the warmed path compared to what
+    Material builds, the queueing rules, and the runner. **Anti-tested both halves** via
+    `LBF_PLUGIN=` / `LBF_BROWSE=` — restoring the old table = 4 red, splicing the spec after the
+    extension instead of before = 6 red.
+
+### 0.9.174 — PRE-RELEASE REVIEW OF THE 0.9.173 WORKING TREE. Eight defects, all fixed.
+
+Reviewed the full working-tree diff (~4,700 lines across `API.pm`, `Browse.pm`,
+`DSTM.pm`, `Diag.pm`, `Plugin.pm` + the new `DB.pm`). None was a compile break —
+`t_loads.pl` passed throughout, which is exactly why they survived. Three produce
+user-visible hangs or stalls, three are genre-ladder gaps, two are efficiency.
+
+**THE HANGS**
+
+- **`_hostedGet`'s 429 retry had NO ATTEMPT CAP.** A sustained 429 rescheduled for
+  ever, so `$onMiss` never fired — and `$onMiss` is not a cosmetic branch, it is the
+  **MusicBrainz fallback** in `getArtistMbidByName`. `DSTM::_resolveArtistMbids` pumps
+  one artist at a time waiting on that callback, so one wedged lookup stalls the whole
+  radio seed rather than degrading to the slower source. The LB side has capped this at
+  `LB_RETRY_MAX` since it was written; this side never did. Now `HOSTED_RETRY_MAX` (3),
+  plus a **separate, looser `HOSTED_WAIT_MAX` (6)** for the shared-deadline stand-down.
+  **Two counters, not one, on purpose:** standing down on somebody else's deadline is
+  not this caller's 429, and sharing a counter would spend a caller's whole budget on
+  other callers' rate limiting and miss to MusicBrainz under ordinary concurrency.
+- **THE MUSICBRAINZ PATH HAD NO BACKOFF AT ALL — fixed 0.9.180, the last of the three.**
+  ListenBrainz had `_lbWait` and the hosted API had `_hostedNoteLimit`; the MB artist-sort
+  warm logged a rate limit at info level and moved straight to the next artist. **503, not
+  429, is how MusicBrainz throttles** — a backoff copied from the hosted side without that
+  line would never fire. Now `_mbWait` / `_mbIsRateLimited` / `_mbNoteLimit` / `_mbNoteOk`:
+  shared deadline, 5s doubling to 30s, reset on success, **outward-only** (a fresh limit
+  must not shorten a window still running). A rate limit now **ends the pass** and hands
+  the whole in-flight reservation back — miss that release and the queued MBIDs stay
+  marked in flight for the life of the process, which the in-flight guard then reads as
+  "MB has no sort-name for these", for ever. **The courtesy gap is not a rate limiter:**
+  measured 2026-08-22, two 503s inside eight requests paced at 1.2s, *wider* than the 1.1s
+  gap this code applies. Guarded by `t_genrefill.pl` §13, anti-tested 4 red.
+  **Stage D of the MB retreat (`caching-rework.md` §2.4.3) is DROPPED, not deferred** — a
+  `type`-driven local sort key files Panda Bear as "Bear, Panda", and LB's payload carries
+  no signal that separates a stage name from a legal name. MB stays the sort-name source.
+  **The budget is threaded through the reschedule (`$st`)** — re-entering without it
+  would reset the count on every retry and the cap would be inert while reading as
+  fixed. `t_genrefill.pl` §9 pins all of it, including the threading.
+- **`_ingestFeed` widened the recorded window from UNVALIDATED payload dates.** The
+  format check passes `2099-01-01` as happily as a real date, and one such row pushed
+  the span past `DB::WINDOW_MAX_DAYS` (800) — where **`_dayRange` refuses silently**,
+  returning an empty list. No `feed_day` row is then written for **any** day, so
+  coverage can never complete, every open sees a gap and revalidates, and the "serve
+  from the store, no HTTP at all" case this whole rework exists for never happens again
+  for that feed. The same widened window is also the **rotation scope**, so an outlier
+  widens what RULE 2 may delete. Fixed with `WINDOW_SLACK_DAYS` (180) — a date only
+  gets a vote if it is plausibly part of this window — plus a hard fallback to the
+  requested window if the span still exceeds the bound (`days` is a user pref).
+  **Outliers are still STORED**; they are simply not allowed to define the day range.
+- **`_execBlob` prepared a fresh statement per call**, and `ingestFeed` calls it once
+  per release inside one synchronous transaction: **~3,255 prepare/execute cycles
+  blocking the event loop inside an HTTP callback**. That is the hazard `_withGenresLB`
+  spends a whole block comment avoiding at 150 — twenty times smaller. Now
+  `prepare_cached($sql, undef, 3)`; `$if_active = 3` is a guard, not a path, since
+  every statement through here is DML and DBD::SQLite does not leave those active.
+
+**THE GENRE-LADDER GAPS** — all three are the same failure mode: *a bare view is a bug*
+
+- **`_withGenres` discarded every release with no `release_group_mbid`.** They never
+  reached `_mergeHostedGenres`, so the two **artist-keyed** rungs — LB artist tags and
+  Last.fm — were unreachable for them. Those rungs key on the artist, not on a release
+  group, and **the Trending rows with no MBID are precisely the case they exist to
+  answer**: the rows the ladder was built for were the rows it could never reach. They
+  now ride in a separate `@artOnly` list on **their own budget** rather than in
+  `@rels` — `@rels` is what the release-group lookups are batched from and `$max`
+  bounds that HTTP, so letting artist-only rows in would displace lookups that actually
+  fetch something.
+- **For You built `$meta` under the 150-release `GENRE_FETCH_MAX` and then filtered the
+  FULL list.** Every release past the cap had no entry, bucketed as `GENRE_NONE`, and
+  was dropped outright by any ticked family — **while the picker counts over
+  `GENRE_WARM_MAX` (600)**, so it promised rows the view then refused to show.
+  `_buildAllLanding` already applies the rule (filter-before-paging needs the wider
+  fill); For You now does too, and only when a filter is actually set.
+- **The top-up gate counted ROWS PRESENT, not GENRES PRESENT.** `rgGet` answers for any
+  row that exists, and rows get created by things with nothing to do with the LB genre
+  tier — the detail page files its own answer with `rgPut($rg, detail_genres => …)`,
+  which leaves `n_genres` at its **-1 "never asked"** default. So a feed whose release
+  groups had each had a detail page opened once looked fully covered, the top-up never
+  fired, and the rows stayed bare in the list for ever however many times they were
+  opened. New `_rgAnswered` gates on a recorded answer or an actual genre.
+
+**THE EFFICIENCY TWO**
+
+- **`warmArtistSorts` aged sort-names against the row-wide `fetched_at`** instead of
+  the `sort_at` stamp schema 3 added — which was **written and never read** (the string
+  `sort_at` appeared nowhere in `API.pm`). The mirror genre tier rewrites that same
+  MBID-keyed artist row daily, so a row recording "MB has no sort-name"
+  (`SORT_NONE_AGE`, one day) had its clock reset every night and was never re-asked,
+  while a real sort-name was held well past `SORT_FOUND_AGE` for the same reason.
+  Falls back to `fetched_at` only for a pre-migration row whose stamp is still 0.
+- **`_withGenresMirror`'s peek called `peekArtistGenres` PER ARTIST** — up to ~600
+  synchronous SQLite SELECTs inside the browse callback on the picker's whole-feed
+  pass, the same hazard 0.9.130 removed from the release-group side and 0.9.165 nearly
+  put back. `peekArtistGenresBulk` already existed and is what every other peek uses.
+
+**A TEST WAS CHANGED, NOT JUST CODE.** `t_genrefill.pl` asserted the *old* contract —
+"a rate-limited request is retried, NOT reported as a miss" — with a regex requiring no
+`$onMiss->(` anywhere in the 429 branch. The cap necessarily violates that, because an
+exhausted budget **must** miss for the MusicBrainz fallback to be reachable. Rewritten
+to pin the new contract (bounded retry / miss only once spent / budget threaded), 1
+assertion → 5. **Cleared by the same review and left alone:** blob bind positions at
+every `_execBlob` call site, the `%FACT` alias direction, key-family/`retirePrefixes`
+overlaps, the `n:<norm>`-vs-MBID artist key space, the self-passing closures
+(`$next`/`$step`/`$pump`) for cycles and missed callbacks, `_releaseDetail`'s `$pending`
+barrier on all four genre branches, `_bioBullet`'s list-vs-scalar change and its
+callers, and Diag's staggered capture and display redaction.
+
+**No cache-prefix bump was needed** and none was made: nothing here changes the SHAPE
+of a stored value, and the two read-side gate fixes are self-healing. The version bump
+alone triggers `_buildChanged`, which clears the derived tier and the genre answers.
+
+### THE GENRE LADDER AS OF 0.9.174 — the current shape, read this before the two docs below
+
+> **`docs/genre-ladder-current.md` is now the canonical statement of what ships** — the ladder,
+> which views show genres, what the hosted API is called for, and what was built and then
+> discarded. This section stays as the summary; that doc is the detail, and the older genre
+> docs are history.
+
+```
+LB release-group tags  →  the DETAIL PAGE's own answer  →  LB artist tags
+                       →  inline release_tags  →  Last.fm
+```
+
+- **The hosted ARTIST rung is GONE.** It was removed because the premise that put it
+  there was wrong: the hosted API is MusicBrainz-DERIVED, so it is not an independent
+  source — it fails wherever ListenBrainz fails. Measured on the RESIDUE (the artists
+  that actually reach it, which is the only population that matters): **4 of 120 on
+  2026-08-13 and 1 of 67 on 2026-08-21**, ~2%, for ONE HTTP request per artist at a
+  concurrency of one (~64s per warm). **Last.fm is the only genuinely independent rung
+  and answers ~63% of that same population.** Judging any genre source on a whole-feed
+  sample (~50%) is what made this look useful — those artists never reach the rung.
+- **~~The hosted ALBUM route STAYS~~ — REMOVED TOO, 0.9.185.** It was kept in 0.9.173
+  for the established-album population that shares the release detail page, and that
+  reasoning turned out to be wrong for a reason nobody checked at the time: **the
+  Trending Albums build already fetches and stores genres itself** — its release-group
+  metadata pass carries `inc=release_group tag` — so those genres are in the store
+  before a row can be clicked, and the peek that precedes the call already answers.
+  What was left firing on the residue where every MB-derived source was empty, which
+  both of these are. Measured 2026-08-22: **hosted 0 of 40** albums off the live
+  fresh-releases feed; the MB release-group tier behind it 0 of 14 on the same
+  residue. **Two blocking requests per album open to re-ask a well that had just come
+  up dry.** `getReleaseGroupGenres`, `_hostedGenreNames` and the `HGENRES_*` constants
+  went with it; `lbf:hgenres:`/`lbf:rggenres:` are out of `KEY_VERSIONS` (they lived
+  in `Slim::Utils::Cache`, not `kv`, so they simply age out).
+- **`release_group.detail_genres` (schema 5) is now WRITE-ONCE HISTORY.** The detail
+  page filed what it learned so the LIST could read it; with nothing left to learn,
+  nothing writes it. **It is still READ as ladder tier 1b and values already stored
+  stay valid — do not strip the tier out of `_genresFor`.**
+- **If any hosted genre route is ever reinstated it MUST come back with the
+  lowercasing** (`_hostedGenreNames`, removed with its last caller). The payload is
+  Title-Cased; `_genreFamily`/`_genreKnown`/`_bucketFor` key on the lowercase
+  vocabulary in `genre-families.txt`, and a Title-Cased genre does not fail loudly —
+  it silently stops rolling up to its family.
+- **`genre_mbid` was ALREADY the gate** (`_genreTags`), and it cannot replace
+  `genre-families.txt`: that file gates the **Last.fm** rung, and Last.fm tags carry
+  no `genre_mbid`. They are not substitutes.
+- **The ARTIST-KEYED rungs (LB artist tags, Last.fm) do NOT need a release group**, and
+  since 0.9.174 they are actually reachable without one. `_withGenres` used to drop any
+  release with no `release_group_mbid` before the merge ran, which silently amputated
+  the bottom of the ladder for exactly the rows — Trending, no MBID — those rungs were
+  added to answer. If a row is bare, check it reached `_mergeHostedGenres` at all
+  before assuming the tier had no answer.
+
+#### ⚠️ THE MB ARTIST RUNG IS LIVE CODE — a zero counter lied about it
+
+`cachestats` reports `artist_mb_have` 0 / `none` 0 / `never` 2191, which reads as
+"never called, safe to delete". **It is not.** `mb_base_url` on the live box is set to
+the public API, so `hasMirror()` is false, `_genreLookupMode()` returns `'lb'`, and the
+mirror path never runs THERE. For a user with a local MusicBrainz mirror it returns
+`'mirror'`, and `_withGenresMirror` → `API::getArtistGenres` is their **entire** artist-tier
+genre lookup — `_withGenresLB` never runs at all. Removing it would take genres away from
+those users completely. **Since 0.9.186 the mirror path is no longer artist-only:**
+`_mergeRgGenres` folds the two release-group tiers (1 `genres`, 1b `detail_genres`) in from
+the store on all three of its exits, which mirror mode could not see at all before.
+
+**The general rule: a zero counter on ONE box is evidence about that box's prefs, not
+about whether code is reachable.** Check what gates the path before reading a zero as
+dead. (This box is one pref away from that path — CLAUDE.md's own advice for the
+sluggishness is to clear `mb_base_url`.)
+
+#### `bench_walk.pl` was silently half-dead — fixed 0.9.173
+
+`_sortWithin` calls `_firstArtistMbids`, which was never in the bench's sub list, so
+the bench **died there and skipped everything after it** — including the `_bucketFor`
+line, which is the guard that caught the per-release SELECT in 0.9.165. A harness that
+dies half way through reports a SHORTER LIST, not a failure, so a dead guard looked
+like a quiet one. If a bench line you expect is missing, check for a die before
+concluding the thing it measures is fine.
+
+### WARM ORDERING & FOLLOWER LATENCY — READ `docs/warm-ordering-and-follower-latency.md`
+
+**Stage 1 built in 0.9.175 (instrumentation only). Stage 2 designed, NOT started,
+and deliberately gated on the numbers** — Simon's call was "let's test to see if
+these proposals give us the gains before committing", so do not start reordering
+the warm until `["lbf","warmstats"]` has been read off a real tick.
+
+Three findings from that doc that correct things people assume about this plugin:
+
+- **Playlists and Followers are NOT missing a cache.** They live in `kv` on flat
+  TTLs rather than in the feed store, so they log no "served from the store" line
+  and — the part that bites on a dev box — **every dev build wipes them**, because
+  `_buildChanged` is one unconditional `DELETE FROM kv`. The release feeds survive
+  in the feed store, which is why only they look cached.
+- **There has NEVER been a "still building" state.** `PLUGIN_LBF_NO_TRENDING` fires
+  only from the affirmative empty branch (nobody followed / no active followers / no
+  candidates). Nothing was removed from history; a cold Followers open simply blocks
+  the whole fan-out with no interim response and Material spins. Don't go looking for
+  the regression that removed it.
+- **A cold Followers open runs the entire build on the open path with NO in-flight
+  guard** — two 30s fan-out deadlines before the streaming work starts, `$callback`
+  invoked only at the very end, and each of the three views paying separately. The
+  `%REVALIDATING` shape in `API.pm` is the fix pattern and already exists for feeds.
+
+### FEEDS & GENRES — READ `docs/feed-findings-2026-08-14.md` FIRST
+
+**The current record.** It holds the 2026-08-13/14 live measurements and the decisions
+that came out of them: that ListenBrainz, MusicBrainz and the hosted API are **one
+MB-derived well** (they fail together — only Last.fm is independent), Simon's decision
+to **drop genre filling from hosted + MB and keep LB + Last.fm**, LB's unused bulk
+`/1/metadata/artist/?artist_mbids=&inc=tag` endpoint and its `genre_mbid` genre gate, the
+**cache-age policy (empty → 1 day, found → 30 days)**, the transient-empty Trending cache
+bug, the ~10% of rows whose artwork claim is stale, and the work order. It supersedes
+parts of the doc below — read it before that one.
+
+### GENRES — READ `docs/genre-ladder-rework.md` BEFORE TOUCHING ANYTHING GENRE-RELATED
+
+**That doc is the record of the 0.9.166–0.9.169 genre work and the standing plan, and it
+exists because this work has now been half-lost twice** — once when `docs/caching-rework.md`
+was rewritten on disk mid-session and took a set of corrections with it, once when an agreed
+design shipped only half-implemented without that being flagged. It carries: the ninety-day
+lockout and its root cause (freshness judged per ROW where the request answers TWO questions);
+the three same-shaped "a write touching what it does not own" defects that schema 3 makes
+inexpressible; **the gap between the approved schema and what 0.9.169 actually shipped**; the
+artist-keying defect that makes both artist-level rungs re-buy answers the store already owns;
+the MAI precedent read from source (uncapped, ONE request in flight, 5s-doubling 429 backoff)
+and what it says about our caps; the live measurements; and the agreed 4-step plan. Don't
+re-derive any of it, and don't reinstate `HOSTED_WARM_ALL` on its own.
+
+### IN BUILD — THE CACHING REWORK. READ `docs/caching-rework.md` FIRST (started 2026-08-13)
+
+**Not built, not versioned, not installed.** The plan, the staging and the decisions
+already taken (do not re-open them) are in `docs/caching-rework.md`, whose header
+carries a live stage table. Two things from it that change how you read the rest of
+this file:
+
+- **GENRES HAVE NEVER WORKED, AND IT WAS NEVER THE GENRE CODE.** `RECMETA_TTL` and
+  `AGEN_FOUND_TTL` were both `90 * 86400`, and LMS reads any TTL over **2,592,000** as
+  an ABSOLUTE epoch — so every entry was written expiring **1 April 1970** and every
+  read returned undef, silently. Because the long TTL is the **dated** branch, the
+  entries worth keeping were exactly the ones discarded. `RECMETA_TTL` is applied by
+  `getReleaseGroupMetadata` as well as the recording cache, which is where the visible
+  damage was: **the ListenBrainz genre tiers have never once served a dated release.**
+  Every label seen on screen came from inline `release_tags` or Last.fm, and the
+  background top-up re-fetched the same releases on every visit. Both are now `30 *
+  86400` and pinned by **`tools/t_ttlceiling.pl`**. **Expect a visible jump in genre
+  coverage on the first run — that is the tier working, not a new bug.**
+  ([[lms-cache-30day-ttl-boundary]], `docs/cache-ttl-30-day-boundary.md`.)
+- **`ListenBrainzFreshReleases/DB.pm` IS NOW THE WHOLE STORE, AND THE FEEDS READ IT.**
+  Stages 1–7 are in: schema (BASE / FACTS / `kv`), `PRAGMA user_version` migrations, the
+  `kv*` API with an ALWAYS-ABSOLUTE `expires_at`, the durable three as tables, the FACTS
+  tables, and — since 0.9.166 — the feed itself. **The rule that makes the tiers work:
+  if it is in `kv` it is disposable; if it must survive, it needs a table.**
+  Guarded by **`tools/t_db.pl`** (204 assertions, persistence proved CROSS-PROCESS
+  because `$dbh` is a file-lexical and an in-process read proves nothing; anti-tested
+  four ways — a `kvSet` that returns 1 without writing, a missing `SQL_BLOB` bind, an
+  accepted empty ingest, and an ignored `rotate` flag).
+- **THE FEED IS STORED, NOT CACHED (0.9.166) — and this is what ends the midnight
+  re-mint.** `getFreshReleasesAll` keyed its one big blob on TODAY'S DATE, so the entire
+  ~3,255-release structure was re-fetched and re-frozen every local midnight and on any
+  window/past/future change. Coverage is now a QUERY over `feed_day`:
+  - **narrowing the window (days 14→7) costs nothing; widening costs only the days it
+    adds; midnight leaves exactly ONE day uncovered** and every stored row still served.
+  - **any stored coverage is served IMMEDIATELY and revalidated behind the render** —
+    safe because every feed callback is already `cachetime => 0`. Only a genuinely cold
+    store blocks.
+  - **`_feedWindow` / `_feedFromStore` / `_fetchReleaseFeed` in API.pm** replace the
+    `lbf:feed:*` + `…fb:` twin keys. The date stays in the five-second in-process memo
+    key, where it is harmless, and is gone from storage, where it was the bug.
+  - **`%REVALIDATING` is load-bearing**: one tap produces 3+ walks from the root, and
+    without it each would see the same stale coverage and launch its own fetch.
+  - **MUSPY IS STORED WITH ROTATION OFF, and that is not tuning.** `?limit=100` is a
+    top-N SLICE, so day coverage would be a lie and window-scoped rotation would delete
+    rows that are still valid, merely pushed past the limit. *A truncated list is not
+    proof of absence* — the same family as "an empty result is never a fact".
+  - **Refresh no longer DELETES a feed**; it marks coverage stale, so the user keeps
+    seeing releases while the re-fetch runs and a failed refresh leaves them with what
+    they had. Both memo layers are still dropped (the 0.9.141 review bug survives the
+    move unchanged).
+  - **`_buildChanged` is the dev-build wipe** — one unconditional `DELETE FROM kv` plus
+    the genre columns, safe only because everything durable has a table. Its marker is a
+    **PREF** (`last_build`), never a `kv` row: the wipe would delete its own marker and
+    every start would look like a new build.
+  - **The genre half has TWO triggers, and only one of them existed before 0.9.175**:
+    `DEV_BUILD` (every dev build clears genres) and `last_genre_fact` vs
+    `GENRE_FACT_VERSION` (a RELEASED build clears them only when the parser changed).
+    The pref was written and **read by nothing**, so a released upgrade with unchanged
+    genre code threw away all four artist tiers, the release-group genres and the whole
+    `lastfm_tags` table — the 0.9.166/0.9.167 harm, re-inflicted on users, and the exact
+    opposite of what the 0.9.169 changelog promises. Guarded by `tools/t_buildwipe.pl`.
+  - **`Browse::warmFeeds` runs AHEAD of `warmCache`'s username gate** — All Releases
+    needs no account and had therefore never been warmed for anyone.
+
+**0.9.165 — GENRES ON THE ROW FROM THE FIRST OPEN.** The field report was *"genres are
+not populating on build of the view, having to go in/out of a release for these to show"*.
+Three causes, and only the first was known:
+- the TTL bug (0.9.164) meant nothing the warm found ever persisted;
+- **`GENRE_WARM_MAX` = 600 against a 3,255-release feed** — ~80% of All Releases was never
+  warmed, so most weeks rendered bare and filled only from `_kickGenreFill`, which is
+  throttled to one run per `GENRE_KICK_GAP` (120s). **That cap was concealing the TTL bug,
+  not protecting anything**: before persistence worked, warming more just re-fetched more.
+  New `GENRE_WARM_ALL` (4000) covers the whole feed;
+- **the For You genre warm still required a TOKEN** (`unless ($user && $token)`), four
+  releases after 0.9.160 established `fresh_releases` never needed one.
+- **New tier: hosted artist genres** (`API::getArtistGenresHosted`, `_hostedGenres`),
+  because LB alone answers only ~52% and a fully-warmed feed at 52% still looks half
+  empty. Ladder is now LB release-group → LB artist → **hosted artist** → inline
+  `release_tags` → Last.fm. **Hosted sits BELOW LB's artist tags deliberately** — those
+  arrive free on a call already made, and both sources agree where both have one.
+- **THE RENDER PATH READS NO STORE.** The hosted tier arrives through the render's
+  existing `$meta` map from ONE bulk `DB::artistGet`. The first cut read the store per
+  release — ~2,900 synchronous SELECTs on the genre picker's whole-feed walk, the same
+  hazard 0.9.130 exists for. **Caught by `tools/bench_walk.pl`, not by review**; pinned by
+  a test, and `HOSTED_MARK` short-circuits before any key is built so the empty case is
+  free (`_bucketFor` 1.93ms → 1.47ms).
+- **Rate limiting is now handled** (`_lbWait`/`_lbNoteLimit`/`_lbIsRateLimited`): measured
+  30 requests per ~10s window, and the widened warm is 66 batches, so a 429 went from
+  possible to certain. **A 429 is a retry, not a lost chunk** — the chunk stays at the head
+  of the queue, `X-RateLimit-Reset-In` is honoured, and the deadline is SHARED so
+  concurrent callers back off together.
+
+**MEASURED 2026-08-13 against the live API — don't re-derive:** the All Releases feed is
+**3,255 releases / 66 batches**; a batch is **0.23s median**, so the whole feed is **~16s
+serial**. Coverage **6% release-group + 46% artist**. Hosted artist route: **median
+0.08s**, Title-Cased (must be lowercased or `_genreFamily` silently stops rolling up),
+`genres` key ABSENT for Radiohead, and `[]` for Panda Bear — an empty list is a real
+answer, distinct from absent, and both are stored.
+
+**Do NOT re-derive the sluggishness.** It is mostly one server pref: `mb_base_url` is
+set to the public API on the live box, so `autodetectMirror` returns early and the
+local mirror at `plex:5000` is never adopted — 45 × `503` from one artist-sort warm.
+Clearing the pref needs no build.
+
+### THE GENRE WORK IS UNPARKED AND LIVES ON `dev` NOW (0.9.162, 2026-08-12)
+
+**Read this before touching anything genre-related, and before believing `ALPHA.md`.**
+
+The genre-labels + genre-picker feature was parked on the **`alpha`** branch at 0.9.140. It is now
+**ported onto `dev`** and switched ON by default. Simon's instruction was explicit: *"I want this all
+worked on in dev not alpha."*
+
+- **`alpha` IS NOW STALE AND MUST NOT BE MERGED.** Its `ALPHA.md` still says the feature is blocked
+  and waiting on "whether the plugin adopts a Lyrion API server as a metadata backend". That question
+  is answered and the answer was not the hosted API — see below. Treat `alpha` as history.
+- **WHY IT COULD BE UNPARKED — the blocker was fixed upstream, by ListenBrainz.** The feature needed a
+  genre for every release in a feed, and `ALPHA.md` records the measurement that killed it:
+  `/1/metadata/release_group/` answered a 50-mbid batch in **0.25s–24s**, 502'd above ~90 mbids, and
+  took **125s** to fill one 381-release feed. **Re-benchmarked 2026-08-12 against the live
+  556-release All Releases week: 2.8s for the WHOLE feed** — 12 batches of 50, worst batch 0.52s, no
+  502s. Coverage reproduced exactly (5% release-group tags, 47% artist tags). Don't re-derive these.
+- **The unpark itself was ONE LINE.** Both backends were already written. `Browse::_genreLookupMode`
+  used to end `return $pref eq 'always' ? 'lb' : 'off'`, so the default `auto` meant **off** for
+  everyone without a local MusicBrainz mirror. It now falls through to `'lb'`. `genre_lookup`'s
+  `'always'` changed meaning accordingly: it now forces the ListenBrainz path even when a mirror
+  exists, rather than opting in to something slow.
+- **The genres ride a call the plugin ALREADY makes.** `getReleaseGroupMetadata` fetches years/dates
+  for the trending path; adding `tag` to its `inc` returns `tag.release_group` + `tag.artist` in the
+  same request. There is no separate genre fetch at feed level.
+- **`tools/t_genrefill.pl`** guards all of this — in particular the lookup-mode default, so anyone
+  reinstating "off unless a mirror" fails the suite. Anti-tested both ways.
+
+**THE HOSTED LMS-COMMUNITY API IS NOT THE GENRE BACKEND — measured, don't retry it.** It was the
+obvious candidate and it does not fit this plugin's population:
+- Its `/album/<title>/<artist>/genres` returns **MusicBrainz's own genres** (verified twice: `So` by
+  Peter Gabriel and `OK Computer` both come back as MB's exact set, in MB's count order, Title-Cased)
+  — so it is a faster route to the 5% release-group tier we already had, not a new source.
+- On the actual All Releases population it covered **1 of 60** Album-type releases (~2%).
+- **There is NO artist-genre route**, and the artist tier is where 47% of the coverage lives.
+  `/music/artist/<n>/genres` answers **HTTP 200 with the PICTURE payload**, as do `/tags`, `/genre`,
+  `/info` and any other unrecognised path under `/artist/<n>/` — it never 404s. Confirmed against the
+  dev's own route list (`~/Downloads/mai-api.md`), which documents exactly one genre route.
+- Where it DOES win is `getArtistMbidByName` and the radio's similar artists — see below — **plus one
+  narrow genre use: the RELEASE DETAIL PAGE's last-resort genre lookup.** That path is not the feed's
+  genre backend and never sees a list row; it is the single per-page call that used to go straight to
+  MusicBrainz — i.e. **one public-API-throttled request per page open** for every user without a
+  mirror. The hosted route answers the same data unthrottled (it returns MB's OWN genres, Title-Cased
+  — verified on *So*, *OK Computer* and *In Rainbows*), and its hit rate on the **Trending Albums**
+  population that also lands on this page was measured at **57%**, versus ~2% on fresh releases. The
+  MusicBrainz call stays behind it, unconditionally. Don't read this as licence to try the endpoint on
+  list rows again — the ~2% and the missing artist tier are why that cannot work.
+
+**NO OPT-OUT PREF FOR THE HOSTED API — decided 2026-08-12 (Simon), don't add one, don't propose one.**
+Every hosted tier is unconditional. What makes that safe is the fallback behind each one, not a
+setting: an outage, a rejected answer or a miss all degrade to exactly the pre-hosted behaviour on
+their own. `docs/hosted-lms-community-api.md` used to suggest a pref; that line is struck.
+
+### Hosted LMS-community API — what it is used for (current as of 0.9.186)
+Adopted for **name→MBID resolution**, **similar artists**, and since 0.9.179 the **release-group
+resolver**. **It has nothing to do with genres any more:** the artist tier was built and removed in
+0.9.173, the album tier in 0.9.185. All calls go through `API::_hostedGet` (one
+funnel, mandatory `X-LMS-Plugin-ID`, auth slot for later). Note the live route prefix is
+**`/music/...`** — `docs/hosted-lms-community-api.md`'s route lines omit it and are wrong; its header
+now says so.
+
+**THREE ROUTES, and there are no others** — re-verified 2026-08-23 by grepping every construction of
+`HOSTED_BASE_URL`/`hostedUrl` in the tree (plus one diagnostics probe):
+- `artist/<name>/discography` → **`getReleaseGroupByName`** (0.9.179), so **Followers → Trending**
+  and **Trending Albums** resolve unmapped-listen rows without an MB search each. One call per
+  ARTIST, not per album. **Never swap this for `/album/<t>/<a>` — that returns a RELEASE mbid.**
+- ~~`album/<album>/<artist>/genres`~~ → **REMOVED 0.9.185.** The detail page fetches no genres at
+  all now; it reads the store, which the ladder and the trending build have already filled.
+- `artist/<name>/mbid` → **DSTM radio** only (seed artist, then each similar artist).
+- `artist/<name>/relatedArtists` → **DSTM radio** only, when LB has no similar artists for the seed.
+- `artist/<probe>/mbid` → the **diagnostics page**, once per open.
+
+**What stays on MusicBrainz, settled and not to be re-proposed** (`hosted-lms-community-api.md` §7):
+`warmArtistSorts` (sort-names) and `getReleaseDetails` (tracklist) have no alternative anywhere —
+neither LB nor the hosted API carries the field. 0.9.180 therefore made the sort path well-behaved
+(the 503 backoff above) rather than moving it. See also §2.4.3 of `caching-rework.md` for why the
+`type`-driven local sort key was dropped rather than built.
+
+Full table, with fallbacks and triggers, in `docs/genre-ladder-current.md` §4.
+- `getArtistMbidByName` is two-tier: hosted first, accepted **only** when the returned name folds
+  equal to the query (via `Browse::_norm`) **and** the MBID is non-empty. That length check is
+  load-bearing — an unknown artist returns `{"name":"<query lowercased>","mbid":""}`, so the name
+  folds equal to itself. Anything else falls back to the previous MusicBrainz search, byte for byte
+  and unconditionally.
+- `getSimilarArtistsHosted` → `/artist/<n>/relatedArtists`: 25 artists, **100% carrying MBIDs**, no
+  API key. Emits the same shape as the Last.fm rung so it drops into `DSTM::_resolveArtistMbids`,
+  whose inline-MBID short-circuit then costs **zero** MusicBrainz lookups. Radio ladder is now
+  LB similar → hosted → Last.fm → recommendations.
 
 ### State of play (2026-07-30) — read this before starting anything
 
@@ -124,11 +1161,14 @@ part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
   after it cost the Pitchfork plugin five releases of misdiagnosis. Fix is `30 * 86400`, **no
   `RECMETA_PFX` bump** (nothing under the current prefix is retrievable anyway), plus a test sweep
   failing any TTL over the boundary. The doc's §5 is worth reading before diagnosing anything similar.
-- **`docs/token-free-refactor.md`** — the plugin can drop the ListenBrainz token AND the Last.fm key
-  entirely. Verified against LB server source + live anon calls: **the token is needed for exactly one
-  thing**, `recording_recommendation` events. `fresh_releases` (the flagship feed!) is public and is
-  gated on a token it never needed. Public replacements found for the rest (loved tracks, pins). Scope,
-  code changes, cache bumps and the one open design question (volume) are all in the doc.
+- **`docs/token-free-refactor.md`** — **§3.1 SHIPPED in 0.9.160**; §3.2/§3.3 still open, §4 dropped.
+  Re-verified live 2026-08-12 against the real account: every LB endpoint the plugin calls returns a
+  **byte-identical payload anonymous vs authenticated**, and `/1/user/<u>/feed/events` is the **only**
+  401 in the whole plugin. So the token is now optional everywhere except the *Recommended* list.
+  **The four follow-feed gates are deliberately KEPT** — read §0 of the doc and
+  `tools/t_tokenfree.pl` before touching them; removing them turns a missing tile into a runtime 401.
+  Still open: rebuilding Recommended on public loved-tracks/pins (§3.2) and the volume decision it
+  depends on (§3.3). The Last.fm own-key idea (§4) is **superseded** by the hosted-API refactor.
 - **`docs/year-in-music.md`** — Spotify-Wrapped-style yearly review from LB's public Year in Music
   endpoint. One request, 20 pre-computed sections, most of it reuses existing machinery. Cheapest big
   feature on the board. Needs a tester with a longer listening history.
@@ -154,6 +1194,12 @@ part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
   they do NOT self-heal, which would force a playlist-wide re-resolve. Doc carries the LBF-specific
   gotchas (`$dropSingles` ordering, Bandcamp already excluded), the CLI recipe for reproducing the
   measurement, and the two test traps that bit PFR's suite.
+- **`docs/genre-ladder-current.md`** — **START HERE for anything genre- or hosted-API-related.**
+  What ships at 0.9.175: the ladder rung by rung with what each is keyed on and stored in, which
+  views show a genre line (Trending Albums is a release row that *could* and currently doesn't),
+  the three hosted routes and the section each serves, and the two tiers that were built and
+  discarded (hosted ARTIST genres, ~2% on the residue; MusicBrainz, now mirror-only) with the
+  measurements that killed them. The docs below are the history that led to it.
 - **`docs/genre-sources-investigation.md`** — investigated MAI / the hosted LMS-community API as a
   genre backend. **Conclusion: not for list rows** (16% coverage on real fresh releases vs our
   existing 49%, per-album not bulk, non-MB vocabulary, and **no artist-genre route to fall back to** —
@@ -167,7 +1213,10 @@ part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
   majority who run no mirror, biggest gain on the DSTM/similar-artist loops. **Secondary:** detail-page
   genres/cover from the rich `/album/<title>/<artist>` endpoint (now that the dev fixed freshness),
   **but** the DB rebuilds WEEKLY (daily WIP), so a new-release plugin MUST keep an MB fallback. Partly
-  supersedes `genre-sources-investigation.md`. Not started.
+  supersedes `genre-sources-investigation.md`. **SHIPPED 0.9.162, and partly reversed 0.9.173** —
+  the resolver and `relatedArtists` landed as scoped, only the *genres* half of the `/album` idea
+  was taken (LB already carries type + date on the request that fetches tags), and the hosted ARTIST
+  genre tier was removed again. Its route lines omit the live `/music` prefix.
 
 **Branches.** `dev` (this one) is the working line. Last commit is `e5c919d` (**0.9.151**, the bio
 blob fix); **0.9.152–0.9.157 are BUILT AND UNCOMMITTED** in the working tree — the prose-row
@@ -198,39 +1247,28 @@ genre work at 0.9.140 — pushed, see `ALPHA.md` there, do not merge it. `main` 
 - **CHANGELOG has no entries for 0.9.120–0.9.125.** 0.9.120 shipped as a commit (the fleet
   matcher sync) with no changelog block; 121–125 have none at all. Not reconstructed — the
   record is genuinely missing, so don't invent it, and don't be surprised by the gap.
-- **ACTION — the Cover Art Archive image-proxy handler asks for the SMALLEST image when the
-  skin asks for the LARGEST.** Found 2026-08-05 while doing the Pitchfork Reviews optimisation
-  pass; verified against `Slim/Web/ImageProxy.pm` and Material's `material.min.js`, not inferred.
-  `Plugin::initPlugin`'s handler maps the requested spec to a CAA size with
-  `getRightSize($spec, { 50 => '250', 100 => '250', 250 => '250', 500 => '500' }) || '250'`.
-  `getRightSize` returns the value of the smallest key **>=** the requested dimension, and
-  **undef when nothing is big enough** — so the `|| '250'` fallback fires precisely on the
-  BIGGEST requests and serves the SMALLEST file. Material asks for `_<n>x<n>_f`, where n is
-  `IS_HIGH_DPI ? 600 : 300` for a grid tile and `IS_HIGH_DPI ? 300 : 150` for a list row, so:
-  - list 150 → front-250 ✓ ; grid 300 → front-500 ✓ ; hi-dpi list 300 → front-500 ✓
-  - **hi-dpi grid 600 → front-250, upscaled 2.4× — visibly soft cover art on exactly the
-    surface that shows artwork biggest, on every retina/HiDPI client.**
-  CAA serves `front-250` (8.8KB), `front-500` (18KB) and `front-1200` (77KB) — measured live.
-  **Fix:** add a `1200 => '1200'` bucket (or `600 => '1200'`) and make the fallback the
-  LARGEST option, not the smallest — a fallback of `'250'` is only correct if the table's
-  ceiling can never be exceeded, which is the assumption that broke. One-line change in
-  `Plugin.pm`, no cache bump (the image URL is regenerated per render and the proxy keys its
-  cache on the ORIGINAL url + spec, so nothing stale survives).
-  **While in there, tidy the registration gate but do NOT expect it to change behaviour:**
-  the block ends `} if preferences('server')->get('useLocalImageproxy');`, which reads as
-  "only when local proxying is on". That pref is not a boolean — it is the image-proxy
-  SELECTOR behind Settings → Performance (`1` = local, `2` = helper, or an external proxy's
-  id; `Slim/Utils/Prefs.pm` defaults it to `main::ISWINDOWS ? 1 : 2`), and a registered
-  `match` handler is consulted regardless of it (`ImageProxy::getImage` → `getHandlerFor`;
-  the pref is read only at line ~172, to pick an EXTERNAL proxy). So the gate is truthy on
-  every default install and the handler does run — it is misleading, not broken. **The
-  sibling Pitchfork Reviews plugin registers its `media.pitchfork.com` handler
-  unconditionally and its size table falls back to the ORIGINAL width — copy that shape.**
+- **DONE (see "Cover art" under Fixes on top of 0.9.174) — the Cover Art Archive image-proxy
+  handler asked for the SMALLEST image when the skin asked for the LARGEST.** Kept here for the
+  mechanism, which is a fleet-wide trap: `getRightSize` returns the value of the smallest key
+  **>=** the requested dimension and **undef when nothing is big enough**, so a
+  `|| '<smallest>'` fallback fires precisely on the BIGGEST requests. The table now reaches
+  `1200 => '1200'` and falls back to the largest option. CAA serves `front-250` (8.8KB),
+  `front-500` (18KB) and `front-1200` (77KB) — measured live. **Still true and still not
+  changed:** the block ends `} if preferences('server')->get('useLocalImageproxy');`, which
+  reads as "only when local proxying is on". That pref is not a boolean — it is the image-proxy
+  SELECTOR behind Settings → Performance (`1` = local, `2` = helper, or an external proxy's id;
+  `Slim/Utils/Prefs.pm` defaults it to `main::ISWINDOWS ? 1 : 2`), and a registered `match`
+  handler is consulted regardless of it (`ImageProxy::getImage` → `getHandlerFor`; the pref is
+  read only when picking an EXTERNAL proxy). So the gate is truthy on every default install and
+  the handler does run — it is misleading, not broken.
 - **Discography carries the same wide-character cache bug fixed here in 0.9.141**, in FOUR
   places: `Discography/Browse.pm` ~1159 (`$text`, artist bio), ~3240 (`$desc`, review
   description), ~3270 (`$text`, MAI album review) and `Discography/API.pm` ~705
-  (`$canonName`, MB canonical artist name). All bare-string `$cache->set` calls. Port
-  `API::_setText`/`_getText` — it is NOT the shared matcher, so the hold above doesn't apply.
+  (`$canonName`, MB canonical artist name). All bare-string `$cache->set` calls. It is NOT the
+  shared matcher, so the hold above doesn't apply. **The helpers to port are GONE from LBF as of
+  0.9.186** (removed with `getArtistBio`, their last caller) — carry the PATTERN, not the sub
+  names: `set` a `{ t => $text }` hashref and read `ref $c eq 'HASH' ? $c->{t} : $c`, which
+  Storable-encodes on the way in and still reads a legacy bare string.
 - **0.9.141 VERIFIED ON THE REAL SERVER (2026-07-29).** Installed build fingerprinted via the log's
   `Sub::Name (LINE)` numbers (`_fetchArtistInfo (4074)`, MAI bio `(4108)`). Confirmed live:
   - **The `&rt=` handshake works through Material.** Added *3OH!3 – MY FRIENDS* (MB **Single**, 3
@@ -275,6 +1313,16 @@ genre work at 0.9.140 — pushed, see `ALPHA.md` there, do not merge it. `main` 
   coderef). Now emits `PLUGIN_LBF_NO_RESULTS`, like an empty landing.
 
 **Repo test scripts** (all exit 0 on `dev`; run the relevant one after touching that area):
+**`tools/t_loads.pl` — RUN THIS BEFORE EVERY BUILD, and run it against the ZIP**
+(`LBF_PLUGIN=<extracted>/ListenBrainzFreshReleases perl tools/t_loads.pl`). It compiles each
+module in its OWN fresh interpreter with only LMS stubs present, which is the condition LMS
+imposes and the one every other suite hides by loading its subject with the rest of the plugin
+already in memory. **0.9.166 shipped a plugin that would not load at all** — a bareword
+reference to `DB::KEY_VERSIONS` is resolved at COMPILE time, before the runtime `require`
+three lines above it has run, so `use strict subs` killed the whole module: no menu, no feeds,
+no settings, and a log line naming a constant. **The failure was seen during that build and
+explained away** (`perl -c` failed alone, passed with `DB.pm` preloaded → "production must load
+DB first"; it does not). Use `Other::Package->CONSTANT`, never `Other::Package::CONSTANT`.
 `tools/bench_walk.pl` (per-walk render cost + the memo assertions), `tools/t_cache_widechar.pl`
 (the DbCache bare-string bug, reproduced against real DBD::SQLite),
 `tools/t_ll_handshake.pl` (the `&rt=` release-type handshake, driven from BOTH repos' live
@@ -283,8 +1331,16 @@ MuSpy memo on Refresh, empty week under the family lens), `tools/t_trending_empt
 0.9.149 empty-aggregate TTL + the Refresh row on the empty Trending Albums view;
 `LBF_BROWSE=` points it at a mutated copy for anti-testing), `tools/t_diag.pl` (the connectivity
 diagnostic — probe coverage, answered-vs-unreachable, the semantic checks, redaction and the
-deadline; `LBF_DIAG=` points it at a mutated copy), `tools/matcher_sync_check.py`
-(currently exits 1 — see the hold).
+deadline; `LBF_DIAG=` points it at a mutated copy), `tools/t_db.pl` (the plugin-owned SQLite
+store, against a REAL file in a tempdir — persistence proved CROSS-PROCESS, the kv
+0/''/undef distinctions, wide chars both sides, non-UTF-8 blob bytes, the 90-day
+round-trip, prefix retirement, the dev-build wipe leaving the durable tables alone, and
+degrade-never-die; `LBF_DB=` points it at a mutated copy), `tools/t_ttlceiling.pl` (no
+TTL handed to `Slim::Utils::Cache` may exceed 2,592,000 — reproduces LMS's own rule
+first, so a guard set to the WRONG number fails before it can pass vacuously),
+`tools/t_coverwarm.pl` (the CAA size table + the cover pre-warm — the warmed path must
+equal what Material requests; `LBF_PLUGIN=`/`LBF_BROWSE=` point it at mutated copies),
+`tools/t_statsratelimit.pl` (the follower stats burst — the shared backoff on `_getUserStats` and the serialised follower chain; `LBF_API=`/`LBF_BROWSE=` point it at mutated copies, anti-tested two ways), `tools/bench_store.pl` (the feed store's blocking cost — ingest and read, against real DBD::SQLite at a real feed size; RUN IT after any change to `ingestFeed`/`feedReleases`, and it is what set `INGEST_CHUNK`), `tools/t_ingestchunk.pl` (the chunked ingest's SAFETY property — rotation and coverage only on a complete pass, identical store either way, merge across a chunk boundary, synchronous refusal; `LBF_DB=` points it at a mutated copy, anti-tested two ways), `tools/t_warmstats.pl` (the warm-stage instrument — that it records the OVERLAP between stages and not merely their durations, and that the warm subs actually CALL it; `LBF_PLUGIN=`/`LBF_BROWSE=` point it at mutated copies, anti-tested five ways), `tools/t_feedsingleflight.pl` (the COLD feed path fetches ONCE however many browse walks arrive — behavioural, driven through a suspending HTTP stub because the property is "how many requests went out and who was called back", which no pattern match shows; also that BOTH outcomes fan out, that waiters get the same STRING shape as the primary on error, and that the key is the REQUEST (memo key + headers) so a token holder is never multiplexed onto an anonymous fetch. `LBF_API=` points it at a mutated copy, anti-tested five ways), `tools/t_buildingstate.pl` (the in-flight guard and the building row — that the flag is TAKEN before a fan-out, RELEASED on every exit via a single wrapper rather than at each of 8 returns, never released by a caller that did not take it, and that "building" is signalled as `undef` and never as an empty list; also that the feed chain's error paths all advance it and that `_warmTick` waits on its callback. `LBF_BROWSE=` points it at a mutated copy, anti-tested five ways), `tools/t_rgresolver.pl` (the hosted `/discography` release-group tier — that a hit returns a release-GROUP id and never asks MB, that it is ONE call per artist not per album, that `?mbid=` reaches BOTH cache keys, which of several same-titled groups wins, and that EVERY non-hit falls back to MusicBrainz; `LBF_API=` points it at a mutated copy, anti-tested five ways. **Its cache lever is `DB::store`, not `Slim::Utils::Cache`** — API.pm holds the plugin's own store, and a first cut that stubbed the wrong one failed ten assertions because nothing could be observed or reset between sections; the suite now dies loudly if the override is not in effect rather than running vacuous), `tools/t_weekwindow.pl` (the whole-week release window — that the edges are real Mondays and Sundays on EVERY day of the week and for every legal (past, future) pair; **the Friday test**, run across a real week, that a Friday release is still in scope on Saturday and Sunday with earlier weeks OFF and leaves on the next MONDAY rather than at midnight; that the four-week budget survives a hand-edited 52/52; that the derived LB `days=` never exceeds 27, is never 0, and reports `future=true` with zero later weeks; that the gate fallbacks in `%WEEK_GATES` are DERIVED from Plugin.pm's `$prefs->init` rather than restated; that the feed memo key has ONE builder both fetchers and both halves of `clearFeedCache` go through; and that the checkbox-coercion sentinel names a field `settings.html` actually posts. `LBF_API=`/`LBF_DB=`/`LBF_BROWSE=` point it at mutated copies, anti-tested three ways — a today-relative window, the sentinel left on `pref_days`, and `foryou_future` drifting back to `// 0`), `tools/matcher_sync_check.py` (currently exits 1 — see the hold).
 
 - **Listen Later release-type handshake — `&rt=` on the favurl (0.9.141).** LL 0.1.86 stores a
   release type per row (`album|ep|single`) and drives its glyph, its Played thresholds (single = 1
@@ -343,10 +1399,15 @@ deadline; `LBF_DIAG=` points it at a mutated copy), `tools/matcher_sync_check.py
     `warmArtistSorts` (the MB sort-name — the `artist-sort cache set failed` spam in live logs, once
     per non-Latin artist) and `getArtistBio` (a Last.fm bio, where **one curly quote or em-dash is
     enough**, so almost no bio was ever cached and every release-page open re-fetched it).
-  - Fixed at the boundary with **`API::_setText` / `_getText`**, which wrap in a hashref so Storable
-    handles any codepoint and hands the string back with its utf8 flag intact. Chosen over
-    encode-on-write/decode-on-read: one place to get right, no mojibake risk, and `_getText` reads a
+  - Fixed at the boundary with **`API::_setText` / `_getText`**, which wrapped in a hashref so
+    Storable handles any codepoint and hands the string back with its utf8 flag intact. Chosen over
+    encode-on-write/decode-on-read: one place to get right, no mojibake risk, and `_getText` read a
     legacy bare string unchanged so **no cache prefix needed bumping**.
+  - **BOTH HELPERS WERE REMOVED IN 0.9.186** — `getArtistBio` was their last caller (the sort-name,
+    the other one, had moved to `DB::artistPut` when the store landed), so nothing in `API.pm` writes
+    a bare string to the cache any more. **THE RULE OUTLIVED THEM and is kept at that spot in the
+    file**, because it is about the next one: never `$cache->set($key, $some_string)` with text that
+    came from an API — wrap it in a hashref, or put it in the store.
   - **Distinct from the 0.6.15 bug**, which was the same die from the KEY side (`_key` md5's the key).
     Keys built from free text are encoded to octets at the point of use — see `getLastfmTags` /
     `getArtistBio`. Both halves have now bitten; check both when adding a cache.
@@ -1435,13 +2496,20 @@ callback (never serialised), so `url` coderefs (Read-more, Block, Refresh) are s
   `image => $_->{url}` internally, so the photo arrives as `image`, NOT `url` (reading `url`
   silently yielded no photo until the 0.9.21 fix). NB: MAI's `getArtistPhotos` looks photos up by
   artist **name** only — it passes `undef` for the artist_id and ignores `$args->{mbid}`, so the
-  mbid we pass is honoured for the bio but not the photo) — bio AND photo. Falls back to
-  `API::getArtistBio` (Last.fm `artist.getinfo`, needs `lastfm_api_key`) for a bio only (no photo).
-  Runs inside the detail-page async barrier; fully eval-guarded — no MAI and no key = name +
-  Block-artist only. INFO-logs MAI detection + photo count for diagnosis. `API::_cleanBio` uses
+  mbid we pass is honoured for the bio but not the photo) — bio AND photo. **MAI OR NOTHING
+  since 0.9.186**: the Last.fm `getArtistBio` fallback is deleted (MAI's own sources already
+  include Last.fm, and this population was never offered a photo either), so `$wantArtist` is
+  gated on `_maiEnabled()` and the task is ABSENT from the render barrier without MAI rather
+  than a slot resolving to an empty hash. Runs inside the detail-page async barrier; fully
+  eval-guarded — no MAI = name + Block-artist only. INFO-logs MAI detection + photo count for diagnosis. `API::_cleanBio` uses
   Last.fm's FULL `content` (not the short `summary`), strips HTML/"Read more"/CC boilerplate, keeps
-  paragraph breaks; capped only by `BIO_MAX`=20000 (DoS guard, never visibly trims). Bio cache key
-  `lbf:bio:2:*`.
+  paragraph breaks; capped only by `BIO_MAX`=20000 (DoS guard, never visibly trims). **`_cleanBio`
+  and `BIO_MAX` STAY** — the MAI path runs its bio through them, which is why its HTML handling is
+  tuned for MAI's runtime output ([[mai-bio-is-html-at-runtime]]) rather than Last.fm's. The
+  `lbf:bio:` cache key family went with `getArtistBio` in 0.9.186; there is no bio cache any more,
+  and with it goes the trap that key carried (it stored the CLEANED text, so it had to be bumped on
+  ANY change to `_cleanBio`'s output or the old shape kept serving for the full 30d TTL and the fix
+  looked unshipped). **If a bio is ever cached again, that rule comes back with it.**
 - **Bio display — KEY Material fact, and the 0.9.150 correction.** A `type=>'text'` row renders its
   `name` IN FULL; Material has NO auto-collapse / "more" for plain text. So the preview must be
   **pre-trimmed** (`BIO_PREVIEW`=150 chars) — that part still stands, and don't "fix" it by putting
@@ -1516,8 +2584,9 @@ convention documented under "Icon System".
   so the row text is informational instead:
   - **New Releases for You / All Releases** (`_categoryTile`): subtitle = the date span actually being
     viewed (real earliest/latest release date of the loaded feed, stashed by `_stashSummary` under
-    `lbf:summary:{user,all}`; before that, the window implied by `days`/past/future via `_windowSpan`)
-    plus the release count (`PLUGIN_LBF_N_RELEASES`). Tracks the *Days window* setting automatically.
+    `lbf:summary:{user,all}`; before that, the whole-week window via `_windowSpan`, which asks
+    `API::sectionWindow` rather than recomputing one) plus the release count
+    (`PLUGIN_LBF_N_RELEASES`). Tracks the *Earlier/Upcoming weeks* settings automatically.
   - **Playlists** (`_playlistsTile`): subtitle = the date span the playlists inside cover (earliest
     week-commencing/day → today; real span stashed by `_stashPlaylistSummary` under
     `lbf:summary:playlists`, else a synchronous fallback of last week's Monday → today).
@@ -1564,10 +2633,50 @@ page show the new ones. Sanitising the incoming `$paramRef->{pref_*}` (the prior
 belongs in `handler`, before `SUPER::handler`. Fleet-wide rule — LBF, PFR and Discography all had it.
 
 ### General Settings
-- `username` — ListenBrainz username
-- `token` — ListenBrainz API token
-- `lastfm_api_key` — optional Last.fm API key; enables three fallbacks: detail-page genres when MusicBrainz has none, the artist biography when MAI isn't installed (bio only, no photo), and similar artists for the DSTM radio when ListenBrainz has none (default empty = disabled)
-- `days` — days window (1-90, default 14)
+- `username` — ListenBrainz username. **This is the only required credential** (0.9.160)
+- `token` — ListenBrainz API token, **OPTIONAL since 0.9.160**. It gates exactly one feature: the *Recommended* list under People You Follow (`/1/user/<u>/feed/events` is the only endpoint in the plugin that 401s anonymously). Every other LB endpoint returns a byte-identical payload with or without it — verified live, see `docs/token-free-refactor.md` §0. Still SENT on `fresh_releases` when set; `Settings::handler` still validates it on save
+- `lastfm_api_key` — optional Last.fm API key. **Two roles as of 0.9.186** (it had three): the genre ladder's **tier 5** — filled by `_warmLastfm`, and the ONLY rung not derived from MusicBrainz ([[lbf-genre-sources-one-well]]), so it is what fills the lists and the detail page for brand-new releases; and **similar artists for the DSTM radio** when ListenBrainz's dataset has none. The third — the artist biography when MAI isn't installed — was removed in 0.9.186, as was the detail page's own second Last.fm tag call (tier 5 had already answered by then). Default empty = disabled
+- **The release window is WHOLE MONDAY-TO-SUNDAY WEEKS (0.9.185).** It replaced a rolling `days`
+  count (1-90, default 14) measured from today, which cut the current week in half: the UI renders
+  `W/C <Monday>` rows, but the window's edges landed on arbitrary days, so with *Include earlier
+  weeks* off the current week held only *today onwards* and **Friday's releases were gone by
+  Saturday**. Now:
+  - `weeks_past` — whole weeks BEFORE the current one (0-3, default **1**)
+  - `weeks_future` — whole weeks AFTER the current one (0-3, default **2**)
+  - the **current week is always included in full**, Monday to Sunday, and `1 + past + future` is
+    clamped to **four weeks** (`API::WEEKS_MAX_SIDE`). Over budget the past side is honoured and the
+    future takes the remainder (3/3 → 3 back, 0 ahead) — clamped BOTH on save (`Settings::handler`)
+    and at read time (`API::_clampWeeks`), because `prefs.yaml` is hand-editable.
+  - **`API::sectionWeeks($prefix)` is the only place these prefs are read** — `'foryou'`, `'all'` or
+    `'muspy'`. It applies that section's two checkbox gates (an unticked box = ZERO weeks on that
+    side, for that section only) so For You and All Releases keep independent defaults. It replaced
+    ~12 duplicated `$prefs->get('days') // 14` + past/future sites that **disagreed**: `foryou_future`
+    fell back to `// 0` in four of them and `// 1` in `warmFeeds`, so a warm and a browse asked
+    ListenBrainz two different questions. `API::sectionWindow($prefix)` is the same thing as
+    ('YYYY-MM-DD','YYYY-MM-DD') for `_windowSpan` and `_mergeMuSpy`. It lives in `API.pm` because
+    `clearFeedCache` has to rebuild the identical memo key.
+  - **`_feedWindow` reuses `DB::_weekStart`** (arithmetic-only, Monday-based, matching
+    `Browse::_weekStart`) — there is no third week-start implementation.
+  - **The LB `days=` parameter is DERIVED, never configured** (`API::_feedRequestDays`). ListenBrainz
+    has no date-range parameter — both `fresh_releases` routes take `days=N&past=&future=` and answer
+    SYMMETRICALLY about today — so a week-aligned window asks for the **wider of its two sides** and
+    lets `DB::feedReleases` trim the rest on read. Worst case **27** days (3 weeks + 6), against the
+    old ceiling of 90. Over-fetched rows on the narrow side are simply stored; nothing shows them.
+    **`future` comes back true even when the user's later-weeks box is off**, because the current
+    week runs to Sunday — that is intended, and it is the mechanism behind whole weeks.
+  - **Migration: none.** Old `days` / `muspy_future_months` values are left in place and stop being
+    read; their form fields are gone. **No `BASE_VERSION` bump** — the 0.9.166 store keeps releases
+    permanently and the window is only a filter on the READ, so narrowing costs nothing and
+    invalidates nothing (a bump would lose every older row for good; see `DB.pm`'s header).
+  - **The `Settings.pm` trap.** `exists $params->{pref_days}` was the sentinel that says "this is a
+    real form POST" and is what makes the checkbox coercion run at all. It moved to
+    `pref_weeks_past`. Removing the field without moving the sentinel breaks **every** checkbox on
+    the page silently: unchecked boxes store `undef`, which reads back ON through the `// 1` guards,
+    so `all_past`/`foryou_past` become impossible to turn off. `tools/t_weekwindow.pl` §7 ties the
+    sentinel to a field the template actually posts.
+  - Gates relabelled: *Include Past/Upcoming Releases* → **Include earlier/later weeks** — their
+    meaning shifted from "any past release" to "earlier whole weeks", since the current week is
+    included either way.
 - **Sort is per-view, not a global setting (0.9.97).** The old global `sort` radio (and the `group_by_artist` / `week_dividers` toggles) were removed. Each list has a **"Sorted by …" toggle in an Options section** cycling Release Date / Artist / Album Title:
   - **For You** is now ALWAYS weekly (W/C material headers, newest week first); the toggle sorts the releases *inside* each week and persists to the durable `foryou_sort` pref (default `release_date`; set only via the in-view toggle, not on the settings page — like `follow_sort`).
   - **All Releases** per-week views each carry the toggle, backed by a **single durable `all_sort` pref shared across every week** — set it once and every week honours it, and it survives restarts. (0.9.97 first shipped this as per-week module state; that was changed because opening a *different* week always started at the default, which read as "the sort keeps resetting".) Paging stays per-week module state (`%pageState`); only the sort is a pref now.
@@ -1582,13 +2691,17 @@ belongs in `handler`, before `SUPER::handler`. Fleet-wide rule — LBF, PFR and 
 - `people_follow` — master on/off for the whole **People You Follow** browse section (What's Trending, both Trending Albums lists, Recommended); default ON (0.9.118). When off the section is absent AND its warm pre-build + unmatched-debug entry are skipped, so nothing there is fetched/cached/warmed
 - `follow_sort` — People You Follow list ordering: `date` (day dividers, newest first) or `recommender` (grouped by the follower who recommended each track); default `date`. Flipped in place by the inline toggle at the top of that list, not shown on the settings page (0.9.88; toggle label made state+hint "Sorted by … (tap for …)" in 0.9.91)
 - `prefer_library` — when building a Created-for-You playlist, use a track from the user's own LMS library (matched by MusicBrainz ID, then artist + title) before searching streaming services (default ON; see "Prefer local library")
+- `warm_covers` — pre-warm the image proxy for each feed's cover art during the daily background
+  warm (default ON). The proxy caches per SIZE SPEC, and the spec comes from the device, so without
+  this every new device/view pays ~1.5-2s per cover to Cover Art Archive. Off = no background
+  artwork traffic at all. See `Browse::_warmCovers` and the 0.9.174 fixes section
 - `debug_log` — opt-in dedicated warm/resolve debug log (default OFF, 0.9.54). When on, `Plugin::dbg` appends the playlist warm/match timeline — incl. the per-playlist **library-match count** and scan-defers — to `lbf-debug.log` in the LMS log dir (`Slim::Utils::OSDetect::dirsFor('log')`, cachedir fallback), size-capped ~1 MB with one `.old` rotation. The same lines always also go to `server.log` at INFO. Turn on to diagnose a match/caching problem, off after.
 
 ### MuSpy Settings (own section, kept LAST — 0.9.81)
 Grouped separately from the ListenBrainz prefs so the two aren't confused. All three drive `API::getMuSpyReleases` → `Browse::_mergeMuSpy` (For You feed only).
 - `muspy_userid` — optional MuSpy (muspy.com) public user ID; folds that user's followed-artist releases into the For You feed. Public endpoint, no auth/password stored. Default empty = disabled
-- `muspy_future` — include MuSpy **upcoming** releases (default ON, 0.9.79). MuSpy is upcoming-heavy, so its future side has its own toggle instead of riding `foryou_future`. MuSpy's past side still honours `foryou_past` + `days`. Turn off for already-released MuSpy titles only
-- `muspy_future_months` — how far ahead the MuSpy upcoming side reaches (1-24 months, default 12; 0.9.80). Kept separate from the LB feed's narrow `days` window; `_mergeMuSpy` caps the future side at `months * 30` days, clamped by `MUSPY_FUTURE_MONTHS_DEFAULT`/`_MAX` so a garbage pref can't blow the window open. Only applies when `muspy_future` is on
+- `muspy_future` — include MuSpy **upcoming** releases (default ON, 0.9.79). MuSpy is upcoming-heavy, so its future side has its own toggle instead of riding `foryou_future`. That toggle is exactly what `API::sectionWeeks('muspy')` is: the For You window with `muspy_future` swapped in for `foryou_future`. Turn off for already-released MuSpy titles only
+- `muspy_future_months` — **RETIRED in 0.9.185** (was 1-24 months, default 12; 0.9.80). MuSpy now rides the same whole-week window as everything else, so `_mergeMuSpy` carries no month arithmetic and `MUSPY_FUTURE_MONTHS_DEFAULT`/`_MAX` and `Browse::_dateShift` are gone. **This loses no far-out announcements:** MuSpy is fetched `?limit=100` newest-first, stored with `rotate => 0` and read back from the store **unwindowed** (`_feedFromStore($feed, undef, undef, 0)`), so an album announced three months out is fetched and HELD today — the week window only decides whether it is DISPLAYED, and each Monday the forward edge rolls on and it appears. Rows age out on `seen_at` in `DB::feedSweep` at 120 days, and upcoming releases sit at the top of MuSpy's newest-first list, so they keep being refreshed while they wait
 
 ### Blocked Artists Settings
 - `blocked_artists` — arrayref of `{ mbid, name }`. Releases by these artists are hidden from EVERY feed (For You / All Releases / home shelves via `Browse::_filterSection`, and since 0.9.111 the whole People You Follow section via `_trendBlocked`) by `_isBlocked` (matches any blocked `artist_mbids` OR normalised credit name). No ListenBrainz API exists for this — the `fresh_releases` endpoint takes only date/sort params and the feedback API is per-recording (love/hate, `score 1/-1`) and isn't consumed by the feed — so it's a purely local, render-time filter (takes effect on next browse; no feed-cache clear). Added from a release detail page's **"Block this artist"** link (`Browse::_blockArtist`); VA is never offered (would hide unrelated compilations). The settings section lists each blocked artist with an Unblock checkbox (`lbf_unblock_<i>`); `Settings::handler` removes ticked entries on save (the pref is NOT in the `prefs()` list, so it's mutated directly).
@@ -1805,6 +2918,46 @@ that cause empty/junk pools:
    ([[mb-mirror-search-index-gotcha]]); test the library with `["artists",…,"search:NAME"]`.
 
 ## Version History
+- **0.9.160** — **the ListenBrainz token is now OPTIONAL. `fresh_releases` — the flagship feed — had
+  been gated on a credential the endpoint has never required.** This is §3.1 of
+  `docs/token-free-refactor.md`; §3.2/§3.3 remain open and §4 was dropped.
+  - **RE-VERIFIED LIVE BEFORE ANY CODE, against the real configured account** (the 2026-07-31 scoping
+    pass used borrowed test users). Each endpoint fetched twice, anonymous and authenticated, and
+    compared: `fresh_releases` came back **byte-identical** (same sha1 over `payload.releases`, same
+    count, same 13 fields per release), as did createdfor + `/1/playlist/<mbid>`, `cf/recommendation`,
+    `following`, `listens`, both `stats/user/…` ranges, `metadata/recording` and
+    `popularity/top-recordings-for-artist`. **`/1/user/<u>/feed/events` returned the only 401 in the
+    entire plugin.** Six individual followers' weekly stats compared identical too — which also
+    settles that a token could never have unlocked a *follower's* private stats (it authenticates you,
+    not them), so the Trending fan-out was never in question.
+  - **CHANGED — two gates, both on the same feed:** `API::getFreshReleasesForUser` now returns early
+    only `unless ($username)` and pushes `Authorization` only when a token is set (the
+    `getFollowing`/`_getUserStats` shape); `Browse::topLevel` gates the New Releases for You tile on
+    `$username` alone. The error string no longer blames the token — it used to send a tokenless user
+    to fix the wrong field.
+  - **DELIBERATELY NOT CHANGED — all four follow-feed gates** (`getFollowFeed`, `_followTile`,
+    `_warmFollow`, the unmatched-debug entry). **These gates are CORRECT and must stay.** They are
+    what turns "no token" into a tile that is simply absent; strip them and a tokenless user gets an
+    opaque runtime 401 instead. This is the likeliest way a future "finish the token-free work" pass
+    goes wrong, which is why it is pinned by a test rather than a comment.
+  - **An empty `Authorization: Token ` header is worse than none** — a malformed credential rather
+    than an anonymous request — so the header is omitted entirely rather than sent empty. Asserted.
+  - **NO CACHE BUMPS.** Nothing about any cached shape or any cached *decision* changed — the same
+    URL returns the same payload either way, which is the whole finding. Bumping would force a
+    pointless full re-resolve; the standing dev-build "invalidate everything" habit does not apply.
+  - **`tools/t_tokenfree.pl` — 23 assertions.** Sections 1-3 are BEHAVIOURAL: `API.pm` is loaded for
+    real and `getFreshReleasesForUser` driven through a recording HTTP stub, so they assert what the
+    sub *does* (does it request, with which headers), not how its source reads. Section 4 is
+    source-level, for the 0.9.145 reason — there is no return value to inspect when the point is that
+    a sub was NOT reached. **Anti-tested three ways** via `LBF_API=`/`LBF_BROWSE=`: restoring the old
+    gate = 7 red, unconditional auth header = 2 red, dropping `_followTile`'s `if $token` = 1 red.
+  - **THE TEST LESSON, and it is the 0.9.149 trap again, caught only by the anti-test run.** Two of
+    my own assertions used a bare `m//` in `ok()`'s LIST-context argument slot, so the match returned
+    a match LIST, the args shifted, and the label became the condition — they PASSED against any
+    truthy string. The baseline was green and meaningless for those two. The mutation run is what
+    exposed it, then exposed a third. `ok()` now **dies** on a missing message rather than printing a
+    blank label, so a recurrence is loud instead of silent. **Wrap every match and grep in
+    `scalar()`** — this has now cost two suites in this repo.
 - **0.9.159** — **`MB_PROBE_MBID` was never a real artist, so `autodetectMirror` has NEVER adopted a
   mirror since 0.9.94. Found by 0.9.158's diagnostic on its FIRST real run — which is the whole
   argument for having built it.**
@@ -2135,11 +3288,16 @@ that cause empty/junk pools:
   - **RESULT, on the real bio through the real subs: 92 rows -> 1 row / 16 paragraphs (5 of them
     headings, all correctly marked); detail page 122 items -> 31** (16 fixed rows + 15 tracks, for the
     measured release).
-  - **THE PROPERTY THAT MATTERS MOST, and it is not the row count itself: expanding the bio now costs
-    the SAME two rows as collapsing it** (text + toggle, either way). Before, expanding added 91 rows
-    and did the threshold-crossing itself. **So the bio can no longer push a page into the scroller at
-    all** — page size is now purely a function of tracklist length. Keep that true: anything added to
-    the expanded branch of `_artistRows` must not scale with the length of the text.
+  - ~~**THE PROPERTY THAT MATTERS MOST, and it is not the row count itself: expanding the bio now costs
+    the SAME two rows as collapsing it** (text + toggle, either way) … **So the bio can no longer push a
+    page into the scroller at all** — page size is now purely a function of tracklist length.~~
+    **NO LONGER TRUE — SUPERSEDED BY 0.9.155, corrected here 0.9.161.** 0.9.155 deliberately went back
+    to **one row per paragraph** (matching Discography) once `_bioBlocks` parsed correctly and the same
+    bio came out ~10 rows instead of 92 — the hazard was bad parsing, never row-per-paragraph. So
+    **expanding adds N rows again** and the bio DOES contribute to `LMS_MAX_NON_SCROLLER_ITEMS` (100)
+    alongside the tracklist. Read the residual below with that in mind: the ~85-track figure assumed a
+    fixed-cost bio, and the real threshold is ~10 rows lower for an artist with a long biography. The
+    call-site comment in `_artistRows` claimed the old property until 0.9.161 too.
   - **KNOWN RESIDUAL — OPEN, Simon's call 2026-08-05 ("leave it open, may address later"), do NOT
     silently close it.** The detail page emits one text row per TRACK, so ~16 fixed rows + N tracks
     means a release needs roughly **85+ tracks** (box set / big compilation) to cross

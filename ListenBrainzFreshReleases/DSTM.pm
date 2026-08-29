@@ -27,11 +27,14 @@ use List::Util qw(shuffle);
 
 use Slim::Utils::Log;
 use Slim::Utils::Prefs;
-use Slim::Utils::Cache;
+
+use Plugins::ListenBrainzFreshReleases::DB;
 
 my $log   = logger('plugin.listenbrainzfreshreleases');
 my $prefs = preferences('plugin.listenbrainzfreshreleases');
-my $cache = Slim::Utils::Cache->new();
+
+# THE STORE, NOT THE LMS CACHE — see the note in API.pm.
+my $cache = Plugins::ListenBrainzFreshReleases::DB::store();
 
 # CF recommendations regenerate ~weekly; cache the resolved name-pool a day.
 use constant RECS_TTL => 24 * 3600;
@@ -179,18 +182,28 @@ sub _radioFromArtist {
                 });
             }
             else {
-                # ListenBrainz has no similar artists for this seed → try Last.fm
-                # before giving up. Final fallback = the seed's own top recordings
-                # (then DSTM's own random if even that's empty), as before.
+                # ListenBrainz has no similar artists for this seed (a known gap)
+                # → try the hosted API, then Last.fm, before giving up. Hosted goes
+                # first because it needs no API key and its entries carry MBIDs, so
+                # it costs no MusicBrainz lookups; Last.fm stays behind it as the
+                # rung for anyone whose seed it does not know. Final fallback = the
+                # seed's own top recordings (then DSTM's own random if even that's
+                # empty), as before.
                 $log->info("DSTM radio: no LB similar artists for $seed");
-                _radioViaLastfm($client, $cb, $seed, $seedName,
-                    sub { _radioSeedOnly($client, $cb, $seed) });
+                _radioViaNames($client, $cb, $seed, $seedName,
+                    sub {
+                        _radioViaNames($client, $cb, $seed, $seedName,
+                            sub { _radioSeedOnly($client, $cb, $seed) }, 'lastfm');
+                    }, 'hosted');
             }
         },
-        # LB request failed → try Last.fm too; final fallback = recommendations.
+        # LB request failed → try the same two rungs; final fallback = recommendations.
         sub {
-            _radioViaLastfm($client, $cb, $seed, $seedName,
-                sub { _recommendedFill($client, $cb) });
+            _radioViaNames($client, $cb, $seed, $seedName,
+                sub {
+                    _radioViaNames($client, $cb, $seed, $seedName,
+                        sub { _recommendedFill($client, $cb) }, 'lastfm');
+                }, 'hosted');
         },
     );
 }
@@ -204,40 +217,58 @@ sub _radioSeedOnly {
     });
 }
 
-# Last.fm similar-artist fallback for the radio. Needs the seed's NAME and a
-# Last.fm key; resolves the returned artist names to MBIDs (bounded, parallel) and
-# fans out from them plus the seed. No key / no name / nothing usable → $orig->().
-sub _radioViaLastfm {
-    my ($client, $cb, $seed, $seedName, $orig) = @_;
+# Name-based similar-artist fallback for the radio. Needs the seed's NAME;
+# resolves the returned artist names to MBIDs (bounded, parallel) and fans out
+# from them plus the seed. Nothing usable → $orig->().
+#
+# $src selects the source and is the whole difference between the two rungs:
+#   'hosted' — the hosted LMS-community API. NO KEY NEEDED, and every entry it
+#              returns carries an MBID, so _resolveArtistMbids below short-
+#              circuits on the inline id and makes ZERO MusicBrainz lookups.
+#   'lastfm' — Last.fm, gated on lastfm_api_key. Names with spotty mbids, so the
+#              misses cost one throttled MB lookup each.
+# Split out from the old Last.fm-only _radioViaLastfm; everything after the fetch
+# is shared, because both sources deliberately return the same
+# { name, artist_mbid, score } shape.
+sub _radioViaNames {
+    my ($client, $cb, $seed, $seedName, $orig, $src) = @_;
+    $src ||= 'lastfm';
 
-    unless (length($seedName // '') && length($prefs->get('lastfm_api_key') // '')) {
+    unless (length($seedName // '')) { $orig->(); return; }
+    if ($src eq 'lastfm' && !length($prefs->get('lastfm_api_key') // '')) {
         $orig->();
         return;
     }
 
-    $log->info("DSTM radio: trying Last.fm similar artists for '$seedName'");
-    $API->getSimilarArtistsLastfm($seedName,
+    my $fetch = $src eq 'hosted'
+        ? sub { $API->getSimilarArtistsHosted(@_) }
+        : sub { $API->getSimilarArtistsLastfm(@_) };
+
+    $log->info("DSTM radio: trying $src similar artists for '$seedName'");
+    $fetch->($seedName,
         sub {
             my $similar = shift // [];
             unless (@$similar) {
-                $log->info("DSTM radio: Last.fm had no similar artists for '$seedName'");
+                $log->info("DSTM radio: $src had no similar artists for '$seedName'");
                 $orig->();
                 return;
             }
 
-            # Bias toward Last.fm's match score and cap the fan-out (each name
-            # without an inline MBID costs a MusicBrainz lookup to resolve).
+            # Bias toward the source's match score and cap the fan-out (each name
+            # without an inline MBID costs a MusicBrainz lookup to resolve — which
+            # is why this cap matters far less on the hosted source, where every
+            # entry already carries one).
             my @ranked = sort { ($b->{score} // 0) <=> ($a->{score} // 0) } @$similar;
             @ranked = @ranked[0 .. LFM_FANOUT - 1] if @ranked > LFM_FANOUT;
 
             _resolveArtistMbids(\@ranked, sub {
                 my $mbids = shift // [];
                 unless (@$mbids) {
-                    $log->info("DSTM radio: no Last.fm artists resolved to MBIDs");
+                    $log->info("DSTM radio: no $src artists resolved to MBIDs");
                     $orig->();
                     return;
                 }
-                $log->info("DSTM radio: Last.fm gave " . scalar(@$mbids) . " artist MBID(s)");
+                $log->info("DSTM radio: $src gave " . scalar(@$mbids) . " artist MBID(s)");
                 _collectArtistTracks([ $seed, @$mbids ], sub {
                     _resolveAndReturn($client, $cb, shift // [], 'radio');
                 });

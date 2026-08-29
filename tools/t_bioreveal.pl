@@ -85,6 +85,7 @@ my $API = $ENV{LBF_API} || File::Spec->catfile($ROOT, 'ListenBrainzFreshReleases
     sub BIO_WRAP_MAX_COL       { 100 }
     sub BIO_WRAP_MIN_LINES     { 4 }
     sub BIO_HEADING_MAX_COL    { 80 }
+    sub BIO_HEADING_RUN_MAX    { 3 }
     sub PROSE_INDENT           { '72px' }
     sub PROSE_BULLET_IND       { '1.2em' }
 }
@@ -525,6 +526,137 @@ print "\n14. THE REAL RUNTIME INPUT IS MAI's HTML, NOT PLAIN TEXT\n";
     ok(scalar(headings_in(@rows)) == 2,           'exactly two rows render bold');
     ok(scalar(grep { $_->{style} =~ /font-weight:bold/ } prose_divs(@rows)) == 2,
                                                   'and they use an explicit weight');
+}
+
+print "\n15. A BIO IS NEVER DISCARDED WHOLESALE\n";
+{
+    # 0.9.161. `pop @paras while $paras[-1]{heading}` had no floor, so a document
+    # in which EVERY block was heading-flagged was thrown away entirely —
+    # _proseBlock returned () and the expanded branch emitted only "Show less".
+    #
+    # The two shapes that reach it are different and BOTH have to be covered: a
+    # bare-line misread (no underline anywhere), and a genuine setext heading whose
+    # body was a link list that _cleanBio removed.
+    my $LIST = "Discography\n\nVarmints (2016)\n\nFIBS (2019)\n\nBumps Per Minute (2021)\n";
+    my @p = T::_bioParagraphs($LIST);
+    ok(scalar(@p) == 4,                        'an all-heading bio keeps every block');
+    ok(scalar(grep { $_->{heading} } @p) == 0, '...and a run of bare-line headings is demoted');
+    ok(scalar(T::_proseBlock(@p)) == 4,        '...so it still renders rows');
+
+    # The same list UNDER a real opening sentence. bodyCount is now non-zero, so
+    # the pop is live — and must still not eat the list, because none of it is
+    # setext-marked.
+    my $MIXED = "Anna Meredith is a Scottish composer and producer based in London.\n\n"
+              . "Discography\n\nVarmints (2016)\n\nFIBS (2019)\n";
+    my @m = T::_bioParagraphs($MIXED);
+    ok(scalar(@m) == 4,                             'a trailing list survives the pop');
+    ok(scalar(grep { /Varmints/ } para_text(@m)),   '...including its entries');
+    # Surviving is not enough — a discography rendered entirely in bold is the
+    # other half of the same misread, and it is what the run demotion fixes.
+    ok(scalar(grep { $_->{heading} } @m) == 0,      '...and none of it renders bold');
+    ok(scalar(headings_in(T::_proseBlock(@m))) == 0, '...through to the emitted rows');
+
+    # A SETEXT heading over nothing is still dropped — that is the case the pop
+    # exists for, and narrowing it must not disable it.
+    my $DANGLE = "They formed in Leeds and released four albums.\n\nMore online sources\n----------\n";
+    my @d = T::_bioParagraphs($DANGLE);
+    ok(scalar(grep { /More online sources/ } para_text(@d)) == 0,
+                                               'a dangling SETEXT heading is still dropped');
+    ok(scalar(@d) == 1,                        '...leaving the body');
+
+    # ...but never down to nothing.
+    my @only = T::_bioParagraphs("More online sources\n----------\n");
+    ok(scalar(@only) == 1,                     'a setext-only bio is not popped to empty');
+}
+
+print "\n16. A LONE DASH IS PUNCTUATION, NOT A LIST MARKER\n";
+{
+    # A hard wrap can push a dashed parenthetical to column 0. Read as a bullet, it
+    # closes the preceding partial paragraph as its own block — one short line, no
+    # terminal punctuation — which _bioLooksLikeHeading then renders BOLD.
+    my $BIO = "Their second album\n- recorded in 1997 -\n"
+            . "was released to acclaim and sold well across Europe that year.\n"
+            . "The band toured extensively before splitting up in 2001 after tensions.";
+    my @p = T::_bioParagraphs($BIO);
+    ok(scalar(grep { $_->{bullet} } @p) == 0,  'a lone dashed line is not a bullet');
+    ok(scalar(grep { $_->{heading} } @p) == 0, '...so nothing before it is emboldened');
+    ok(scalar(grep { /Their second album - recorded in 1997/ } para_text(@p)) == 1,
+                                               '...and the sentence stays intact');
+
+    # A RUN of dashes still is a list — corroboration, not a ban on dashes.
+    my $RUN = "The roster is as follows.\n\n- Dean De Benedictis\n- Smite Matter\n- Zygote\n";
+    my @r = T::_bioParagraphs($RUN);
+    ok(scalar(grep { $_->{bullet} } @r) == 3,  'a RUN of dashed lines is still a list');
+
+    # An unambiguous marker never needs corroboration.
+    my ($mk) = T::_bioBullet('* on its own');
+    ok(defined $mk && $mk eq '*',              '"*" is returned as the marker');
+    ok(!defined((T::_bioBullet('e-mail was how they signed'))[0]),
+                                               'a hyphenated word is still not a marker');
+}
+
+print "\n17. THE COLLAPSED PREVIEW CARRIES NO SETEXT UNDERLINE\n";
+{
+    # _cleanBio rewrites <h2> as "title\n----------". The collapsed path never went
+    # through _bioBlocks, so it collapsed the RAW text and the underline survived
+    # into the preview as ten literal hyphens.
+    my $clean = A::_cleanBio(
+        '<p>Lambchop is an American band from Nashville, Tennessee.</p>'
+      . '<h2>Description and history</h2>'
+      . '<p>Initially formed as a three piece in 1986 with Kurt Wagner and others, '
+      . 'the band went on to release a long run of albums through the 1990s.</p>');
+
+    my @rows = rows_for({ artist_credit_name => 'Lambchop' }, $clean);
+    my ($prev) = grep { $_->{name} =~ /Lambchop is an American band/ } @rows;
+    ok($prev,                                   'the preview row is present');
+    ok(scalar($prev->{name} !~ /-{3,}/),        'and carries no run of hyphens');
+    ok(scalar($prev->{name} !~ /Description and history/),
+                                                '...nor the heading text itself');
+    ok(scalar($prev->{name} =~ /\x{2026}$/),    '...and is still ellipsised');
+
+    # The fill must not regress: a plain multi-paragraph bio still fills the cap.
+    my @plain = rows_for({ artist_credit_name => 'X' },
+        "Radiohead are an English rock band formed in Abingdon in 1985.\n"
+      . "The band consists of Thom Yorke, Jonny Greenwood, Colin Greenwood, Ed O'Brien and Philip Selway.\n"
+      . "They signed to EMI in 1991 and released their debut single Creep.");
+    my ($pp) = grep { $_->{name} =~ /Radiohead are an English/ } @plain;
+    ok(length($pp->{name}) > $T::BIO_PREVIEW - 20,
+                                                'a multi-paragraph preview still fills the cap');
+}
+
+print "\n18. AN INLINE LINK KEEPS ITS WORDS\n";
+{
+    # MAI's runtime input is Wikipedia-derived HTML, full of inline links inside
+    # sentences. The blanket `<a ...>.*?</a>` delete removed those words silently.
+    my $clean = A::_cleanBio(
+        '<p>The band signed to <a href="/wiki/Merge">Merge Records</a> in 1994 '
+      . 'and toured with <a href="/wiki/YLT">Yo La Tengo</a>.</p>');
+    ok(scalar($clean =~ /signed to Merge Records in 1994/), 'inline link text is kept');
+    ok(scalar($clean =~ /toured with Yo La Tengo\./),       '...on both sides of the sentence');
+    ok(scalar($clean !~ /</),                               '...with the tags gone');
+
+    # Last.fm's own trailing link is still removed, by its text.
+    my $lfm = A::_cleanBio('<p>A short bio. <a href="https://last.fm/x">Read more on Last.fm</a></p>');
+    ok(scalar($lfm !~ /Read more on Last\.fm/), 'the Last.fm "Read more" link is still dropped');
+
+    # A list item that is NOTHING BUT a link is still dropped, so MAI's "More
+    # online sources" section still ends up empty and is still popped.
+    my $srcs = A::_cleanBio('<p>Body text.</p><h2>More online sources</h2>'
+                          . '<ul><li><a href="http://x">X</a></li><li><a href="http://y">Y</a></li></ul>');
+    ok(scalar($srcs !~ /More online sources[\s\S]*[XY]/),
+                                                'a link-only list item is still dropped');
+
+    # ...but ONLY that item. With `.*?` in the middle the engine backtracked past
+    # </li><li> to a later item's </a>, so a Wikipedia discography list — linked
+    # title followed by a year, the shape MAI's runtime HTML is full of — was
+    # deleted whole. Every item that is a link PLUS text must survive.
+    my $disc = A::_cleanBio(
+        '<ul><li><a href="x">Album One</a> (1994)</li>'
+      . '<li><a href="y">Album Two</a> (1996)</li>'
+      . '<li><a href="z">Album Three</a></li></ul>');
+    ok(scalar($disc =~ /Album One \(1994\)/),   'a link-PLUS-TEXT item survives');
+    ok(scalar($disc =~ /Album Two \(1996\)/),   '...including one after it');
+    ok(scalar($disc !~ /Album Three/),          '...while the link-only item still goes');
 }
 
 printf "\n%d passed, %d failed\n", $pass, $fail;

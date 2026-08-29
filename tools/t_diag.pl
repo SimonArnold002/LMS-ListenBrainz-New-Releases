@@ -71,9 +71,15 @@ BEGIN {
 
     package Slim::Utils::Timers;
     our @T;
-    sub setTimer { my (undef, $when, $cb) = @_; push @T, { cb => $cb, killed => 0 }; return $T[-1] }
+    # $when is RECORDED and fire() honours it. The staggered same-host probes and
+    # the overall deadline are both timers, and firing them in REGISTRATION order
+    # would run the 12s deadline before a 1.1s probe — inverting real time and
+    # making the pacing look broken when it is not.
+    sub setTimer { my (undef, $when, $cb) = @_; push @T, { cb => $cb, when => $when, killed => 0 }; return $T[-1] }
     sub killSpecific { my ($t) = @_; $t->{killed} = 1 if ref $t eq 'HASH' }
-    sub fire { for my $t (@T) { next if $t->{killed}; $t->{cb}->() } }
+    sub fire {
+        for my $t (sort { $a->{when} <=> $b->{when} } @T) { next if $t->{killed}; $t->{cb}->() }
+    }
     sub reset { @T = () }
     $INC{'Slim/Utils/Timers.pm'} = 1;
 
@@ -132,6 +138,8 @@ BEGIN {
     our $MB_PUBLIC = 0;
     sub mbBase     { $MB_BASE }
     sub mbIsPublic { $MB_PUBLIC }
+    sub hostedUrl     { 'https://api.lms-community.org/music/' }
+    sub hostedHeaders { { 'X-LMS-Plugin-ID' => 'Plugins::ListenBrainzFreshReleases::Plugin' } }
     $INC{'Plugins/ListenBrainzFreshReleases/API.pm'} = 1;
 
     package Plugins::ListenBrainzFreshReleases::Browse;
@@ -157,6 +165,9 @@ sub healthy {
         { match => qr{similar-artists},  content => '[]' },
         { match => qr{artist/\?query=},  content => '{"count":3,"artists":[]}' },
         { match => qr{artist/a74b1b7f},  content => '{"name":"Radiohead"}' },
+        # Hosted LMS-community API. Echoes the same probe MBID the row asserts
+        # against, so a healthy run settles it 'ok'.
+        { match => qr{lms-community},    content => '{"name":"Radiohead","mbid":"a74b1b7f-06a0-4672-a641-eb3353aa608d"}' },
         { match => qr{coverartarchive},  content => 'binary' },
         { match => qr{audioscrobbler},   content => '{"token":"abc"}' },
         { match => qr{muspy},            content => '[]' },
@@ -174,6 +185,29 @@ sub runDiag {
     ($ROWS, $CTX, $CALLS) = (undef, undef, 0);
     $DIAGPKG->run(sub { ($ROWS, $CTX) = @_; $CALLS++ });
 
+    return ($ROWS, $CTX, $CALLS);
+}
+
+# Healthy answers with the PUBLIC MusicBrainz base (section 8). Kept separate from
+# healthy() because that one is written around the localhost mirror the rest of the
+# suite uses — which is exactly why the pacing was uncovered until 0.9.161.
+sub healthy_public {
+    return (
+        { match => qr{validate-token},   content => '{"valid":true,"user_name":"simon"}' },
+        { match => qr{similar-artists},  content => '[]' },
+        { match => qr{artist/\?query=},  content => '{"count":3,"artists":[]}' },
+        { match => qr{artist/a74b1b7f},  content => '{"name":"Radiohead"}' },
+        # Hosted LMS-community API. Echoes the same probe MBID the row asserts
+        # against, so a healthy run settles it 'ok'.
+        { match => qr{lms-community},    content => '{"name":"Radiohead","mbid":"a74b1b7f-06a0-4672-a641-eb3353aa608d"}' },
+        { match => qr{coverartarchive},  content => 'binary' },
+    );
+}
+
+# Run, then let every queued timer fire, then return the settled report.
+sub runDiagFired {
+    my @r = runDiag();
+    Slim::Utils::Timers::fire();
     return ($ROWS, $CTX, $CALLS);
 }
 
@@ -311,13 +345,20 @@ print "\n5. A report must be safe to paste\n";
 {
     my $tok = 'ZZTOPSECRETTOKEN';
     my $key = 'YYLASTFMSECRET';
-    setPrefs(token => $tok, username => 'simon', lastfm_api_key => $key, muspy_userid => '99');
+    my $usr = 'XXMUSPYUSERID';
+    setPrefs(token => $tok, username => 'simon', lastfm_api_key => $key, muspy_userid => $usr);
     routes(healthy());
     my ($rows, $ctx) = runDiag();
 
     my $blob = join "\n", map { join '|', map { $_ // '' } @{$_}{qw(key name url status note)} } @$rows;
     ok(index($blob, $tok) < 0, 'token appears nowhere in the rows');
     ok(index($blob, $key) < 0, 'Last.fm key appears nowhere in the rows');
+    # A MuSpy user id is a public identifier, not a credential — but the section's
+    # own rule is "it must be safe to paste", and the row had no `display` key at
+    # all until 0.9.161 while the Last.fm row beside it did.
+    ok(index($blob, $usr) < 0, 'MuSpy user id appears nowhere in the rows');
+    ok(scalar(grep { index($_, $usr) >= 0 } @Slim::Networking::SimpleAsyncHTTP::REQUESTS),
+       '...while the real MuSpy id IS still sent');
     ok(index(join('|', map { $_ // '' } values %$ctx), $tok) < 0, 'token not in the context');
     ok(scalar($ctx->{token} =~ /^set \(\d+ chars\)$/), 'token reported as presence + length only');
 
@@ -341,7 +382,10 @@ print "\n6. A silent host cannot hold the report open\n";
     ok($CALLS == 1, 'deadline settles the report exactly once');
 
     my $r = byKey($ROWS);
-    ok(scalar(keys %$r) == 7, 'report is COMPLETE despite the silent host');
+    # 8 rows: listenbrainz, lb_labs, musicbrainz, mb_search, hosted_api, coverart,
+    # lastfm, muspy. Bump this when a probe is added — a silent host must never
+    # cost the report a row, which is the whole point of this section.
+    ok(scalar(keys %$r) == 8, 'report is COMPLETE despite the silent host');
     ok($r->{listenbrainz}{status} eq 'fail', 'silent host -> fail');
     ok(scalar($r->{listenbrainz}{note} =~ /timed out/i), '...noted as a timeout');
     ok($r->{musicbrainz}{status} eq 'ok', 'the hosts that did answer keep their results');
@@ -403,6 +447,15 @@ print "\n7. The mirror-probe artist exists (live MusicBrainz)\n";
         if ($code eq '000') {
             print "  SKIP  no network - could not ask MusicBrainz about $mbid\n";
         }
+        # ...AND RATE LIMITING IS NOT AN ANSWER EITHER. MusicBrainz allows ~1
+        # anonymous request per second and replies 503 (429 behind some proxies)
+        # when you exceed it. That says nothing about whether the MBID is real, so
+        # failing on it reports a fault in the plugin for a fault in the test's own
+        # traffic — observed once while iterating on this suite, which is the same
+        # class of false alarm that section 8 exists to stop in the product.
+        elsif ($code eq '503' || $code eq '429') {
+            print "  SKIP  MusicBrainz rate-limited this check (HTTP $code) - re-run to verify $mbid\n";
+        }
         elsif ($code ne '200') {
             ok(0, "$mbid is not a real artist on MusicBrainz (HTTP $code) "
                 . "- the mirror auto-detect can NEVER succeed");
@@ -412,6 +465,40 @@ print "\n7. The mirror-probe artist exists (live MusicBrainz)\n";
                "$mbid really is $name on MusicBrainz (or the mirror auto-detect can NEVER succeed)");
         }
     }
+}
+
+print "\n8. TWO PROBES OF THE SAME REMOTE HOST ARE STAGGERED\n";
+{
+    # Both MusicBrainz rows are built from the same _mbBase. With no mirror that is
+    # musicbrainz.org, whose anonymous limit is ~1 req/s — fired together, the loser
+    # comes back 503 (LMS routes any non-2xx to the ERROR callback) and the report
+    # shows a fault on a perfectly healthy install.
+    #
+    # NB the rest of this suite runs against a LOCALHOST mirror, which is never
+    # paced — so nothing here was covered until this section existed.
+    local $Plugins::ListenBrainzFreshReleases::API::MB_BASE   = 'https://musicbrainz.org/ws/2/';
+    local $Plugins::ListenBrainzFreshReleases::API::MB_PUBLIC = 1;
+
+    setPrefs(username => 'simon', token => 'x' x 36);
+    routes(healthy_public());
+
+    my ($rows, $ctx, $calls) = runDiag();
+
+    my @sent = @Slim::Networking::SimpleAsyncHTTP::REQUESTS;
+    ok(scalar(grep { m{^https://musicbrainz\.org/} } @sent) == 1,
+                                     'only ONE musicbrainz.org request goes out immediately');
+    ok(scalar(grep { m{coverartarchive} } @sent) == 1,
+                                     'a different host is NOT delayed behind it');
+    ok(!$calls,                      'the report does not complete while a probe is queued');
+
+    Slim::Utils::Timers::fire();
+    @sent = @Slim::Networking::SimpleAsyncHTTP::REQUESTS;
+    ok(scalar(grep { m{^https://musicbrainz\.org/} } @sent) == 2,
+                                     'the second musicbrainz.org request follows on its timer');
+
+    my $r = byKey((runDiagFired())[0]);
+    ok($r->{musicbrainz}{status} eq 'ok', 'identity row still settles ok');
+    ok($r->{mb_search}{status}   eq 'ok', 'search row still settles ok');
 }
 
 printf("\n%d passed, %d failed\n", $pass, $fail);

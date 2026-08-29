@@ -1,6 +1,9 @@
 # Genre sources — is MAI a better backend than LB/Last.fm?
 
-**Status:** INVESTIGATION ONLY, 2026-07-31. No code written, no decision taken.
+**Status:** INVESTIGATION ONLY, 2026-07-31. **OUTCOME, added 2026-08-22: this doc's
+conclusion held.** The detail-page enricher shipped (`getAlbumGenresHosted`); the list-row
+idea was built anyway as a hosted ARTIST tier in 0.9.162 and removed again in 0.9.173 on
+the numbers. Current shape: `genre-ladder-current.md`.
 **Question:** the genre-labels feature is parked on `alpha` because ListenBrainz's bulk metadata
 endpoint is too slow. Would **MusicArtistInfo (MAI)** populate genres without harming performance,
 compared with the LB/Last.fm ladder we shelved?

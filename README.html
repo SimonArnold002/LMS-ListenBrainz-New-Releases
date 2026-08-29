@@ -116,7 +116,7 @@
   <h1>ListenBrainz Fresh Releases — LMS Plugin</h1>
   <p class="tagline">A plugin for <strong>Lyrion Music Server (LMS)</strong> built around <a href="https://listenbrainz.org">ListenBrainz</a>. It browses newly released albums (a personalised feed plus the global feed), turns your ListenBrainz playlists and recommendations into playable music, and adds rich release detail pages with artist bios and one-tap streaming.</p>
   <div class="badges">
-    <span class="badge accent">v0.9.159</span>
+    <span class="badge accent">v0.9.172</span>
     <span class="badge">LMS 9.0.0+</span>
     <span class="badge">Material Skin</span>
     <span class="badge">Powered by ListenBrainz</span>
@@ -131,7 +131,7 @@
 <section id="features-at-a-glance">
 <h2>Features at a glance</h2>
 <div class="feature-cards">
-<div class="card"><h4>New Releases for You</h4><p>Fresh releases from artists you listen to</p><span class="needs">Needs: ListenBrainz username + token</span></div>
+<div class="card"><h4>New Releases for You</h4><p>Fresh releases from artists you listen to</p><span class="needs">Needs: ListenBrainz username</span></div>
 <div class="card"><h4>MuSpy artists <em>(optional)</em></h4><p>Fold releases — especially <strong>upcoming</strong> ones — from the artists you follow on MuSpy into New Releases for You</p><span class="needs">Needs: MuSpy user ID (public)</span></div>
 <div class="card"><h4>All Releases</h4><p>The global ListenBrainz fresh-releases feed</p><span class="needs">Needs: nothing</span></div>
 <div class="card"><h4>Release detail pages</h4><p>Streaming matches, artist photo + biography, tracklist, genres, MusicBrainz link</p></div>
@@ -151,7 +151,9 @@
 <ul>
 <li><strong>LMS / Lyrion Music Server 9.0.0+</strong> (tested with Material Skin).
 </li>
-<li>A <strong>ListenBrainz account + API token</strong> for anything personalised (For You, Playlists, Don't Stop The Music). The global <em>All Releases</em> feed needs nothing. Your token is on your <a href="https://listenbrainz.org/settings/">ListenBrainz settings page</a>; the For You feed only reflects artists you've actually submitted listens for.
+<li>A <strong>ListenBrainz account</strong> for anything personalised (For You, Playlists, People You Follow, Don't Stop The Music) — just the <strong>username</strong>, no API token. The global <em>All Releases</em> feed needs nothing at all. The For You feed only reflects artists you've actually submitted listens for.
+</li>
+<li>An <strong>API token is optional</strong> and adds exactly one thing: the <strong>Recommended</strong> list under People You Follow, which reads your private ListenBrainz feed. Everything else uses public endpoints. Your token is on your <a href="https://listenbrainz.org/settings/">ListenBrainz settings page</a>.
 </li>
 <li><strong>Optional add-ons</strong> the plugin uses when present:
 <ul>
@@ -176,8 +178,10 @@
 <ol>
 <li>Open <strong>Settings → Advanced → ListenBrainz Fresh Releases</strong> (also linked from the plugin menu as <strong>Plugin Settings</strong>).
 </li>
-<li>Enter your <strong>ListenBrainz username</strong> and <strong>API token</strong> (needed for the personalised features).
-</li>
+<li>Enter your <strong>ListenBrainz username</strong> — that alone enables every personalised feature.
+</li></ol>
+<p><em>(Optional)</em> Add your <strong>API token</strong> if you also want the <strong>Recommended</strong> list under People You Follow.</p>
+<ol>
 <li><em>(Optional)</em> Paste a <strong>Last.fm API key</strong> and set <strong>Streaming Services</strong> priorities if you have Qobuz/Tidal/Bandcamp/Deezer.
 </li>
 <li><em>(Optional)</em> Add your <strong>MuSpy user ID</strong> (bottom of the settings page, in the <strong>MuSpy</strong> section) to fold your followed artists' releases into New Releases for You.
@@ -265,7 +269,7 @@
 </tr></thead>
 <tbody>
 <tr><td>ListenBrainz Username</td><td><em>(empty)</em></td><td>Needed for For You, Playlists, Don't Stop The Music</td></tr>
-<tr><td>User Token</td><td><em>(empty)</em></td><td>From listenbrainz.org/settings/</td></tr>
+<tr><td>User Token <em>(optional)</em></td><td><em>(empty)</em></td><td>Only adds the <strong>Recommended</strong> list under People You Follow (private feed). From listenbrainz.org/settings/</td></tr>
 <tr><td>Last.fm API Key</td><td><em>(empty)</em></td><td>Optional — enables genre + artist-bio + radio similar-artist fallbacks</td></tr>
 <tr><td>Days window</td><td><strong>14</strong></td><td>1–90 days of releases to show</td></tr>
 <tr><td>Find on Streaming Services</td><td><strong>On</strong></td><td>Show playable Qobuz/Tidal/Bandcamp/Deezer matches on detail pages</td></tr>

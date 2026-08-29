@@ -19,8 +19,17 @@
 <div id="lbf_lastfm_status" style="margin-top:6px;font-weight:bold;"></div>
 [% END %]
 
-[% WRAPPER setting title="PLUGIN_LBF_DAYS" desc="PLUGIN_LBF_DAYS_HINT" %]
-<input type="number" name="pref_days" value="[% prefs.days %]" min="1" max="90" size="4">
+[%# The week window. pref_weeks_past is ALSO the sentinel Settings::handler uses %]
+[%# to recognise a real form POST before coercing the checkboxes — if this field %]
+[%# ever moves or is renamed, move the `exists $params->{pref_weeks_past}` check %]
+[%# with it, or every checkbox on this page silently stops being able to be      %]
+[%# turned off.                                                                  %]
+[% WRAPPER setting title="PLUGIN_LBF_WEEKS_PAST" desc="PLUGIN_LBF_WEEKS_PAST_HINT" %]
+<input type="number" name="pref_weeks_past" value="[% prefs.weeks_past %]" min="0" max="3" size="4">
+[% END %]
+
+[% WRAPPER setting title="PLUGIN_LBF_WEEKS_FUTURE" desc="PLUGIN_LBF_WEEKS_FUTURE_HINT" %]
+<input type="number" name="pref_weeks_future" value="[% prefs.weeks_future %]" min="0" max="3" size="4">
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LBF_PLAY_VIA_SETTING" desc="PLUGIN_LBF_PLAY_VIA_SETTING_DESC" %]
@@ -37,6 +46,16 @@
 
 [% WRAPPER setting title="PLUGIN_LBF_MB_BASE_URL" desc="PLUGIN_LBF_MB_BASE_URL_DESC" %]
 <input type="text" name="pref_mb_base_url" value="[% prefs.mb_base_url %]" size="48" placeholder="https://musicbrainz.org/ws/2/">
+[% END %]
+
+[% WRAPPER setting title="PLUGIN_LBF_GENRE_LOOKUP" desc="PLUGIN_LBF_GENRE_LOOKUP_DESC" %]
+<label><input type="radio" name="pref_genre_lookup" value="auto" [% IF prefs.genre_lookup != 'always' AND prefs.genre_lookup != 'off' %]checked="checked"[% END %]> [% 'PLUGIN_LBF_GENRE_LOOKUP_AUTO' | string %]</label><br>
+<label><input type="radio" name="pref_genre_lookup" value="always" [% IF prefs.genre_lookup == 'always' %]checked="checked"[% END %]> [% 'PLUGIN_LBF_GENRE_LOOKUP_ALWAYS' | string %]</label><br>
+<label><input type="radio" name="pref_genre_lookup" value="off" [% IF prefs.genre_lookup == 'off' %]checked="checked"[% END %]> [% 'PLUGIN_LBF_GENRE_LOOKUP_OFF' | string %]</label>
+[% END %]
+
+[% WRAPPER setting title="PLUGIN_LBF_WARM_COVERS" desc="PLUGIN_LBF_WARM_COVERS_DESC" %]
+<label><input type="checkbox" name="pref_warm_covers" value="1" [% IF prefs.warm_covers %]checked="checked"[% END %]> [% 'PLUGIN_LBF_ENABLED' | string %]</label>
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LBF_DEBUG_LOG" desc="PLUGIN_LBF_DEBUG_LOG_DESC" %]
@@ -165,10 +184,6 @@
 
 [% WRAPPER setting title="PLUGIN_LBF_MUSPY_FUTURE" desc="PLUGIN_LBF_MUSPY_FUTURE_HINT" %]
 <label><input type="checkbox" name="pref_muspy_future" value="1" [% IF prefs.muspy_future %]checked="checked"[% END %]> [% 'PLUGIN_LBF_ENABLED' | string %]</label>
-[% END %]
-
-[% WRAPPER setting title="PLUGIN_LBF_MUSPY_FUTURE_MONTHS" desc="PLUGIN_LBF_MUSPY_FUTURE_MONTHS_HINT" %]
-<input type="number" name="pref_muspy_future_months" value="[% prefs.muspy_future_months %]" min="1" max="24" size="4">
 [% END %]
 
 </div>

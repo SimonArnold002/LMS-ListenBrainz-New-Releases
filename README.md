@@ -10,7 +10,7 @@ Tested on LMS 9.x with the **Material Skin**.
 
 | Feature | What it gives you | Needs |
 |---|---|---|
-| **New Releases for You** | Fresh releases from artists you listen to | ListenBrainz username + token |
+| **New Releases for You** | Fresh releases from artists you listen to | ListenBrainz username |
 | **MuSpy artists** *(optional)* | Fold releases — especially **upcoming** ones — from the artists you follow on MuSpy into New Releases for You | MuSpy user ID (public) |
 | **All Releases** | The global ListenBrainz fresh-releases feed | Nothing |
 | **Release detail pages** | Streaming matches, artist photo + biography, tracklist, genres, MusicBrainz link | — |
@@ -29,7 +29,8 @@ Tested on LMS 9.x with the **Material Skin**.
 ## Requirements
 
 - **LMS / Lyrion Music Server 9.0.0+** (tested with Material Skin).
-- A **ListenBrainz account + API token** for anything personalised (For You, Playlists, Don't Stop The Music). The global *All Releases* feed needs nothing. Your token is on your [ListenBrainz settings page](https://listenbrainz.org/settings/); the For You feed only reflects artists you've actually submitted listens for.
+- A **ListenBrainz account** for anything personalised (For You, Playlists, People You Follow, Don't Stop The Music) — just the **username**, no API token. The global *All Releases* feed needs nothing at all. The For You feed only reflects artists you've actually submitted listens for.
+- An **API token is optional** and adds exactly one thing: the **Recommended** list under People You Follow, which reads your private ListenBrainz feed. Everything else uses public endpoints. Your token is on your [ListenBrainz settings page](https://listenbrainz.org/settings/).
 - **Optional add-ons** the plugin uses when present:
   - **Qobuz**, **Tidal**, **Bandcamp** and/or **Deezer** LMS plugins (installed + signed in) → streaming playback.
   - **Music & Artist Information (MAI)** plugin → artist biographies *and* photos.
@@ -56,7 +57,8 @@ Then install **ListenBrainz Fresh Releases** from the plugin list and restart.
 ## Quick start
 
 1. Open **Settings → Advanced → ListenBrainz Fresh Releases** (also linked from the plugin menu as **Plugin Settings**).
-2. Enter your **ListenBrainz username** and **API token** (needed for the personalised features).
+2. Enter your **ListenBrainz username** — that alone enables every personalised feature.
+   *(Optional)* Add your **API token** if you also want the **Recommended** list under People You Follow.
 3. *(Optional)* Paste a **Last.fm API key** and set **Streaming Services** priorities if you have Qobuz/Tidal/Bandcamp/Deezer.
 4. *(Optional)* Add your **MuSpy user ID** (bottom of the settings page, in the **MuSpy** section) to fold your followed artists' releases into New Releases for You.
 5. Save. The plugin appears in **Apps → ListenBrainz Fresh Releases**.
@@ -138,7 +140,7 @@ Use **Copy report** if you're asking for help; it never contains your token or y
 | Setting | Default | Notes |
 |---|---|---|
 | ListenBrainz Username | *(empty)* | Needed for For You, Playlists, Don't Stop The Music |
-| User Token | *(empty)* | From listenbrainz.org/settings/ |
+| User Token *(optional)* | *(empty)* | Only adds the **Recommended** list under People You Follow (private feed). From listenbrainz.org/settings/ |
 | Last.fm API Key | *(empty)* | Optional — enables genre + artist-bio + radio similar-artist fallbacks |
 | Days window | **14** | 1–90 days of releases to show |
 | Find on Streaming Services | **On** | Show playable Qobuz/Tidal/Bandcamp/Deezer matches on detail pages |

@@ -1,8 +1,49 @@
 # Removing the ListenBrainz token (and the Last.fm key) — findings & scope
 
-**Status:** SCOPED, NOT STARTED. Investigated 2026-07-31. No code written.
+**Status:** **§3.1 SHIPPED (0.9.160, 2026-08-12).** §3.2 and §3.3 still open. §4 (Last.fm) is
+**superseded** — see the note at the head of §4.
 **Goal:** the plugin should work fully with a **username only** — no ListenBrainz token, no
 Last.fm API key — so a new user types one field and everything works.
+
+---
+
+## 0. What shipped in 0.9.160, and what is still open
+
+**RE-VERIFIED 2026-08-12 before writing any code**, against the real configured account rather
+than the 2026-07-31 test users. Every LB endpoint the plugin calls was fetched twice — once
+anonymous, once with that user's token — and compared:
+
+| Endpoint | Anon | vs authed |
+|---|---|---|
+| `/1/user/<u>/fresh_releases` | 200 | **byte-identical** (same sha1 over `payload.releases`) |
+| `/1/user/<u>/playlists/createdfor` + `/1/playlist/<mbid>` | 200 | identical |
+| `/1/cf/recommendation/user/<u>/recording` | 200 | identical |
+| `/1/user/<u>/following` | 200 | identical |
+| `/1/user/<u>/listens?count=1` | 200 | identical |
+| `/1/stats/user/<u>/{recordings,release-groups}` | 200 | identical |
+| `/1/metadata/recording/` | 200 | identical |
+| `/1/popularity/top-recordings-for-artist/` | 200 | identical |
+| **`/1/user/<u>/feed/events`** | **401** | — |
+
+Six individual followers' weekly stats were compared the same way and were also identical —
+worth knowing, because it confirms the token can't unlock a *follower's* private stats either
+(it authenticates you, not them), so the Trending fan-out was never affected.
+
+**Shipped (§3.1):** the two token gates on the For You feed are gone. `getFreshReleasesForUser`
+now requires a username only and sends `Authorization` only when a token happens to be set;
+`topLevel` gates the New Releases for You tile on `$username` alone. Strings reworded.
+
+**Deliberately NOT changed:** all four follow-feed gates (`getFollowFeed`, `_followTile`,
+`_warmFollow`, the unmatched-debug entry). Those gates are CORRECT — without them a tokenless
+user gets an opaque 401 at runtime instead of a tile that simply isn't there.
+
+**`tools/t_tokenfree.pl`** (23 assertions) pins both halves, and the second half is the reason
+it exists: a later "finish the token-free work" pass could easily strip the follow gates too.
+Anti-tested three ways — restoring the old gate = 7 red, unconditional auth header = 2 red,
+dropping `_followTile`'s `if $token` = 1 red.
+
+**Still open:** §3.2 (rebuild Recommended on public loved-tracks/pins) and the §3.3 volume
+decision it depends on. Until then, a user with no token simply has no Recommended tile.
 
 Everything below was verified two ways: against the **ListenBrainz server source**
 (`metabrainz/listenbrainz-server`, master) and with **live anonymous HTTP calls**. Where the two
@@ -139,7 +180,7 @@ is the backfill option if history matters.
 
 ## 3. Code changes required
 
-### 3.1 Drop the token gates (small, do first — this is the real user-facing win)
+### 3.1 Drop the token gates — **DONE, 0.9.160.** Kept below as the record of what changed.
 
 | Location | Change |
 |---|---|
@@ -213,12 +254,18 @@ the cover (`tools/make_covers.py` → `menu-follow.png`), and the strings.
 
 ## 4. The Last.fm key
 
+> **SUPERSEDED (Simon, 2026-08-12) — do NOT ship the plugin-owned key recommended below.**
+> The plugin is moving to the hosted LMS-community API as its metadata backend
+> (`docs/hosted-lms-community-api.md`), which removes the need for a Last.fm key rather than
+> hiding it behind a bundled credential. Fold this section's three uses into that refactor;
+> don't do it twice. The analysis below is still accurate about what the key is used for.
+
 Separate credential, same goal. Used in exactly three places:
 
 | Use | Location | Keyless replacement |
 |---|---|---|
-| Genre/tag fallback | `API::getLastfmTags` ~2145 | See `genre-sources-investigation.md`. Partly replaceable; not a clean win. |
-| Artist biography (only when MAI absent) | `API::getArtistBio` ~2060 | MB `artist/<mbid>?inc=url-rels` → Wikidata → Wikipedia TextExtracts. No key. MAI ships `Wikipedia.pm` doing exactly this. |
+| Genre/tag fallback | `API::getLastfmTags` ~2145 | See `genre-sources-investigation.md`. Partly replaceable; not a clean win. **Still live, and now the ONLY caller is `_warmLastfm`** — the ladder's tier-5 filler. The detail page's own second call to it went in 0.9.186 (tier 5 had already answered by the time the page peeked). |
+| ~~Artist biography (only when MAI absent)~~ | ~~`API::getArtistBio`~~ | **MOOT — the sub was DELETED in 0.9.186**, with the `lbf:bio:` key family and `_setText`/`_getText`. No MAI now means no bio, deliberately: MAI's own bio sources include Last.fm, and this population was never offered an artist photo either. The keyless replacement below is recorded only in case a bio source is ever wanted again. (MB `artist/<mbid>?inc=url-rels` → Wikidata → Wikipedia TextExtracts. No key. MAI ships `Wikipedia.pm` doing exactly this.) |
 | DSTM similar-artists fallback | `DSTM.pm` 213 | **No keyless equivalent** of `artist.getsimilar`. Since 0.9.77 an empty radio pool already falls back to the CF pool, so losing it degrades rather than breaks. |
 
 **Alternative worth considering: ship a plugin-owned key.** MusicArtistInfo does exactly this —
@@ -234,13 +281,14 @@ Wikipedia bio path, and it removes the field as a *requirement* immediately.
 
 ## 5. Suggested order
 
-1. **3.1 token gates** — biggest user-facing win, smallest change, no cache bumps.
-2. **4 Last.fm own-key** — one small change, removes the second credential.
+1. ~~**3.1 token gates**~~ — **DONE (0.9.160).**
+2. ~~**4 Last.fm own-key**~~ — **dropped**; superseded by the hosted-API refactor (see §4).
 3. **3.3 volume decision** — needs a call before any of 3.2 is worth writing.
 4. **3.2 public-source rebuild** — the actual work.
 
-Steps 1 and 2 alone mean **no user ever has to enter a credential**, with the only loss being
-recommendation events for users who don't set a token. That may be enough on its own.
+With step 1 shipped, the ListenBrainz token is already optional for every feature except
+Recommended. The remaining credential is the Last.fm key, and that now goes away as part of
+`docs/hosted-lms-community-api.md` rather than here.
 
 ---
 
