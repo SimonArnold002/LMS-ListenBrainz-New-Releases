@@ -152,6 +152,7 @@ ListenBrainzFreshReleases/
 ├── HomeExtras.pm                      # Material home-page shelves — three HomeExtraBase subclasses (New Releases for You / Playlists / All Releases)
 ├── DSTM.pm                            # Don't Stop The Music propagators — 2 mixers: Radio (seeds from last-played artist → similar-artists → top-recordings, evolves) + Recommended (CF pool); streaming-first resolution via Browse::_resolveTracks
 ├── Settings.pm                        # CSRF-protected settings page (General / Streaming Services / For You / All Releases)
+├── DB.pm                              # The durable SQLite store behind the release feeds. THREE TIERS, and the rule that keeps them honest: IF IT IS IN `kv` IT IS DISPOSABLE, IF IT MUST SURVIVE IT NEEDS A TABLE. BASE (release/feed_member/feed_day/feed_meta/bandcamp_pin/follow_item) dies only to a BASE_VERSION bump; FACTS (release_group/recording/artist) to their own *_FACT_VERSION, with a dev build clearing ONLY the genre columns so years/types/MBIDs/sort-names survive; DERIVED (kv) is wiped wholesale by `wipeDerived` on every build change
 ├── SingleFlight.pm                    # SHARED FLEET MODULE (canonical copy — see tools/singleflight_sync_check.py). The one async coalescing registry: claim / park / fan out / watchdog. Replaces the THIRTEEN hand-rolled guards across four repos (LBF %BUILDING/%INFLIGHT/%coverQueued/%sortInFlight/%agenInFlight, LL %counting/%trackPending, PFR %PENDING/%RESOLVING, DSC %nameRefetched/%candWaiting/%bandsInFlight/%officialInFlight) that between them produced the same four review findings, one site at a time, for weeks
 ├── Diag.pm                            # Server-side connectivity report — probes every upstream host (LB, LB Labs, MusicBrainz via _mbBase, the MB search index, CAA, Last.fm, MuSpy) in parallel and returns ok/warn/fail/skip per target; driven by the ["lbf","diag"] CLI dispatch in Plugin.pm and by the Settings page's Connection Check section
 ├── install.xml                        # <extension> format, icon_svg.png (version in <version>)
@@ -187,7 +188,152 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-**0.9.186** — built, not yet installed. **The seven findings of the 0.9.184 code review,
+**0.9.188** — built 2026-08-30, **NOT installed and NOT tested**. Two user-visible changes,
+both small and both measured on the live server first: **cover art is cached as JPEG instead
+of re-encoded PNG**, and the **top-level menu is reordered** (All Releases directly under For
+You; People You Follow last of the content sections). No schema change, no `BASE_VERSION`
+bump. One cache family bump: **`lbf:imgwarm:` -> 2**, which is mandatory here — see below.
+
+**0.9.188 — THE COVERS WERE BEING RE-ENCODED AS PNG, AND NOTHING SAID SO.**
+
+The complaint was "artwork loading from cache can be slow". Measured on the live server, cold
+covers deep in All Releases ran **1.4–2.2s each against 0.02s warm** — the cover warm caps at
+`COVER_WARM_MAX` (150) per feed while the `all` feed holds ~3,000 in-window releases, so most
+rows were simply never warmed. That cap is still there and is still the bigger problem (it is
+on the structural list, not fixed here). What IS fixed is what each of those requests costs.
+
+`XMLBrowser` runs every row image through `proxiedImage`, which takes the proxied path's
+extension **from the source URL and defaults to `.png` when the URL has none**. CAA's
+`/front-250` has none. So every LBF cover shipped as `/imageproxy/<esc>/image.png` and the
+proxy re-encoded it as PNG. Same cover, same spec, varying ONLY the extension:
+
+| spec | `.png` | `.jpg` |
+|---|---|---|
+| `_150x150_f` | 44,000 B | 7,994 B |
+| `_300x300_f` | 160,972 B | 25,620 B |
+| `_600x600_f` | 648,081 B | 101,100 B |
+
+The 600px PNG was **larger than the full 1200px JPEG source it was scaled down from**
+(394,707 B), and PNG-encoding a 600x600 photograph is far more CPU than JPEG — paid on the
+event loop, per cover, on first sight. A 150-cover x 3-spec warm cached ~128 MB of PNG; it now
+caches ~20 MB.
+
+**WHY THE OTHER PLUGINS NEVER SHOWED THIS.** Their covers come from services whose URLs
+already end in `.jpg` (Qobuz `_600.jpg`, Tidal `/640x640.jpg`), so they got JPEG by accident
+of the source URL — verified live: a PFR row is `…/j9c95moy56n55_600.jpg/image.jpg`. CAA's
+extensionless path was the only one falling through to the default. This is NOT a fleet-wide
+defect to go porting; it is specific to a source URL with no extension.
+
+**THREE THINGS HAD TO MOVE TOGETHER, and any one alone is a silent regression:**
+
+- `API::coverArtUrl` names `/front-250.jpg` (CAA serves `front-<n>` and `front-<n>.jpg`
+  identically — same bytes, `image/jpeg`; probed live, 14/14 real release covers and both
+  release-group covers 200).
+- **Plugin.pm's CAA size ladder was anchored `s|/front-\d+$|…|`**, so the moment the URL
+  carried an extension it matched nothing and the ladder stopped firing — every spec then
+  served from whatever size the row happened to name. Verified live before the fix: a
+  `_600x600_f` came back off the 250px source instead of front-1200. It now captures the
+  optional extension and puts it back, so an extensionless URL still behaves as before.
+- `Browse::_warmCovers` warms the EXACT path the client will request, and its builder splices
+  the spec before whatever extension it finds — so it follows automatically. But every marker
+  written so far describes a `.png` path no client will ask for again. Without invalidating
+  them the warm would skip the whole feed and leave every cover cold, which is the precise
+  failure the warm exists to prevent. Hence the bump.
+
+**`lbf:imgwarm:` IS NOW A REGISTERED KEY FAMILY** (`DB::KEY_VERSIONS`, version 2). It was
+written as a bare literal, which meant it was invisible to `cachestats` (~950 of 1,570 kv rows
+on the live server were unaccounted for), unreachable by `retirePrefixes`, and impossible to
+invalidate short of the dev wipe. All three are fixed by declaring it.
+
+Also folded in: the Trending row's artwork fallback built its own release-group CAA URL as a
+literal, so it would have been the one row type left on PNG. It goes through `coverArtUrl` now
+— one builder for the string, which is what stops this recurring.
+
+**0.9.188 — TOP-LEVEL SECTION ORDER.** Now Created for You -> **All Releases** -> **People You
+Follow** -> Settings. Only the first can be assembled synchronously: the All Releases weeks are
+inlined from an async feed fetch, so everything below them has to be emitted inside `$finish`.
+The People section moved in there for that reason alone — `@people` is still built
+synchronously and captured by the closure, so a disabled or empty section is absent exactly as
+before, and both fallback paths (the `TOPLEVEL_ALL_WAIT` watchdog and the fetch error) render
+through the same `$finish`, so the order holds on a cold or failing feed too.
+
+**TESTS.** `tools/t_coverwarm.pl` is 44 assertions (was 38) and gained the ladder's REWRITE,
+which was never covered — section 1 checked which size the handler picks and stopped there,
+but picking 1200 is worthless if the substitution that stamps it in doesn't fire, which is
+exactly what broke. Two things it was paraphrasing are now extracted verbatim like every other
+body in that suite: `coverArtUrl` (a hand-written copy returning `/front-250` sat there while
+the shipped sub moved on, which would have kept the whole suite asserting `.png`) and the
+marker's key version, read from the real `KEY_VERSIONS`. `LBF_API` / `LBF_DB_SRC` overrides
+were added so the anti-test can reach them — without those a mutated `coverArtUrl` went on
+passing against the pristine copy. Both mutants now fail behaviourally.
+
+**ONE PRE-EXISTING TEST FAILURE FIXED IN PASSING, unrelated to either change.**
+`t_review_fixes.pl` asserted `_bcMatchKey` "DID exist at HEAD" to prove its removal check was
+comparing something real. The sub was removed in `cab9450` (0.9.186), so from that commit on
+the premise could never hold and the suite failed permanently while the property it guards was
+intact. It is now pinned to the last commit that contained the sub, resolved by content rather
+than hardcoded. An anti-test that fails for a reason unrelated to the thing it protects
+teaches the next reader to ignore it.
+
+**0.9.187** — superseded by 0.9.188. Adds **Spotify as a fifth
+streaming service, via the Spotty plugin** — PR #17 by **honzup**, hand-applied (`c68cbb1`,
+honzup credited as `Co-Authored-By`). No schema change, no `BASE_VERSION` bump, and **no cache
+bumps needed** — every stream/playlist/follow/trending layer already keys on `svcOrder`, so
+registering a fifth adapter invalidates them by construction. First build to ship
+`SingleFlight.pm`, which **no call site adopts yet** — it loads nowhere and changes nothing.
+
+**0.9.187 — SPOTIFY, VIA SPOTTY. And why this adapter is not shaped like the other four.**
+
+Spotty is an OLDER, INDEPENDENT codebase — not the Michael-Herger Qobuz/Tidal/Deezer family —
+and three differences follow from that, all deliberate: `getAPIHandler` is a **CLASS** method
+(`->`, not the function form LBF uses for Qobuz/Deezer), the renderers live in **`OPML.pm`**
+rather than `Plugin.pm`, and search results arrive **already normalized**. Album nodes are the
+Tidal/Deezer shape (coderef `url` + uri in `passthrough`), so `_rebuildStreamItems` reattaches
+`\&OPML::album` on re-read exactly as it does for the others.
+
+**TWO SPOTIFY-SPECIFIC TRAPS, both found in review and both now guarded:**
+
+- **Signed-out Spotty reports a REAL no-match, not "inconclusive".** `->can('getAPIHandler')` is
+  true the moment the plugin loads, regardless of accounts, but with **zero credentials on the
+  server** `AccountHelper::getAccount` returns undef on EVERY call — permanently, not
+  transiently (verified against Spotty master: `AccountHelper.pm:40-65` takes its `else` branch,
+  sets `$id = undef`, returns undef). Reporting that as `undef` would make `$inconclusive++`
+  fire, pinning every genuine miss to `STREAM_INCONCLUSIVE_TTL` (1h) instead of
+  `STREAM_NOMATCH_TTL` (24h) **for ever** — 24x the re-search load on the other four. Both
+  `_searchSpotify` and `_searchSpotifyTrack` therefore gate on `AccountHelper->hasCredentials()`
+  and hand back `[]`. **This is new to Spotify** — the other three plugins' handlers are
+  server-wide, so "no handler" there really is transient. The guard lives at the SEARCH SITE, not
+  in `_streamingAdapters`: that sub is memoed for only `ADAPTER_MEMO_TTL` (5s), and
+  `getAllCredentials` re-scans the cache folders on every call while the result is empty — i.e.
+  exactly in the signed-out case.
+
+- **Spotify has NO EP CLASS — EPs come back as `album_type: "single"`.** Adding the field to
+  `_candReleaseType`'s trusted list would therefore mis-drop a Spotify EP for an album or
+  compilation target (`$dropSingles` only falls back to the full set when NOTHING survives). The
+  single verdict is guarded on the count instead: `total_tracks <= 3`. A 4+-track EP falls
+  through to `''`; a real 1-3 track single still classifies. Keeping the field beats dropping it —
+  it catches the 0.9.89 case (a like-named 3+-track single) that a count alone cannot.
+
+**A CORRECTION TO A RULE STATED ELSEWHERE IN THIS FILE, worth carrying:** `total_tracks` here is
+**NOT** inert the way the removed `&tc=` param was. The `_attachFavUrl` note says count fields are
+album-ENDPOINT-only and absent from search responses — true for Qobuz/Tidal/Deezer, and **false
+for Spotify**, whose search payload genuinely carries `total_tracks` and whose `normalize()` keeps
+it. Spotify is **the one service whose SEARCH result feeds the count chain**. Both comment sites
+now say so; don't "clean up" that field as dead code.
+
+**Spotty's own `favorites_url` is PRESERVED** — Spotify returns early from `_attachFavUrl`, the
+only service that does. Spotty's `album()` extracts the id with a greedy `/album:(.*)/`, so the
+decorated `<svc>://album:<id>?cover=…` scheme would capture the query string INTO the id and break
+a natively-saved favourite on replay. Nothing is lost: the decorator exists because Qobuz/Tidal/
+Deezer leaked a BROKEN coderef favurl, and Listen Later has no spotify source support anyway.
+
+**NOT VERIFIED LIVE. Spotty is not installed on the test server**, so every claim above is
+source-verified only — read from real Spotty v4.62.2 source, never observed running. Full review
+findings and the merge plan: `docs/spotify-spotty-adapter-pr17.md`. **Owed at the main merge: a
+CHANGELOG credit line for honzup** (the PR's own CHANGELOG hunk was deliberately not taken, per
+the dev-branch rule).
+
+**0.9.186** — superseded by 0.9.187. **The seven findings of the 0.9.184 code review,
 all fixed** (`docs/code-review-0.9.184.md` — every one carries its mechanism, its guard
 and its anti-test), plus **the removal of the detail page's two remaining Last.fm calls**.
 No schema change and no `BASE_VERSION` bump; `DEV_BUILD` clears the derived store on first
@@ -714,11 +860,12 @@ value on every run.
   - **The now-playing specs (1024/2048) are deliberately NOT warmed** — no LBF row is ever the
     now-playing artwork and they are the most expensive entries in the table.
   - **No cache bumps.** Nothing about a stored shape or a cached decision changed.
-  - `tools/t_coverwarm.pl` (36 assertions): the size table driven through `getRightSize`'s REAL
-    algorithm against the table PARSED out of `Plugin.pm`, the warmed path compared to what
-    Material builds, the queueing rules, and the runner. **Anti-tested both halves** via
-    `LBF_PLUGIN=` / `LBF_BROWSE=` — restoring the old table = 4 red, splicing the spec after the
-    extension instead of before = 6 red.
+  - `tools/t_coverwarm.pl` (44 assertions as of 0.9.188): the size table driven through
+    `getRightSize`'s REAL algorithm against the table PARSED out of `Plugin.pm`, the ladder's
+    url REWRITE, the warmed path compared to what Material builds, the queueing rules, and the
+    runner. **Anti-tested four ways** via `LBF_PLUGIN=` / `LBF_BROWSE=` / `LBF_API=` —
+    restoring the old table, re-anchoring the rewrite as `s|/front-\d+$|…|`, dropping the
+    `.jpg` from `coverArtUrl`, or splicing the spec after the extension instead of before.
 
 ### 0.9.174 — PRE-RELEASE REVIEW OF THE 0.9.173 WORKING TREE. Eight defects, all fixed.
 
@@ -1338,8 +1485,10 @@ round-trip, prefix retirement, the dev-build wipe leaving the durable tables alo
 degrade-never-die; `LBF_DB=` points it at a mutated copy), `tools/t_ttlceiling.pl` (no
 TTL handed to `Slim::Utils::Cache` may exceed 2,592,000 — reproduces LMS's own rule
 first, so a guard set to the WRONG number fails before it can pass vacuously),
-`tools/t_coverwarm.pl` (the CAA size table + the cover pre-warm — the warmed path must
-equal what Material requests; `LBF_PLUGIN=`/`LBF_BROWSE=` point it at mutated copies),
+`tools/t_coverwarm.pl` (the CAA size table, the ladder's url rewrite + the cover pre-warm —
+the warmed path must equal what Material requests, down to the EXTENSION, which decides
+whether the proxy caches JPEG or re-encodes every cover as PNG;
+`LBF_PLUGIN=`/`LBF_BROWSE=`/`LBF_API=`/`LBF_DB_SRC=` point it at mutated copies),
 `tools/t_statsratelimit.pl` (the follower stats burst — the shared backoff on `_getUserStats` and the serialised follower chain; `LBF_API=`/`LBF_BROWSE=` point it at mutated copies, anti-tested two ways), `tools/bench_store.pl` (the feed store's blocking cost — ingest and read, against real DBD::SQLite at a real feed size; RUN IT after any change to `ingestFeed`/`feedReleases`, and it is what set `INGEST_CHUNK`), `tools/t_ingestchunk.pl` (the chunked ingest's SAFETY property — rotation and coverage only on a complete pass, identical store either way, merge across a chunk boundary, synchronous refusal; `LBF_DB=` points it at a mutated copy, anti-tested two ways), `tools/t_warmstats.pl` (the warm-stage instrument — that it records the OVERLAP between stages and not merely their durations, and that the warm subs actually CALL it; `LBF_PLUGIN=`/`LBF_BROWSE=` point it at mutated copies, anti-tested five ways), `tools/t_feedsingleflight.pl` (the COLD feed path fetches ONCE however many browse walks arrive — behavioural, driven through a suspending HTTP stub because the property is "how many requests went out and who was called back", which no pattern match shows; also that BOTH outcomes fan out, that waiters get the same STRING shape as the primary on error, and that the key is the REQUEST (memo key + headers) so a token holder is never multiplexed onto an anonymous fetch. `LBF_API=` points it at a mutated copy, anti-tested five ways), `tools/t_buildingstate.pl` (the in-flight guard and the building row — that the flag is TAKEN before a fan-out, RELEASED on every exit via a single wrapper rather than at each of 8 returns, never released by a caller that did not take it, and that "building" is signalled as `undef` and never as an empty list; also that the feed chain's error paths all advance it and that `_warmTick` waits on its callback. `LBF_BROWSE=` points it at a mutated copy, anti-tested five ways), `tools/t_rgresolver.pl` (the hosted `/discography` release-group tier — that a hit returns a release-GROUP id and never asks MB, that it is ONE call per artist not per album, that `?mbid=` reaches BOTH cache keys, which of several same-titled groups wins, and that EVERY non-hit falls back to MusicBrainz; `LBF_API=` points it at a mutated copy, anti-tested five ways. **Its cache lever is `DB::store`, not `Slim::Utils::Cache`** — API.pm holds the plugin's own store, and a first cut that stubbed the wrong one failed ten assertions because nothing could be observed or reset between sections; the suite now dies loudly if the override is not in effect rather than running vacuous), `tools/t_weekwindow.pl` (the whole-week release window — that the edges are real Mondays and Sundays on EVERY day of the week and for every legal (past, future) pair; **the Friday test**, run across a real week, that a Friday release is still in scope on Saturday and Sunday with earlier weeks OFF and leaves on the next MONDAY rather than at midnight; that the four-week budget survives a hand-edited 52/52; that the derived LB `days=` never exceeds 27, is never 0, and reports `future=true` with zero later weeks; that the gate fallbacks in `%WEEK_GATES` are DERIVED from Plugin.pm's `$prefs->init` rather than restated; that the feed memo key has ONE builder both fetchers and both halves of `clearFeedCache` go through; and that the checkbox-coercion sentinel names a field `settings.html` actually posts. `LBF_API=`/`LBF_DB=`/`LBF_BROWSE=` point it at mutated copies, anti-tested three ways — a today-relative window, the sentinel left on `pref_days`, and `foryou_future` drifting back to `// 0`), `tools/matcher_sync_check.py` (currently exits 1 — see the hold).
 
 - **Listen Later release-type handshake — `&rt=` on the favurl (0.9.141).** LL 0.1.86 stores a
@@ -2904,9 +3053,20 @@ authoritative table, kept from upstream source. Don't guess these; they break si
 that cause empty/junk pools:
 1. **Envelope: ONLY Qobuz hands back the whole result hash** (`{artists}{items}`/`{albums}{items}`);
    Tidal & Deezer unwrap `{data}` themselves → plain ARRAY.
-2. **Query encoding differs** (`query_enc`): Qobuz + Tidal want a CHARACTER string, Deezer wants
-   BYTES. Feeding octets to Qobuz/Tidal double-encodes accents → junk/0 results (fixed 2026-07-10;
-   LBF carries `query_enc`/`qChars`/`qBytes` in `_findPlayable`/`_findPlayableTrack`).
+2. **Query encoding differs** (`query_enc`): Qobuz + Tidal + **Spotify** want a CHARACTER string,
+   Deezer + Bandcamp want BYTES. Feeding octets to the character camp double-encodes accents →
+   junk/0 results (fixed 2026-07-10; LBF carries `query_enc`/`qChars`/`qBytes` in
+   `_findPlayable`/`_findPlayableTrack`). Spotty escapes with `uri_escape_utf8` in
+   `API::_prepareCall`, which is what puts it in the character camp.
+
+**SPOTIFY/SPOTTY IS THE EXCEPTION TO MOST OF THIS SECTION** (0.9.187, LBF only). It is an older,
+independent codebase: `getAPIHandler` is a **class** method, the renderers live in `OPML.pm`, the
+search key is **`query`** (not `search`) with a **singular** `type`, and results come back
+**already normalized** as a bare arrayref. Its Pipeline also **swallows API/auth errors into an
+empty arrayref**, so an outage is genuinely indistinguishable from a clean miss at that layer —
+accepted, with nothing better reachable through Spotty's public surface. Two behaviours that bite
+only here — signed-out being PERMANENT, and EPs typed as `single` — are written up in full under
+0.9.187 in "Current Version"; read that before touching `_searchSpotify`.
 
 **HOW TO DEBUG A SEARCH (the canonical method — stop trying variants each session):**
 1. `["pref","plugin.listenbrainzfreshreleases:debug_log","1"]` (via jsonrpc).

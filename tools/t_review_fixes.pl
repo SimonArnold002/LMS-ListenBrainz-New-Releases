@@ -101,6 +101,25 @@ my $api_src    = slurp($API);
 my $head_src = `cd '$ROOT' && git show HEAD:ListenBrainzFreshReleases/Browse.pm`;
 die "couldn't read Browse.pm at HEAD\n" unless length $head_src;
 
+# A SECOND, FIXED REFERENCE — and the reason is a lesson about anti-tests that
+# read a moving branch. The `_bcMatchKey` premise below asserts the sub really
+# DID exist once, so that "it is gone now" is a claim about a removal rather
+# than about a name that was never there. It compared against HEAD, and HEAD
+# moved: the sub was removed in cab9450 (0.9.186), and from the moment that
+# commit landed the premise could never hold again. The suite then failed
+# permanently while the property it guards was perfectly intact — an anti-test
+# that fails for a reason unrelated to the thing it protects teaches the next
+# reader to ignore it, which is worse than not having it.
+#
+# Pinned to the last commit that still CONTAINED the sub, resolved by content
+# rather than hardcoded, so it stays true regardless of what HEAD does next.
+my $BCREF = `cd '$ROOT' && git log --format=%H -S'sub _bcMatchKey' -- ListenBrainzFreshReleases/Browse.pm`;
+my ($bc_removed) = split /\n/, ($BCREF // '');
+my $pre_src = '';
+if ($bc_removed) {
+    $pre_src = `cd '$ROOT' && git show $bc_removed~1:ListenBrainzFreshReleases/Browse.pm 2>/dev/null`;
+}
+
 # --- shared stubs (defined ONCE; each finding's package just uses them) -----
 {
     # A stand-in for Slim::Utils::Cache: get/set/remove over a plain hash.
@@ -139,8 +158,9 @@ print "-" x 74, "\n";
     # not crept back.
     ok(!scalar($browse_src =~ /sub _bcMatchKey\b/),
        '_bcMatchKey no longer exists — there is no key left to bump');
-    ok(scalar($head_src =~ /sub _bcMatchKey\b/),
-       '...and it DID exist at HEAD, so this assertion is comparing something real');
+    ok(scalar($pre_src =~ /sub _bcMatchKey\b/),
+       '...and it DID exist before ' . substr($bc_removed // '?', 0, 7)
+       . ', so this assertion is comparing something real');
 
     # A QUOTED literal, not any mention: the comments here deliberately recount the
     # 0.9.42/0.9.141 history, and a test that failed on its own explanation would

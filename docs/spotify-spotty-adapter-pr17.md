@@ -1,7 +1,27 @@
 # Spotify via Spotty — PR #17 review findings & merge plan
 
-**Status:** **PARKED — do not merge yet.** Merge once `dev` reaches a stable point (the tree is
-currently +1728/−147 on `Browse.pm` vs `origin/dev`).
+**Status:** **DONE — applied, committed and built.** Hand-applied into the working tree and
+committed as **`c68cbb1`** on `dev` (2026-08-29), with honzup credited as `Co-Authored-By`; built
+into **0.9.187**. **Not pushed, not installed, NOT tested** — Spotty is still absent from the test
+server, so everything below remains source-verified only.
+
+**Still owed:** the PR stays OPEN (its `Closes #17` only fires on the default branch, `main`) —
+Simon is closing it by hand once `dev` is pushed, and has already replied to honzup. **A CHANGELOG
+credit line for honzup is owed at the main merge**, since the PR's own CHANGELOG hunk was
+deliberately not taken.
+
+**How it was applied, and the rule that came out of it:** hand-applying was right on 2026-08-21
+(the tree was uncommitted) but NOT on 2026-08-29, once the tree was committed as `cab9450`. A
+`git merge-tree` simulation showed `Browse.pm` and `Plugin.pm` would have merged CLEANLY, with
+conflicts only in `CHANGELOG.md`, `CLAUDE.md` and `Settings.pm` — so push-then-merge was available
+and would have preserved honzup's authorship natively and auto-closed the PR. **The rule going
+forward: if the working tree is COMMITTED, push first and merge on GitHub; only hand-apply when
+uncommitted work sits in the same files.**
+
+**One change was made beyond the PR** (§4 housekeeping, done in the same commit): `_attachFavUrl`'s
+`&tc=` comment claimed count fields are absent from EVERY service's search response, which the new
+`_candReleaseType` note contradicts for Spotify. A clause now records the exception so the two
+notes don't fight.
 **PR:** [#17 "Add Spotify streaming adapter via the Spotty plugin"](https://github.com/SimonArnold002/LMS-ListenBrainz-New-Releases/pull/17)
 — `honzup:spotify-adapter` → `dev`, opened 2026-07-19, 1 commit, 7 files, +194/−26. Closes #16.
 **Reviewed:** 2026-08-21, against Spotty **v4.62.2** master source (`Plugin.pm`, `OPML.pm`,

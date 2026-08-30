@@ -43,6 +43,8 @@
 #
 # ANTI-TEST: point LBF_PLUGIN / LBF_BROWSE at a mutated copy.
 #   * restore `500 => '500'` as the ceiling with `|| '250'`  -> section 1 fails.
+#   * re-anchor the url rewrite as `s|/front-\d+$|...|`       -> section 1 fails.
+#   * drop the `.jpg` from coverArtUrl (LBF_API)              -> section 2 fails.
 #   * change the spec splice to append after the extension    -> section 2 fails.
 #
 # Exit 0 = all good. Exit 1 = at least one regressed.
@@ -53,6 +55,13 @@ use File::Spec;
 my $ROOT   = File::Spec->rel2abs(File::Spec->catdir((File::Spec->splitpath($0))[1], File::Spec->updir));
 my $BROWSE = $ENV{LBF_BROWSE} || File::Spec->catfile($ROOT, 'ListenBrainzFreshReleases', 'Browse.pm');
 my $PLUGIN = $ENV{LBF_PLUGIN} || File::Spec->catfile($ROOT, 'ListenBrainzFreshReleases', 'Plugin.pm');
+# API.pm and DB.pm joined the suite when `coverArtUrl` and the marker's key
+# version stopped being paraphrased here. They need the same override as the
+# other two or the anti-test cannot reach them: a mutated coverArtUrl would go on
+# passing against the pristine copy, which is the failure mode this whole file is
+# organised against.
+my $API    = $ENV{LBF_API}    || File::Spec->catfile($ROOT, 'ListenBrainzFreshReleases', 'API.pm');
+my $DB     = $ENV{LBF_DB_SRC} || File::Spec->catfile($ROOT, 'ListenBrainzFreshReleases', 'DB.pm');
 
 my ($pass, $fail) = (0, 0);
 sub ok {
@@ -87,6 +96,45 @@ sub grab {
 
 my $bsrc = slurp($BROWSE);
 my $psrc = slurp($PLUGIN);
+
+# The one collaborator that decides which cover a release has — EXTRACTED
+# VERBATIM, like every other body in this suite, and it was the one thing here
+# that wasn't. A hand-written copy returning '/front-250' sat here while the
+# shipped sub moved to '/front-250.jpg', and because `proxiedImage` derives the
+# proxied path's extension FROM THAT URL, the paraphrase kept the whole suite
+# asserting `.png` paths that the plugin had stopped producing. That is exactly
+# the drift the header comment warns about, and it is worth more than a fixed
+# literal here: the extension is not cosmetic, it decides whether the proxy
+# caches JPEG or re-encodes every cover as PNG (measured: 44,000 B vs 7,994 B at
+# _150x150_f, 648,081 B vs 101,100 B at _600x600_f).
+my $asrc = slurp($API);
+{
+    package Plugins::ListenBrainzFreshReleases::API;
+    use constant CAA_BASE_URL    => 'https://coverartarchive.org/release/';
+    use constant CAA_RG_BASE_URL => 'https://coverartarchive.org/release-group/';
+}
+{
+    my $body = grab($asrc, 'coverArtUrl');
+    eval "package Plugins::ListenBrainzFreshReleases::API; $body 1;"
+        or die "eval coverArtUrl: $@";
+}
+
+# The store's key-version rule, reproduced from DB.pm's own KEY_VERSIONS so the
+# marker assertions below check the REAL family version rather than a guess. A
+# bump has to invalidate the markers — every one of them names a proxy path, and
+# the `.png` -> `.jpg` switch changed every path the plugin will ever request.
+my $dsrc = slurp($DB);
+my ($kv_src) = $dsrc =~ /use constant KEY_VERSIONS => \{(.*?)^\};/ms
+    or die "no KEY_VERSIONS in DB.pm\n";
+my %KEY_VERSIONS = $kv_src =~ /'([^']+)'\s*=>\s*(\d+)/g;
+die "KEY_VERSIONS parsed empty\n" unless keys %KEY_VERSIONS;
+die "'lbf:imgwarm:' is not a registered key family\n"
+    unless defined $KEY_VERSIONS{'lbf:imgwarm:'};
+{
+    package Plugins::ListenBrainzFreshReleases::DB;
+    sub kver { return $_[0] . $KEY_VERSIONS{ $_[0] } . ':' }
+}
+my $IMGWARM = 'lbf:imgwarm:' . $KEY_VERSIONS{'lbf:imgwarm:'} . ':';
 
 # ==========================================================================
 section('1. the CAA size table answers the specs Material actually asks for');
@@ -124,6 +172,46 @@ ok($fallback eq $largest,
 # And the rule that made it a bug in the first place is really live.
 ok(!defined right_size(600, { 50 => '250', 100 => '250', 250 => '250', 500 => '500' }),
    'getRightSize really does return undef above the table ceiling (the premise)');
+
+# THE REWRITE ITSELF, not just the table it consults. Section 1 checked which
+# SIZE the handler picks and stopped there — but picking 1200 is worthless if the
+# substitution that stamps it into the URL doesn't fire, and that is precisely
+# what went wrong: the pattern was anchored `/front-\d+$`, so the moment
+# `coverArtUrl` started naming `.jpg` it matched nothing, the url passed through
+# untouched, and every spec was served from whatever size the row happened to
+# carry. Verified live before the fix — a `_600x600_f` came back off the 250px
+# source instead of front-1200. Silent, and invisible to a table-only test.
+#
+# The line is lifted VERBATIM from the shipped handler for the usual reason.
+# Delimiter-agnostic on purpose: pinning the extraction to `s{...}` would mean a
+# reverted handler failed to PARSE rather than failing an assertion, and "the line
+# looks different" is a much weaker claim than "the rewrite no longer works".
+my ($rewrite_src) = $psrc =~ /^(\s*\$url =~ s.*?\/front.*?;)$/ms
+    or die "no CAA url rewrite in Plugin.pm\n";
+eval "sub caa_rewrite { my (\$url, \$size) = \@_; $rewrite_src return \$url; } 1;"
+    or die "eval rewrite: $@";
+
+{
+    my $J = 'https://coverartarchive.org/release/x/front-250.jpg';
+    my $B = 'https://coverartarchive.org/release/x/front-250';
+    ok(caa_rewrite($J, '1200') eq 'https://coverartarchive.org/release/x/front-1200.jpg',
+       'the ladder fires on an EXTENSIONED url and keeps the extension');
+    ok(caa_rewrite($J, '500') eq 'https://coverartarchive.org/release/x/front-500.jpg',
+       '...at every rung, not just the top one');
+    ok(caa_rewrite($B, '1200') eq 'https://coverartarchive.org/release/x/front-1200',
+       'an extension-less url still behaves exactly as it always did');
+    # The regression this guards, stated as the property rather than the pattern:
+    # whatever coverArtUrl builds must still be rewritable, or the ladder is dead.
+    my $live = Plugins::ListenBrainzFreshReleases::API->coverArtUrl(
+                   { caa_release_mbid => 'zz' });
+    ok(caa_rewrite($live, '1200') ne $live,
+       "the ladder actually matches what coverArtUrl ships today ($live)");
+    ok(caa_rewrite($live, '1200') =~ m{/front-1200(\.\w+)?$},
+       '...and lands the chosen size at the end of the path');
+    ok(caa_rewrite('https://coverartarchive.org/release/x/back-250.jpg', '1200')
+         eq 'https://coverartarchive.org/release/x/back-250.jpg',
+       'a path that is not /front-<n> is left alone');
+}
 
 # ==========================================================================
 section('2. a warmed path is byte-identical to what Material will request');
@@ -242,15 +330,6 @@ for my $name (qw(_warmCovers _coverTick)) {
         or die "eval $name: $@";
 }
 
-# The one collaborator that decides which cover a release has.
-{
-    package Plugins::ListenBrainzFreshReleases::API;
-    sub coverArtUrl {
-        my ($class, $rel) = @_;
-        return undef unless $rel->{caa_release_mbid};
-        return 'https://coverartarchive.org/release/' . $rel->{caa_release_mbid} . '/front-250';
-    }
-}
 
 sub reset_world {
     no warnings 'once';
@@ -278,11 +357,19 @@ sub rel {
 }
 
 # THE reference string: what Material builds for a list row on a standard-dpi
-# screen. resolveImageUrl takes the row's already-proxied '/imageproxy/<esc>/image.png'
+# screen. resolveImageUrl takes the row's already-proxied '/imageproxy/<esc>/image<ext>'
 # and splices the size in before the extension.
+#
+# DERIVED, NOT WRITTEN OUT. Both halves come from shipped code — the real
+# `coverArtUrl` and the transcribed `proxiedImage` — so this string cannot go on
+# describing a path the plugin no longer builds. A literal here is what let the
+# suite keep passing against `.png` after the source moved to `.jpg`.
 my $MBID    = 'mbid-0001';
-my $EXPECT  = '/imageproxy/https%3A%2F%2Fcoverartarchive.org%2Frelease%2F'
-            . $MBID . '%2Ffront-250/image';
+my $SRCURL  = Plugins::ListenBrainzFreshReleases::API->coverArtUrl(
+                  { caa_release_mbid => $MBID });
+my $EXPECT  = Slim::Web::ImageProxy::proxiedImage($SRCURL);
+my ($EXT)   = $EXPECT =~ /(\.\w+)$/;
+$EXPECT     =~ s/\Q$EXT\E$//;
 
 # _warmCovers starts the runner before it returns, so one path is already in
 # flight by the time we look — every count below is queue PLUS in-flight.
@@ -299,17 +386,30 @@ T::_warmCovers([ rel() ], 'test');
 
 ok(warmed_count() == 3, 'one cover produces exactly three requests (one per spec)');
 my @paths = warmed_paths();
-ok(scalar(grep { $_ eq $EXPECT . '_150x150_f.png' } @paths),
-   'list row, standard dpi: ' . $EXPECT . '_150x150_f.png');
-ok(scalar(grep { $_ eq $EXPECT . '_300x300_f.png' } @paths),
-   'list row hi-dpi / grid standard dpi: ..._300x300_f.png');
-ok(scalar(grep { $_ eq $EXPECT . '_600x600_f.png' } @paths),
-   'grid tile hi-dpi: ..._600x600_f.png');
-ok(!scalar(grep { /\.png_/ } @paths),
-   'the spec goes BEFORE the extension — no path ends up as image.png_150x150_f');
+ok(scalar(grep { $_ eq $EXPECT . '_150x150_f' . $EXT } @paths),
+   'list row, standard dpi: ' . $EXPECT . '_150x150_f' . $EXT);
+ok(scalar(grep { $_ eq $EXPECT . '_300x300_f' . $EXT } @paths),
+   'list row hi-dpi / grid standard dpi: ..._300x300_f' . $EXT);
+ok(scalar(grep { $_ eq $EXPECT . '_600x600_f' . $EXT } @paths),
+   'grid tile hi-dpi: ..._600x600_f' . $EXT);
+ok(!scalar(grep { /\Q$EXT\E_/ } @paths),
+   'the spec goes BEFORE the extension — no path ends up as image' . $EXT . '_150x150_f');
+
+# THE EXTENSION ITSELF, asserted rather than merely followed. `proxiedImage`
+# defaults to `.png` for an extension-less source URL, and CAA's `/front-250`
+# was exactly that — so every cover was cached as a re-encoded PNG, measured at
+# 5.5-6.4x the bytes of the same rendition as JPEG (and the 600px PNG came out
+# LARGER than the 1200px JPEG it was scaled down from). Deriving $EXT above
+# keeps the suite honest about what is built; this pins WHICH answer is correct,
+# so a source URL that loses its extension fails here instead of silently
+# doubling the proxy cache again.
+ok($EXT eq '.jpg',
+   "the proxied path is JPEG, not a re-encoded PNG (got $EXT)");
+ok($SRCURL =~ m{/front-\d+\.jpg$},
+   'coverArtUrl names an explicit .jpg on the CAA url — the thing that decides it');
 ok(!scalar(grep { /_1024x1024_f|_2048x2048_f/ } @paths),
    'the now-playing specs are deliberately not warmed');
-ok(scalar(grep { $_->[1] eq 'lbf:imgwarm:' . $_->[0] } @T::coverQueue),
+ok(scalar(grep { $_->[1] eq $IMGWARM . $_->[0] } @T::coverQueue),
    'the marker key is the path itself, so it cannot mark a different one warm');
 
 # ==========================================================================
@@ -339,7 +439,7 @@ ok($HTTP_GETS[0] =~ /mbid-0002/,
 
 reset_world(); $n = 0;
 my $r = rel();
-$CACHE->set('lbf:imgwarm:' . $EXPECT . '_300x300_f.png', 1, 100);
+$CACHE->set($IMGWARM . $EXPECT . '_300x300_f' . $EXT, 1, 100);
 T::_warmCovers([ $r ], 'test');
 ok(warmed_count() == 2, 'a spec already marked warm is not queued again');
 ok(!scalar(grep { /_300x300_f/ } warmed_paths()), '...and it is the right one that was skipped');
@@ -366,7 +466,7 @@ ok($HTTP_GETS[0] =~ m{^http://127\.0\.0\.1:9000/imageproxy/},
 http_settle();
 ok(scalar(@{ $CACHE->{sets} }) == 1, 'a completed request writes its warm marker');
 my ($mk, $mttl) = @{ $CACHE->{sets}[0] };
-ok($mk =~ /^lbf:imgwarm:/, 'the marker is keyed under lbf:imgwarm:');
+ok($mk =~ /^\Q$IMGWARM\E/, "the marker is keyed under the versioned family ($IMGWARM)");
 ok($mttl && $mttl < 30 * 86400,
    'the marker expires INSIDE the proxy\'s own 30-day life, so it cannot outlive the image');
 ok(scalar(@Slim::Utils::Timers::PENDING) == 1, 'the next request is armed on a timer, not fired inline');

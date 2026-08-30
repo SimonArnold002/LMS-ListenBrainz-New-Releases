@@ -469,9 +469,16 @@ sub topLevel {
     # inlined DIRECTLY under their header (no intermediate tile/folder). The feed is
     # cached (24h) + warm-fetched, so this is usually instant; on a cold miss it costs
     # one fetch, and on error we fall back to the old drill tile so the menu still works.
+    #
+    # SECTION ORDER: Created for You -> All Releases -> People You Follow ->
+    # Settings. Only the FIRST of those can be assembled here, because the All
+    # Releases weeks are inlined from an async feed fetch and everything after
+    # them has to be emitted on the far side of that callback. So @head is the
+    # part that precedes All Releases, and $finish emits the rest in order — the
+    # People section moved into $finish for no reason other than that it now
+    # sits below a section which is only known asynchronously.
     my @head;
     push @head, _sectionHeader($client, 'PLUGIN_LBF_SECTION_CREATED_FOR_YOU', $useH, \@createdFor), @createdFor;
-    push @head, _sectionHeader($client, 'PLUGIN_LBF_SECTION_PEOPLE', $useH, \@people), @people if @people;
 
     my ($finished, $watchdog);
     my $finish = sub {
@@ -481,6 +488,12 @@ sub topLevel {
         Slim::Utils::Timers::killSpecific($watchdog) if $watchdog;
         my @items = @head;
         push @items, _sectionHeader($client, 'PLUGIN_LBF_ALL_RELEASES', $useH, $allRows), @$allRows;
+        # People You Follow sits BELOW All Releases and above Settings — last of
+        # the content sections. Emitted here rather than in @head purely because
+        # of that position; the array itself is built synchronously above and is
+        # captured by this closure, so an empty/disabled section is still simply
+        # absent, exactly as before.
+        push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_PEOPLE', $useH, \@people), @people if @people;
         push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_SETTINGS', $useH, \@settings), @settings;
         # cachetime => 0 so Material doesn't cache the top menu per-player — keeps the
         # inlined weeks in step with the weekly rollover (same rationale as the feeds).
@@ -2699,8 +2712,15 @@ sub _trendingAlbumRow {
     # release-group mbid (from stats or the MB name-resolution) the Cover Art
     # Archive can serve the GROUP's front cover directly — same host, so the
     # registered image proxy caches it like every other cover.
+    # THROUGH coverArtUrl, not a literal. This built the same release-group URL
+    # by hand, which meant it was the one CAA row in the plugin that did NOT pick
+    # up the `.jpg` suffix — so trending rows would have gone on shipping as
+    # `image.png` and re-encoding every cover at ~6x the bytes while every other
+    # row got JPEG. One builder for the string is what stops that recurring; the
+    # hashref form is exactly the shape coverArtUrl already handles for MuSpy.
     if (($item->{image} // '') eq ICON && $agg->{release_group_mbid}) {
-        $item->{image} = 'https://coverartarchive.org/release-group/' . $agg->{release_group_mbid} . '/front-250';
+        $item->{image} = Plugins::ListenBrainzFreshReleases::API->coverArtUrl(
+            { caa_release_group_mbid => $agg->{release_group_mbid} });
     }
     # Trending signal in place of the type/genre line.
     $item->{line2} = sprintf(cstring($client, 'PLUGIN_LBF_TREND_BREADTH'), $agg->{breadth} // 0);
@@ -3303,7 +3323,13 @@ sub _warmCovers {
         for my $spec (@{ +COVER_SPECS }) {
             (my $path = $base) =~ s/(\.\w+)$/$spec$1/ or next;
             next if $coverQueued{$path};
-            my $key = 'lbf:imgwarm:' . $path;
+            # THROUGH kver, so the family can be invalidated like every other.
+            # Written as a bare literal this marker outlived the thing it
+            # described: it is a claim about an entry in the LMS image proxy's
+            # cache, keyed by a path that changes whenever the row URL changes
+            # (the `.png` -> `.jpg` switch being exactly that), and there was no
+            # way to retire the stale ones short of the dev wipe.
+            my $key = Plugins::ListenBrainzFreshReleases::DB::kver('lbf:imgwarm:') . $path;
             next if $cache->get($key);
             $coverQueued{$path} = 1;
             push @coverQueue, [ $path, $key ];

@@ -4316,6 +4316,40 @@ sub _parseReleaseDetails {
 
 # ---------------------------------------------------------------------------
 # Build Cover Art Archive thumbnail URL
+#
+# THE `.jpg` IS LOAD-BEARING, AND IT IS NOT ABOUT COVER ART ARCHIVE. CAA serves
+# `/front-250` and `/front-250.jpg` identically (same bytes, same
+# `image/jpeg` — probed live). What the extension decides is what LMS does on
+# the way OUT: XMLBrowser runs every row image through `proxiedImage`, which
+# takes the proxied path's extension FROM THE SOURCE URL and defaults to `.png`
+# when the URL has none. A bare `/front-250` therefore shipped rows as
+# `/imageproxy/<esc>/image.png`, and the proxy re-encoded every cover as PNG.
+#
+# Measured on the live server, one cover, varying ONLY the extension:
+#   _150x150_f   44,000 B png ->   7,994 B jpg
+#   _300x300_f  160,972 B png ->  25,620 B jpg
+#   _600x600_f  648,081 B png -> 101,100 B jpg
+# The 600px PNG was LARGER than the full 1200px JPEG source it was scaled down
+# from (394,707 B), and PNG-encoding a 600x600 photograph is far more CPU than
+# JPEG — paid on the event loop, per cover, on first sight. A 150-cover x
+# 3-spec warm cached ~128 MB of PNG where the same warm now caches ~20 MB.
+#
+# This is why the fleet's other plugins never showed the problem: their covers
+# come from services whose URLs already end in `.jpg` (Qobuz `_600.jpg`, Tidal
+# `/640x640.jpg`), so they got JPEG by accident of the source URL. CAA's
+# extensionless path was the only one that fell through to the default.
+#
+# TWO THINGS MUST AGREE WITH THIS SUFFIX and will break silently without it:
+#   * Plugin.pm's CAA image-proxy handler rewrites `/front-<n>` to pick a source
+#     size per requested spec. Its regex is anchored at end-of-string, so it must
+#     tolerate the extension or the ladder simply stops firing — verified live:
+#     with `.jpg` against the unpatched handler, `_600x600_f` came back served
+#     from the 250px source instead of front-1200.
+#   * `Browse::_warmCovers` warms the EXACT path the client will ask for. Its
+#     builder splices the spec before whatever extension it finds, so it follows
+#     this automatically — but every marker written under the old `.png` paths
+#     describes an entry nothing will request again, which is why
+#     `lbf:imgwarm:` is now a versioned family in DB::KEY_VERSIONS.
 # ---------------------------------------------------------------------------
 sub coverArtUrl {
     my ($class, $rel) = @_;
@@ -4326,21 +4360,21 @@ sub coverArtUrl {
     # Accept either a release hashref or a bare caa_release_mbid string so
     # playlist tracks (which carry the mbid directly) can reuse this.
     if (ref $rel eq 'HASH') {
-        return CAA_BASE_URL . $rel->{caa_release_mbid} . '/front-250'
+        return CAA_BASE_URL . $rel->{caa_release_mbid} . '/front-250.jpg'
             if $rel->{caa_release_mbid};
         # MuSpy items carry only a release-GROUP MBID — CAA serves group art at a
         # different path. (No has-art signal exists for a group, so this may 404
         # for the rare art-less release group; the image proxy degrades to a
         # placeholder. Overlaps with an LB copy are resolved in _dedupeReleases,
         # which prefers the entry that has cover art — i.e. the richer LB one.)
-        return CAA_RG_BASE_URL . $rel->{caa_release_group_mbid} . '/front-250'
+        return CAA_RG_BASE_URL . $rel->{caa_release_group_mbid} . '/front-250.jpg'
             if $rel->{caa_release_group_mbid};
         return undef;
     }
 
     my $mbid = $rel;
     return undef unless $mbid;
-    return CAA_BASE_URL . $mbid . '/front-250';
+    return CAA_BASE_URL . $mbid . '/front-250.jpg';
 }
 
 # ---------------------------------------------------------------------------

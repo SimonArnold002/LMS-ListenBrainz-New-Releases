@@ -879,6 +879,17 @@ use constant KEY_VERSIONS => {
     # lived in Slim::Utils::Cache rather than kv, so there is nothing here to
     # retire — stale entries age out on their own TTL and nothing reads them.
     'lbf:hsimilar:'          => 1,
+    # THE COVER-WARM MARKER, AND IT WAS THE ONE FAMILY NOT DECLARED HERE.
+    # `_warmCovers` wrote `lbf:imgwarm:<proxy path>` by hand, so the family was
+    # invisible to `cachestats` (about 950 of 1,570 kv rows on the live server
+    # were unaccounted for), unreachable by `retirePrefixes`, and had no way to
+    # be invalidated short of the dev wipe. Registering it fixes all three, and
+    # the bump is needed NOW: every marker written so far describes a `.png`
+    # proxy path, and `coverArtUrl` emits `.jpg` from this build on. Those
+    # markers claim a warm entry for a URL no client will ever request again, so
+    # without a bump the warm would skip the whole feed and every cover would be
+    # cold on first sight — the exact failure the warm exists to prevent.
+    'lbf:imgwarm:'           => 2,
     'lbf:lastlisten:'        => 1,
     'lbf:rgbyname:'          => 1,
     'lbf:stream:'            => 27,

@@ -345,7 +345,22 @@ sub initPlugin {
                         500  => '500',
                         1200 => '1200',
                     }) || '1200';
-                    $url =~ s|/front-\d+$|/front-$size|;
+                    # ANCHORED SO IT TOLERATES THE EXTENSION, and that is not
+                    # cosmetic. `coverArtUrl` now emits `/front-250.jpg` so the
+                    # proxied path — and therefore the cached rendition — is
+                    # JPEG rather than PNG (see the block comment on that sub:
+                    # a 600px PNG measured 648,081 B against 101,100 B of JPEG,
+                    # and the PNG was larger than the 1200px source it came
+                    # from). This pattern used to be anchored straight at
+                    # end-of-string, so the moment the URL carried an extension
+                    # it stopped matching and this whole ladder silently stopped
+                    # firing — every spec then served from whatever size the row
+                    # happened to name. Verified live before the fix: with a
+                    # `.jpg` source URL, `_600x600_f` came back off the 250px
+                    # source instead of front-1200. The extension is captured and
+                    # put back, so the two changes cannot drift apart and an
+                    # extensionless URL still behaves exactly as it always did.
+                    $url =~ s{/front-\d+(\.\w+)?$}{'/front-' . $size . ($1 // '')}e;
                     return $url;
                 },
             );
