@@ -106,7 +106,24 @@ use constant FEED_STALE_AFTER => FEED_TTL;
 # Keyed on the FEED, deliberately coarser than %INFLIGHT's per-request key: two
 # revalidations of one feed differing only by sort are still two requests at
 # ListenBrainz, and the rate limit is per-user, not per-question.
-my %REVALIDATING;
+#
+# IT HOLDS A COUNT, NOT A BOOLEAN (the 0.9.192 review), and that follows from the coarse key
+# the moment every fetch claims it. The key is per-FEED while the release is per-
+# FETCH, so two foreground fetches of one feed on different $ikeys — a browse and a
+# forced warm on another sort, exactly the overlap 0.9.192 opened — both claimed it
+# and whichever finished FIRST deleted it, leaving its sibling running unguarded.
+# A background revalidation arriving in that gap sailed past the guard: duplicate
+# request, duplicate ~3,000-release chunked ingest, the one thing on this path that
+# must not happen twice ([[lbf-ingest-event-loop-stall]]). A count releases on the
+# LAST fetch out rather than the first.
+#
+# `our`, not `my`, for the same reason %FEED_MEMO is: a test must be able to reset it
+# between sections. Not cosmetic — a suite drives fetches it deliberately never
+# answers, and since every section shares one feed key those claims accumulate. The
+# boolean hid that (any single release deleted the entry); a count does not, so an
+# un-resettable registry would make each section's result depend on what the sections
+# before it happened to leave dangling.
+our %REVALIDATING;
 
 # ...and a per-REQUEST guard is needed as well, because a foreground caller OWES AN
 # ANSWER and so can never simply return the way a background refresh does — the
@@ -1018,12 +1035,15 @@ sub _fetchReleaseFeed {
     # duplicate ListenBrainz fetch AND duplicate ~3,000-release chunked ingest, which is
     # the one thing on this path that must not happen twice.
     #
-    #   %REVALIDATING — "a fetch for this FEED is running", claimed by BOTH roles now.
-    #                   It suppresses BACKGROUND refreshes only: a background walk has
-    #                   an answer on screen already, so skipping is free. Keyed on the
-    #                   feed, deliberately coarser than $ikey — two revalidations of one
-    #                   feed differing only by sort are still two requests at ListenBrainz,
-    #                   and the rate limit is per-user, not per-question.
+    #   %REVALIDATING — "HOW MANY fetches for this FEED are running", claimed by BOTH
+    #                   roles now. It suppresses BACKGROUND refreshes only: a background
+    #                   walk has an answer on screen already, so skipping is free. Keyed
+    #                   on the feed, deliberately coarser than $ikey — two revalidations
+    #                   of one feed differing only by sort are still two requests at
+    #                   ListenBrainz, and the rate limit is per-user, not per-question.
+    #                   A COUNT because that coarse key is shared: two fetches on
+    #                   different $ikeys claim the same entry, so releasing on the first
+    #                   one OUT would leave the second running unguarded (the 0.9.192 review).
     #   %INFLIGHT     — the per-REQUEST waiter list. A foreground caller owes an answer,
     #                   so it can never simply return; if an identical request is already
     #                   running — background or foreground — it parks and is answered from
@@ -1037,8 +1057,20 @@ sub _fetchReleaseFeed {
                  . scalar(@$waiters) . " waiting)");
         return;
     }
-    $REVALIDATING{$feed} = 1;
+    $REVALIDATING{$feed}++;
     $INFLIGHT{$ikey}     = [];
+
+    # RELEASE THIS FETCH'S CLAIM, ONCE. Both halves matter and for different reasons.
+    # It is a COUNT, so releasing a claim this fetch does not hold would free a
+    # SIBLING's — the watchdog can fire and the real callback arrive afterwards, and
+    # $done/$failed are each written as if they were the only exit. $claimed makes
+    # every path idempotent, which a bare `delete` was for free and a decrement is not.
+    my $claimed = 1;
+    my $unclaim = sub {
+        return unless $claimed;
+        $claimed = 0;
+        delete $REVALIDATING{$feed} unless --$REVALIDATING{$feed} > 0;
+    };
 
     # Answer everyone parked behind this fetch, exactly once. EVAL'd per waiter: these
     # are XMLBrowser render callbacks, and one of them dying must not strand the rest
@@ -1067,8 +1099,10 @@ sub _fetchReleaseFeed {
     # fetch now holds $ikey, so a callback that never arrives would strand every later
     # cold open of that feed on a list nothing drains — the exact permanent failure
     # %INFLIGHT_TIMER exists to prevent, reachable from the one role that used to be
-    # exempt. It also clears $REVALIDATING, or one dead background fetch would suppress
-    # every future revalidation of that feed for the life of the process.
+    # exempt. It also releases this fetch's $REVALIDATING claim, or one dead background
+    # fetch would suppress every future revalidation of that feed for the life of the
+    # process — THIS fetch's claim only, so a healthy sibling on another $ikey keeps its
+    # own and is not stranded unguarded by its neighbour's timeout.
     eval {
         $INFLIGHT_TIMER{$ikey} = Slim::Utils::Timers::setTimer(
             undef, Time::HiRes::time() + INFLIGHT_MAX, sub {
@@ -1076,14 +1110,14 @@ sub _fetchReleaseFeed {
                 $log->error("feed '$feed' single-flight claim expired after "
                           . INFLIGHT_MAX . "s without a result — releasing "
                           . scalar(@{ $INFLIGHT{$ikey} }) . " waiter(s)");
-                delete $REVALIDATING{$feed};
+                $unclaim->();
                 $fanout->('onError', 'ListenBrainz feed fetch did not complete');
             });
         1;
     };
 
     my $done = sub {
-        delete $REVALIDATING{$feed};
+        $unclaim->();
         # EVAL'D FOR THE SAME REASON THE WAITERS ARE, and this is the asymmetry that
         # was the bug: $fanout — the ONLY place the claim is released — runs AFTER
         # the first caller's own callback. $p{onDone} is an XMLBrowser render
@@ -1099,7 +1133,7 @@ sub _fetchReleaseFeed {
 
     my $failed = sub {
         my ($resp) = @_;
-        delete $REVALIDATING{$feed};
+        $unclaim->();
         _ingestNoteFailure($feed, $p{from}, $p{to});
 
         # A background refresh with NOBODY parked on it has no one to answer: release
@@ -1257,8 +1291,18 @@ sub getMuSpyReleases {
     # Best-effort throughout: ANY failure resolves onDone with the stored copy or
     # an empty list. It must never blank the LB feed it merges into, so there is
     # deliberately no onError path.
+    # SERVE THE STORE, NOT THE FETCHED SLICE — the success path uses this too (the 0.9.192 review).
+    # `?limit=100` is a TOP-N slice while every browse renders from the UNWINDOWED store
+    # (rotation off, 120-day retention), so answering a forced warm with $rels alone
+    # hands `_warmCovers` a SHORTER list than the view draws: stored rows inside the
+    # display window that fell outside the 100 silently lose their nightly cover warm,
+    # and the 5s memo publishes the short list to For You in the meantime. $fallback is
+    # the fetched slice, used only if the store somehow reads back empty — better a
+    # short answer than none.
     my $serveStored = sub {
+        my ($fallback) = @_;
         my ($rels) = _feedFromStore($feed, undef, undef, 0);
+        $rels = $fallback if !($rels && @$rels) && $fallback && @$fallback;
         $args{onDone}->($rels && @$rels ? _memoSet($memoKey, $rels) : []);
     };
 
@@ -1267,9 +1311,12 @@ sub getMuSpyReleases {
             my $resp = shift;
             my $rels = _parseMuSpy($resp);
             if (defined $rels) {
-                my $res = _ingestFeed($feed, $rels, undef, undef, 0);
-                if ($res->{refused}) { $serveStored->(); return }
-                $args{onDone}->(_memoSet($memoKey, $rels));
+                # A refused ingest and a successful one converge on the same answer,
+                # and that is the point: the caller gets what the STORE holds either
+                # way — with today's rows merged in when the ingest took them, without
+                # when it refused. It is never the raw slice.
+                _ingestFeed($feed, $rels, undef, undef, 0);
+                $serveStored->($rels);
             }
             else {
                 # A 200 with an unparseable body: serve the stored copy rather than

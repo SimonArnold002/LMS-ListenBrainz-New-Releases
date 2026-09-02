@@ -7,6 +7,17 @@ enough on its own, without reading the rest of the plugin first.
 **Applies to:** ListenBrainz Fresh Releases (LBF), Pitchfork Reviews (PFR), Listen to
 Later (LL).
 
+**Copies of this file.** Each plugin carries its own copy, so the paths in it resolve from
+inside the repo you are working in:
+
+    LMS-ListenBrainz-New-Releases/docs/streaming-adapter-spec.md   (canonical)
+    LMS-Pitchfork-Reviews/docs/streaming-adapter-spec.md
+    LMS-Listen-to-Later/docs/streaming-adapter-spec.md
+
+They are **verbatim** copies. Edit the canonical one and re-copy over the others in the same
+session — the same rule the shared matcher follows. To check for drift, compare the three
+files' checksums; they must agree.
+
 **Terms used throughout.**
 
 - **Adapter** — one entry in a plugin's adapter table, plus the search functions it points at.

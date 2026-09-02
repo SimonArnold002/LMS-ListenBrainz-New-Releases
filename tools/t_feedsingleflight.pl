@@ -36,6 +36,16 @@
 #                                             revalidation issues its own second fetch)
 #   - restore `return if $bg` in $fanout   -> 3 red (a background fetch never releases
 #                                             the claim, so its waiters hang for ever)
+#   - %REVALIDATING released UNCONDITIONALLY (a flag, not a count, i.e. the 0.9.192
+#     shape)                               -> 3 red in the LAST section, one of them
+#                                             reading 3 requests where 2 were expected —
+#                                             the duplicate fetch + duplicate ingest
+#                                             itself, and the watchdog one showing a
+#                                             dead fetch freeing a healthy sibling
+#   - MuSpy success answers with $rels     -> 1 red (the forced warm hands _warmCovers
+#     instead of the store                    the top-100 slice, not what the view draws;
+#                                             the FETCHED assertion beside it stays GREEN,
+#                                             which is why they are two assertions)
 #
 # THE LAST THREE ARE DELIBERATELY SEPARATE MUTANTS. The two guards close the overlap
 # from opposite directions, and each is invisible to the other's assertions: the
@@ -649,6 +659,18 @@ section('MUSPY HAS TWO SHORT-CIRCUITS, AND force MUST GATE BOTH');
     local *Plugins::ListenBrainzFreshReleases::DB::feedReleases = sub { [ @stored ] };
     local *Plugins::ListenBrainzFreshReleases::DB::feedCoverage =
         sub { { any => 1, complete => 1, days => 28, covered => 28, ok_at => time() } };
+    # THE INGEST STUB IS STATEFUL HERE, and it has to be. The property under test is
+    # "the forced warm answers from the STORE, which now holds what arrived" — with a
+    # no-op ingest the store can never reflect the fetch and the section could only
+    # ever pin a stub artefact. Appending is also what the real store does: MuSpy is
+    # stored with rotation OFF, so today's slice MERGES with the retained rows rather
+    # than replacing them.
+    local *Plugins::ListenBrainzFreshReleases::DB::ingestFeed = sub {
+        my ($f, $rels) = @_;
+        my %have = map { ($_->{release_name} // '') => 1 } @stored;
+        push @stored, grep { !$have{ $_->{release_name} // '' }++ } @{ $rels || [] };
+        return { ok => 1, stored => scalar @{ $rels || [] } };
+    };
 
     my $browse = { done => [] };
     $api->getMuSpyReleases(onDone => sub { push @{ $browse->{done} }, $_[0] });
@@ -668,8 +690,24 @@ section('MUSPY HAS TWO SHORT-CIRCUITS, AND force MUST GATE BOTH');
                           . '"mbid":"rg-fresh","name":"FETCHED","date":"2026-08-20","type":"Album"}]')
         if @REQUESTS;
     is(scalar(@{ $warm->{done} }), 1, '...it answers once the fetch lands');
-    is((($warm->{done}[0] || [])->[0] || {})->{release_name}, 'FETCHED',
-       '...with what the FETCH returned, not the stored copy — the whole point');
+
+    # WHAT THE ANSWER MUST CONTAIN, and it is BOTH rows — the two properties pull in
+    # opposite directions and only the pair pins the behaviour.
+    #
+    #   FETCHED       is 0.9.190: the warm must act on what actually ARRIVED. An answer
+    #                 without it is the stale-store bug `force` exists to fix.
+    #   STORED-MUSPY  is the 0.9.192 review: `?limit=100` is a TOP-N SLICE while every browse
+    #                 renders from the UNWINDOWED store, so an answer of the slice ALONE
+    #                 hands _warmCovers fewer rows than the view draws — stored rows
+    #                 inside the display window silently lose their nightly cover warm —
+    #                 and briefly publishes the short list to For You through the memo.
+    #
+    # Asserting only the first passes against serving the raw slice, which is exactly
+    # how the 0.9.192 assertion read.
+    my %warmed = map { ($_->{release_name} // '') => 1 } @{ $warm->{done}[0] || [] };
+    ok($warmed{FETCHED}, '...carrying what the FETCH returned — the warm acts on what arrived');
+    ok($warmed{'STORED-MUSPY'},
+       '...AND the stored rows outside the top-100 slice, which is what the view renders');
 
     # And the best-effort contract is unchanged: a forced fetch that FAILS must still
     # answer, degrading to the store rather than blanking the feed it merges into.
@@ -699,6 +737,12 @@ section('THE TWO GUARDS CAN SEE EACH OTHER');
 {
     local @REQUESTS = ();
     %Plugins::ListenBrainzFreshReleases::API::FEED_MEMO = ();
+    # RESET THE FEED GUARD. It has held a COUNT since the 0.9.192 review, and the sections above
+    # leave fetches deliberately suspended and never answered — claims that in
+    # production would always be released by $done/$failed/the watchdog. They share
+    # one feed key, so without this the count arrives here non-zero and this section
+    # would be asserting about the previous ones.
+    %Plugins::ListenBrainzFreshReleases::API::REVALIDATING = ();
 
     my @stored = ({ release_name => 'STORED', artist_credit_name => 'B',
                     release_date => '2026-08-01', release_group_mbid => 'rg-s',
@@ -782,6 +826,95 @@ section('THE TWO GUARDS CAN SEE EACH OTHER');
     answer_fail($REQUESTS[0], 'boom') if @REQUESTS;
     is(scalar(@{ $parked->{done} }) + scalar(@{ $parked->{error} }), 1,
        'a FAILED background fetch still answers the caller parked on it');
+}
+
+# ==========================================================================
+section('THE FEED GUARD IS A COUNT, NOT A FLAG');
+# ==========================================================================
+# The hole 0.9.192 left open, and it is a consequence of its own design: %REVALIDATING
+# is keyed on the FEED but was RELEASED per FETCH, unconditionally. Two foreground
+# fetches of one feed on different $ikeys — a browse and a forced warm on another sort,
+# precisely the overlap that build made possible — both claimed the one entry, and
+# whichever finished FIRST deleted it. The survivor then ran unguarded and the next
+# background revalidation sailed through: duplicate request, duplicate ~3,000-release
+# chunked ingest, the one thing on this path that must not happen twice.
+#
+# %INFLIGHT CANNOT SEE THIS AND NEVER COULD. It is per-REQUEST, so it says nothing
+# about two fetches asking different questions of the same feed — which is the whole
+# reason the coarse guard exists. The section above pins that the two guards can see
+# each other; this one pins that the coarse guard survives its first release.
+{
+    local @REQUESTS = ();
+    %Plugins::ListenBrainzFreshReleases::API::FEED_MEMO = ();
+    %Plugins::ListenBrainzFreshReleases::API::REVALIDATING = ();   # see the section above
+
+    my @stored = ({ release_name => 'STORED', artist_credit_name => 'B',
+                    release_date => '2026-08-01', release_group_mbid => 'rg-s',
+                    release_mbid => 'r-s' });
+    no warnings 'redefine', 'once';
+    local *Plugins::ListenBrainzFreshReleases::DB::feedReleases = sub { [ @stored ] };
+    # STALE and populated: a browse renders from it AND revalidates behind the render,
+    # which is the only state in which the guard is consulted at all.
+    local *Plugins::ListenBrainzFreshReleases::DB::feedCoverage =
+        sub { { any => 1, complete => 1, days => 28, covered => 28,
+                ok_at => time() - 10 * 86400 } };
+
+    # TWO forced fetches of ONE feed on DIFFERENT sorts. Different $ikey, so the second
+    # cannot park on the first — it issues its own request and claims the same feed.
+    my $a = { done => [] };
+    $api->getFreshReleasesAll(sort => 'refc-a', force => 1,
+        onDone => sub { push @{ $a->{done} }, $_[0] });
+    my $b = { done => [] };
+    $api->getFreshReleasesAll(sort => 'refc-b', force => 1,
+        onDone => sub { push @{ $b->{done} }, $_[0] });
+    is(scalar(@REQUESTS), 2, 'two fetches of one feed on different sorts both go out');
+
+    # The FIRST one lands. Under a boolean this deleted the claim outright.
+    answer_ok($REQUESTS[0], $PAYLOAD) if @REQUESTS;
+    is(scalar(@{ $a->{done} }), 1, 'the first is answered');
+    is(scalar(@{ $b->{done} }), 0, '...and the second is still in flight');
+
+    # A browse on a THIRD sort now arrives. Its $ikey matches neither fetch, so only
+    # the feed guard can suppress its revalidation — and only if the still-running
+    # second fetch's claim survived the first one's release.
+    %Plugins::ListenBrainzFreshReleases::API::FEED_MEMO = ();
+    my $browse = { done => [] };
+    $api->getFreshReleasesAll(sort => 'refc-c',
+        onDone => sub { push @{ $browse->{done} }, $_[0] });
+    is(scalar(@{ $browse->{done} }), 1, 'a browse still renders instantly from the store');
+    is(scalar(@REQUESTS), 2,
+       'and its revalidation is SUPPRESSED while a sibling fetch is still running');
+
+    # The last fetch out releases the claim — a count that never reached zero would
+    # suppress every revalidation of this feed for the life of the process, which is
+    # the failure a naive refcount trades for the one above.
+    answer_ok($REQUESTS[1], $PAYLOAD) if @REQUESTS > 1;
+    is(scalar(@{ $b->{done} }), 1, 'the second is answered');
+
+    %Plugins::ListenBrainzFreshReleases::API::FEED_MEMO = ();
+    $api->getFreshReleasesAll(sort => 'refc-d', onDone => sub { });
+    is(scalar(@REQUESTS), 3,
+       'once BOTH are out, a later browse can revalidate again — the count reached zero');
+    answer_ok($REQUESTS[2], $PAYLOAD) if @REQUESTS > 2;
+
+    # AND A DEAD FETCH FREES ONLY ITS OWN CLAIM. The watchdog fires for one fetch while
+    # a sibling is healthy; releasing the shared entry there would strand the sibling
+    # unguarded exactly as the first-one-out release did.
+    @REQUESTS = ();
+    %Plugins::ListenBrainzFreshReleases::API::FEED_MEMO = ();
+    @TIMERS = ();
+    $api->getFreshReleasesAll(sort => 'refc-e', force => 1, onDone => sub { });
+    $api->getFreshReleasesAll(sort => 'refc-f', force => 1, onDone => sub { });
+    is(scalar(@REQUESTS), 2, 'two more fetches in flight');
+
+    # Fire the FIRST fetch's leak watchdog, leaving the second untouched.
+    my ($wd) = grep { $_->{cb} } @TIMERS;
+    $wd->{cb}->(@{ $wd->{args} || [] }) if $wd;
+
+    %Plugins::ListenBrainzFreshReleases::API::FEED_MEMO = ();
+    $api->getFreshReleasesAll(sort => 'refc-g', onDone => sub { });
+    is(scalar(@REQUESTS), 2,
+       "an expired fetch's watchdog does not free a healthy sibling's claim");
 }
 
 printf "\n%s\n%d passed, %d failed.\n", '=' x 74, $pass, $fail;

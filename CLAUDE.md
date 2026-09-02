@@ -67,8 +67,15 @@ does not cover. Say which ledger entry you are challenging and what changed.
 
 Fixed findings are recorded per review in `docs/code-review-<version>.md`, each
 with its mechanism, its guard and its test. Check there before reporting: the
-0.9.174, 0.9.184 and 0.9.191 findings are all fixed and verified. Do not
+0.9.174, 0.9.184, 0.9.191 and 0.9.192 findings are all fixed and verified. Do not
 re-derive them.
+
+**A closed finding is not a closed MECHANISM.** Both 0.9.192 findings were
+second-order consequences of the 0.9.191 fixes — not regressions of old code, and
+not re-reports either. A fix that changes WHO participates in a mechanism (which
+roles claim a guard, which callers reach a fetch) is worth re-reading from the
+OTHER end of it: the release, the caller, the consumer. That is new information
+about a closed entry, and it is exactly what section C wants reported.
 
 ### D. ADDING TO THIS LEDGER
 
@@ -189,6 +196,66 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
+
+**0.9.193** — built 2026-09-02, **NOT installed and NOT tested**. Both findings of the 0.9.192
+code review (`docs/code-review-0.9.192.md`), each with its mechanism, its guard and its
+anti-test count. Both are in `API.pm`'s feed path. **No schema change and no cache bump** —
+nothing here changes the SHAPE of a stored value, and the version bump alone triggers
+`_buildChanged`, which clears the derived tier and the genre answers on first start
+([[dev-builds-clear-caches]]).
+
+**BOTH ARE SECOND-ORDER CONSEQUENCES OF THE 0.9.192 FIXES THEMSELVES — read them that way.**
+Neither is a regression of older code and neither is a re-report. Each follows from a *correct*
+fix that changed who participates in a mechanism without the other end of that mechanism being
+re-read: 0.9.192 widened who CLAIMS a guard without revisiting who RELEASES it, and it un-gated
+a fetch without revisiting what that fetch's CALLER is then handed. Both defects sit one frame
+from the line that changed.
+
+1. **`%REVALIDATING` was a flag where its own key demands a COUNT.** It is keyed on the FEED
+   but was released per FETCH, unconditionally — so two foreground fetches of one feed on
+   different `$ikey`s (a browse and a forced warm on another sort, precisely the overlap
+   0.9.192 opened) both claimed the single entry and **whichever finished first deleted it**.
+   The survivor ran unguarded and the next background revalidation sailed past the guard:
+   duplicate request, duplicate ~3,000-release chunked ingest ([[lbf-ingest-event-loop-stall]]).
+   The watchdog had the same hole in reverse — one dead fetch cleared a healthy sibling's claim.
+   **`%INFLIGHT` could never cover this**: it is per-REQUEST, and two fetches asking different
+   questions of one feed is the whole reason the coarse guard exists beside it.
+   **The coarse key STAYS** (two revalidations differing only by sort are still two requests,
+   and the rate limit is per-user); only the release changed — `$REVALIDATING{$feed}++` plus an
+   **idempotent** per-fetch `$unclaim`. **The `$claimed` flag is load-bearing, not defensive**:
+   a bare `delete` was idempotent for free, a decrement is not, and a second release would free
+   a SIBLING's claim — the original bug by another door.
+   **`%REVALIDATING` is now `our`**, for the reason `%FEED_MEMO` is: a suite drives fetches it
+   deliberately never answers, all on one feed key, and **the boolean hid that** because any
+   single release deleted the entry. A count does not, so the registry has to be resettable or
+   each test section asserts about the ones before it.
+
+2. **The forced MuSpy warm answered with the fetched SLICE, not the store.** 0.9.192's `!$force`
+   gate is right, but the success path resolved the caller with the raw `?limit=100` payload
+   while **every other exit** — cached, refused, unparseable, network failure — answers from the
+   UNWINDOWED store (rotation off, 120-day retention), exactly as the comment above the sub
+   insists. `warmFeeds` hands that answer straight to `_warmCovers`, so stored rows inside the
+   display window that fell outside the 100 **silently lost their nightly cover warm**, and the
+   5s memo briefly published the short list to For You. **This is the sub's own rule arriving
+   from a new direction** — "a truncated list is not proof of absence" is why rotation is off;
+   serving the slice as the answer is the same mistake at the other end. Success and refusal now
+   converge on `$serveStored`, deliberately: the caller gets what the STORE holds either way,
+   never the raw slice.
+
+**TESTS.** `t_feedsingleflight.pl` 78 → **88**. A new section for finding 1 (*THE FEED GUARD IS
+A COUNT, NOT A FLAG*, 9 assertions, behavioural against a stale-but-populated store) pins that
+the first fetch landing does not free the second's claim, that the count still reaches zero
+(the failure a naive refcount trades for the one being fixed), and that a fired watchdog frees
+only its own. For finding 2 **one assertion became two, and the pair is the point**: the answer
+must contain the FETCHED row (0.9.190 — the warm acts on what arrived) **and** the stored row
+outside the slice (the warm warms what the view renders). Either alone passes against the wrong
+behaviour — asserting only the first is how the 0.9.192 assertion read.
+**The MuSpy ingest stub had to become STATEFUL**, and that is a finding about the test: with a
+no-op ingest the store can never reflect the fetch, so the section could only ever pin a stub
+artefact. **Anti-tested per defect:** the unconditional release → **3 red** (one reading 3
+requests where 2 were expected — the duplicate fetch itself); serving `$rels` → **1 red**, with
+the FETCHED assertion beside it still GREEN, which is the evidence the two are independent.
+
 **0.9.192** — built 2026-09-02, **NOT installed and NOT tested**. All three findings of the
 0.9.191 code review (`docs/code-review-0.9.191.md`): two in `API.pm`'s feed path, one in the
 Trending Albums cover warm. **No schema change and no cache bump** — nothing here changes the
