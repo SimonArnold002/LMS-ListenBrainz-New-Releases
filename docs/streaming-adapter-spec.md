@@ -4,8 +4,8 @@
 the acceptance criteria it is reviewed against. Read it before writing code; it should be
 enough on its own, without reading the rest of the plugin first.
 
-**Applies to:** ListenBrainz Fresh Releases (LBF), Pitchfork Reviews (PFR), Discography
-(DSC), Search Hub, Listen to Later (LL).
+**Applies to:** ListenBrainz Fresh Releases (LBF), Pitchfork Reviews (PFR), Listen to
+Later (LL).
 
 **Terms used throughout.**
 
@@ -13,7 +13,7 @@ enough on its own, without reading the rest of the plugin first.
 - **Service plugin** — the third-party LMS plugin that actually talks to the service
   (Qobuz, TIDAL, Deezer, Spotty, …). We never talk to a streaming API directly; the adapter
   calls the service plugin.
-- **Leg** — one capability of an adapter: album search, track search, artist search.
+- **Leg** — one capability of an adapter, such as album search or track search.
 - **Item** — an XMLBrowser menu node produced by the service plugin's own renderer.
 
 ## How to use this document
@@ -54,7 +54,7 @@ Two rules follow directly, and both matter on day one:
   every affected entry is invalidated automatically. An extra bump only forces a second,
   redundant re-resolve.
 - **MUST NOT change the shared matcher.** `_albumMatches`, `_trackMatches` and `_norm` are
-  one engine kept in step across five repos. An adapter that appears to need the matcher
+  one engine kept in step across the plugins. An adapter that appears to need the matcher
   loosened is normally sending a mis-encoded query or reading the wrong field from a
   candidate; fix that instead.
 
@@ -121,12 +121,11 @@ Where the table lives, and the legs each plugin defines:
 |---|---|---|
 | LBF | `ListenBrainzFreshReleases/Browse.pm:5688` | `run`, `runTrack` |
 | PFR | `PitchforkReviews/Browse.pm:2124` | `run` |
-| DSC | `Discography/Sources.pm:92` | `run`, `artists` |
-| Search Hub | `SearchHub/Adapters.pm:67` | `legs => { artists, albums, tracks, playlists }`, `artistAlbums` |
 | LL | none — see section 9 | — |
 
-Search Hub's `legs` hash is the preferred shape: capabilities in a named sub-hash, `undef`
-for one that isn't built yet, so adding a leg later never changes an adapter's arity.
+Where a plugin grows a third leg, prefer collecting them into a named sub-hash
+(`legs => { albums => …, tracks => … }`, `undef` for one that isn't built yet) rather than
+adding another top-level key, so adding a leg later never changes an adapter's arity.
 
 ---
 
@@ -266,8 +265,6 @@ the registry, not work for an adapter author; close them as they come up.
 | Plugin | Sites | Field that removes it |
 |---|---|---|
 | PFR | `Browse.pm:3696` rebuild chain; `Browse.pm:2174`, where the adapter-list memo key is built from a fixed list of service names | `rebuild`; build the memo key from the table. **Do the memo key before adding a fourth service** — otherwise that service's priority changes will not invalidate the memo |
-| DSC | `Sources.pm:1154` per-service artist-image URL builder; `Browse.pm:3123` per-service play-url format (one service requires a file-extension suffix, the others do not) | `artist_image => \&…` and `play_url => \&…` |
-| Search Hub | None of substance | — |
 | LL | See section 9 | — |
 
 ---
@@ -278,8 +275,6 @@ the registry, not work for an adapter author; close them as they come up.
 |---|---|---|---|
 | **LBF** | Qobuz, Bandcamp, TIDAL, Deezer, Spotify | About 200 lines: two legs, one pref default, one settings entry, one rebuild branch | Ready |
 | **PFR** | Qobuz, TIDAL, Deezer | About 100 lines (album leg only), plus a rebuild branch, plus the memo-key fix | Ready once the memo key is table-driven |
-| **DSC** | Qobuz, TIDAL, Deezer | About 150 lines (album and artist legs), plus two per-service branches | Ready |
-| **Search Hub** | Qobuz, TIDAL, Deezer | One `legs` entry per leg built | Ready; development on hold |
 | **LL** | qobuz, bandcamp, tidal, deezer, via a url-scheme map (`Sources.pm:26`) | Not a table entry — capability is expressed across roughly fifteen per-source branches in `Sources.pm` and `Plugin.pm` | Refactor first |
 
 LL works differently by design: it does not search a service, it **recognises** one from the
