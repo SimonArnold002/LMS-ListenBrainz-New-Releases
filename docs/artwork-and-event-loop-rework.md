@@ -759,6 +759,21 @@ proposes bumping it, that is a signal something changed the proxy path by accide
 
 ---
 
+## Related work, deliberately OUT OF SCOPE for this document
+
+**Overnight pre-warm of detail-page data (tracklist + streaming links) — see
+`docs/overnight-detail-prewarm.md`.** Raised 2026-09-03 during Stage 1's live
+verification: covers and genres get proactive overnight treatment, but a
+release's MusicBrainz tracklist and its streaming matches never have — both are
+still strictly on-demand, cached only after a user's first open. The goal (Simon):
+"the user wakes up to find new material ready and waiting," not just for covers.
+**On-demand stays as the correctness path; this is additive**, the same
+relationship the cover warm already has to the image proxy's on-demand fetch. It
+touches different code (`_releaseDetail`, `_findPlayable`, `getReleaseDetails`)
+and different cost drivers (MusicBrainz rate limits, multi-service search
+fan-out, not local event-loop stalls) — it needs its own investigation and design
+pass, not a bolt-on to this plan. **Not started.**
+
 ## Deferred, and explicitly not doing
 
 ### Deferred work

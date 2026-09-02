@@ -1954,6 +1954,15 @@ Full table, with fallbacks and triggers, in `docs/genre-ladder-current.md` §4.
 ### State of play (2026-07-30) — read this before starting anything
 
 **PLANNED WORK — scoped 2026-07-31, none of it started. Read the doc before opening the code:**
+- **`docs/overnight-detail-prewarm.md`** — **requirement captured 2026-09-03, NOT
+  investigated, not designed.** The overnight warm already pre-fetches covers and genres for
+  new releases; a release's MusicBrainz tracklist and its streaming matches never have — both
+  are strictly on-demand, first-open-triggers-a-live-fetch, always. Goal (Simon): "the user
+  wakes up to find new material ready and waiting," not just for artwork. **On-demand stays as
+  the correctness path** — this is additive, the same relationship the cover warm has to the
+  image proxy's on-demand fetch. Needs its own investigation (MB rate-limit participation,
+  `_findPlayable` fan-out cost at scale) before a design exists. Do not start implementing from
+  the doc alone.
 - **`docs/cache-ttl-30-day-boundary.md`** — **BUG, one line to fix.** `RECMETA_TTL` is 90 days, and
   LMS's `DbCache` reads any TTL **over 2,592,000s (30 days)** as an *absolute Unix timestamp*, not a
   duration — so it is stored expiring in **1970** and every read returns undef. `set` returns 1 and
