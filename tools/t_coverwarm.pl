@@ -587,41 +587,84 @@ section('5. people you follow — trending albums warm their covers too');
 # feeds, from a section nobody had wired up.
 #
 # The property worth pinning is not "it queues something" — it is that the warmed
-# path is byte-identical to what the ROW will request. Both sides therefore go
-# through the same two extracted builders, and the assertion compares the warm's
-# queue against the image `_buildReleaseItem` actually puts on the row.
+# path is byte-identical to what the ROW will request, AND that nothing else is
+# warmed. Both halves matter and only the first was asserted until 0.9.192: the warm
+# queued a second release-GROUP rel for every aggregate carrying a release_group_mbid,
+# while the row falls back to group art only when there is NO caa_release_mbid — so
+# every MAPPED row warmed 3 covers no client would ever request, and the suite was
+# green because every path it checked was correct. AN ASSERTION THAT EVERY WARMED
+# PATH IS RIGHT SAYS NOTHING ABOUT WHETHER EVERY WARMED PATH IS WANTED. Hence the
+# exact-count assertions below.
+#
+# ONE REL, ONE COVER URL. Since 0.9.192 _trendingAlbumRel carries both art ids and
+# coverArtUrl picks between them (release, then group), exactly as _parseMuSpy does —
+# so there is one builder, the row does no ICON re-test, and the warm has no branch
+# to replay. _trendingAlbumFallbackRel is gone.
 {
-    for my $name (qw(_trendingAlbumRel _trendingAlbumFallbackRel _warmTrendingCovers)) {
+    for my $name (qw(_trendingAlbumRel _warmTrendingCovers)) {
         my $body = grab($bsrc, $name);
         eval "package T; our (\@coverQueue, \%coverQueued, \$coverRunning, \$coverPumping,"
            . " \$coverStageOpen, \$coverFetched); $body 1;"
             or die "eval $name: $@";
     }
+    ok(scalar($bsrc !~ /_trendingAlbumFallbackRel/),
+       'the second rel builder is GONE — one builder per row, as every other view has');
+    my ($rowsub) = $bsrc =~ /^sub _trendingAlbumRow \{(.*?)^\}/ms;
+    (my $rowcode = $rowsub // '') =~ s/^\s*#.*$//mg;
+    ok(scalar(length $rowsub && $rowcode !~ /\bICON\b/),
+       '...and the row no longer re-tests the built item for ICON to choose a URL');
 
     # A mapped aggregate (has a release MBID) and an UNMAPPED one (stats row with
-    # only a release group), which is the case that falls back to release-group art.
+    # only a release group), which is the case that resolves to release-group art.
     my $mapped = { artist => 'A', title => 'T', year => 2026,
                    release_group_mbid => 'rg-1', caa_release_mbid => 'rel-1' };
     my $unmapped = { artist => 'B', title => 'U', year => 2026,
                      release_group_mbid => 'rg-2' };
+    # Neither id: the row shows the plugin icon and there is nothing to warm.
+    my $bare = { artist => 'C', title => 'V', year => 2026 };
 
     reset_world();
-    T::_warmTrendingCovers([ $mapped, $unmapped ], 'trending albums · this month');
+    T::_warmTrendingCovers([ $mapped, $unmapped, $bare ], 'trending albums · this month');
     my @paths = warmed_paths();
     ok(scalar(@paths) > 0, 'a trending albums build queues cover warms at all');
 
-    # What the ROW would ask for, derived the same way the renderer does it.
+    # What the ROW would ask for, derived the same way the renderer does it — ONE
+    # coverArtUrl call on the row's own rel, for both shapes.
+    # Asserted on the RAW coverArtUrl output, not the proxied path: proxiedImage
+    # percent-escapes the url into a single path segment, so `release-group/` is not
+    # greppable there and a regex against it would pass for the wrong reason.
     my $api = 'Plugins::ListenBrainzFreshReleases::API';
-    my $rowMapped = Slim::Web::ImageProxy::proxiedImage(
-        $api->coverArtUrl(T::_trendingAlbumRel($mapped)));
-    my $rowFallback = Slim::Web::ImageProxy::proxiedImage(
-        $api->coverArtUrl(T::_trendingAlbumFallbackRel($unmapped)));
-    for my $pair ([ $rowMapped, 'a mapped album' ], [ $rowFallback, 'an UNMAPPED stats row (release-group art)' ]) {
+    my $urlMapped   = $api->coverArtUrl(T::_trendingAlbumRel($mapped))   // '';
+    my $urlUnmapped = $api->coverArtUrl(T::_trendingAlbumRel($unmapped)) // '';
+    ok(scalar($urlMapped =~ m{/release/rel-1/}),
+       'a mapped aggregate resolves to RELEASE art (coverArtUrl prefers it)');
+    ok(scalar($urlUnmapped =~ m{/release-group/rg-2/}),
+       'an UNMAPPED one resolves to RELEASE-GROUP art from the SAME builder');
+    ok(scalar(!defined $api->coverArtUrl(T::_trendingAlbumRel($bare))),
+       '...and one with neither id resolves to nothing, so the row keeps the icon');
+
+    my $rowMapped   = Slim::Web::ImageProxy::proxiedImage($urlMapped);
+    my $rowUnmapped = Slim::Web::ImageProxy::proxiedImage($urlUnmapped);
+    for my $pair ([ $rowMapped, 'a mapped album' ], [ $rowUnmapped, 'an UNMAPPED stats row (release-group art)' ]) {
         my ($base, $what) = @$pair;
         (my $want = $base) =~ s/(\.\w+)$/_150x150_f$1/;
         ok(scalar(grep { $_ eq $want } @paths),
            "$what warms the exact path its row will request");
     }
+
+    # THE HALF THAT WAS MISSING. Two rows with art, three specs each, and nothing
+    # else — in particular NO release-group cover for the mapped row, which is what
+    # 0.9.191 queued and no client would ever ask for. The bare aggregate contributes
+    # nothing. Counting is the only way to see work that is correct but unwanted.
+    is_count(scalar(@paths), 2 * scalar(@{ +T::COVER_SPECS() }),
+             'exactly one cover URL per row with art, times the spec ladder — nothing spare');
+    # The escaped form, because that is what lands in the queue. rg-1 is the mapped
+    # aggregate's group: 0.9.191 warmed this and nothing would ever request it.
+    my $strayRg = Slim::Web::ImageProxy::proxiedImage(
+        $api->coverArtUrl({ caa_release_group_mbid => 'rg-1' }));
+    (my $strayBase = $strayRg) =~ s/(\.\w+)$//;
+    ok(scalar(!grep { index($_, $strayBase) == 0 } @paths),
+       'the MAPPED row does NOT also warm its release-group cover');
     ok(scalar(grep { /\.jpg$/ } @paths) == scalar(@paths),
        'trending covers are JPEG like every other row, not re-encoded PNG');
     reset_world();

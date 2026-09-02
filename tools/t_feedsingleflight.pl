@@ -24,10 +24,25 @@
 #   out and who got called back", which no pattern match can show.
 #
 # ANTI-TEST: point LBF_API / LBF_BROWSE at a mutated copy.
-#   - remove the $INFLIGHT park           -> section 1 red (3 requests, not 1)
-#   - drop $fanout from $done             -> section 2 red (waiters never answered)
-#   - drop $fanout from the failure path  -> section 3 red (waiters hang on an error)
-#   - key $INFLIGHT on $feed not $memoKey -> section 4 red (different query, wrong answer)
+#   - remove the $INFLIGHT park            -> section 1 red (3 requests, not 1)
+#   - drop $fanout from $done              -> section 2 red (waiters never answered)
+#   - drop $fanout from the failure path   -> section 3 red (waiters hang on an error)
+#   - key $INFLIGHT on $feed not $memoKey  -> section 4 red (different query, wrong answer)
+#   - MuSpy store gate ignores `force`     -> 4 red (the 0.9.190 state: the nightly
+#                                             warm returns yesterday's rows, no request)
+#   - only $bg claims %REVALIDATING        -> 1 red (a browse revalidates a feed the
+#                                             warm is already fetching, on another sort)
+#   - only !$bg claims %INFLIGHT           -> 5 red (a forced warm arriving during a
+#                                             revalidation issues its own second fetch)
+#   - restore `return if $bg` in $fanout   -> 3 red (a background fetch never releases
+#                                             the claim, so its waiters hang for ever)
+#
+# THE LAST THREE ARE DELIBERATELY SEPARATE MUTANTS. The two guards close the overlap
+# from opposite directions, and each is invisible to the other's assertions: the
+# per-request %INFLIGHT covers a browse asking the SAME question, and only the coarse
+# per-feed %REVALIDATING covers one asking a different question of the same feed.
+# Asserting only the same-question case passes with the feed guard removed entirely,
+# which is how the first cut of these sections read.
 
 use strict;
 use warnings;
@@ -609,6 +624,164 @@ section('THE WARM FETCHES; IT DOES NOT READ THE STORE');
     my $forced = () = $code =~ /force\s*=>\s*1/g;
     ok($calls > 0, "warmFeeds makes $calls feed call(s)");
     is($forced, $calls, 'EVERY feed call in warmFeeds passes force => 1');
+}
+
+# ==========================================================================
+section('MUSPY HAS TWO SHORT-CIRCUITS, AND force MUST GATE BOTH');
+# ==========================================================================
+# 0.9.190 gave MuSpy `force` and gated only the MEMO, on the stated grounds that
+# "MuSpy has no store short-circuit (it always fetches)". It has one — the same
+# `if ($stored && !$stale)` the LB feeds have, minus the day-coverage test. With
+# WARM_INTERVAL and FEED_STALE_AFTER both 24h, ANY browse inside the window leaves
+# a fresh store, so the nightly forced warm returned yesterday's rows and issued no
+# request: precisely the bug `force` was added to fix, reached through the other
+# door. The memo assertion alone could never see it — the memo is a 5s window.
+{
+    local @REQUESTS = ();
+    $PREFS{muspy_userid} = 'mu-1';
+
+    my @stored = ({ release_name => 'STORED-MUSPY', artist_credit_name => 'B',
+                    release_date => '2026-08-01', release_group_mbid => 'rg-m',
+                    release_mbid => 'r-m' });
+    no warnings 'redefine', 'once';
+    # FRESH, not stale: ok_at is now, so !$stale — the state the forced warm has to
+    # push past. A stale store would fetch either way and prove nothing.
+    local *Plugins::ListenBrainzFreshReleases::DB::feedReleases = sub { [ @stored ] };
+    local *Plugins::ListenBrainzFreshReleases::DB::feedCoverage =
+        sub { { any => 1, complete => 1, days => 28, covered => 28, ok_at => time() } };
+
+    my $browse = { done => [] };
+    $api->getMuSpyReleases(onDone => sub { push @{ $browse->{done} }, $_[0] });
+    is(scalar(@REQUESTS), 0, 'unforced + a fresh store makes NO request (the browse path)');
+    is((($browse->{done}[0] || [])->[0] || {})->{release_name}, 'STORED-MUSPY',
+       '...and is answered from the store');
+
+    # The memo now holds the stored copy, so this also covers both short-circuits at
+    # once: a `force` that gated only the memo would fall straight into the store.
+    @REQUESTS = ();
+    my $warm = { done => [] };
+    $api->getMuSpyReleases(force => 1, onDone => sub { push @{ $warm->{done} }, $_[0] });
+    is(scalar(@REQUESTS), 1, 'forced goes to the network even with a fresh store');
+    is(scalar(@{ $warm->{done} }), 0, '...and does NOT answer from the store first');
+
+    answer_ok($REQUESTS[0], '[{"artist":{"name":"MB Artist","sort_name":"Artist, MB"},'
+                          . '"mbid":"rg-fresh","name":"FETCHED","date":"2026-08-20","type":"Album"}]')
+        if @REQUESTS;
+    is(scalar(@{ $warm->{done} }), 1, '...it answers once the fetch lands');
+    is((($warm->{done}[0] || [])->[0] || {})->{release_name}, 'FETCHED',
+       '...with what the FETCH returned, not the stored copy — the whole point');
+
+    # And the best-effort contract is unchanged: a forced fetch that FAILS must still
+    # answer, degrading to the store rather than blanking the feed it merges into.
+    @REQUESTS = ();
+    my $bad = { done => [] };
+    $api->getMuSpyReleases(force => 1, onDone => sub { push @{ $bad->{done} }, $_[0] });
+    is(scalar(@REQUESTS), 1, 'forced fetch issued');
+    answer_fail($REQUESTS[0], 'boom') if @REQUESTS;
+    is(scalar(@{ $bad->{done} }), 1, 'a failed forced fetch still answers');
+    is((($bad->{done}[0] || [])->[0] || {})->{release_name}, 'STORED-MUSPY',
+       '...degrading to the stored list, so the warm warms something');
+
+    delete $PREFS{muspy_userid};
+}
+
+# ==========================================================================
+section('THE TWO GUARDS CAN SEE EACH OTHER');
+# ==========================================================================
+# %REVALIDATING was claimed only when $bg and %INFLIGHT only when not, so the two
+# roles were mutually invisible. Harmless while the warm revalidated in the
+# BACKGROUND; 0.9.190 made it a foreground caller, and from that build a browse
+# could kick a background revalidation of a feed the warm was already fetching —
+# two ListenBrainz requests and two ~3,000-release chunked ingests of one payload.
+#
+# A stale-but-populated store is the state both roles meet in: the browse serves it
+# and revalidates behind the render, while the forced warm fetches for real.
+{
+    local @REQUESTS = ();
+    %Plugins::ListenBrainzFreshReleases::API::FEED_MEMO = ();
+
+    my @stored = ({ release_name => 'STORED', artist_credit_name => 'B',
+                    release_date => '2026-08-01', release_group_mbid => 'rg-s',
+                    release_mbid => 'r-s' });
+    no warnings 'redefine', 'once';
+    local *Plugins::ListenBrainzFreshReleases::DB::feedReleases = sub { [ @stored ] };
+    # STALE: ok_at well past FEED_STALE_AFTER, so a browse revalidates behind its render.
+    local *Plugins::ListenBrainzFreshReleases::DB::feedCoverage =
+        sub { { any => 1, complete => 1, days => 28, covered => 28,
+                ok_at => time() - 10 * 86400 } };
+
+    # --- warm first, then a browse -----------------------------------------
+    my $warm = { done => [] };
+    $api->getFreshReleasesAll(sort => 'overlap-a', force => 1,
+        onDone => sub { push @{ $warm->{done} }, $_[0] });
+    is(scalar(@REQUESTS), 1, 'the forced warm fetches');
+
+    my $browse = { done => [] };
+    $api->getFreshReleasesAll(sort => 'overlap-a',
+        onDone => sub { push @{ $browse->{done} }, $_[0] });
+    is(scalar(@{ $browse->{done} }), 1, 'the browse still renders instantly from the store');
+    is(scalar(@REQUESTS), 1,
+       'and its revalidation is SUPPRESSED — no second fetch or ingest of one payload');
+
+    # AND WITH A DIFFERENT QUESTION, which is what the coarse per-feed guard is FOR.
+    # A browse on another sort has a different $ikey, so %INFLIGHT says nothing about
+    # it — only %REVALIDATING does, and only because the warm claims it. Two
+    # revalidations of one feed are still two requests at ListenBrainz and two
+    # ~3,000-release ingests, and the rate limit is per-user, not per-question.
+    my $other = { done => [] };
+    $api->getFreshReleasesAll(sort => 'overlap-a-alt',
+        onDone => sub { push @{ $other->{done} }, $_[0] });
+    is(scalar(@{ $other->{done} }), 1, 'a browse on another sort still renders from the store');
+    is(scalar(@REQUESTS), 1,
+       'and ITS revalidation is suppressed too — the feed guard, not the request guard');
+
+    answer_ok($REQUESTS[0], $PAYLOAD) if @REQUESTS;
+    is(scalar(@{ $warm->{done} }), 1, 'the warm is answered');
+
+    # The claim is released on the way out, or one warm would suppress every
+    # revalidation of that feed for the life of the process.
+    @REQUESTS = ();
+    %Plugins::ListenBrainzFreshReleases::API::FEED_MEMO = ();
+    $api->getFreshReleasesAll(sort => 'overlap-a',
+        onDone => sub { });
+    is(scalar(@REQUESTS), 1, 'a later browse CAN revalidate again — the claim was released');
+    answer_ok($REQUESTS[0], $PAYLOAD) if @REQUESTS;
+
+    # --- the other direction: a foreground caller arriving mid-revalidation --
+    # It owes an answer, so it can never simply return; it parks on the background
+    # fetch and is answered from it. Before 0.9.192 it issued its own request.
+    @REQUESTS = ();
+    %Plugins::ListenBrainzFreshReleases::API::FEED_MEMO = ();
+    $api->getFreshReleasesAll(sort => 'overlap-b', onDone => sub { });
+    is(scalar(@REQUESTS), 1, 'the browse kicks a background revalidation');
+
+    %Plugins::ListenBrainzFreshReleases::API::FEED_MEMO = ();
+    my $late = { done => [] };
+    $api->getFreshReleasesAll(sort => 'overlap-b', force => 1,
+        onDone => sub { push @{ $late->{done} }, $_[0] });
+    is(scalar(@REQUESTS), 1, 'a forced warm arriving mid-revalidation PARKS, it does not re-fetch');
+    is(scalar(@{ $late->{done} }), 0, '...and is not answered before the fetch lands');
+
+    answer_ok($REQUESTS[0], $PAYLOAD) if @REQUESTS;
+    is(scalar(@{ $late->{done} }), 1,
+       '...then a BACKGROUND fetch fans out to it — the claim it holds is answerable');
+    is((($late->{done}[0] || [])->[0] || {})->{release_name}, 'A',
+       '...with what the fetch returned');
+
+    # A failing background fetch must release its waiters too — a park that becomes a
+    # hang is strictly worse than the duplicate fetch this replaces.
+    @REQUESTS = ();
+    %Plugins::ListenBrainzFreshReleases::API::FEED_MEMO = ();
+    $api->getFreshReleasesAll(sort => 'overlap-c', onDone => sub { });
+    %Plugins::ListenBrainzFreshReleases::API::FEED_MEMO = ();
+    my $parked = { done => [], error => [] };
+    $api->getFreshReleasesAll(sort => 'overlap-c', force => 1,
+        onDone  => sub { push @{ $parked->{done} },  $_[0] },
+        onError => sub { push @{ $parked->{error} }, $_[0] });
+    is(scalar(@REQUESTS), 1, 'one fetch, one parked forced caller');
+    answer_fail($REQUESTS[0], 'boom') if @REQUESTS;
+    is(scalar(@{ $parked->{done} }) + scalar(@{ $parked->{error} }), 1,
+       'a FAILED background fetch still answers the caller parked on it');
 }
 
 printf "\n%s\n%d passed, %d failed.\n", '=' x 74, $pass, $fail;

@@ -2698,6 +2698,27 @@ sub _trendingSortToggle {
 # needs a $rel to hand _warmCovers, and a second copy of this mapping would drift
 # the moment either side changed — which is exactly how the release-group cover
 # URL came to be built two different ways (0.9.188).
+#
+# ONE REL, ONE COVER URL — the rule every other view has always followed, and which
+# trending did not until 0.9.192. A trending aggregate is the only row shape in the
+# plugin that can carry EITHER art id: a mapped listen yields a caa_release_mbid, an
+# unmapped one only a release group (the gap _aggregateAlbums exists for; LB's
+# fresh_releases payload is MB-derived and never has it). That choice used to be made
+# in _trendingAlbumRow, by testing the built item for ICON and then hand-building a
+# second `{ caa_release_group_mbid => ... }` hashref — so "which URL does this row
+# use" was a decision in Browse.pm rather than a property of the rel, and ANYTHING
+# wanting the row's URL without rendering the row had to replay it. _warmTrendingCovers
+# replayed it with the wrong condition (`if release_group_mbid`, where the row asks
+# `unless caa_release_mbid`) and warmed a release-group cover for every MAPPED
+# aggregate as well — 3 Cover Art Archive fetches and 3 markers per row that nothing
+# would ever request.
+#
+# Filing the group id under the key coverArtUrl actually READS is the whole fix, and
+# it is exactly what _parseMuSpy does (API.pm — MuSpy has no release-level mbid, so
+# the group is its only art signal). coverArtUrl's own priority — release, then group,
+# then undef — is the branch that was being hand-rolled. So the row, the detail page
+# and the warm now all just call coverArtUrl once, like every other view, and the
+# mismatch is not merely fixed but inexpressible.
 sub _trendingAlbumRel {
     my ($agg) = @_;
     return {
@@ -2708,40 +2729,27 @@ sub _trendingAlbumRel {
         release_group_primary_type => ($agg->{type} // ''),
         caa_id                     => $agg->{caa_id},
         caa_release_mbid           => $agg->{caa_release_mbid},
+        # NOT a duplicate of release_group_mbid above: that key names the release
+        # GROUP for metadata/genre/dedupe purposes and coverArtUrl does not read it.
+        # This one is the ART signal, and is the lower-priority half of coverArtUrl's
+        # ladder — set only when there is a group, so an aggregate with neither id
+        # still resolves to undef and the row shows the plugin icon, as before.
+        caa_release_group_mbid     => $agg->{release_group_mbid},
         artist_mbids               => ($agg->{artist_mbid} ? [ $agg->{artist_mbid} ] : []),
     };
-}
-
-# The release-GROUP art fallback, as a $rel coverArtUrl understands. Stats rows
-# built from UNMAPPED listens carry no caa_release_mbid, so the row would fall back
-# to the plugin icon; a release-group mbid still resolves at CAA. Named because the
-# warm has to queue the IDENTICAL url — a warm that guessed differently would fill
-# a key nobody reads, which is the trap _warmCovers' own comment describes.
-sub _trendingAlbumFallbackRel {
-    my ($agg) = @_;
-    return { caa_release_group_mbid => $agg->{release_group_mbid} };
 }
 
 sub _trendingAlbumRow {
     my ($client, $agg) = @_;
     my $rel = _trendingAlbumRel($agg);
 
+    # NO ARTWORK FALLBACK HERE — deliberately, since 0.9.192. A stats row built from
+    # an UNMAPPED listen still gets its release-GROUP cover, but it gets it the way
+    # every other view does: `caa_release_group_mbid` is on the $rel, so the single
+    # coverArtUrl call inside _buildReleaseItem resolves it. The `eq ICON` re-test and
+    # the second hashref that used to live here were the plugin's only place where a
+    # row's cover URL was chosen OUTSIDE coverArtUrl — see _trendingAlbumRel.
     my $item = _buildReleaseItem($rel, $client);
-    # Artwork fallback: stats rows built from UNMAPPED listens carry no
-    # caa_release_mbid (coverArtUrl → undef → plugin icon), but once the row has a
-    # release-group mbid (from stats or the MB name-resolution) the Cover Art
-    # Archive can serve the GROUP's front cover directly — same host, so the
-    # registered image proxy caches it like every other cover.
-    # THROUGH coverArtUrl, not a literal. This built the same release-group URL
-    # by hand, which meant it was the one CAA row in the plugin that did NOT pick
-    # up the `.jpg` suffix — so trending rows would have gone on shipping as
-    # `image.png` and re-encoding every cover at ~6x the bytes while every other
-    # row got JPEG. One builder for the string is what stops that recurring; the
-    # hashref form is exactly the shape coverArtUrl already handles for MuSpy.
-    if (($item->{image} // '') eq ICON && $agg->{release_group_mbid}) {
-        $item->{image} = Plugins::ListenBrainzFreshReleases::API->coverArtUrl(
-            _trendingAlbumFallbackRel($agg));
-    }
     # Trending signal in place of the type/genre line.
     $item->{line2} = sprintf(cstring($client, 'PLUGIN_LBF_TREND_BREADTH'), $agg->{breadth} // 0);
     # _buildReleaseItem only links when there's an MBID; a release-group without one
@@ -2767,19 +2775,21 @@ sub _trendingAlbumRow {
 # aggregates when the data is still inside its TTL (2/7/30 days by range), so the
 # list is in hand either way, and the covers are what expire independently of it.
 #
-# Both mappings go through the same two builders the ROW uses, so the warmed path
-# is byte-identical to what the client will ask for. The fallback rel is included
-# because a stats row with no caa_release_mbid renders its cover from the release
-# GROUP — the case that is most likely to be cold and least likely to be noticed.
+# IT QUEUES THE ROW'S REL AND NOTHING ELSE, which is the whole shape of this sub
+# since 0.9.192 and is the same shape the three feed callers use. It can be this
+# simple because _trendingAlbumRel now carries BOTH art ids and coverArtUrl picks
+# between them — so "what will this row request" is one call, not a branch the warm
+# has to replay. The 0.9.191 version queued a second, release-GROUP rel per aggregate
+# `if release_group_mbid`, where the row falls back only `unless caa_release_mbid`:
+# every MAPPED row therefore warmed 3 covers nothing would ever ask for. Its dateless
+# fallback hashref also sorted to the FLOOR of _warmCovers' newest-first queue, so
+# the genuinely unmapped rows — the ones with no other art source — had their covers
+# queued behind every mapped row in all three spec passes, which is a small rerun of
+# the ordering bug 0.9.189 exists to fix. Both go away with the second rel.
 sub _warmTrendingCovers {
     my ($aggs, $label) = @_;
     return unless ref $aggs eq 'ARRAY' && @$aggs;
-    my @rels;
-    for my $agg (@$aggs) {
-        next unless ref $agg eq 'HASH';
-        push @rels, _trendingAlbumRel($agg);
-        push @rels, _trendingAlbumFallbackRel($agg) if $agg->{release_group_mbid};
-    }
+    my @rels = map { _trendingAlbumRel($_) } grep { ref $_ eq 'HASH' } @$aggs;
     _warmCovers(\@rels, $label);
     return;
 }

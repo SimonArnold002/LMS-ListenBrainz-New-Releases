@@ -67,7 +67,8 @@ does not cover. Say which ledger entry you are challenging and what changed.
 
 Fixed findings are recorded per review in `docs/code-review-<version>.md`, each
 with its mechanism, its guard and its test. Check there before reporting: the
-0.9.174 and 0.9.184 findings are all fixed and verified. Do not re-derive them.
+0.9.174, 0.9.184 and 0.9.191 findings are all fixed and verified. Do not
+re-derive them.
 
 ### D. ADDING TO THIS LEDGER
 
@@ -188,6 +189,117 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
+**0.9.192** — built 2026-09-02, **NOT installed and NOT tested**. All three findings of the
+0.9.191 code review (`docs/code-review-0.9.191.md`): two in `API.pm`'s feed path, one in the
+Trending Albums cover warm. **No schema change and no cache bump** — nothing here changes the
+SHAPE of a stored value, and the version bump alone triggers `_buildChanged`, which clears the
+derived tier and the genre answers on first start ([[dev-builds-clear-caches]]).
+
+**0.9.192 — THE FIRST TWO ARE THE SAME EVENT: 0.9.190 CHANGED THE WARM'S ROLE.**
+
+That build turned the nightly warm from a background revalidation into a **foreground caller**
+(`force => 1`). Both defects are consequences of that role change landing in code whose guards
+were written around the old one, and **neither is visible from the warm's own call site** —
+both are two frames down, in decisions made about `$bg`. Worth reading as one thing.
+
+1. **`force` did not reach MuSpy's store short-circuit.** It gated the memo, and the comment
+   above the sub asserted that was the whole of it because "MuSpy has no store short-circuit
+   (it always fetches)". It has one. With `WARM_INTERVAL` and `FEED_STALE_AFTER` both 24h, any
+   browse inside the window leaves a fresh store, so **the nightly forced warm returned
+   yesterday's rows and issued no request** — the exact bug `force` exists to fix, arriving
+   through the other door, and invisible in `warmstats` for the same reason the original was
+   (the stage completes quickly, having done nothing).
+
+2. **The two dedupe guards could no longer see each other.** `%REVALIDATING` was claimed only
+   when `$bg` and `%INFLIGHT` only when not. That was harmless while the warm WAS the background
+   revalidation — it set `%REVALIDATING`, and an overlap was impossible by construction. Once the
+   warm took the `onDone` branch, a browse-triggered revalidation could run alongside it: two
+   ListenBrainz requests and **two ~3,000-release chunked ingests of one payload**, which is the
+   one thing on this path that must not happen twice ([[lbf-ingest-event-loop-stall]]).
+
+**BOTH GUARDS ARE KEPT, WITH ONE JOB EACH — do not collapse them.** `%REVALIDATING` is now
+claimed by every fetch and keyed on the **feed**; it suppresses BACKGROUND refreshes only,
+because a background walk has an answer on screen already and skipping is free. `%INFLIGHT` is
+now claimed by every fetch and keyed on the **request** (memo key + headers); it blocks nobody —
+a foreground caller OWES AN ANSWER, so it parks on an identical in-flight fetch and is answered
+from it, while a different question proceeds as it must. The coarse key is deliberate: two
+revalidations of one feed differing only by sort are still two requests, and the rate limit is
+per-user, not per-question.
+
+**LETTING A BACKGROUND FETCH HOLD `%INFLIGHT` HAS THREE CONSEQUENCES, all handled.** `$fanout`
+lost its `return if $bg` (it is the only thing that releases the claim, and a background fetch
+may now carry waiters). **The leak watchdog is armed for a background fetch too** — not
+belt-and-braces: a background callback that never arrives would otherwise strand every later
+cold open of that feed on a list nothing drains, the permanent failure `%INFLIGHT_TIMER` exists
+to prevent, newly reachable from the one role that used to be exempt; it clears `%REVALIDATING`
+as well, or one dead background fetch would suppress every future revalidation of that feed for
+the life of the process. And `$failed` keeps its early exit for a background fetch with **no**
+waiters, so the log line and the memo refresh still belong to answering someone.
+
+**TESTS.** `t_feedsingleflight.pl` 55 → 78, in two new sections, both behavioural. The MuSpy one
+installs a store that ANSWERS and is FRESH — the state in which the short-circuit exists at all —
+and pins that forced answers with **what the fetch returned, not the stored copy**; the memo
+assertions could never have seen this, since the memo is a 5s window. The guard one runs against
+a **stale but populated** store, the state both roles meet in, and pins both directions plus the
+release of the claim and the failure path.
+
+**ANTI-TESTED FOUR WAYS, and the split is the point:** MuSpy's store gate un-gated → 4 red; only
+`$bg` claims `%REVALIDATING` → 1 red; only `!$bg` claims `%INFLIGHT` → 5 red; `return if $bg`
+restored in `$fanout` → 3 red. **The first cut of the guard section asserted only the
+same-question case and passed with the per-feed guard removed entirely** — `%INFLIGHT` satisfies
+that case on its own. The case that distinguishes the two guards is a browse asking a DIFFERENT
+question (another sort) of the SAME feed. *Two guards need two cases; an anti-test that goes red
+on one mutation is not evidence that it covers the other.*
+
+**0.9.192 — AND THE THIRD FINDING: TRENDING NOW GETS ITS COVER THE WAY EVERY OTHER VIEW DOES.**
+
+`_warmTrendingCovers` queued a release-GROUP cover for every aggregate with a
+`release_group_mbid`, while the ROW falls back to group art only `unless caa_release_mbid` —
+different tests, and uncorrelated, since a mapped aggregate normally has both ids. So every
+mapped row warmed 3 Cover Art Archive covers (~2.1s each) and 3 `lbf:imgwarm:` markers that
+nothing would ever request: up to **300 wasted requests** per tick
+(`TRENDING_MAX` 50 × 2 ranges × 3 specs), ~78s of background work. Once per 25-day marker in
+production — but every dev build wipes `kv`, so in development it was every build.
+
+**FIXED BY DELETING THE SECOND PATH, NOT BY REPAIRING IT** (Simon: *"fix it so it works like the
+others, we don't want to maintain two different paths to this"*). The right question turned out
+to be why trending was different at all:
+
+- **the three feeds each have ONE art shape per row, filed under the key `coverArtUrl` READS** —
+  LB rows carry `caa_release_mbid`, MuSpy rows carry `caa_release_group_mbid` (set once in
+  `_parseMuSpy`; MuSpy has no release-level mbid). `coverArtUrl($rel)` is therefore total: one
+  call, one answer, and `_warmCovers` is right by construction with no branch to duplicate.
+- **a trending aggregate can be EITHER**, per row, in one list — the unmapped-listen gap
+  `_aggregateAlbums` exists for, which only the stats-derived views have. And
+  `_trendingAlbumRel` filed the group id under `release_group_mbid`, a key `coverArtUrl` does not
+  read — so the row recovered it in `_trendingAlbumRow` with a hand-built second hashref behind
+  an `eq ICON` test. **That made "which URL does this row use" a decision in the renderer rather
+  than a property of the rel**, and anything wanting the URL without rendering the row had to
+  replay it. The warm replayed it with the wrong condition.
+
+So `_trendingAlbumRel` now carries `caa_release_group_mbid` too, `coverArtUrl`'s own priority
+(release → group → undef) makes the choice it was hand-rolling, and
+**`_trendingAlbumFallbackRel` and the ICON branch are gone**; `_warmTrendingCovers` is one `map`,
+the same shape the feed callers use. Rendering is unchanged in all three cases. **One deliberate
+change:** an unmapped row's DETAIL page showed no artwork and now shows the release-group cover,
+matching the list row it was opened from.
+
+**A SECOND BUG WENT WITH IT, found while explaining the first.** `_warmCovers` sorts newest-first
+and the queue order IS the priority (0.9.189). The fallback hashref had no `release_date`, so
+every one sorted to the FLOOR in all three spec passes — the genuinely unmapped rows, which have
+no other art source, were queued behind every mapped row. A small rerun of the ordering bug
+0.9.189 exists to fix, and it disappears with the hashref.
+
+**TESTS.** `t_coverwarm.pl` 57 → 64. **The old §5 could not have caught this**: it asserted the
+warmed path is byte-identical to what the row requests, for a mapped album and an unmapped stats
+row, and both were true — it never asked whether the mapped album should have been queued for the
+group URL as well. *An assertion that every warmed path is correct says nothing about whether
+every warmed path is needed; only COUNTING sees work that is right but unwanted.* §5 now pins the
+exact count, that the mapped row does not also warm its group cover, that both shapes resolve
+through the SAME builder, and — at source level — that the fallback builder is gone and the row
+no longer re-tests for `ICON`. **Anti-tested** by restoring the 0.9.191 shape: **5 red**, the
+count reading **9 instead of 6** — the waste itself.
+
 **0.9.191** — built 2026-09-02, **NOT installed and NOT tested**. **People You Follow warmed no
 artwork at all.** Trending Albums (This Month / This Year) now warm their covers on the same
 queue as the release feeds. No schema change, no cache bump.

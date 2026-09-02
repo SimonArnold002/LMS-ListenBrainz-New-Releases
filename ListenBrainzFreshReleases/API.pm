@@ -93,24 +93,39 @@ use constant FEED_FALLBACK_TTL => 30 * 86400;
 # query buys is the decision of whether that fetch has to block, which it does not.
 use constant FEED_STALE_AFTER => FEED_TTL;
 
-# Only ONE revalidation per feed may be in flight. Without this, the three or more
-# XMLBrowser walks a single tap produces would each see the same stale coverage and
-# each launch its own fetch — turning a background refresh into a self-inflicted
-# burst against the rate limit the 429 work exists to respect.
+# "A fetch for this feed is running" — claimed by EVERY fetch, background or open.
+# It suppresses BACKGROUND refreshes only. Without it, the three or more XMLBrowser
+# walks a single tap produces would each see the same stale coverage and each launch
+# its own fetch — turning a background refresh into a self-inflicted burst against the
+# rate limit the 429 work exists to respect.
+#
+# IT IS CLAIMED BY THE OPEN PATH TOO (0.9.192), and that is the half that was missing:
+# 0.9.190 turned the nightly warm into a foreground caller, so without this a browse
+# could kick a background revalidation of a feed the warm was already fetching —
+# two requests and two ~3,000-release chunked ingests of the same payload.
+# Keyed on the FEED, deliberately coarser than %INFLIGHT's per-request key: two
+# revalidations of one feed differing only by sort are still two requests at
+# ListenBrainz, and the rate limit is per-user, not per-question.
 my %REVALIDATING;
 
-# ...and the SAME argument applies to the OPEN path, which %REVALIDATING does not
-# cover: its guard is `if ($bg)`, and an open-path fetch carries onDone so $bg is
-# false. On a WARM store that is harmless — the extra walks read the store and never
-# fetch. On a COLD store (first open after install, or after the store is wiped)
-# there is nothing to read, so each of those three-plus walks fires its own
-# ListenBrainz fetch for the identical URL. %FEED_MEMO cannot help: it caches
-# COMPLETED results, and none of them completes until 2-10s later.
+# ...and a per-REQUEST guard is needed as well, because a foreground caller OWES AN
+# ANSWER and so can never simply return the way a background refresh does — the
+# coarse feed guard above has nothing useful to say to it. On a WARM store the extra
+# walks are harmless: they read the store and never fetch. On a COLD store (first open
+# after install, or after the store is wiped) there is nothing to read, so each of
+# those three-plus walks fires its own ListenBrainz fetch for the identical URL.
+# %FEED_MEMO cannot help: it caches COMPLETED results, and none of them completes
+# until 2-10s later.
 #
 # So the second and subsequent callers WAIT on the first instead of racing it. Keyed
 # on the MEMO key, not the feed name, because sort and the week window both change
 # what comes back and are all in that key — fanning one result out to a caller that
 # asked a different question would be worse than the duplicate fetch.
+#
+# A BACKGROUND REVALIDATION CLAIMS IT TOO (0.9.192), so a foreground caller arriving
+# mid-revalidation of the SAME request parks on it rather than issuing its own —
+# the other direction of the overlap %REVALIDATING closes above. It normally carries
+# no waiters; the claim is what makes it visible.
 my %INFLIGHT;   # memo key => [ { onDone, onError }, ... ] waiting on the in-flight fetch
 
 # A CLAIMED KEY THAT IS NEVER RELEASED IS WORSE THAN NO SINGLE-FLIGHT AT ALL: every
@@ -984,18 +999,8 @@ sub _fetchReleaseFeed {
     my (%p) = @_;
     my $feed = $p{feed};
 
-    # One revalidation per feed at a time. A single tap produces three or more
-    # XMLBrowser walks from the root, and without this each would see the same
-    # stale coverage and launch its own fetch.
     my $bg = !$p{onDone};
-    if ($bg) {
-        return if $REVALIDATING{$feed};
-        $REVALIDATING{$feed} = 1;
-    }
 
-    # SINGLE-FLIGHT the open path. See %INFLIGHT above for why %REVALIDATING does not
-    # cover this. A caller that finds a fetch already running is parked and answered
-    # from that fetch's result; only the first caller reaches the network.
     # THE KEY MUST DESCRIBE THE REQUEST THAT WILL ACTUALLY BE SENT, not just the
     # feed — the memo key covers the sort and the week window, and the HEADERS cover
     # the rest. Without them a caller holding a ListenBrainz token could be parked
@@ -1004,22 +1009,46 @@ sub _fetchReleaseFeed {
     # t_tokenfree exists to pin) but it would make the request LBF issues depend on
     # which browse walk happened to arrive first. Only identical requests share.
     my $ikey = ($p{memoKey} // $feed) . "\0" . join("\0", map { defined $_ ? $_ : '' } @{ $p{headers} || [] });
-    unless ($bg) {
-        if (my $waiters = $INFLIGHT{$ikey}) {
-            push @$waiters, { onDone => $p{onDone}, onError => $p{onError} };
-            $log->info("feed '$feed' already being fetched — waiting on it ("
-                     . scalar(@$waiters) . " waiting)");
-            return;
-        }
-        $INFLIGHT{$ikey} = [];
+
+    # TWO GUARDS, AND THEY MUST BE ABLE TO SEE EACH OTHER. They did not until 0.9.192:
+    # %REVALIDATING was set only when $bg and %INFLIGHT only when not, so the two roles
+    # were mutually invisible. That was harmless while the warm revalidated in the
+    # BACKGROUND; 0.9.190 made the warm a foreground caller (`force => 1`), and from
+    # that build a browse-triggered revalidation could run alongside the nightly warm —
+    # duplicate ListenBrainz fetch AND duplicate ~3,000-release chunked ingest, which is
+    # the one thing on this path that must not happen twice.
+    #
+    #   %REVALIDATING — "a fetch for this FEED is running", claimed by BOTH roles now.
+    #                   It suppresses BACKGROUND refreshes only: a background walk has
+    #                   an answer on screen already, so skipping is free. Keyed on the
+    #                   feed, deliberately coarser than $ikey — two revalidations of one
+    #                   feed differing only by sort are still two requests at ListenBrainz,
+    #                   and the rate limit is per-user, not per-question.
+    #   %INFLIGHT     — the per-REQUEST waiter list. A foreground caller owes an answer,
+    #                   so it can never simply return; if an identical request is already
+    #                   running — background or foreground — it parks and is answered from
+    #                   that fetch. A DIFFERENT request proceeds, as it must.
+    if ($bg) {
+        return if $REVALIDATING{$feed} || $INFLIGHT{$ikey};
     }
+    elsif (my $waiters = $INFLIGHT{$ikey}) {
+        push @$waiters, { onDone => $p{onDone}, onError => $p{onError} };
+        $log->info("feed '$feed' already being fetched — waiting on it ("
+                 . scalar(@$waiters) . " waiting)");
+        return;
+    }
+    $REVALIDATING{$feed} = 1;
+    $INFLIGHT{$ikey}     = [];
 
     # Answer everyone parked behind this fetch, exactly once. EVAL'd per waiter: these
     # are XMLBrowser render callbacks, and one of them dying must not strand the rest
     # — they are unrelated browse sessions that merely asked the same question.
+    # It runs for a BACKGROUND fetch too, and must: since 0.9.192 a background
+    # revalidation claims $ikey like any other, so it can collect foreground waiters
+    # that arrived after it started — and it is the only thing that releases the claim.
+    # With no waiters it is simply the claim-and-watchdog release.
     my $fanout = sub {
         my ($which, @args) = @_;
-        return if $bg;                            # a background refresh parks nobody
         eval { Slim::Utils::Timers::killSpecific(delete $INFLIGHT_TIMER{$ikey})
                    if $INFLIGHT_TIMER{$ikey}; 1 };
         my $waiters = delete $INFLIGHT{$ikey} or return;
@@ -1034,37 +1063,53 @@ sub _fetchReleaseFeed {
     # parked waiters rather than merely dropping the key — a waiter freed without a
     # callback is still a browse that never renders, which is the very thing being
     # prevented.
-    unless ($bg) {
-        eval {
-            $INFLIGHT_TIMER{$ikey} = Slim::Utils::Timers::setTimer(
-                undef, Time::HiRes::time() + INFLIGHT_MAX, sub {
-                    return unless $INFLIGHT{$ikey};
-                    $log->error("feed '$feed' single-flight claim expired after "
-                              . INFLIGHT_MAX . "s without a result — releasing "
-                              . scalar(@{ $INFLIGHT{$ikey} }) . " waiter(s)");
-                    $fanout->('onError', 'ListenBrainz feed fetch did not complete');
-                });
-            1;
-        };
-    }
+    # ARMED FOR A BACKGROUND FETCH TOO, and that is not belt-and-braces: a background
+    # fetch now holds $ikey, so a callback that never arrives would strand every later
+    # cold open of that feed on a list nothing drains — the exact permanent failure
+    # %INFLIGHT_TIMER exists to prevent, reachable from the one role that used to be
+    # exempt. It also clears $REVALIDATING, or one dead background fetch would suppress
+    # every future revalidation of that feed for the life of the process.
+    eval {
+        $INFLIGHT_TIMER{$ikey} = Slim::Utils::Timers::setTimer(
+            undef, Time::HiRes::time() + INFLIGHT_MAX, sub {
+                return unless $INFLIGHT{$ikey};
+                $log->error("feed '$feed' single-flight claim expired after "
+                          . INFLIGHT_MAX . "s without a result — releasing "
+                          . scalar(@{ $INFLIGHT{$ikey} }) . " waiter(s)");
+                delete $REVALIDATING{$feed};
+                $fanout->('onError', 'ListenBrainz feed fetch did not complete');
+            });
+        1;
+    };
 
     my $done = sub {
-        delete $REVALIDATING{$feed} if $bg;
-        return unless $p{onDone};
+        delete $REVALIDATING{$feed};
         # EVAL'D FOR THE SAME REASON THE WAITERS ARE, and this is the asymmetry that
         # was the bug: $fanout — the ONLY place the claim is released — runs AFTER
         # the first caller's own callback. $p{onDone} is an XMLBrowser render
         # callback like any waiter's, so a die in it left $ikey claimed for ever and
         # every later cold open of this feed parked behind a fetch that had finished.
-        eval { $p{onDone}->($_[0]); 1 } or $log->error("feed caller (onDone) raised: $@");
+        if ($p{onDone}) {
+            eval { $p{onDone}->($_[0]); 1 } or $log->error("feed caller (onDone) raised: $@");
+        }
+        # A background fetch reaches $fanout too — it may be carrying waiters, and it
+        # holds the claim either way.
         $fanout->('onDone', $_[0]);
     };
 
     my $failed = sub {
         my ($resp) = @_;
-        delete $REVALIDATING{$feed} if $bg;
+        delete $REVALIDATING{$feed};
         _ingestNoteFailure($feed, $p{from}, $p{to});
-        return if $bg;
+
+        # A background refresh with NOBODY parked on it has no one to answer: release
+        # the claim and stop, exactly as before. Kept as its own exit so the branches
+        # below can assume a caller or a waiter exists — the log line and the memo
+        # refresh belong to answering someone, not to a silent revalidation.
+        unless ($p{onDone} || ($INFLIGHT{$ikey} && @{ $INFLIGHT{$ikey} })) {
+            $fanout->('onDone');
+            return;
+        }
 
         # Nothing was rendered, so there is still a caller to answer. Serve stored
         # rows if there are any — a ListenBrainz outage degrades to slightly stale
@@ -1078,9 +1123,15 @@ sub _fetchReleaseFeed {
             # first caller's own callback ahead of $fanout, so a die here strands the
             # claim identically. The error branch below is safe by construction —
             # _handleError runs no user code between it and $fanout.
-            eval { $p{onDone}->(_memoSet($p{memoKey}, $stored)); 1 }
-                or $log->error("feed caller (onDone, stored copy) raised: $@");
-            $fanout->('onDone', $stored);
+            # `if ($p{onDone})` because a BACKGROUND fetch can reach here now, holding
+            # foreground waiters and no callback of its own; they are answered by the
+            # $fanout below with the same arrayref _memoSet hands back.
+            my $rels = $p{memoKey} ? _memoSet($p{memoKey}, $stored) : $stored;
+            if ($p{onDone}) {
+                eval { $p{onDone}->($rels); 1 }
+                    or $log->error("feed caller (onDone, stored copy) raised: $@");
+            }
+            $fanout->('onDone', $rels);
             return;
         }
         # A FAILURE MUST RELEASE THE WAITERS TOO. Parking them and then answering only
@@ -1142,8 +1193,12 @@ sub _ingestNoteFailure {
 # an empty list — it must never blank the LB feed. No onError path by design.
 # `force => 1` is honoured here for the same reason as the two LB feeds — the warm
 # is a caller, and the memo would otherwise hand it whatever a browse left behind.
-# MuSpy has no store short-circuit (it always fetches), so gating the memo is the
-# whole of it.
+# IT MUST GATE BOTH SHORT-CIRCUITS, and this sub HAS TWO: the memo, and the store
+# read below. (0.9.190's comment here claimed MuSpy "always fetches" and that gating
+# the memo was the whole of it — untrue, and it made the forced warm inert: with
+# WARM_INTERVAL and FEED_STALE_AFTER both 24h, any browse inside the window leaves a
+# fresh store, so the nightly warm returned yesterday's rows without a request. The
+# exact bug `force` exists to fix, arriving through the other door.)
 sub getMuSpyReleases {
     my ($class, %args) = @_;
 
@@ -1190,7 +1245,7 @@ sub getMuSpyReleases {
     # rows are the only source of an inline artist_sort_name.
     # ------------------------------------------------------------------
     my ($stored, $stale) = _feedFromStore($feed, undef, undef, 0);
-    if ($stored && !$stale) {
+    if ($stored && !$stale && !$force) {
         $args{onDone}->(_memoSet($memoKey, $stored));
         return;
     }
