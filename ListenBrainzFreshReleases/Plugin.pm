@@ -331,44 +331,65 @@ sub initPlugin {
                 match => qr/coverartarchive\.org/,
                 func  => sub {
                     my ($url, $spec) = @_;
-                    # getRightSize returns the value of the SMALLEST key >= the
-                    # requested dimension, and UNDEF when nothing in the table is
-                    # big enough (verified in Slim/Web/ImageProxy.pm — the loop
-                    # simply falls off the end). So a `|| '<smallest>'` fallback
-                    # fires on exactly the BIGGEST requests and serves the
-                    # SMALLEST file. Material asks for `_<n>x<n>_f` where n is
-                    # IS_HIGH_DPI ? 600 : 300 for a grid tile, ? 300 : 150 for a
-                    # list row and ? 2048 : 1024 for now-playing — so with the
-                    # table topping out at 500, every hi-dpi grid tile was a
-                    # 250px thumbnail upscaled 2.4x, on the one surface that
-                    # shows artwork biggest. Measured live: a `_600x600_f` came
-                    # back SMALLER (38KB) than the `_400x400_f` beside it (72KB).
-                    # The table now reaches 1200 (CAA serves front-250 8.8KB /
-                    # front-500 18KB / front-1200 77KB) and the fallback is the
-                    # LARGEST option, never the smallest.
-                    my $size = Slim::Web::ImageProxy->getRightSize($spec, {
-                        50   => '250',
-                        100  => '250',
-                        250  => '250',
-                        500  => '500',
-                        1200 => '1200',
-                    }) || '1200';
+                    # ONE SOURCE URL FOR EVERY SPEC, and that is the whole point.
+                    #
+                    # Slim::Web::ImageProxy::getImage queues by the REWRITTEN SOURCE
+                    # URL ($queue{$url}), and _resizeFromFile then walks that queue
+                    # resizing EACH waiting entry to its own spec, caching each under
+                    # its own cachekey. So N concurrent requests for different specs
+                    # of one source URL cost ONE download and N local resizes.
+                    #
+                    # The old ladder mapped each spec to a DIFFERENT CAA size, so the
+                    # three specs Material asks for were three different source URLs
+                    # and could never share a download: a 2,000-release pass issued
+                    # ~6,000 upstream fetches where it needed 2,000. There is no
+                    # alternative fix — the proxy calls SimpleAsyncHTTP with
+                    # {cache=>1} but no `expires`, and SimpleHTTP::Base caches only a
+                    # response carrying Cache-Control: max-age or Expires, which
+                    # archive.org sends neither of (Last-Modified + ETag only). The
+                    # downloaded original is genuinely never cached, so CONCURRENCY
+                    # IS THE ONLY WAY TO SHARE ONE DOWNLOAD. Browse::_warmCovers
+                    # therefore launches a release's three specs in one turn.
+                    #
+                    # WHY 1200 AND NOT 500: Material's largest ask on a row is
+                    # _600x600_f (LMS_IMAGE_SZ = IS_HIGH_DPI ? 600 : 300) and CAA
+                    # offers 250 / 500 / 1200 only, so 1200 is the ONLY source that
+                    # never upscales. It is also the fewest bytes overall — one
+                    # 339 KB fetch beats the 73 KB + 339 KB pair a two-size ladder
+                    # would still pull — because the cost here is latency, not size:
+                    # 20 covers 8-way measured 5.35s at _thumb250 against 6.33s at
+                    # _thumb1200. Now-playing artwork comes from the streaming
+                    # service, never from this path, so nothing above 600 is needed.
+                    #
+                    # PROBED 2026-09-02 before this landed: the newest 24 releases on
+                    # the live feed, all three sizes each — 22 answered 200 at every
+                    # size, 2 answered 404 at every size, and NONE disagreed. IA
+                    # derives the thumbnails as one task, so asking only for 1200
+                    # cannot lose a cover that 250 would have found. (Those two 404s
+                    # are the "IA holds only the original" case; they fail on every
+                    # route and size alike.)
+                    #
+                    # DO NOT REINSTATE getRightSize HERE. Kept as a warning because
+                    # it cost a release: it returns the value of the SMALLEST key >=
+                    # the request and UNDEF when nothing is big enough, so a
+                    # `|| '<smallest>'` fallback fires on exactly the BIGGEST
+                    # requests and serves the SMALLEST file — measured live, a
+                    # _600x600_f came back 38,248 bytes against the _400x400_f beside
+                    # it at 72,764. With one source there is no table to get wrong.
+                    # $spec is deliberately unused: every spec resolves alike, and
+                    # the proxy still caches each rendition under its own path.
+                    #
                     # ANCHORED SO IT TOLERATES THE EXTENSION, and that is not
-                    # cosmetic. `coverArtUrl` now emits `/front-250.jpg` so the
-                    # proxied path — and therefore the cached rendition — is
-                    # JPEG rather than PNG (see the block comment on that sub:
-                    # a 600px PNG measured 648,081 B against 101,100 B of JPEG,
-                    # and the PNG was larger than the 1200px source it came
-                    # from). This pattern used to be anchored straight at
-                    # end-of-string, so the moment the URL carried an extension
-                    # it stopped matching and this whole ladder silently stopped
-                    # firing — every spec then served from whatever size the row
-                    # happened to name. Verified live before the fix: with a
-                    # `.jpg` source URL, `_600x600_f` came back off the 250px
-                    # source instead of front-1200. The extension is captured and
-                    # put back, so the two changes cannot drift apart and an
-                    # extensionless URL still behaves exactly as it always did.
-                    $url =~ s{/front-\d+(\.\w+)?$}{'/front-' . $size . ($1 // '')}e;
+                    # cosmetic. `coverArtUrl` emits `/front-250.jpg` so the proxied
+                    # path — and therefore the cached rendition — is JPEG rather than
+                    # PNG (a 600px PNG measured 648,081 B against 101,100 B of JPEG,
+                    # and the PNG was larger than the 1200px source it came from).
+                    # This pattern used to be anchored straight at end-of-string, so
+                    # the moment the URL carried an extension it stopped matching and
+                    # the whole ladder silently stopped firing. The extension is
+                    # captured and put back, so an extensionless URL still behaves
+                    # exactly as it always did.
+                    $url =~ s{/front-\d+(\.\w+)?$}{'/front-1200' . ($1 // '')}e;
                     return $url;
                 },
             );

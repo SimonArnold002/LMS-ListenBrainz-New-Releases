@@ -1,18 +1,29 @@
 # LBF — the artwork pipeline and the event-loop stalls
 
-**Status: INVESTIGATED AND DESIGNED, NOT STARTED.** Measured 2026-09-02 against
-`dev` at 0.9.195, live ListenBrainz feeds, and LMS `public/9.0` source.
+**Status: REVIEWED; §1.1 AND §1.2 BUILT (uncommitted, not installed, not tested on
+the box).** Measured 2026-09-02 against
+`dev` at 0.9.195, live ListenBrainz feeds, and LMS `public/9.0` source. **Re-read
+against the source the same day (second pass); nine corrections are folded in below
+and each is marked `[review]`** — one of them (§1.2's marker check) is load-bearing
+for stage 3, and one stage was dropped outright.
 
 | stage | what | state |
 |---|---|---|
-| 1 | Artwork: one upstream fetch per cover | designed, no cache invalidation needed |
-| 2 | Top level stops blocking; building rows; Last.fm last in the warm | designed |
-| 3 | Page-aligned warming — the "gaps on re-entry" fix | designed |
-| 4 | Remaining per-row SQLite work off the render path | designed |
-| 5 | Last.fm album tier becomes a bulk read | designed |
+| 1 | Artwork: one upstream fetch per cover | **1.1 + 1.2 BUILT** (gate probed, passed); 1.3/1.4 next, 1.5 **dropped** |
+| 2 | Top level stops blocking; a building row for For You; Last.fm last in the warm | designed + reviewed; 2.1a memo key rebuilt, 2.2 **narrowed to For You** |
+| 3 | Page-aligned warming — the "gaps on re-entry" fix | designed; **its dependency (§1.2's marker move) is now BUILT** |
+| 4 | Remaining per-row SQLite work off the render path | designed + reviewed |
+| 5 | Last.fm album tier becomes a bulk read | designed + reviewed |
 
 Five faster artwork origins were checked and **all five rejected** — see the last
 section, which exists so they are not re-proposed.
+
+**Two stages contradicted decisions already recorded in `CLAUDE.md`, and the review
+caught both.** Stage 2.2 reversed 0.9.184's *"THE FEEDS DO NOT GET THE BUILDING ROW,
+deliberately"*; stage 1.5 reversed 0.9.191's measured *"there is nothing there worth
+warming"*. One survives with a stated challenge, one is dropped. **A plan that
+proposes work in an area with a ledger entry must name the entry** — see the ledger's
+own section D.
 
 ## Context
 
@@ -181,6 +192,41 @@ guard as a version probe.
 *Risk:* resizing a 1200px source to 150px costs marginally more CPU on the box than
 500→150. Measure it (below); it is milliseconds against a 2s fetch.
 
+> **[review] GATE THIS ON ONE PROBE FIRST, because 1.1 and 1.2 together make artwork
+> failure all-or-nothing.** Today the three specs are three independent requests, so a
+> release whose `front-1200` is unavailable still gets its `front-250`. After 1.1 every
+> spec asks for 1200, and after 1.2 they share one `%queue` bucket that
+> `_gotArtworkError` flushes as a unit — so one missing size costs the row *all three*
+> renditions rather than one.
+>
+> That matters here more than it would anywhere else: the rejected-origins section
+> below already records a case where "IA holds only the original and has not derived
+> `_thumbN` yet", and **a fresh-releases plugin's whole population is newly-uploaded,
+> partially-derived art.** Whether IA can have derived 250 but not 1200 is *unverified
+> either way*.
+>
+> **PROBED 2026-09-02, AND THE GATE PASSES — 1.1 SHIPS AS WRITTEN.** The newest 24
+> `caa_release_mbid`s off the live feed (all `release_date` 2026-09-02, i.e. the
+> least-derived population that exists), each requested at `front-250`, `front-500` and
+> `front-1200`:
+>
+> | outcome | releases |
+> |---|---|
+> | all three sizes **200** | 22 |
+> | all three sizes **404** | 2 |
+> | **sizes disagreeing** | **0** |
+>
+> So IA derives the thumbnails as one task, exactly as assumed, and the two failures
+> are the "holds only the original" case this document already records — they fail on
+> *every* route and size equally, so grouping costs them nothing they were not already
+> losing. **1.2's whole-bucket error flush is therefore safe: a release that loses 1200
+> was never going to get 250 either.**
+>
+> Sample is small and deliberately worst-case rather than representative. If a
+> disagreement is ever observed in the field, 1.1 needs a per-release fallback to the
+> next size down and 1.2's grouping has to tolerate a partial bucket — a materially
+> bigger change than the one written here.
+
 ### 1.2 Warm release-major, in triples — `_warmCovers` / `_coverTick` / `_coverLaunch` (Browse.pm:3429-3583)
 
 - Queue elements become **groups**: one release contributes its three spec paths as a
@@ -195,7 +241,35 @@ guard as a version probe.
   `$done` still fires inline when a launch `eval` fails.
 - **Named hazard:** `_gotArtworkError` flushes the whole bucket, so a failed download
   now fails all three specs together. Acceptable (the marker is only written on a
-  proxy answer, and the next warm retries) — but do **not** add a retry here.
+  proxy answer, and the next warm retries) — but do **not** add a retry here. See the
+  probe gate in 1.1: this is the half of it that makes a missing size expensive.
+
+> **[review] THE MARKER CHECK MOVES INTO `_coverLaunch`, AND IT MOVES HERE, NOT IN
+> STAGE 3.** Stage 3 was written asserting that `_coverLaunch` already skips an
+> already-marked path. **It does not** — [Browse.pm:3529-3577] only *writes*
+> `$cache->set($key, 1, COVER_WARM_TTL)` on success. The one marker read in the whole
+> file is `next if $cache->get($key)` inside `_warmCovers`' build loop
+> (Browse.pm:3478), which is exactly the line stage 3 says must not run inside a
+> browse callback. Left as-is, stage 3 re-queues ~30 rows × 3 specs of already-warm
+> covers on every page render — cheap per request (the proxy answers from its own
+> cache) but ~90 needless local requests against the very handler pool 1.3 exists to
+> protect, and it destroys the "steady state only pays for genuinely new releases"
+> property the markers exist for.
+>
+> So: **`_coverLaunch` gains the `$cache->get($key)` check and returns the slot
+> immediately when it hits** (a store read in the pump is a timer context, not a
+> render one), and the build loop **drops** it. That is also what makes the shared
+> `_coverGroupsFor($rels)` honest — otherwise the two callers cannot share a loop
+> without one of them doing ~90 store reads on the render path.
+>
+> **Two counters change meaning and must be fixed in the same edit, or the
+> Verification section below starts asserting on the wrong number:**
+> - `$added` becomes "groups queued", not "groups needing work", so `_stage('start',
+>   'covers')` and the `_dbg` line would fire on every warm even when nothing is
+>   fetched. Gate the stage on work actually launched, or count skips separately.
+> - `$coverFetched` currently counts every `$done`. With the skip in `_coverLaunch` it
+>   must count *fetches*, not *dequeues*, or `request(s) ≈ 3 × source url(s)` measures
+>   nothing.
 
 ### 1.3 Browse-aware concurrency — the direct fix for "locks up moving between views"
 
@@ -204,10 +278,19 @@ constant sits at 8 despite the measured scaling. Replace one compromise number w
 two, and let the reader win:
 
 ```perl
-use constant COVER_CONCURRENCY_IDLE     => 16;   # releases in flight
+use constant COVER_CONCURRENCY_IDLE     => 8;    # releases in flight — see [review] below
 use constant COVER_CONCURRENCY_BROWSING => 2;
 use constant COVER_BROWSE_QUIET         => 20;   # seconds since the last browse tap
 ```
+
+> **[review] 16 WAS 48, AND 48 WAS NEVER MEASURED.** The limit is redefined as
+> *releases*, and a release is three local requests — so `IDLE => 16` is **48
+> simultaneous HTTP connections to our own LMS server**. The scaling table above was
+> measured in *requests* and tops out at P=32; today's `COVER_CONCURRENCY => 8` is 8
+> requests, i.e. ~2.7 releases. Setting 16 puts the pass beyond the top of the measured
+> range, against the constraint this document itself names as binding ("LMS's own HTTP
+> handler slots"). **Start at 8 releases (24 requests, inside the measured range) and
+> raise it only after re-running the concurrency measurement in units of releases.**
 
 A `_noteBrowse()` one-liner at the top of every browse entry point — `topLevel` (442),
 `fetchForYou` (730), `fetchAll` (906), `fetchPlaylists` (972), `resolvePlaylist`
@@ -218,26 +301,103 @@ when it stops *because* of the browsing limit it arms a one-shot timer at
 callback. A dropping limit never kills in-flight requests — the existing `while`
 simply stops launching.
 
+**[review] That timer needs an armed-flag or `killSpecific`.** Every landing callback
+re-enters `_coverTick`, and with the browsing limit held each re-entry would arm
+another one-shot — so a brake applied while 48 requests are draining schedules 48
+timers. Keep one, the way `_kickGenreFill` keeps its gap.
+
 ### 1.4 Warm only what will be rendered
 
 `_warmCovers` gets the **raw** feed; the render applies `_filterSection`
-(Browse.pm:3801-3818). Blocked artists, unticked types and VA rows are warmed and
+(Browse.pm:3796-3818). Blocked artists, unticked types and VA rows are warmed and
 never drawn, eating `COVER_WARM_MAX = 2000` slots. Wrap the four call sites in
 `_filterAll` / `_filterForYou` — `_warmGenres` already does exactly this, and says
 why. One consequence to state: newly-ticked types stay cold until the next warm —
 fixed entirely by Stage 3.
 
-### 1.5 Warm the follower / playlist / trending-track rows
+### 1.5 ~~Warm the follower / playlist / trending-track rows~~ — **DROPPED [review]**
 
-Never warmed by anything today — their art is streaming-CDN or `/music/<id>/cover.jpg`
-and never reaches `coverArtUrl`. Every spec's *rendition* is cold, which is exactly
-the "it said it was building, then it still had to load artwork" report. Add a small
-adapter that proxies the built row's `image` directly, and call it at the end of each
-resolve. ~50 rows, cheap.
+*Proposed: an adapter that proxies each resolved row's `image` directly, called at the
+end of each resolve. Dropped on two counts, and the second is a defect rather than a
+judgement.*
 
-**Expected Stage 1 effect:** upstream fetches per cover 3 → **1**; idle drain 3.98 →
-7.85 covers/s; a 2,000-release first pass from **~27 min to ~7 min**, and LBF's load
-on the handler pool during browsing from 8 concurrent 2-second requests to 2.
+1. **It reverses a measured decision without new evidence.** `CLAUDE.md` 0.9.191 records
+   this as checked, not assumed: *"Trending Tracks, the follow feed (Recommended) and
+   the Created-for-You playlists all render resolved rows, whose artwork comes from the
+   streaming service or the local library — and a service origin is ~0.05s (measured,
+   `static.qobuz.com`) against CAA's ~2.1s. **There is nothing there worth warming.**"*
+   The counter-argument — that the *rendition* is cold even when the origin is fast — is
+   fair, but it buys ~0.1s × ~50 rows for ~150 local requests. That is not a stage.
+2. **The mechanism is wrong for the commonest row.** `prefer_library` defaults ON, so
+   most playlist and follow rows are library hits, and `_localItemHash` sets
+   `image => "/music/<id>/cover.jpg"` — a **local** path.
+   `Slim::Web::ImageProxy::proxiedImage` is for *remote* URLs: handed a local path it
+   yields the LMS **no-artwork placeholder** (measured 16,749 B PNG, against 78,946 B
+   of real JPEG served direct). So the adapter would fetch and mark placeholders, and
+   write `lbf:imgwarm:` entries describing them.
+
+**If it is ever revived** it must (a) fire only on rows whose `image` is a remote URL,
+and (b) come with a measurement of the rendition round trip that beats 0.9.191's
+origin measurement. Neither is hard; neither is worth stage 1's attention.
+
+**Expected Stage 1 effect:** upstream fetches per cover 3 → **1**; a 2,000-release
+first pass from **~27 min** to well under half that, and LBF's load on the handler pool
+during browsing from 8 concurrent 2-second requests to 6 (2 releases).
+
+**[review] The drain figures were restated as a range, deliberately.** "3.98 → 7.85
+covers/s" read the scaling table at P=8 and P=16 *requests*; with the limit now counting
+releases and starting at 8 (24 requests), the honest claim is "fetches per cover fall by
+two thirds and the pass runs wider than it does today" — the exact covers/s figure is
+what the re-measurement in Verification is for.
+
+---
+
+### As built — §1.1 and §1.2, and the stall nobody had counted
+
+`Plugin.pm`: the `getRightSize` table and its `|| '1200'` fallback are gone; every
+spec rewrites to `front-1200`. The registration guard stays as a version probe.
+
+`Browse.pm`: `_coverGroupsFor($rels, $cap)` is the shared, **allocation-only** queue
+builder; a queue element is now a group (every spec of one release);
+`COVER_CONCURRENCY` keeps its value of 8 but counts **releases**, so the fan-out is 24
+local requests and 8 upstream downloads; `_coverLaunch` takes a group, skips the paths
+already marked, and completes once per group; the stage note reports four numbers
+(requests / releases / skipped / peak) instead of one.
+
+**THE THING THE PLAN DID NOT KNOW, and it changes why §1.2 is worth doing.** The
+marker check was moved out of the queue builder because stage 3 needed it moved. It
+turns out the builder was **already** a real event-loop stall: it did one
+`$cache->get` per PATH, and it runs inside a feed's `onDone` — an async HTTP callback
+on the loop that streams audio and serves the image proxy. At `COVER_WARM_MAX` that is
+**2,000 × 3 = 6,000 synchronous SQLite reads in a single turn**, every warm, on both
+release feeds. Same hazard class as the 16,000-statement ingest
+(`DB::ingestFeed`, 0.9.176) and the per-row SELECTs `bench_walk` caught in 0.9.165 —
+it had simply never been counted here, and this document's stage 4 was written about
+much smaller instances of exactly this.
+
+It is pinned by a counting assertion rather than a comment: `t_coverwarm.pl` now counts
+store reads during a build and requires **zero**. The anti-test that moves the check
+back into the builder reports **90 reads** for a 30-release fixture — the same defect
+at test scale.
+
+**Suite: `t_coverwarm.pl` 66 → 78 assertions**, and section 1 inverted — it used to
+assert the ladder picked the right size per spec; it now asserts the table is gone and
+that all three specs rewrite to **one** url, with the old ladder kept live as a pinned
+demonstration that it produces three. Anti-tested three ways: reinstating the ladder
+**9 red**, moving the marker check back into the builder **2 red** (including the 90
+reads), restoring spec-major ordering **10 red**.
+
+**One test-hygiene fix went in alongside**, because the first anti-test run tripped the
+trap this repo has already recorded once: a reinstated ladder made section 1 **die**
+(the extracted rewrite line referenced a `$size` the harness does not have) rather than
+fail, which took every later assertion in the file with it. The rewrite is now compiled
+defensively and "it compiles depending on `$url` alone" is itself an assertion — which
+is the property the collapse actually buys.
+
+**Not built here, deliberately:** §1.3 (the browsing brake) and §1.4 (warm only what
+will be rendered). Landing them separately keeps the throughput measurement clean — a
+brake and a filter in the same build are two confounds in the number this stage exists
+to move.
 
 ---
 
@@ -252,12 +412,35 @@ memo is all that hides it, and the `TOPLEVEL_ALL_WAIT` watchdog means a cold ope
 sits for five seconds. Everything the user wants first — the For You tile, Playlists,
 People, Settings — is held behind it.
 
-**2.1a — render immediately (small, do first).** Add a long-lived landing memo (keyed
-on `_sectionSig('all')` + view + `all_sort`, ~6h TTL) written by `_buildAllLanding`
-and pre-filled by the warm's `all_feed` `onDone`. `topLevel` renders from it
-synchronously; on a miss it renders the existing drill-tile fallback **immediately**
-and fires the feed detached purely to fill the memo. `TOPLEVEL_ALL_WAIT` and its
-watchdog then become dead and should be deleted, not left as a trap.
+**2.1a — render immediately (small, do first).** Add a long-lived landing memo written
+by `_buildAllLanding` and pre-filled by the warm's `all_feed` `onDone`. `topLevel`
+renders from it synchronously; on a miss it renders the existing drill-tile fallback
+**immediately** and fires the feed detached purely to fill the memo.
+`TOPLEVEL_ALL_WAIT` and its watchdog then become dead and should be deleted, not left
+as a trap.
+
+> **[review] THE PROPOSED KEY WOULD REINTRODUCE THE 0.9.141 REFRESH BUG.** The key was
+> written as `_sectionSig('all')` + view + `all_sort` at a ~6h TTL. Four problems, and
+> the first is the serious one:
+>
+> 1. **A Refresh cannot invalidate it.** `%SECTION_MEMO` is safe *because* validity is
+>    the **identity of the source arrayref** plus a 5s TTL — its own comment
+>    (Browse.pm:3836) says a refresh necessarily produces a NEW ref, so a refresh cannot
+>    be masked. A 6h memo keyed on prefs alone has no such property: press Refresh at
+>    10am and the landing stays stale until the nightly warm or the TTL. **The landing
+>    memo must be dropped by `clearFeedCache`/`_memoDrop`, and should carry the source
+>    ref (or the feed's `ok_at`) in its validity test, not just prefs.**
+> 2. **`_sectionSig` does not read `all_past` / `all_future`.** It reads `foryou_past`,
+>    `muspy_future`, `weeks_past`, `weeks_future` (Browse.pm:3854-3865) — harmless
+>    behind a 5s ref check, silent staleness at 6h. Add them.
+> 3. **The memo bakes in one client.** `_buildAllLanding`'s week closures capture
+>    `$headers` (`$useH`), and the row names come from `_weekLabel($client, …)`. A memo
+>    filled by a Material walk would hand `header-basic` closures to a non-Material
+>    skin, and one client's language to another. Either key on `$useH` + language or
+>    memo the *releases* and build the rows per walk.
+> 4. **If 2.1b is deferred, the memo pins the feed in memory.** Those closures capture
+>    each week's release list, so ~3,000 hashrefs stay live for 6h where today they are
+>    transient. On a Pi that is worth knowing before choosing the TTL.
 
 **2.1b — stop loading 3,000 rows at all.** `release` already has a `week_start`
 column *and* an index on it (DB.pm:454, 464), and `feedReleases` already accepts a
@@ -273,18 +456,55 @@ whole feed and calls `feedReleases($feed, $ws, $ws+6d)` instead.
 > fallback only. If that machinery looks disproportionate when the code is in front
 > of us, 2.1a alone already removes the user-visible stall — 2.1b is the memory and
 > steady-state win, and can be deferred.
+>
+> **[review] AND THE FILTERS ARE THE BIGGER HALF OF THAT RISK, not the dedupe.** A
+> `GROUP BY week_start` runs over the raw `release` table, so it cannot apply
+> `_filterSection` (Browse.pm:3796) — release type, artwork-only, Various Artists or
+> `blocked_artists`, every one of which needs the payload. Today `_buildAllLanding`
+> receives the **already-filtered** list, so a week that filters to nothing simply has
+> no row. Under the raw GROUP BY it gets a row that opens on `PLUGIN_LBF_NO_RESULTS`.
+> So the week index the warm writes has to hold the *filtered, deduped* survivors, and
+> **the raw GROUP BY is not an equivalent cold fallback** — it is a different answer.
+> If the index is cold, falling back to the existing whole-feed path is honest; falling
+> back to the GROUP BY is not.
 
 The week row label carries no count (`_weekLabel`, Browse.pm:5112), so nothing in the
 UI changes.
 
-### 2.2 Building rows for the two feeds that lack them
+### 2.2 A building row for For You — and **only** For You [review]
+
+> **THE LEDGER ENTRY THIS CHALLENGES, named as section D requires.** `CLAUDE.md`
+> 0.9.184: *"THE FEEDS DO NOT GET THE BUILDING ROW, deliberately. They are already
+> stale-while-revalidate …, a fetch failure degrades to the stored copy, and the only
+> unready case is a completely empty store bounded by `FEED_TIMEOUT` (10s). At ≤10s
+> once ever, a building row plus a 'Check again' tap is WORSE than letting it load."*
+>
+> **What is new: For You is not bounded by one `FEED_TIMEOUT`.** `fetchForYou`
+> (Browse.pm:730) chains LB → MuSpy — `getMuSpyReleases` is called from inside
+> `getFreshReleasesForUser`'s `onDone` (Browse.pm:746-806) — so a cold open is **two
+> sequential** timeout windows, up to ~20s, outside the ≤10s the 0.9.184 argument was
+> built on. That is a case the recorded reasoning does not cover.
+>
+> **What is NOT new, so it does not get the row:** `fetchAll` is a single fetch, and
+> 0.9.184's argument applies to it unchanged. **`feed:all` is dropped from this
+> stage.** Note too that the MuSpy leg costs nothing when unconfigured
+> (`getMuSpyReleases` resolves immediately), so for a user with no MuSpy id For You is
+> also a single round trip — the row is right for the two-fetch case and merely
+> harmless for the one-fetch case, which is the trade being accepted.
 
 `_buildingRow` (Browse.pm:332) is used by playlist open, follow, trending tracks and
-trending albums, but **not** For You — which holds its callback through **two chained**
-network round trips (Browse.pm:808 → 748) with nothing on screen — nor `fetchAll`.
-Apply the settled pattern verbatim: claim `%BUILDING` (`feed:foryou`, `feed:all`),
-render the row *now*, clear `$callback` (never wrap it), complete into cache. The
-trap the existing comments name twice: **the first opener must get the row too.**
+trending albums. Apply the settled pattern to For You: claim `%BUILDING`
+(`feed:foryou`), render the row *now*, clear `$callback` (never wrap it), let the fetch
+complete into the feed store. The trap the existing comments name twice: **the first
+opener must get the row too.**
+
+> **[review] "Apply the pattern verbatim" hides an edit at every callback site.** The
+> pattern is quoted from `_resolveFollow`, which reads `$callback->(…) if $callback` at
+> every exit (Browse.pm:1320-1341) *because it is also on the warm path*.
+> `fetchForYou` calls `$callback->({…})` **unconditionally** (Browse.pm:801). Clearing
+> it there is a runtime die inside an async callback — i.e. a blank view, logged
+> nowhere useful. Every callback site in the sub needs the `if $callback` guard as part
+> of this change, not as a follow-up.
 
 ### 2.3 Last.fm becomes the last leg of the genre warm — `_warmGenres` (Browse.pm:8790)
 
@@ -323,26 +543,51 @@ to the *front* of `@coverQueue`, with no cap and no `_stage` (it is not a warm s
 Rate-gate it like `_kickGenreFill` (`COVER_NOW_GAP => 5`) so paging cannot unshift
 faster than the pump drains.
 
+**[review] "No `_stage`" is not the same as "invisible to the stage".** These requests
+still run through `_coverLaunch`, so they still increment `$coverFetched` — the counter
+the Verification section asserts `request(s) ≈ 3 × source url(s)` on. Count
+page-aligned launches separately, or the warmstats assertion measures a mixture.
+
 Wire it to the render sites that already know their visible slice: the All Releases
 week `$render` (4956-4959, the `PAGE_SIZE` slice **plus the next page**), `fetchForYou`
-(801), `homeForYou` (846), and — via the Stage 1.5 adapter — `_followResult` (1423),
-`_trendingResult` (2215), `_playlistResult` (3056).
+(801) and `homeForYou` (846).
+
+**[review] The three resolved-row sites are out, because Stage 1.5 is dropped.**
+`_followResult` (1423), `_trendingResult` (2215) and `_playlistResult` (3056) were only
+reachable here through the 1.5 adapter, and that adapter would have warmed the LMS
+no-artwork placeholder for every library-matched row. Their artwork is a ~0.05s service
+origin or a local file; neither wants page-aligned warming. **Stage 3 is release rows
+only** — which is also exactly the population `coverArtUrl` and the `lbf:imgwarm:`
+markers describe, so the stage keeps one mechanism instead of two.
 
 > **Hazard the Plan pass caught:** the build loop runs inside a *browse callback*, so
 > it must stay allocation-only. Do **not** do the `$cache->get` marker check inline —
 > that is ~90 store reads for a 30-row page, the exact class of blocking 0.9.130
 > removed. Unshift unchecked and let `_coverLaunch` skip an already-marked path.
+>
+> **[review] THAT LAST SENTENCE WAS FALSE WHEN IT WAS WRITTEN, and it is this stage's
+> load-bearing assumption.** `_coverLaunch` (Browse.pm:3529-3577) never reads the
+> marker — it only *writes* it on success. The single marker read in the file is inside
+> `_warmCovers`' build loop (Browse.pm:3478), the very line this hazard forbids. Left
+> uncorrected, this stage re-queues ~30 rows × 3 specs of already-warm covers on every
+> page render: cheap per request, ~90 needless local requests per render, and it
+> removes the reason the markers exist.
+>
+> **The fix belongs in §1.2, not here** — move the check into `_coverLaunch` and drop
+> it from the build loop, so the shared `_coverGroupsFor` can be shared without one
+> caller doing store reads on the render path. **Stage 3 must not ship before that
+> lands.** Then this sentence becomes true and the unshift is genuinely free.
 
 ---
 
 ## Stage 4 — Remaining synchronous work off the render path
 
-**4.1 `_playlistTile` (Browse.pm:1121)** thaws each playlist's *whole resolved
+**4.1 `_playlistTile` (Browse.pm:1023)** thaws each playlist's *whole resolved
 payload* per row just to print "N/M matched". Write a sidecar count row at resolve
 time (`lbf:pl:count:`, a few dozen bytes, registered in `KEY_VERSIONS`) and sum the
 enabled services from that.
 
-**4.2 `_trendingTile` (Browse.pm:1885)** thaws up to 50 item hashes just to count
+**4.2 `_trendingTile` (Browse.pm:1875)** thaws up to 50 item hashes just to count
 them, on every top-level render outside a 5s memo — which matters more once 2.1 makes
 the top level otherwise fast. Same sidecar treatment.
 
@@ -355,7 +600,13 @@ immediately, then fire the feed fetch + merge detached through the existing
 `follow:feed` `%BUILDING` guard. Re-read the stamp every time — the warm's own
 `_resolveFollow` also writes the store.
 
-**4.4 Pref writes during render** — `_effectiveView` (4241) and the follow "seen"
+**[review] The `stamp => sig` memo is in-process, so "serve the cached resolve
+immediately" is not unconditional.** After every restart the memo is empty, so the first
+follow open still computes `_followSig` over the store — the 500-row `SELECT` with 500
+thaws this stage exists to avoid. That is acceptable (once per restart, not once per
+open) but it should be stated rather than discovered: the win is on repeat opens.
+
+**4.4 Pref writes during render** — `_effectiveView` (4203) and the follow "seen"
 marker (1489). Both are already change-guarded; audit only, and defer to a zero-delay
 timer if `Slim::Utils::Prefs` turns out to flush synchronously. Lowest value here; do
 it only if 4.1–4.3 leave a measurable residue.
@@ -382,7 +633,7 @@ per release.
   single-release peek (5467), where one SELECT is correct.
 - Give `homeForYou` a `_withGenres(…, peek => 1)` wrapper matching `fetchForYou`'s.
 
-> **Marker-isolation trap:** `_artistTierGenres` (8955) returns early unless its mark
+> **Marker-isolation trap:** `_artistTierGenres` (8956) returns early unless its mark
 > is set, precisely so the empty case costs nothing. The album rung needs its **own**
 > distinct mark — reusing `LFM_MARK` makes the two rungs read each other's slots.
 
@@ -402,6 +653,16 @@ download and three `"Resized image should now be in cache"`.
 **Throughput.** `["lbf","warmstats"]` — extend `_coverMaybeEnd`'s stage note from
 `"$coverFetched request(s)"` to also report source-URL count and peak in-flight, then
 assert `request(s) ≈ 3 × source url(s)`. Before the change the ratio is 1.0.
+**[review] `$coverFetched` must be redefined to count FETCHES, not dequeues**, once
+`_coverLaunch` skips already-marked paths (§1.2) and stage 3 unshifts into the same
+queue — otherwise this ratio measures a mixture of warm, skip and page-aligned work.
+Report skips and page-aligned launches as their own numbers.
+
+**[review] The `front-1200` availability probe — do this BEFORE writing §1.1.** Take
+the newest ~50 `caa_release_mbid`s off the live feed and request all three sizes for
+each, comparing status codes. Expected: they agree. If 1200 is ever absent where 250 is
+present, §1.1 and §1.2 together turn one missing size into a row with no artwork at
+all, and both need rethinking before either is written.
 
 **Browse latency under load.** `time_total` on a jsonrpc top-level POST while a cover
 pass runs, before vs after 1.3. This is the number the user is actually feeling.
@@ -430,10 +691,17 @@ keep the anti-test that restoring `250 => '250'` fails); §2 asserts the warmed 
 is byte-identical to what the client requests — leave it as-is, since `coverArtUrl`
 does not change; §3 add blocked/unticked rows queueing nothing; §4 add "all three
 specs of a release appear in one in-flight set" and the browsing/idle limit
-transitions; new §5 for `_warmCoversNow` ordering and its gap gate. `bench_walk.pl` —
+transitions; new §5 for `_warmCoversNow` ordering and its gap gate.
+**[review] §4 also needs the marker skip asserted behaviourally** — a queued path whose
+`lbf:imgwarm:` marker is already set must issue **no** HTTP request and must free its
+slot, since that property moved out of the build loop and into `_coverLaunch` and
+nothing else in the suite covers it. Anti-test it by deleting the check: the assertion
+should go red on request *count*, which is the only thing that sees it. `bench_walk.pl` —
 which already caught the `_lbArtistGenres` per-row regression — gains a top-level walk
 and a Playlists walk, asserting zero payload deserialisations at the top level.
-`t_buildingstate.pl` gains `fetchForYou`/`fetchAll`. `matcher_sync_check.py` must
+`t_buildingstate.pl` gains `fetchForYou` — **[review] not `fetchAll`**, which keeps its
+0.9.184 behaviour, and the suite should pin that it has *no* building row so the
+narrowing cannot be quietly undone. `matcher_sync_check.py` must
 still exit 0. `perl -c` every touched module **and actually call** any renamed or moved
 sub in a test — `perl -c` passes on calls to subs that no longer exist.
 

@@ -142,12 +142,93 @@ die "'lbf:imgwarm:' is not a registered key family\n"
 my $IMGWARM = 'lbf:imgwarm:' . $KEY_VERSIONS{'lbf:imgwarm:'} . ':';
 
 # ==========================================================================
-section('1. the CAA size table answers the specs Material actually asks for');
+section('1. every spec resolves to ONE source url, so the proxy can coalesce');
 # ==========================================================================
-# getRightSize's REAL body, transcribed from Slim/Web/ImageProxy.pm (LMS 9.1):
-# smallest key >= the requested dimension, undef when nothing is big enough.
-# Reproduced rather than stubbed so a table that looks fine against a made-up
-# rule cannot pass — the undef is the whole bug.
+# THIS SECTION INVERTED IN 0.9.196, and the old assertions are kept below as
+# anti-tests rather than deleted. It used to check that the size LADDER picked
+# the right CAA size per spec. The ladder is the bug: mapping each spec to a
+# different CAA size means three different SOURCE URLs, and
+# Slim::Web::ImageProxy::getImage queues by the source url — so three specs of one
+# release could never share a download. Collapsing them to one url is what turns
+# three upstream fetches into one, and the table's absence is now the property.
+
+ok($psrc !~ /getRightSize\(\$spec/,
+   'the getRightSize size table is GONE from the handler');
+ok($psrc =~ /UNIVERSAL::can\('Slim::Web::ImageProxy',\s*'getRightSize'\)/,
+   '...but the registration guard still probes for it as a version check');
+
+# THE REWRITE ITSELF, not just what it resolves to. Lifted VERBATIM from the
+# shipped handler for the usual reason. Delimiter-agnostic on purpose: pinning the
+# extraction to `s{...}` would mean a reverted handler failed to PARSE rather than
+# failing an assertion, and "the line looks different" is a much weaker claim than
+# "the rewrite no longer works".
+my ($rewrite_src) = $psrc =~ /^(\s*\$url =~ s.*?\/front.*?;)$/ms;
+ok(defined $rewrite_src, 'the CAA url rewrite is still there to extract');
+
+# COMPILED STANDALONE, AND THAT IS ITSELF THE ASSERTION. After the collapse the
+# rewrite depends on nothing but $url — no computed size, no table lookup — so it
+# must eval cleanly in a sub that supplies only ($url, $spec). Reinstating a
+# ladder reintroduces a `$size` this scope does not have, and that is caught here
+# as a FAIL rather than as a die.
+#
+# It must NOT die: the suite once lost every later assertion in the file because a
+# failing check then died on the very thing it was asserting about, so a real
+# regression reported one failure and hid the rest.
+my $rewrite_ok = 0;
+if (defined $rewrite_src) {
+    $rewrite_ok = eval "sub caa_rewrite { my (\$url, \$spec) = \@_; $rewrite_src return \$url; } 1;" ? 1 : 0;
+}
+ok($rewrite_ok, 'the rewrite compiles depending on $url alone — no size to compute');
+
+if (!$rewrite_ok) {
+    ok(0, "SKIPPED (rewrite would not compile): $_") for
+        ('all three specs rewrite to one url', 'that url is front-1200',
+         'extension-less url unchanged', 'release-group url shape',
+         'matches what coverArtUrl ships', 'lands front-1200',
+         'non-front path left alone');
+}
+elsif (1) {
+    my $J = 'https://coverartarchive.org/release/x/front-250.jpg';
+    my $B = 'https://coverartarchive.org/release/x/front-250';
+    my $G = 'https://coverartarchive.org/release-group/y/front-250.jpg';
+
+    # THE COALESCING PROPERTY, stated directly: the three specs Material asks for
+    # must produce ONE string. This is the assertion the whole stage rests on —
+    # if these ever differ again, every release costs three downloads and nothing
+    # else in this file would notice.
+    my @out = map { caa_rewrite($J, $_) } qw(_150x150_f _300x300_f _600x600_f);
+    is_count(scalar(keys %{{ map { $_ => 1 } @out }}), 1,
+             'all three of Material\'s specs rewrite to ONE source url');
+    ok($out[0] eq 'https://coverartarchive.org/release/x/front-1200.jpg',
+       '...and that url is front-1200, the only size that never upscales at 600');
+
+    ok(caa_rewrite($B, '_600x600_f') eq 'https://coverartarchive.org/release/x/front-1200',
+       'an extension-less url still behaves exactly as it always did');
+    ok(caa_rewrite($G, '_150x150_f') eq 'https://coverartarchive.org/release-group/y/front-1200.jpg',
+       'the release-GROUP url shape rewrites too (trending / MuSpy rows)');
+
+    # The regression this guards, stated as the property rather than the pattern:
+    # whatever coverArtUrl builds must still be rewritable, or the handler is dead.
+    # The pattern used to be anchored `/front-\d+$`, so the moment coverArtUrl
+    # started naming `.jpg` it matched nothing and every spec was served from
+    # whatever size the row happened to carry.
+    my $live = Plugins::ListenBrainzFreshReleases::API->coverArtUrl(
+                   { caa_release_mbid => 'zz' });
+    ok(caa_rewrite($live, '_600x600_f') ne $live,
+       "the rewrite actually matches what coverArtUrl ships today ($live)");
+    ok(caa_rewrite($live, '_600x600_f') =~ m{/front-1200(\.\w+)?$},
+       '...and lands front-1200 at the end of the path');
+    ok(caa_rewrite('https://coverartarchive.org/release/x/back-250.jpg', '_600x600_f')
+         eq 'https://coverartarchive.org/release/x/back-250.jpg',
+       'a path that is not /front-<n> is left alone');
+}
+
+# THE ANTI-TEST, kept live rather than described in a comment: reinstating the
+# ladder must fail here. getRightSize's REAL body, transcribed from
+# Slim/Web/ImageProxy.pm (LMS 9.1) — smallest key >= the request, UNDEF when
+# nothing is big enough. That undef is why a `|| '<smallest>'` fallback served the
+# SMALLEST file on the BIGGEST request, and it is why the table is a trap for
+# anyone who puts it back.
 sub right_size {
     my ($want, $sizes) = @_;
     for my $k (sort { $a <=> $b } keys %$sizes) {
@@ -155,67 +236,19 @@ sub right_size {
     }
     return undef;
 }
-
-# Table + fallback lifted out of the shipped handler.
-my ($table_src) = $psrc =~ /getRightSize\(\$spec,\s*\{(.*?)\}\)\s*\|\|\s*'(\d+)'/s
-    or die "no CAA size table in Plugin.pm\n";
-my $fallback = $2;
-my %sizes = $table_src =~ /(\d+)\s*=>\s*'(\d+)'/g;
-die "size table parsed empty\n" unless keys %sizes;
-
-sub caa_size { return right_size($_[0], \%sizes) || $fallback }
-
-ok(caa_size(150)  eq '250',  'list row, standard dpi (150) -> front-250');
-ok(caa_size(300)  eq '500',  'list row hi-dpi / grid tile standard dpi (300) -> front-500');
-ok(caa_size(600)  eq '1200', 'grid tile hi-dpi (600) -> front-1200, not the 250 it used to get');
-ok(caa_size(1024) eq '1200', 'now playing, standard dpi (1024) -> the largest option');
-ok(caa_size(2048) eq '1200', 'now playing, hi-dpi (2048) -> the largest option');
-# The property, stated independently of the numbers: the fallback IS the ceiling.
-my ($largest) = sort { $b <=> $a } values %sizes;
-ok($fallback eq $largest,
-   "the fallback ($fallback) is the LARGEST table entry, never the smallest");
-# And the rule that made it a bug in the first place is really live.
 ok(!defined right_size(600, { 50 => '250', 100 => '250', 250 => '250', 500 => '500' }),
-   'getRightSize really does return undef above the table ceiling (the premise)');
-
-# THE REWRITE ITSELF, not just the table it consults. Section 1 checked which
-# SIZE the handler picks and stopped there — but picking 1200 is worthless if the
-# substitution that stamps it into the URL doesn't fire, and that is precisely
-# what went wrong: the pattern was anchored `/front-\d+$`, so the moment
-# `coverArtUrl` started naming `.jpg` it matched nothing, the url passed through
-# untouched, and every spec was served from whatever size the row happened to
-# carry. Verified live before the fix — a `_600x600_f` came back off the 250px
-# source instead of front-1200. Silent, and invisible to a table-only test.
-#
-# The line is lifted VERBATIM from the shipped handler for the usual reason.
-# Delimiter-agnostic on purpose: pinning the extraction to `s{...}` would mean a
-# reverted handler failed to PARSE rather than failing an assertion, and "the line
-# looks different" is a much weaker claim than "the rewrite no longer works".
-my ($rewrite_src) = $psrc =~ /^(\s*\$url =~ s.*?\/front.*?;)$/ms
-    or die "no CAA url rewrite in Plugin.pm\n";
-eval "sub caa_rewrite { my (\$url, \$size) = \@_; $rewrite_src return \$url; } 1;"
-    or die "eval rewrite: $@";
-
+   'getRightSize really does return undef above its ceiling (why the table was a trap)');
 {
-    my $J = 'https://coverartarchive.org/release/x/front-250.jpg';
-    my $B = 'https://coverartarchive.org/release/x/front-250';
-    ok(caa_rewrite($J, '1200') eq 'https://coverartarchive.org/release/x/front-1200.jpg',
-       'the ladder fires on an EXTENSIONED url and keeps the extension');
-    ok(caa_rewrite($J, '500') eq 'https://coverartarchive.org/release/x/front-500.jpg',
-       '...at every rung, not just the top one');
-    ok(caa_rewrite($B, '1200') eq 'https://coverartarchive.org/release/x/front-1200',
-       'an extension-less url still behaves exactly as it always did');
-    # The regression this guards, stated as the property rather than the pattern:
-    # whatever coverArtUrl builds must still be rewritable, or the ladder is dead.
-    my $live = Plugins::ListenBrainzFreshReleases::API->coverArtUrl(
-                   { caa_release_mbid => 'zz' });
-    ok(caa_rewrite($live, '1200') ne $live,
-       "the ladder actually matches what coverArtUrl ships today ($live)");
-    ok(caa_rewrite($live, '1200') =~ m{/front-1200(\.\w+)?$},
-       '...and lands the chosen size at the end of the path');
-    ok(caa_rewrite('https://coverartarchive.org/release/x/back-250.jpg', '1200')
-         eq 'https://coverartarchive.org/release/x/back-250.jpg',
-       'a path that is not /front-<n> is left alone');
+    # A ladder that maps the specs to different sizes produces different source
+    # urls — the state this stage exists to leave behind.
+    my %ladder = (50 => '250', 100 => '250', 250 => '250', 500 => '500', 1200 => '1200');
+    my %urls = map {
+        my ($n) = /_(\d+)x/;
+        my $sz = right_size($n, \%ladder) || '1200';
+        ("https://coverartarchive.org/release/x/front-$sz.jpg" => 1)
+    } qw(_150x150_f _300x300_f _600x600_f);
+    is_count(scalar(keys %urls), 3,
+             'the OLD ladder would give three different source urls (the bug, pinned)');
 }
 
 # ==========================================================================
@@ -224,8 +257,10 @@ section('2. a warmed path is byte-identical to what Material will request');
 # ----------------------------------------------------------- stub world --
 {
     package T::Cache;
-    sub new { bless { d => {}, sets => [] }, shift }
-    sub get { my ($s, $k) = @_; return $s->{d}{$k} }
+    sub new { bless { d => {}, sets => [], gets => 0 }, shift }
+    # gets are COUNTED, because "the queue builder reads no store" is a claim
+    # about the event loop that only a count can make.
+    sub get { my ($s, $k) = @_; $s->{gets}++; return $s->{d}{$k} }
     sub set {
         my ($s, $k, $v, $t) = @_;
         $s->{d}{$k} = $v;
@@ -334,10 +369,11 @@ for my $c (qw(COVER_SPECS COVER_WARM_MAX COVER_CONCURRENCY COVER_WARM_TTL)) {
 # measuring what it is actually for.
 { package T; sub _stage { } }
 
-for my $name (qw(_warmCovers _coverTick _coverMaybeEnd _coverLaunch)) {
+for my $name (qw(_warmCovers _coverGroupsFor _coverTick _coverMaybeEnd _coverLaunch)) {
     my $body = grab($bsrc, $name);
     eval "package T; use Time::HiRes (); our (\$cache, \$prefs, \$log); "
-       . "our (\@coverQueue, \%coverQueued, \$coverRunning, \$coverPumping, \$coverStageOpen, \$coverFetched); $body 1;"
+       . "our (\@coverQueue, \%coverQueued, \$coverRunning, \$coverPumping, \$coverStageOpen, "
+       . "\$coverFetched, \$coverSkipped, \$coverGroups, \$coverPeak); $body 1;"
         or die "eval $name: $@";
 }
 
@@ -348,6 +384,11 @@ sub reset_world {
     %T::coverQueued = ();
     $T::coverRunning = 0;
     $T::coverPumping = 0;
+    $T::coverFetched = 0;
+    $T::coverSkipped = 0;
+    $T::coverGroups  = 0;
+    $T::coverPeak    = 0;
+    $T::coverStageOpen = 0;
     @HTTP_GETS = (); @HTTP_PENDING = (); $HTTP_MODE = 'ok';
     @Slim::Utils::Timers::PENDING = ();
     $CACHE = T::Cache->new; $LOG = T::Log->new;
@@ -385,11 +426,16 @@ $EXPECT     =~ s/\Q$EXT\E$//;
 
 # _warmCovers starts the runner before it returns, so one path is already in
 # flight by the time we look — every count below is queue PLUS in-flight.
+# A queue element is a GROUP (every spec of one release) since 0.9.196, so this
+# flattens one level. Written as a flatten rather than a two-level walk at each
+# call site so the request-count assertions below keep meaning "requests".
 sub warmed_paths {
     my @out = map { my $u = $_; $u =~ s{^http://[^/]+}{}; $u } @HTTP_GETS;
-    push @out, map { $_->[0] } @T::coverQueue;
+    push @out, map { $_->[0] } map { @$_ } @T::coverQueue;
     return @out;
 }
+# ...and the release-level view, which is what COVER_CONCURRENCY now bounds.
+sub queued_groups { return scalar @T::coverQueue }
 sub warmed_count { return scalar warmed_paths() }
 
 reset_world();
@@ -422,34 +468,57 @@ ok($SRCURL =~ m{/front-\d+\.jpg$},
 ok(!scalar(grep { /_1024x1024_f|_2048x2048_f/ } @paths),
    'the now-playing specs are deliberately not warmed');
 
-# BREADTH BEFORE DEPTH — the queue order IS the priority, and nothing asserted it.
-# Release-major ordering (all three specs of release 1, then release 2...) means a
-# pass still running leaves most rows with NO cover at the size a list row asks
-# for, while a minority have all three. Spec-major means the first third of the
-# work gives EVERY row its list-row cover. Both orderings queue exactly the same
-# paths, so only the order distinguishes them — a set comparison cannot.
+# RELEASE-MAJOR, AND THE THREE SPECS MUST TRAVEL TOGETHER. This assertion
+# INVERTED in 0.9.196 and the reason is worth keeping, because the old one was
+# correct for its own world.
+#
+# 0.9.189 made the queue spec-major: with three DIFFERENT source urls a release's
+# three specs cost three downloads, so a part-finished release-major pass left
+# most rows with no cover at the size a list row asks for. Spec-major meant the
+# first third of the work gave EVERY row its list-row cover.
+#
+# Collapsing the ladder removes that premise. The three specs now share one
+# download, so grouping them costs a third of the upstream traffic AND finishes
+# whole rows. Grouping is also what makes coalescing possible at all: the proxy
+# queues by source url and only shares a download between requests that are in
+# flight TOGETHER. Both orderings queue exactly the same paths, so only the order
+# distinguishes them — a set comparison cannot see this.
 {
     reset_world(); $n = 0;
     my $N = 12;
     T::_warmCovers([ map { rel() } 1 .. $N ], 'test');
     my @ordered = warmed_paths();
-    my @first   = @ordered[ 0 .. $N - 1 ];
     ok(scalar(@ordered) == $N * 3, "$N covers queue " . ($N * 3) . ' requests');
-    ok($N == scalar(grep { /_150x150_f/ } @first),
-       'the first pass over the feed is ALL list-row covers — breadth before depth');
-    ok(!scalar(grep { /_600x600_f/ } @first),
-       '...and no hi-dpi grid tile is fetched before every row has its list cover');
+
+    # One entry per RELEASE, each holding every spec.
+    is_count(queued_groups() + $T::coverRunning, $N,
+             'the queue holds one GROUP per release, not one entry per request');
+
+    # The property, stated over the path strings rather than the structure: the
+    # first three requests belong to ONE release and cover all three specs.
+    my @first = @ordered[0 .. 2];
+    my %specs = map { /(_\d+x\d+_f)/ ? ($1 => 1) : () } @first;
+    is_count(scalar(keys %specs), 3,
+             'the first three requests are the three SPECS of one release');
+    my %bases = map { my $b = $_; $b =~ s/_\d+x\d+_f//; ($b => 1) } @first;
+    is_count(scalar(keys %bases), 1,
+             '...and they share ONE source path, which is what lets the proxy coalesce');
+
+    # And the old ordering is now the failure: spec-major would put twelve
+    # different releases' list-row covers first.
+    ok(scalar(grep { /_150x150_f/ } @first) == 1,
+       'NOT spec-major — the first three are not twelve rows\' list covers');
     reset_world();
 }
 # THE MARKER NAMES ITS OWN PATH. Checked over a warm big enough to leave entries
-# still QUEUED: with a concurrent runner a three-request pass is launched in full
-# before this line runs, so @coverQueue is empty and a grep over it would pass
-# vacuously — it did, until the runner stopped being serial. Asserted over every
-# queued entry rather than "at least one", which is the actual invariant.
+# still QUEUED: with a concurrent runner a pass is launched in full before this
+# line runs, so @coverQueue is empty and a grep over it would pass vacuously — it
+# did, until the runner stopped being serial. Asserted over every queued entry
+# rather than "at least one", which is the actual invariant.
 {
     reset_world(); $n = 0;
     T::_warmCovers([ map { rel() } 1 .. 20 ], 'test');
-    my @q = @T::coverQueue;
+    my @q = map { @$_ } @T::coverQueue;
     ok(scalar(@q) > 0, 'a pass larger than COVER_CONCURRENCY leaves entries queued');
     ok(scalar(@q) == scalar(grep { $_->[1] eq $IMGWARM . $_->[0] } @q),
        'every queued marker key is its own path, so it cannot mark a different one warm');
@@ -513,10 +582,26 @@ my @many = map { rel() } 1 .. 10;      # 10 covers x 3 specs = 30 requests
 T::_warmCovers(\@many, 'test');
 my $queued = warmed_count();
 ok($queued == 30, 'ten covers, thirty requests in total');
-ok(scalar(@HTTP_GETS) == T::COVER_CONCURRENCY(),
-   'the runner opens COVER_CONCURRENCY (' . T::COVER_CONCURRENCY() . ') requests at once');
+# THE UNIT CHANGED IN 0.9.196 AND THAT IS THE ASSERTION. COVER_CONCURRENCY now
+# bounds RELEASES, and a release is three local requests sharing one upstream
+# download — so the fan-out is 3x the bound in requests and exactly the bound in
+# downloads. Reading this in requests is how someone "tidying" the constant would
+# silently triple the load on the LMS handler pool.
+ok(scalar(@HTTP_GETS) == T::COVER_CONCURRENCY() * 3,
+   'the runner opens COVER_CONCURRENCY (' . T::COVER_CONCURRENCY() . ') RELEASES at once, i.e. '
+   . (T::COVER_CONCURRENCY() * 3) . ' requests');
 ok($T::coverRunning == T::COVER_CONCURRENCY(),
-   '...and its in-flight counter agrees');
+   '...and its in-flight counter agrees, counting releases');
+{
+    # ...and those requests really are whole releases, not a slice across many:
+    # three specs each, one source path each. This is the coalescing precondition.
+    my %base;
+    for my $u (@HTTP_GETS) { (my $b = $u) =~ s/_\d+x\d+_f//; $base{$b}++ }
+    is_count(scalar(keys %base), T::COVER_CONCURRENCY(),
+             'the in-flight requests cover exactly COVER_CONCURRENCY source urls');
+    ok(!scalar(grep { $_ != 3 } values %base),
+       '...and every one of them has all three of its specs in flight together');
+}
 ok($HTTP_GETS[0] =~ m{^http://127\.0\.0\.1:9000/imageproxy/},
    'it is addressed to our OWN server, on the configured http port');
 
@@ -564,9 +649,10 @@ ok($mttl && $mttl < 30 * 86400,
 
 reset_world(); $n = 0;
 $HTTP_MODE = '401';
-T::_warmCovers([ map { rel() } 1 .. 5 ], 'test');
-ok(scalar(@T::coverQueue) == 15 - T::COVER_CONCURRENCY(),
-   'fifteen queued, COVER_CONCURRENCY in flight');
+my $N401 = T::COVER_CONCURRENCY() + 4;      # more releases than fit in one fan-out
+T::_warmCovers([ map { rel() } 1 .. $N401 ], 'test');
+is_count(scalar(@T::coverQueue), $N401 - T::COVER_CONCURRENCY(),
+   'the rest stay queued while COVER_CONCURRENCY releases are in flight');
 http_settle();
 ok(scalar(@T::coverQueue) == 0,
    'a 401 from our own server abandons the whole pass rather than logging it 400 times');
@@ -574,8 +660,77 @@ ok(scalar(grep { /refused a local request/ } @{ $LOG->{info} }), '...and says so
 # The already-in-flight requests still land; what must NOT happen is the queue
 # being picked back up. Nothing beyond the initial fan-out is ever launched.
 http_settle() while @HTTP_PENDING;
-ok(scalar(@HTTP_GETS) == T::COVER_CONCURRENCY(),
-   'no further requests are made after the refusal');
+ok(scalar(@HTTP_GETS) == T::COVER_CONCURRENCY() * 3,
+   'no further requests are made after the refusal — only the initial fan-out');
+
+# --------------------------------------------------------------------------
+# THE MARKER CHECK LIVES IN THE LAUNCHER, NOT THE QUEUE BUILDER (0.9.196).
+# --------------------------------------------------------------------------
+# Two separate properties, and neither was covered before.
+#
+# 1. THE EVENT LOOP. The check used to sit in the queue-building loop, which runs
+#    inside an async HTTP callback (a feed's onDone) — up to COVER_WARM_MAX x 3 =
+#    6,000 synchronous SQLite reads in ONE turn, on the loop that streams audio
+#    and serves the image proxy. Same hazard class as the 16,000-statement ingest.
+#    Asserted as a COUNT of store reads during a build, because that is the only
+#    thing that sees it.
+# 2. THE SKIP ITSELF. Once the builder stops checking, the launcher is the ONLY
+#    thing standing between a re-render and a re-fetch of already-warm covers —
+#    and it is what the page-aligned warm (stage 3) will depend on, since that
+#    unshifts unchecked by design. Asserted on REQUEST COUNT, which is the only
+#    observable: a set comparison of queued paths cannot see a skip.
+{
+    reset_world(); $n = 0;
+    my @feed = map { rel() } 1 .. 30;
+    $CACHE->{gets} = 0;
+    my ($groups, $seen) = T::_coverGroupsFor(\@feed, T::COVER_WARM_MAX());
+    is_count($CACHE->{gets}, 0,
+             'the queue builder reads the store ZERO times — it is allocation only');
+    is_count(scalar(@$groups), 30, '...and still returns one group per release');
+    reset_world();
+}
+{
+    # A release already warm at every spec: no request at all, and the slot is
+    # handed straight back rather than being held by a group that does nothing.
+    reset_world(); $n = 0;
+    my $r    = rel();
+    my $src  = Plugins::ListenBrainzFreshReleases::API->coverArtUrl($r);
+    my $base = Slim::Web::ImageProxy::proxiedImage($src);
+    for my $spec (@{ +T::COVER_SPECS() }) {
+        (my $path = $base) =~ s/(\.\w+)$/$spec$1/;
+        $CACHE->set($IMGWARM . $path, 1, 100);
+    }
+    T::_warmCovers([ $r ], 'test');
+    is_count(scalar(@HTTP_GETS), 0,
+             'a release warm at every spec issues NO request');
+    is_count($T::coverRunning, 0, '...and its slot is released, not held');
+    is_count($T::coverSkipped, scalar(@{ +T::COVER_SPECS() }),
+             '...and the skips are counted, so the stage note can say so');
+    is_count($T::coverGroups, 0, '...and it is not counted as a download');
+    reset_world();
+}
+{
+    # A PARTLY warm release still fetches the missing spec — the skip must be per
+    # path, not per group, or one warm spec would suppress two cold ones.
+    reset_world(); $n = 0;
+    my $r    = rel();
+    my $src  = Plugins::ListenBrainzFreshReleases::API->coverArtUrl($r);
+    my $base = Slim::Web::ImageProxy::proxiedImage($src);
+    my ($first) = @{ +T::COVER_SPECS() };
+    (my $warm = $base) =~ s/(\.\w+)$/$first$1/;
+    $CACHE->set($IMGWARM . $warm, 1, 100);
+
+    T::_warmCovers([ $r ], 'test');
+    is_count(scalar(@HTTP_GETS), scalar(@{ +T::COVER_SPECS() }) - 1,
+             'a partly-warm release fetches only the specs it is missing');
+    ok(!scalar(grep { /\Q$first\E/ } @HTTP_GETS),
+       '...and the already-warm spec is the one that was skipped');
+    is_count($T::coverGroups, 1,
+             '...and it still counts as one download, since the rest coalesce');
+    http_settle() while @HTTP_PENDING;
+    is_count($T::coverRunning, 0, '...and the group completes cleanly afterwards');
+    reset_world();
+}
 
 # ==========================================================================
 section('5. people you follow — trending albums warm their covers too');

@@ -3393,7 +3393,12 @@ use constant COVER_SPECS => [qw(_150x150_f _300x300_f _600x600_f)];
 # Steady state is whatever is genuinely new.
 use constant COVER_WARM_MAX => 2000;
 
-# Requests in flight at once.
+# RELEASES in flight at once — NOT requests. Read the unit carefully.
+#
+# Since the ladder collapsed to one source URL per release, a release's three
+# specs are three LOCAL requests that share ONE upstream fetch (see the handler
+# in Plugin.pm). So this bound now governs 3x this many connections to our own
+# LMS server, and exactly this many downloads from Cover Art Archive.
 #
 # THE OLD VALUE WAS EFFECTIVELY 1, and the comment defending it said a parallel
 # burst was "neither faster for us nor kind to them". The first half is measured
@@ -3403,10 +3408,12 @@ use constant COVER_WARM_MAX => 2000;
 # 307s to an archive.org node with no CDN, ~2.1s to deliver 25-41 KB. That is
 # nearly all waiting, and waiting parallelises.
 #
-# 8 rather than 16, for a reason that has nothing to do with CAA: these requests
-# go to OUR OWN server, so each one occupies an LMS HTTP handler slot that a
-# browsing user might want. 8 takes most of the available speedup while leaving
-# the server responsive. It is a constant precisely so it can be moved.
+# WHY THE NUMBER DID NOT MOVE WHEN THE UNIT DID. Those measurements were taken in
+# REQUESTS, and they top out at 32. 8 releases is 24 local connections, which is
+# inside the measured range; 16 releases would be 48, which is not measured at
+# all. The binding constraint is not CAA — it is that these requests go to OUR
+# OWN server, so each occupies an LMS HTTP handler slot a browsing user might
+# want. Raise this only alongside a re-measurement in units of RELEASES.
 use constant COVER_CONCURRENCY => 8;
 
 # How long we remember that a path is warm. Deliberately UNDER the proxy's own 30d
@@ -3415,22 +3422,68 @@ use constant COVER_CONCURRENCY => 8;
 # expires_at is always absolute — the LMS 30-day TTL cliff does not apply here.
 use constant COVER_WARM_TTL => 25 * 86400;
 
-my @coverQueue;      # [ [$path, $key], ... ] — proxy paths still to fetch
+# A queue element is a GROUP: every proxy path for ONE release, which after the
+# ladder collapse all resolve to the same source URL. They are launched together
+# so the image proxy can coalesce them into a single download (see _coverLaunch).
+my @coverQueue;      # [ [ [$path,$key], ... ], ... ] — one entry per release
 my %coverQueued;     # $path => 1 while queued, so two feeds can't queue it twice
-my $coverRunning = 0;   # requests currently in flight (0 .. COVER_CONCURRENCY)
+my $coverRunning = 0;   # RELEASES currently in flight (0 .. COVER_CONCURRENCY)
 my $coverPumping = 0;   # re-entrancy guard on _coverTick's launch loop
 # Instrumentation only. The queue is SHARED by all three feeds, so the covers
 # stage spans from the first path any of them queues to the moment the queue
 # drains — it is deliberately one row rather than three, because that is how the
 # work actually happens and three rows would imply a parallelism that isn't there.
+#
+# THREE COUNTERS, NOT ONE, and the split is what makes the stage note falsifiable:
+# $coverFetched is requests actually ISSUED, $coverSkipped is requests the marker
+# check answered without touching the network, and $coverGroups is releases —
+# i.e. upstream downloads. The claim this stage exists to prove is
+# "$coverFetched ~ 3 x $coverGroups", and a single merged counter cannot show it.
 my $coverStageOpen = 0;
 my $coverFetched   = 0;
+my $coverSkipped   = 0;
+my $coverGroups    = 0;
+my $coverPeak      = 0;
 
 sub _warmCovers {
     my ($releases, $label) = @_;
 
     return unless $prefs->get('warm_covers') // 1;
     return unless ref $releases eq 'ARRAY' && @$releases;
+
+    my ($groups, $seen) = _coverGroupsFor($releases, COVER_WARM_MAX) or return;
+    return unless @$groups;
+
+    push @coverQueue, @$groups;
+
+    unless ($coverStageOpen) {
+        $coverStageOpen = 1;
+        $coverFetched   = 0;
+        $coverSkipped   = 0;
+        $coverGroups    = 0;
+        $coverPeak      = 0;
+        _stage('start', 'covers');
+    }
+    _dbg("warm: covers — $label queued " . scalar(@$groups) . " release(s) of $seen");
+    _coverTick();
+}
+
+# The queue-building loop, factored out so the nightly warm and (later) the
+# page-aligned warm cannot drift on what a "group" is. Returns (\@groups, $seen).
+#
+# ALLOCATION ONLY — IT READS NO STORE, and that is a hard requirement rather than
+# tidiness. This runs inside an async HTTP callback (a feed's onDone), and the
+# version that lived here until 0.9.196 did one `$cache->get` per PATH: up to
+# 2,000 releases x 3 specs = SIX THOUSAND synchronous SQLite reads in a single
+# turn of the event loop, on the same loop that streams audio and serves the
+# image proxy. That is the same hazard class as the 16,000-statement ingest
+# (DB::ingestFeed) and the per-row SELECTs bench_walk caught in 0.9.165 — it was
+# simply never counted here. The marker check moved into _coverLaunch, where it
+# is ONE read per launch, spread across the pump.
+#
+# $cap bounds RELEASES, not paths, so it means the same thing it always did.
+sub _coverGroupsFor {
+    my ($releases, $cap) = @_;
 
     eval { require Slim::Web::ImageProxy; 1 } or return;
     return unless Slim::Web::ImageProxy->can('proxiedImage');
@@ -3439,33 +3492,30 @@ sub _warmCovers {
     # warms the covers that are actually at the top of the list.
     my @rels = sort { ($b->{release_date} // '') cmp ($a->{release_date} // '') } @$releases;
 
-    # SPEC-MAJOR, NOT RELEASE-MAJOR — the queue is walked in order, so the order
-    # IS the priority, and this was the wrong way round. Release-major meant a
-    # release got all three of its specs before the next release got any, so a
-    # pass interrupted (or merely still running) part-way had a third of the feed
-    # fully warmed at every size and the rest with nothing — while the size a
-    # standard-dpi list row actually asks for, _150x150_f, was still unfetched
-    # for two thirds of the rows the user was looking at.
+    # RELEASE-MAJOR, and this REVERSES the spec-major order 0.9.189 introduced.
     #
-    # Walking spec-first means the FIRST third of the work leaves every row in
-    # the feed with its list-row cover, and the two hi-dpi/grid sizes fill behind
-    # it. COVER_SPECS is already ordered cheapest-and-most-asked-for first, so
-    # the useful pass is the one that completes first.
-    my ($seen, $added) = (0, 0);
-    my @bases;
+    # That comment's reasoning was right for the world it was written in: three
+    # specs meant three DIFFERENT source URLs and three separate downloads, so a
+    # part-finished release-major pass left two thirds of the rows with no
+    # list-row cover, and walking spec-first got every row its cheapest size
+    # first. Collapsing the ladder removes the premise. A release's three specs
+    # now cost ONE download between them, so grouping them is strictly better:
+    # the same pass yields the same rows at ALL THREE sizes for a third of the
+    # upstream traffic, and a part-finished pass leaves whole rows finished
+    # rather than every row partly done.
+    my @groups;
+    my $seen = 0;   # explicit: `last if $seen >= $cap` on the first pass
     for my $rel (@rels) {
-        last if @bases >= COVER_WARM_MAX;
+        last if $seen >= $cap;
         my $url = Plugins::ListenBrainzFreshReleases::API->coverArtUrl($rel) or next;
         # Built by the SAME sub XMLBrowser runs over the row (proxiedImage), so
         # the string we warm is byte-identical to the one the client will ask
         # for. Anything else fills a key nobody ever reads.
         my $base = Slim::Web::ImageProxy::proxiedImage($url) or next;
-        push @bases, $base;
-    }
-    $seen = scalar @bases;
+        $seen++;
 
-    for my $spec (@{ +COVER_SPECS }) {
-        for my $base (@bases) {
+        my @grp;
+        for my $spec (@{ +COVER_SPECS }) {
             (my $path = $base) =~ s/(\.\w+)$/$spec$1/ or next;
             next if $coverQueued{$path};
             # THROUGH kver, so the family can be invalidated like every other.
@@ -3475,33 +3525,25 @@ sub _warmCovers {
             # (the `.png` -> `.jpg` switch being exactly that), and there was no
             # way to retire the stale ones short of the dev wipe.
             my $key = Plugins::ListenBrainzFreshReleases::DB::kver('lbf:imgwarm:') . $path;
-            next if $cache->get($key);
             $coverQueued{$path} = 1;
-            push @coverQueue, [ $path, $key ];
-            $added++;
+            push @grp, [ $path, $key ];
         }
+        push @groups, \@grp if @grp;
     }
 
-    return unless $added;
-    unless ($coverStageOpen) {
-        $coverStageOpen = 1;
-        $coverFetched   = 0;
-        _stage('start', 'covers');
-    }
-    _dbg("warm: covers — $label queued $added request(s) across $seen release(s)");
-    _coverTick();
+    return (\@groups, $seen);
 }
 
-# Keep COVER_CONCURRENCY requests in flight, refilling a slot the moment one
+# Keep COVER_CONCURRENCY RELEASES in flight, refilling a slot the moment one
 # lands. No inter-request timer: with a bounded number in flight the pacing IS
 # the bound, and a gap between launches only lengthened an already-serial pass.
 #
 # THE PUMP IS RE-ENTRANT-GUARDED, and that is not theoretical. `$done` is called
-# INLINE when a request fails to launch at all (the eval below), so without the
-# guard a run of launch failures would recurse one frame per queued path — and
-# the queue is now thousands of entries deep, not a hundred and fifty. The guard
-# makes such a `$done` decrement its counter and return, leaving the loop that is
-# already running to fill the freed slot.
+# INLINE when a request fails to launch at all, and a whole group can now also
+# complete inline when every one of its paths is already marked — so without the
+# guard a run of either would recurse one frame per queued release, and the queue
+# is thousands of entries deep. The guard makes such a completion decrement its
+# counter and return, leaving the loop that is already running to fill the slot.
 sub _coverTick {
     return if $coverPumping;
     $coverPumping = 1;
@@ -3523,57 +3565,116 @@ sub _coverMaybeEnd {
     # would overwrite the row — acceptable, and visible: the report shows
     # the LAST drain, and its start offset says when that pass began.
     $coverStageOpen = 0;
-    _stage('end', 'covers', 'done', "$coverFetched request(s)");
+    # Reported as four numbers because the property worth asserting is a RATIO:
+    # requests should be about three times releases, since a release's specs
+    # share one upstream download. One merged count cannot show that, and cannot
+    # distinguish a pass that did nothing from a pass that skipped everything.
+    _stage('end', 'covers', 'done',
+           "$coverFetched request(s) / $coverGroups release(s)"
+         . ", $coverSkipped already warm, peak $coverPeak in flight");
 }
 
+# Launch ONE release: every spec, in a single synchronous turn.
+#
+# THAT THEY GO OUT TOGETHER IS THE WHOLE OPTIMISATION, not an implementation
+# detail. Slim::Web::ImageProxy::getImage queues by the rewritten SOURCE URL and
+# returns early for everyone after the first (`return if scalar @{$queue{$url}} >
+# 1`); _resizeFromFile then resizes EVERY waiting entry to its own spec from that
+# one download. Since the ladder collapsed, a release's specs share a source URL
+# — so issuing them in one turn costs one fetch instead of three. Issue them in
+# separate turns and the first can complete before the others arrive, and we are
+# back to three downloads. It degrades to the old cost, never worse.
 sub _coverLaunch {
-    my ($next) = @_;
-    my ($path, $key) = @$next;
+    my ($group) = @_;
     $coverRunning++;
+    $coverPeak = $coverRunning if $coverRunning > $coverPeak;
 
-    # ONCE-ONLY. Both SimpleAsyncHTTP callbacks and the inline failure path all
-    # route here; a double call would decrement the in-flight count twice and let
-    # the pass run more than COVER_CONCURRENCY requests wide.
-    my $fired = 0;
-    my $done = sub {
-        return if $fired++;
-        delete $coverQueued{$path};
+    # THE MARKER CHECK LIVES HERE, not in the queue builder, for two reasons that
+    # both matter. (1) The builder runs inside an async HTTP callback and, later,
+    # inside a browse callback; doing this there is thousands of synchronous
+    # SQLite reads in one turn of the event loop. Here it is one read per launch,
+    # naturally spread across the pump. (2) The page-aligned warm unshifts
+    # unchecked precisely because it cannot afford the read — so this is the only
+    # thing standing between a re-rendered page and a re-fetch of covers that are
+    # already warm.
+    my @todo;
+    for my $ent (@$group) {
+        my ($path, $key) = @$ent;
+        if (eval { $cache->get($key) }) {
+            delete $coverQueued{$path};
+            $coverSkipped++;
+            next;
+        }
+        push @todo, $ent;
+    }
+
+    unless (@todo) {
         $coverRunning--;
-        $coverFetched++;
+        _coverTick();   # no-op while the pump loop is running; frees the slot otherwise
+        return;
+    }
+
+    $coverGroups++;
+
+    # ONE completion per GROUP. $outstanding is fixed before anything is launched,
+    # so a request failing inline mid-loop cannot fire the completion early while
+    # its siblings are still being launched.
+    my $outstanding = scalar @todo;
+    my $ended       = 0;
+    my $groupDone   = sub {
+        return if $ended;
+        return if --$outstanding > 0;
+        $ended = 1;
+        $coverRunning--;
         _coverTick();
     };
 
-    my $ok = eval {
-        require Slim::Networking::SimpleAsyncHTTP;
-        my $port = preferences('server')->get('httpport') || 9000;
+    for my $ent (@todo) {
+        my ($path, $key) = @$ent;
 
-        Slim::Networking::SimpleAsyncHTTP->new(
-            sub {
-                # Only the fact that the proxy answered matters — by the time this
-                # returns the resized image is in its cache, and we throw our copy
-                # away.
-                eval { $cache->set($key, 1, COVER_WARM_TTL); 1 };
-                $done->();
-            },
-            sub {
-                my (undef, $error) = @_;
-                # A server behind HTTP auth refuses our own request, and retrying
-                # the rest of the queue would just log the same failure a few
-                # hundred times. Drop the whole pass; the next warm retries.
-                if (($error // '') =~ /\b40[13]\b/) {
-                    $log->info("warm: covers — the server refused a local request ($error);"
-                             . " skipping the cover warm");
-                    @coverQueue  = ();
-                    %coverQueued = ();
-                }
-                $done->();
-            },
-            { timeout => 30 },
-        )->get("http://127.0.0.1:$port$path");
-        1;
-    };
+        # ONCE-ONLY PER REQUEST. Both SimpleAsyncHTTP callbacks and the inline
+        # failure path route here; a double call would decrement $outstanding
+        # twice and let the pass run more than COVER_CONCURRENCY releases wide.
+        my $fired = 0;
+        my $done  = sub {
+            return if $fired++;
+            delete $coverQueued{$path};
+            $coverFetched++;
+            $groupDone->();
+        };
 
-    $done->() unless $ok;
+        my $ok = eval {
+            require Slim::Networking::SimpleAsyncHTTP;
+            my $port = preferences('server')->get('httpport') || 9000;
+
+            Slim::Networking::SimpleAsyncHTTP->new(
+                sub {
+                    # Only the fact that the proxy answered matters — by the time this
+                    # returns the resized image is in its cache, and we throw our copy
+                    # away.
+                    eval { $cache->set($key, 1, COVER_WARM_TTL); 1 };
+                    $done->();
+                },
+                sub {
+                    my (undef, $error) = @_;
+                    # A server behind HTTP auth refuses our own request, and retrying
+                    # the rest of the queue would just log the same failure a few
+                    # hundred times. Drop the whole pass; the next warm retries.
+                    if (($error // '') =~ /\b40[13]\b/) {
+                        $log->info("warm: covers — the server refused a local request ($error);"
+                                 . " skipping the cover warm");
+                        @coverQueue  = ();
+                        %coverQueued = ();
+                    }
+                    $done->();
+                },
+                { timeout => 30 },
+            )->get("http://127.0.0.1:$port$path");
+            1;
+        };
+
+        $done->() unless $ok;
+    }
 }
 
 sub warmCache {
