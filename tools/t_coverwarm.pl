@@ -38,7 +38,8 @@
 #                     extension, for all three specs.
 #   3. Queueing     — pref off, no artwork, the cap, the already-warm skip, the
 #                     cross-feed dedupe, newest-first ordering.
-#   4. The runner   — one request in flight, the marker written under the proxy's
+#   4. The runner   — never more than COVER_CONCURRENCY in flight, the counter
+#                     returning to zero, the marker written under the proxy's
 #                     own 30-day life, and an auth refusal abandoning the pass.
 #
 # ANTI-TEST: point LBF_PLUGIN / LBF_BROWSE at a mutated copy.
@@ -267,7 +268,13 @@ our @HTTP_GETS;         # every url the runner asked for, in order
 our $HTTP_MODE = 'ok';  # 'ok' | '401'
 {
     package Slim::Networking::SimpleAsyncHTTP;
-    sub new { my ($c, $done, $err, $o) = @_; bless { done => $done, err => $err }, $c }
+    # 'die' mode reproduces a launch that never gets off the ground, which is the
+    # ONLY path that calls the runner's $done synchronously.
+    sub new {
+        my ($c, $done, $err, $o) = @_;
+        die "simulated launch failure\n" if $main::HTTP_MODE eq 'die';
+        bless { done => $done, err => $err }, $c;
+    }
     sub get {
         my ($s, $url) = @_;
         push @main::HTTP_GETS, $url;
@@ -311,7 +318,7 @@ my $LOG   = T::Log->new;
 # Constants are EVALLED FROM SOURCE, not restated: a hand-copied COVER_SPECS
 # would drift the moment the shipped list changed, and every path assertion
 # below would then be checking a spec nothing asks for.
-for my $c (qw(COVER_SPECS COVER_WARM_MAX COVER_WARM_GAP COVER_WARM_TTL)) {
+for my $c (qw(COVER_SPECS COVER_WARM_MAX COVER_CONCURRENCY COVER_WARM_TTL)) {
     my ($line) = $bsrc =~ /^(use constant \Q$c\E\s*=>.*?;)$/ms
         or die "no constant $c in Browse.pm\n";
     eval "package T; $line 1;" or die "eval $c: $@";
@@ -323,10 +330,10 @@ for my $c (qw(COVER_SPECS COVER_WARM_MAX COVER_WARM_GAP COVER_WARM_TTL)) {
 # measuring what it is actually for.
 { package T; sub _stage { } }
 
-for my $name (qw(_warmCovers _coverTick)) {
+for my $name (qw(_warmCovers _coverTick _coverMaybeEnd _coverLaunch)) {
     my $body = grab($bsrc, $name);
     eval "package T; use Time::HiRes (); our (\$cache, \$prefs, \$log); "
-       . "our (\@coverQueue, \%coverQueued, \$coverRunning, \$coverStageOpen, \$coverFetched); $body 1;"
+       . "our (\@coverQueue, \%coverQueued, \$coverRunning, \$coverPumping, \$coverStageOpen, \$coverFetched); $body 1;"
         or die "eval $name: $@";
 }
 
@@ -336,6 +343,7 @@ sub reset_world {
     @T::coverQueue  = ();
     %T::coverQueued = ();
     $T::coverRunning = 0;
+    $T::coverPumping = 0;
     @HTTP_GETS = (); @HTTP_PENDING = (); $HTTP_MODE = 'ok';
     @Slim::Utils::Timers::PENDING = ();
     $CACHE = T::Cache->new; $LOG = T::Log->new;
@@ -409,8 +417,40 @@ ok($SRCURL =~ m{/front-\d+\.jpg$},
    'coverArtUrl names an explicit .jpg on the CAA url — the thing that decides it');
 ok(!scalar(grep { /_1024x1024_f|_2048x2048_f/ } @paths),
    'the now-playing specs are deliberately not warmed');
-ok(scalar(grep { $_->[1] eq $IMGWARM . $_->[0] } @T::coverQueue),
-   'the marker key is the path itself, so it cannot mark a different one warm');
+
+# BREADTH BEFORE DEPTH — the queue order IS the priority, and nothing asserted it.
+# Release-major ordering (all three specs of release 1, then release 2...) means a
+# pass still running leaves most rows with NO cover at the size a list row asks
+# for, while a minority have all three. Spec-major means the first third of the
+# work gives EVERY row its list-row cover. Both orderings queue exactly the same
+# paths, so only the order distinguishes them — a set comparison cannot.
+{
+    reset_world(); $n = 0;
+    my $N = 12;
+    T::_warmCovers([ map { rel() } 1 .. $N ], 'test');
+    my @ordered = warmed_paths();
+    my @first   = @ordered[ 0 .. $N - 1 ];
+    ok(scalar(@ordered) == $N * 3, "$N covers queue " . ($N * 3) . ' requests');
+    ok($N == scalar(grep { /_150x150_f/ } @first),
+       'the first pass over the feed is ALL list-row covers — breadth before depth');
+    ok(!scalar(grep { /_600x600_f/ } @first),
+       '...and no hi-dpi grid tile is fetched before every row has its list cover');
+    reset_world();
+}
+# THE MARKER NAMES ITS OWN PATH. Checked over a warm big enough to leave entries
+# still QUEUED: with a concurrent runner a three-request pass is launched in full
+# before this line runs, so @coverQueue is empty and a grep over it would pass
+# vacuously — it did, until the runner stopped being serial. Asserted over every
+# queued entry rather than "at least one", which is the actual invariant.
+{
+    reset_world(); $n = 0;
+    T::_warmCovers([ map { rel() } 1 .. 20 ], 'test');
+    my @q = @T::coverQueue;
+    ok(scalar(@q) > 0, 'a pass larger than COVER_CONCURRENCY leaves entries queued');
+    ok(scalar(@q) == scalar(grep { $_->[1] eq $IMGWARM . $_->[0] } @q),
+       'every queued marker key is its own path, so it cannot mark a different one warm');
+    reset_world();
+}
 
 # ==========================================================================
 section('3. what gets queued, and what does not');
@@ -455,45 +495,83 @@ ok(warmed_count() == $after_first,
 # ==========================================================================
 section('4. the runner');
 # ==========================================================================
+# THE RUNNER IS NOW CONCURRENT, and this section was the thing asserting it was
+# not. The old shape — one request out, a timer arming the next — was measured to
+# be the whole reason a cold feed took hours: the cost of a cover is almost
+# entirely Cover Art Archive's origin latency (~2.1s to deliver 25-41 KB via a
+# 307 to archive.org), so the pass was ~0.40 covers/s of almost pure waiting.
+# Measured on the live server at fixed batch size: 1 -> 0.40 covers/s, 4 -> 1.20,
+# 8 -> 1.62, 16 -> 2.77. The assertions below now pin the BOUND rather than the
+# absence of parallelism, which is the property that actually matters: never more
+# than COVER_CONCURRENCY in flight, and every queued path eventually fetched.
 reset_world(); $n = 0;
-T::_warmCovers([ rel(), rel() ], 'test');
+my @many = map { rel() } 1 .. 10;      # 10 covers x 3 specs = 30 requests
+T::_warmCovers(\@many, 'test');
 my $queued = warmed_count();
-ok($queued == 6, 'two covers, six requests in total');
-ok(scalar(@HTTP_GETS) == 1, 'exactly one request goes out at a time — the runner is serial');
+ok($queued == 30, 'ten covers, thirty requests in total');
+ok(scalar(@HTTP_GETS) == T::COVER_CONCURRENCY(),
+   'the runner opens COVER_CONCURRENCY (' . T::COVER_CONCURRENCY() . ') requests at once');
+ok($T::coverRunning == T::COVER_CONCURRENCY(),
+   '...and its in-flight counter agrees');
 ok($HTTP_GETS[0] =~ m{^http://127\.0\.0\.1:9000/imageproxy/},
    'it is addressed to our OWN server, on the configured http port');
 
-http_settle();
-ok(scalar(@{ $CACHE->{sets} }) == 1, 'a completed request writes its warm marker');
+# THE BOUND, checked at every step of a full drain rather than once: a leak in
+# the counter shows up as creep, and a single sample at the start cannot see it.
+my $peak = $T::coverRunning;
+my $guard = 0;
+while (@HTTP_PENDING) {
+    last if ++$guard > 200;
+    http_settle();
+    $peak = $T::coverRunning if $T::coverRunning > $peak;
+    (shift @Slim::Utils::Timers::PENDING)->() while @Slim::Utils::Timers::PENDING;
+}
+ok($peak == T::COVER_CONCURRENCY(),
+   "never more than COVER_CONCURRENCY in flight across a full drain (peak $peak)");
+ok(scalar(@HTTP_GETS) == $queued, 'every queued request is eventually made, and no more');
+ok($T::coverRunning == 0, 'the in-flight counter returns to zero — no leak');
+ok(scalar(@T::coverQueue) == 0, 'the queue drains completely');
+
+# The marker, from the first completed request.
+ok(scalar(@{ $CACHE->{sets} }) == $queued, 'every completed request writes its warm marker');
 my ($mk, $mttl) = @{ $CACHE->{sets}[0] };
 ok($mk =~ /^\Q$IMGWARM\E/, "the marker is keyed under the versioned family ($IMGWARM)");
 ok($mttl && $mttl < 30 * 86400,
    'the marker expires INSIDE the proxy\'s own 30-day life, so it cannot outlive the image');
-ok(scalar(@Slim::Utils::Timers::PENDING) == 1, 'the next request is armed on a timer, not fired inline');
-ok(scalar(@HTTP_GETS) == 1, '...so still only one request has gone out');
 
-(shift @Slim::Utils::Timers::PENDING)->();
-ok(scalar(@HTTP_GETS) == 2, 'the timer fires the next one');
-
-# Drain, and check the runner stops rather than re-arming for ever.
-my $guard = 0;
-while (@T::coverQueue || @HTTP_PENDING) {
-    last if ++$guard > 50;
-    http_settle();
-    (shift @Slim::Utils::Timers::PENDING)->() while @Slim::Utils::Timers::PENDING;
+# THE RE-ENTRANCY GUARD, which only a launch FAILURE can exercise. When the
+# request cannot be constructed at all, `$done` runs INLINE — so without the
+# guard the pump recurses one frame per queued path, and the queue is now
+# thousands deep rather than 150. Perl reports that as a deep-recursion warning
+# long before it becomes a crash, which is the observable this uses; the pass
+# must still complete either way, so "it finished" proves nothing on its own.
+{
+    reset_world(); $n = 0;
+    local $HTTP_MODE = 'die';
+    my @warn;
+    local $SIG{__WARN__} = sub { push @warn, $_[0] };
+    T::_warmCovers([ map { rel() } 1 .. 60 ], 'test');   # 180 requests
+    ok(!scalar(grep { /Deep recursion/i } @warn),
+       'a run of launch failures does not recurse the pump (the re-entrancy guard)');
+    ok($T::coverRunning == 0 && !@T::coverQueue,
+       '...and the pass still drains completely');
+    reset_world();
 }
-ok(scalar(@HTTP_GETS) == $queued, 'every queued request is eventually made, and no more');
-ok(scalar(@Slim::Utils::Timers::PENDING) == 0, 'an empty queue arms no further timer');
 
 reset_world(); $n = 0;
 $HTTP_MODE = '401';
 T::_warmCovers([ map { rel() } 1 .. 5 ], 'test');
-ok(scalar(@T::coverQueue) == 14, 'fifteen queued, one in flight');
+ok(scalar(@T::coverQueue) == 15 - T::COVER_CONCURRENCY(),
+   'fifteen queued, COVER_CONCURRENCY in flight');
 http_settle();
 ok(scalar(@T::coverQueue) == 0,
    'a 401 from our own server abandons the whole pass rather than logging it 400 times');
 ok(scalar(grep { /refused a local request/ } @{ $LOG->{info} }), '...and says so once, at info');
-ok(scalar(@HTTP_GETS) == 1, 'no further requests are made after the refusal');
+# The already-in-flight requests still land; what must NOT happen is the queue
+# being picked back up. Nothing beyond the initial fan-out is ever launched.
+http_settle() while @HTTP_PENDING;
+ok(scalar(@HTTP_GETS) == T::COVER_CONCURRENCY(),
+   'no further requests are made after the refusal');
 
 # ==========================================================================
 print "\n" . ('=' x 74) . "\n$pass passed, $fail failed.\n";

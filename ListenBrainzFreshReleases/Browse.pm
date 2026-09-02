@@ -3270,15 +3270,39 @@ sub warmFeeds {
 # entries in the whole table.
 use constant COVER_SPECS => [qw(_150x150_f _300x300_f _600x600_f)];
 
-# Covers warmed per feed per pass. A 14-day All Releases feed runs to thousands of
-# releases and nobody scrolls that far; this bounds a cold first run to roughly
-# COVER_WARM_MAX x 3 fetches rather than tens of thousands. Raise it if the tail
-# of a feed matters more than the background traffic.
-use constant COVER_WARM_MAX => 150;
+# Covers warmed per feed per pass.
+#
+# THIS WAS 150 AGAINST A FEED OF 2,157, and the old comment's premise — "nobody
+# scrolls that far" — was answering the wrong question. It is not about scrolling
+# to the tail; it is that 93% of All Releases rows had NO warmed artwork at all,
+# so opening almost any week showed bare rows that filled in front of the user at
+# ~2.1s each. That is the "artwork is missing and then populates" report, and no
+# amount of speed fixes it while the cap is the binding constraint.
+#
+# Raised now because the pass is no longer serial (see COVER_CONCURRENCY): the
+# arithmetic that justified a small cap has changed by ~4x. Measured against the
+# live server, cold covers through the proxy: 0.40/s serial, 1.62/s at
+# concurrency 8. A whole 2,157-release feed is 3 x 2,157 = 6,471 requests, which
+# went from ~4.5 hours to ~1.1 hours of background work — and the markers hold
+# for COVER_WARM_TTL (25 days), so this is a first-run cost, not a nightly one.
+# Steady state is whatever is genuinely new.
+use constant COVER_WARM_MAX => 2000;
 
-# Gap between requests. They are already serial (one in flight at a time), so this
-# is politeness towards archive.org rather than event-loop protection.
-use constant COVER_WARM_GAP => 0.1;
+# Requests in flight at once.
+#
+# THE OLD VALUE WAS EFFECTIVELY 1, and the comment defending it said a parallel
+# burst was "neither faster for us nor kind to them". The first half is measured
+# false: same server, same cold covers, wall time for a fixed batch — 1 -> 0.40
+# covers/s, 4 -> 1.20, 8 -> 1.62, 16 -> 2.77, still climbing at 16. It scales
+# because the cost is almost entirely ORIGIN LATENCY, not work: Cover Art Archive
+# 307s to an archive.org node with no CDN, ~2.1s to deliver 25-41 KB. That is
+# nearly all waiting, and waiting parallelises.
+#
+# 8 rather than 16, for a reason that has nothing to do with CAA: these requests
+# go to OUR OWN server, so each one occupies an LMS HTTP handler slot that a
+# browsing user might want. 8 takes most of the available speedup while leaving
+# the server responsive. It is a constant precisely so it can be moved.
+use constant COVER_CONCURRENCY => 8;
 
 # How long we remember that a path is warm. Deliberately UNDER the proxy's own 30d
 # (Slim::Web::ImageProxy::Cache is constructed with 86400*30), so our marker can
@@ -3288,7 +3312,8 @@ use constant COVER_WARM_TTL => 25 * 86400;
 
 my @coverQueue;      # [ [$path, $key], ... ] — proxy paths still to fetch
 my %coverQueued;     # $path => 1 while queued, so two feeds can't queue it twice
-my $coverRunning = 0;
+my $coverRunning = 0;   # requests currently in flight (0 .. COVER_CONCURRENCY)
+my $coverPumping = 0;   # re-entrancy guard on _coverTick's launch loop
 # Instrumentation only. The queue is SHARED by all three feeds, so the covers
 # stage spans from the first path any of them queues to the moment the queue
 # drains — it is deliberately one row rather than three, because that is how the
@@ -3309,18 +3334,33 @@ sub _warmCovers {
     # warms the covers that are actually at the top of the list.
     my @rels = sort { ($b->{release_date} // '') cmp ($a->{release_date} // '') } @$releases;
 
+    # SPEC-MAJOR, NOT RELEASE-MAJOR — the queue is walked in order, so the order
+    # IS the priority, and this was the wrong way round. Release-major meant a
+    # release got all three of its specs before the next release got any, so a
+    # pass interrupted (or merely still running) part-way had a third of the feed
+    # fully warmed at every size and the rest with nothing — while the size a
+    # standard-dpi list row actually asks for, _150x150_f, was still unfetched
+    # for two thirds of the rows the user was looking at.
+    #
+    # Walking spec-first means the FIRST third of the work leaves every row in
+    # the feed with its list-row cover, and the two hi-dpi/grid sizes fill behind
+    # it. COVER_SPECS is already ordered cheapest-and-most-asked-for first, so
+    # the useful pass is the one that completes first.
     my ($seen, $added) = (0, 0);
+    my @bases;
     for my $rel (@rels) {
-        last if $seen >= COVER_WARM_MAX;
+        last if @bases >= COVER_WARM_MAX;
         my $url = Plugins::ListenBrainzFreshReleases::API->coverArtUrl($rel) or next;
-        $seen++;
-
         # Built by the SAME sub XMLBrowser runs over the row (proxiedImage), so
         # the string we warm is byte-identical to the one the client will ask
         # for. Anything else fills a key nobody ever reads.
         my $base = Slim::Web::ImageProxy::proxiedImage($url) or next;
+        push @bases, $base;
+    }
+    $seen = scalar @bases;
 
-        for my $spec (@{ +COVER_SPECS }) {
+    for my $spec (@{ +COVER_SPECS }) {
+        for my $base (@bases) {
             (my $path = $base) =~ s/(\.\w+)$/$spec$1/ or next;
             next if $coverQueued{$path};
             # THROUGH kver, so the family can be invalidated like every other.
@@ -3347,30 +3387,55 @@ sub _warmCovers {
     _coverTick();
 }
 
-# One request in flight at a time, re-armed on a timer. Serial on purpose: the
-# proxy answers each of these by downloading the original from archive.org, and a
-# parallel burst of a few hundred of those is neither faster for us nor kind to
-# them.
+# Keep COVER_CONCURRENCY requests in flight, refilling a slot the moment one
+# lands. No inter-request timer: with a bounded number in flight the pacing IS
+# the bound, and a gap between launches only lengthened an already-serial pass.
+#
+# THE PUMP IS RE-ENTRANT-GUARDED, and that is not theoretical. `$done` is called
+# INLINE when a request fails to launch at all (the eval below), so without the
+# guard a run of launch failures would recurse one frame per queued path — and
+# the queue is now thousands of entries deep, not a hundred and fifty. The guard
+# makes such a `$done` decrement its counter and return, leaving the loop that is
+# already running to fill the freed slot.
 sub _coverTick {
-    return if $coverRunning;
-    my $next = shift @coverQueue or return;
-    my ($path, $key) = @$next;
-    $coverRunning = 1;
+    return if $coverPumping;
+    $coverPumping = 1;
+    _coverLaunch(shift @coverQueue)
+        while $coverRunning < COVER_CONCURRENCY && @coverQueue;
+    $coverPumping = 0;
 
+    # Checked here rather than inside $done: with several in flight, "the queue is
+    # empty" is not the same as "the pass is over", and ending the stage on the
+    # first callback to see an empty queue would close it with requests still
+    # outstanding.
+    _coverMaybeEnd();
+}
+
+sub _coverMaybeEnd {
+    return if @coverQueue || $coverRunning;
+    return unless $coverStageOpen;
+    # Drained. A later feed landing after this re-opens the stage, which
+    # would overwrite the row — acceptable, and visible: the report shows
+    # the LAST drain, and its start offset says when that pass began.
+    $coverStageOpen = 0;
+    _stage('end', 'covers', 'done', "$coverFetched request(s)");
+}
+
+sub _coverLaunch {
+    my ($next) = @_;
+    my ($path, $key) = @$next;
+    $coverRunning++;
+
+    # ONCE-ONLY. Both SimpleAsyncHTTP callbacks and the inline failure path all
+    # route here; a double call would decrement the in-flight count twice and let
+    # the pass run more than COVER_CONCURRENCY requests wide.
+    my $fired = 0;
     my $done = sub {
+        return if $fired++;
         delete $coverQueued{$path};
-        $coverRunning = 0;
+        $coverRunning--;
         $coverFetched++;
-        if (@coverQueue) {
-            Slim::Utils::Timers::setTimer(undef, Time::HiRes::time() + COVER_WARM_GAP, \&_coverTick);
-        }
-        elsif ($coverStageOpen) {
-            # Drained. A later feed landing after this re-opens the stage, which
-            # would overwrite the row — acceptable, and visible: the report shows
-            # the LAST drain, and its start offset says when that pass began.
-            $coverStageOpen = 0;
-            _stage('end', 'covers', 'done', "$coverFetched request(s)");
-        }
+        _coverTick();
     };
 
     my $ok = eval {

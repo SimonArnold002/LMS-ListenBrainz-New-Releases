@@ -188,7 +188,73 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-**0.9.188** — built 2026-08-30, **NOT installed and NOT tested**. Two user-visible changes,
+**0.9.189** — built 2026-09-02, **NOT installed and NOT tested**. **The cover warm stops being
+the bottleneck.** Three changes to the same pass: it runs 8 requests wide instead of one, it
+covers 2,000 releases per feed instead of 150, and it walks the queue SPEC-first so the first
+third of the work gives every row its list-row cover. No schema change, no cache bump.
+
+**0.9.189 — WHY A COLD FEED TOOK HOURS, MEASURED RATHER THAN REASONED.**
+
+0.9.188 made each cover ~6x cheaper to CACHE (JPEG, not re-encoded PNG). It did nothing about
+how long a cold pass takes, and the report after installing it was still "painfully slow from
+scratch, and artwork is missing when I open a view and then populates". Both halves were right,
+and they had two different causes.
+
+**THE COST IS ORIGIN LATENCY, NOT WORK.** Cover Art Archive 307s to an archive.org node with no
+CDN: ~2.1s to deliver 25-41 KB, measured direct, five samples. That is almost entirely waiting,
+and waiting parallelises. Measured through the proxy on the live server, fixed batch, cold
+covers:
+
+| in flight | covers/s | vs serial |
+|---|---|---|
+| 1 (old) | 0.40 | — |
+| 4 | 1.20 | 3.0x |
+| 8 | 1.62 | 4.1x |
+| 16 | 2.77 | 6.9x |
+
+The old runner was one request at a time with a 0.1s gap, and the comment defending it claimed
+a parallel burst was "neither faster for us nor kind to them". The first half is simply false.
+`COVER_CONCURRENCY` is now 8 — not 16, because these requests go to OUR OWN server and each
+occupies an LMS HTTP handler slot a browsing user might want. Still scaling at 16 if that trade
+ever looks different.
+
+**THE CAP WAS THE OTHER HALF, AND THE BIGGER ONE.** `COVER_WARM_MAX` was 150 against an `all`
+feed holding 2,157 in-window releases — **93% of All Releases rows had no warmed cover at
+all**, so opening almost any week showed bare rows filling in front of the user at ~2.1s each.
+No amount of speed fixes that while the cap binds. Now 2,000. The old comment's premise
+("nobody scrolls that far") was answering the wrong question: this is not about the tail, it is
+about whether the row you are looking at has a cover. At concurrency 8 a whole feed is ~1.1
+hours of background work rather than ~4.5, and markers hold 25 days, so it is a first-run cost.
+
+**SPEC-MAJOR, NOT RELEASE-MAJOR.** The queue is walked in order, so the order IS the priority,
+and it was the wrong way round: each release got all three of its specs before the next got
+any. A pass still running therefore left a third of the feed warm at every size and the rest
+with nothing — while `_150x150_f`, the size a standard-dpi list row actually asks for, was
+still unfetched for most of the rows on screen. Walking spec-first means the first third of the
+work leaves EVERY row with its list-row cover. Same paths, same total work; only the order
+changed, which is exactly why a set-comparison test could not see it.
+
+**THE PUMP IS RE-ENTRANCY-GUARDED.** `$done` runs INLINE when a request cannot be constructed
+at all, so without a guard a run of launch failures recurses one frame per queued path — and
+the queue is now thousands deep, not 150.
+
+**STILL NOT FIXED, and it is now the top of the artwork list:** nothing prioritises the page
+the user is actually looking at. The warm is strictly background and always races the reader on
+a cold store. Page-aligned warming (render page N, queue page N+1) is the remaining piece.
+
+**TESTS.** `t_coverwarm.pl` 44 -> 50 assertions. Section 4 was asserting the runner was SERIAL
+— it now pins the BOUND instead (never more than `COVER_CONCURRENCY` in flight, checked at
+every step of a full drain, counter back to zero, queue fully drained). Two new properties that
+no existing assertion could see: the queue ORDER (both orderings queue the same set, so only
+order distinguishes them) and the re-entrancy guard (exercised through a new 'die' HTTP mode
+that reproduces a launch failure, observed as the absence of a deep-recursion warning). One
+assertion had gone VACUOUS the moment the runner became concurrent — it grepped `@coverQueue`
+for the marker key, and a three-request pass is now launched in full before that line runs, so
+the array was empty; it now warms past `COVER_CONCURRENCY` and asserts over every queued entry.
+Anti-tested four ways: dropping the guard, dropping the counter decrement, reverting the
+ordering, and (from 0.9.188) re-anchoring the ladder regex.
+
+**0.9.188** — superseded by 0.9.189. Two user-visible changes,
 both small and both measured on the live server first: **cover art is cached as JPEG instead
 of re-encoded PNG**, and the **top-level menu is reordered** (All Releases directly under For
 You; People You Follow last of the content sections). No schema change, no `BASE_VERSION`
@@ -860,10 +926,11 @@ value on every run.
   - **The now-playing specs (1024/2048) are deliberately NOT warmed** — no LBF row is ever the
     now-playing artwork and they are the most expensive entries in the table.
   - **No cache bumps.** Nothing about a stored shape or a cached decision changed.
-  - `tools/t_coverwarm.pl` (44 assertions as of 0.9.188): the size table driven through
+  - `tools/t_coverwarm.pl` (50 assertions as of 0.9.189): the size table driven through
     `getRightSize`'s REAL algorithm against the table PARSED out of `Plugin.pm`, the ladder's
     url REWRITE, the warmed path compared to what Material builds, the queueing rules, and the
-    runner. **Anti-tested four ways** via `LBF_PLUGIN=` / `LBF_BROWSE=` / `LBF_API=` —
+    runner's CONCURRENCY BOUND and its queue ORDER. **Anti-tested** via `LBF_PLUGIN=` /
+    `LBF_BROWSE=` / `LBF_API=` —
     restoring the old table, re-anchoring the rewrite as `s|/front-\d+$|…|`, dropping the
     `.jpg` from `coverArtUrl`, or splicing the spec after the extension instead of before.
 
