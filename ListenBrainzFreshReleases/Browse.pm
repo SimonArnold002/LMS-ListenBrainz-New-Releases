@@ -2693,9 +2693,14 @@ sub _trendingSortToggle {
 # release-group metadata (fetched in _buildAlbumsData). We only override line2 with
 # the trending signal (breadth) and keep the always-link safety net for the rare
 # release-group with no MBID.
-sub _trendingAlbumRow {
-    my ($client, $agg) = @_;
-    my $rel = {
+# The fresh-release-shaped hashref a trending aggregate renders through. Split
+# out of _trendingAlbumRow so the COVER WARM can build the same thing: the warm
+# needs a $rel to hand _warmCovers, and a second copy of this mapping would drift
+# the moment either side changed — which is exactly how the release-group cover
+# URL came to be built two different ways (0.9.188).
+sub _trendingAlbumRel {
+    my ($agg) = @_;
+    return {
         artist_credit_name         => $agg->{artist},
         release_name               => $agg->{title},
         release_date               => ($agg->{date} || ($agg->{year} ? "$agg->{year}-01-01" : '')),
@@ -2705,6 +2710,21 @@ sub _trendingAlbumRow {
         caa_release_mbid           => $agg->{caa_release_mbid},
         artist_mbids               => ($agg->{artist_mbid} ? [ $agg->{artist_mbid} ] : []),
     };
+}
+
+# The release-GROUP art fallback, as a $rel coverArtUrl understands. Stats rows
+# built from UNMAPPED listens carry no caa_release_mbid, so the row would fall back
+# to the plugin icon; a release-group mbid still resolves at CAA. Named because the
+# warm has to queue the IDENTICAL url — a warm that guessed differently would fill
+# a key nobody reads, which is the trap _warmCovers' own comment describes.
+sub _trendingAlbumFallbackRel {
+    my ($agg) = @_;
+    return { caa_release_group_mbid => $agg->{release_group_mbid} };
+}
+
+sub _trendingAlbumRow {
+    my ($client, $agg) = @_;
+    my $rel = _trendingAlbumRel($agg);
 
     my $item = _buildReleaseItem($rel, $client);
     # Artwork fallback: stats rows built from UNMAPPED listens carry no
@@ -2720,7 +2740,7 @@ sub _trendingAlbumRow {
     # hashref form is exactly the shape coverArtUrl already handles for MuSpy.
     if (($item->{image} // '') eq ICON && $agg->{release_group_mbid}) {
         $item->{image} = Plugins::ListenBrainzFreshReleases::API->coverArtUrl(
-            { caa_release_group_mbid => $agg->{release_group_mbid} });
+            _trendingAlbumFallbackRel($agg));
     }
     # Trending signal in place of the type/genre line.
     $item->{line2} = sprintf(cstring($client, 'PLUGIN_LBF_TREND_BREADTH'), $agg->{breadth} // 0);
@@ -2731,6 +2751,37 @@ sub _trendingAlbumRow {
         $item->{url}  = sub { my ($c, $cb) = @_; _releaseDetail($rel, $c, $cb); };
     }
     return $item;
+}
+
+# Queue the covers for a list of trending AGGREGATES.
+#
+# WHY THIS EXISTS AT ALL: `_warmCovers` was called from exactly three places, all
+# inside `warmFeeds` — For You, All Releases and MuSpy. **People You Follow warmed
+# no artwork whatsoever**, so every Trending Albums row was cold on first sight,
+# every time, at ~2.1s of Cover Art Archive latency each. That is the same "the
+# artwork is missing and then populates" report as the release feeds, arriving
+# from a section nobody had wired up.
+#
+# It runs on a CACHE HIT as well as a fresh build, and that is the point rather
+# than an accident: `_buildAlbumsData` answers its callback with the stored
+# aggregates when the data is still inside its TTL (2/7/30 days by range), so the
+# list is in hand either way, and the covers are what expire independently of it.
+#
+# Both mappings go through the same two builders the ROW uses, so the warmed path
+# is byte-identical to what the client will ask for. The fallback rel is included
+# because a stats row with no caa_release_mbid renders its cover from the release
+# GROUP — the case that is most likely to be cold and least likely to be noticed.
+sub _warmTrendingCovers {
+    my ($aggs, $label) = @_;
+    return unless ref $aggs eq 'ARRAY' && @$aggs;
+    my @rels;
+    for my $agg (@$aggs) {
+        next unless ref $agg eq 'HASH';
+        push @rels, _trendingAlbumRel($agg);
+        push @rels, _trendingAlbumFallbackRel($agg) if $agg->{release_group_mbid};
+    }
+    _warmCovers(\@rels, $label);
+    return;
 }
 
 # Warm hook: pre-resolve the trending tracks (needs a player) and pre-build the two
@@ -2767,6 +2818,7 @@ sub _warmTrending {
         _stage('start', 'trending_year');
         _buildAlbumsData($client, 'this_year', sub {
             _stage('end', 'trending_year', 'done', scalar(@{ $_[0] // [] }) . ' album(s)');
+            _warmTrendingCovers($_[0], 'trending albums · this year');
         }, $force);
     };
 
@@ -2776,6 +2828,7 @@ sub _warmTrending {
         _stage('start', 'trending_month');
         _buildAlbumsData($client, 'this_month', sub {
             _stage('end', 'trending_month', 'done', scalar(@{ $_[0] // [] }) . ' album(s)');
+            _warmTrendingCovers($_[0], 'trending albums · this month');
             $albumsYear->();
         }, $force);
     };

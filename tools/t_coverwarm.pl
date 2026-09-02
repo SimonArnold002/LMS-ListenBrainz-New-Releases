@@ -71,6 +71,10 @@ sub ok {
     $cond ? ($pass++, print "  PASS  $what\n") : ($fail++, print "  FAIL  $what\n");
     return $cond ? 1 : 0;
 }
+sub is_count {
+    my ($got, $want, $what) = @_;
+    return ok($got == $want, "$what (got $got)");
+}
 sub section { print "\n" . uc($_[0]) . "\n" . ('-' x 74) . "\n" }
 
 sub slurp {
@@ -572,6 +576,72 @@ ok(scalar(grep { /refused a local request/ } @{ $LOG->{info} }), '...and says so
 http_settle() while @HTTP_PENDING;
 ok(scalar(@HTTP_GETS) == T::COVER_CONCURRENCY(),
    'no further requests are made after the refusal');
+
+# ==========================================================================
+section('5. people you follow — trending albums warm their covers too');
+# ==========================================================================
+# THE GAP THIS CLOSES: `_warmCovers` had exactly three callers, all inside
+# `warmFeeds` — For You, All Releases and MuSpy. People You Follow warmed NO
+# artwork at all, so every Trending Albums row was cold on first sight, every
+# time, at ~2.1s of Cover Art Archive latency each. Same symptom as the release
+# feeds, from a section nobody had wired up.
+#
+# The property worth pinning is not "it queues something" — it is that the warmed
+# path is byte-identical to what the ROW will request. Both sides therefore go
+# through the same two extracted builders, and the assertion compares the warm's
+# queue against the image `_buildReleaseItem` actually puts on the row.
+{
+    for my $name (qw(_trendingAlbumRel _trendingAlbumFallbackRel _warmTrendingCovers)) {
+        my $body = grab($bsrc, $name);
+        eval "package T; our (\@coverQueue, \%coverQueued, \$coverRunning, \$coverPumping,"
+           . " \$coverStageOpen, \$coverFetched); $body 1;"
+            or die "eval $name: $@";
+    }
+
+    # A mapped aggregate (has a release MBID) and an UNMAPPED one (stats row with
+    # only a release group), which is the case that falls back to release-group art.
+    my $mapped = { artist => 'A', title => 'T', year => 2026,
+                   release_group_mbid => 'rg-1', caa_release_mbid => 'rel-1' };
+    my $unmapped = { artist => 'B', title => 'U', year => 2026,
+                     release_group_mbid => 'rg-2' };
+
+    reset_world();
+    T::_warmTrendingCovers([ $mapped, $unmapped ], 'trending albums · this month');
+    my @paths = warmed_paths();
+    ok(scalar(@paths) > 0, 'a trending albums build queues cover warms at all');
+
+    # What the ROW would ask for, derived the same way the renderer does it.
+    my $api = 'Plugins::ListenBrainzFreshReleases::API';
+    my $rowMapped = Slim::Web::ImageProxy::proxiedImage(
+        $api->coverArtUrl(T::_trendingAlbumRel($mapped)));
+    my $rowFallback = Slim::Web::ImageProxy::proxiedImage(
+        $api->coverArtUrl(T::_trendingAlbumFallbackRel($unmapped)));
+    for my $pair ([ $rowMapped, 'a mapped album' ], [ $rowFallback, 'an UNMAPPED stats row (release-group art)' ]) {
+        my ($base, $what) = @$pair;
+        (my $want = $base) =~ s/(\.\w+)$/_150x150_f$1/;
+        ok(scalar(grep { $_ eq $want } @paths),
+           "$what warms the exact path its row will request");
+    }
+    ok(scalar(grep { /\.jpg$/ } @paths) == scalar(@paths),
+       'trending covers are JPEG like every other row, not re-encoded PNG');
+    reset_world();
+}
+
+# AND THE BUILD ACTUALLY CALLS IT — the half a unit test of the helper cannot see.
+# Both album ranges, and on the CACHE-HIT path as well as a fresh build, because
+# `_buildAlbumsData` answers its callback with the stored aggregates when the data
+# is still inside its TTL (2/7/30 days by range) — the covers expire on their own
+# schedule, so the list being unchanged is no reason to skip warming them.
+{
+    my ($warm) = $bsrc =~ /^sub _warmTrending \{(.*?)^\}/ms;
+    ok(defined $warm && length $warm, '_warmTrending located');
+    (my $code = $warm) =~ s/^\s*#.*$//mg;
+    my $n = () = $code =~ /_warmTrendingCovers\(/g;
+    is_count($n, 2, 'both trending album ranges warm their covers');
+    my ($builder) = $bsrc =~ /^sub _buildAlbumsData \{(.*?)^\}/ms;
+    ok(defined $builder && $builder =~ /\$onDone->\(\$data\);\s*return/,
+       '...and _buildAlbumsData answers its callback on a CACHE HIT, so a warm still runs');
+}
 
 # ==========================================================================
 print "\n" . ('=' x 74) . "\n$pass passed, $fail failed.\n";

@@ -188,7 +188,53 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-**0.9.190** — built 2026-09-02, **NOT installed and NOT tested**. **The nightly warm was
+**0.9.191** — built 2026-09-02, **NOT installed and NOT tested**. **People You Follow warmed no
+artwork at all.** Trending Albums (This Month / This Year) now warm their covers on the same
+queue as the release feeds. No schema change, no cache bump.
+
+**0.9.191 — THE SECTION NOBODY WIRED UP.**
+
+`_warmCovers` had exactly three callers, all inside `warmFeeds`: For You, All Releases and
+MuSpy. So every Trending Albums row was cold on first sight, every time, at ~2.1s of Cover Art
+Archive latency each — the same "artwork missing, then it populates" symptom as the release
+feeds, arriving from a section that had simply never been connected to the warm.
+
+It runs on a **cache hit as well as a fresh build**, and that is the point rather than an
+accident: `_buildAlbumsData` answers its callback with the stored aggregates while the data is
+inside its TTL (2/7/30 days by range), so the list is in hand either way — and the COVERS
+expire on their own schedule, independently of the list. A warm that skipped the cached case
+would leave exactly the rows a user is most likely to open still cold.
+
+**ONE BUILDER PER URL, AGAIN.** The warm needs the same `$rel` the row renders from, so
+`_trendingAlbumRel` and `_trendingAlbumFallbackRel` are split out of `_trendingAlbumRow` and
+used by both. A second copy of that mapping is precisely how the release-group cover URL came
+to be built two different ways (fixed in 0.9.188); the fallback matters most, because an
+UNMAPPED stats row — no `caa_release_mbid`, cover served from the release GROUP — is the case
+most likely to be cold and least likely to be noticed.
+
+**WHAT DELIBERATELY DOES NOT GET A COVER WARM, checked rather than assumed.** `coverArtUrl` is
+reachable from only one row builder (`_buildReleaseItem`), so Cover Art Archive covers appear on
+RELEASE rows and nowhere else. Trending **Tracks**, the follow feed (Recommended) and the
+Created-for-You playlists all render *resolved* rows, whose artwork comes from the streaming
+service or the local library — and a service origin is ~0.05s (measured, `static.qobuz.com`)
+against CAA's ~2.1s. There is nothing there worth warming.
+
+**AND THE LISTS THEMSELVES ALREADY REFRESH OVERNIGHT.** Worth recording because it looks like a
+gap and is not: the nightly tick calls `_warmTrending` unforced, so a range whose TTL has
+expired REBUILDS on the tick and one still inside its TTL reports `cache-hit`. That is the TTL
+doing its job, not the warm skipping work. The follow feed is separately force-fetched
+(`_warmFollow` has passed `force => 1` since it was written). The only thing that was missing
+overnight was the artwork, which is what this build adds.
+
+**TESTS.** `t_coverwarm.pl` 50 -> 57, with a section that pins the property that actually
+matters: the warmed path is byte-identical to the image `_buildReleaseItem` puts on the row,
+asserted for BOTH a mapped album and an unmapped stats row, plus that the covers are JPEG like
+every other row. Then the half a unit test of the helper cannot see — that both ranges call it,
+counted over comment-stripped source, and that `_buildAlbumsData` really does answer its
+callback on the cache-hit path the warm depends on. Anti-tested two ways: dropping a range's
+warm, and having the warm guess the fallback URL instead of reusing the row's builder.
+
+**0.9.190** — superseded by 0.9.191. **The nightly warm was
 warming yesterday's feed.** Both release feeds (and MuSpy) now take `force => 1`, and
 `warmFeeds` passes it. No schema change, no cache bump.
 
@@ -466,6 +512,14 @@ source-verified only — read from real Spotty v4.62.2 source, never observed ru
 findings and the merge plan: `docs/spotify-spotty-adapter-pr17.md`. **Owed at the main merge: a
 CHANGELOG credit line for honzup** (the PR's own CHANGELOG hunk was deliberately not taken, per
 the dev-branch rule).
+
+**ADDING A SERVICE — READ `docs/streaming-adapter-spec.md` FIRST.** Written from this adapter,
+it is the fleet-wide contract: what the service's own plugin must expose (R1-R8), the `run` /
+`runTrack` semantics (including `undef` = inconclusive vs `[]` = real miss, and the TTLs each
+picks), the item fields to stamp, and the acceptance tests. It also lists every site that still
+forces an edit OUTSIDE `_streamingAdapters` — the `_rebuildStreamItems` chain, the `_attachFavUrl`
+Spotify exemption, the Bandcamp auto-search opt-out and the four hand-maintained service lists —
+with the registry field that closes each — registry work, not adapter work.
 
 **0.9.186** — superseded by 0.9.187. **The seven findings of the 0.9.184 code review,
 all fixed** (`docs/code-review-0.9.184.md` — every one carries its mechanism, its guard
