@@ -100,6 +100,18 @@ The service plugin does **not** have to resemble the others. A different calling
 (class methods, renderers in a separate module, pre-normalised results) is fine. R1–R8 are
 the requirements; family resemblance is not.
 
+**Check the favourites url's SHAPE, not just its presence.** R2's "playable item" says
+nothing about what the renderer puts in `favorites_url`, and that field is what Listen to
+Later receives as Material's `$FAVURL`. Every service but one sends a scheme url
+(`tidal://album:123`); Spotty sends a bare Spotify URI (`spotify:album:<id>`) with no `//`
+at all. LL reads a favurl as a scheme url in four separate places, so a URI-shaped favurl
+silently failed every one of them: the album read as a local-library row, a track was not
+recognised as a track, and the album id sitting in the favurl was never captured. The fix
+was a single normalisation at the point the favurl enters, **not** a Spotify case in each
+reader — if a service's favurl is not a scheme url, normalise it once at the boundary and
+leave the generic readers alone. Worth a line in the section 2 assessment for any new
+service: write down the literal favurl string for an album, a track and a playlist.
+
 ---
 
 ## 3. The adapter table entry
@@ -132,7 +144,7 @@ Where the table lives, and the legs each plugin defines:
 |---|---|---|
 | LBF | `ListenBrainzFreshReleases/Browse.pm:5688` | `run`, `runTrack` |
 | PFR | `PitchforkReviews/Browse.pm:2124` | `run` |
-| LL | none — see section 9 | — |
+| LL | none — recognises a source rather than searching for one; see section 9 | — |
 
 Where a plugin grows a third leg, prefer collecting them into a named sub-hash
 (`legs => { albums => …, tracks => … }`, `undef` for one that isn't built yet) rather than
@@ -165,13 +177,30 @@ target.
 | Call | Meaning | Cache TTL |
 |---|---|---|
 | `$collect->([$item, …])` | Matches found | 7 days |
-| `$collect->([])` | Queried successfully, nothing matched | 24 hours |
-| `$collect->(undef)` | Could not query: no handler, unexpected response shape, renderer failed | 1 hour |
+| `$collect->([])` | Queried successfully, nothing matched | 24 hours (album) / 7 days (track) |
+| `$collect->(undef)` | Could not query: no handler, unexpected response shape, renderer failed | Retried on a bounded schedule, then accepted |
 
 `undef` means "ask again soon". Use it only for states that can clear on their own. A
 **permanent** condition — for example, the service plugin is installed but has no account
-configured at all — **MUST** report `[]`, because reporting it as inconclusive makes every
-genuine miss re-search hourly for as long as that state lasts.
+configured at all — **MUST** report `[]`, because a permanent state reported as inconclusive
+spends the whole retry budget on a question that cannot change.
+
+**The retry is bounded (LBF 0.9.195, `MISS_RETRY_SCHEDULE`).** An inconclusive miss is
+re-searched at 1h, 6h and 24h and is then accepted as an ordinary durable no-match. Earlier
+builds retried on a flat 1-hour TTL, which never ended: a track genuinely on no service answers
+inconclusively every time, so it re-searched for ever and the resolved-list cache stayed short
+on the same clock. **An adapter author does not schedule anything — report `undef` and the
+caller owns the budget. Never add an internal retry loop.**
+
+**ZERO RAW RESULTS IS AN ERROR SIGNAL, NOT AN EMPTY CATALOGUE — and it is the caller's rule, not
+yours.** These searches hit fuzzy indexes that answer with up to 20-200 rows; even a release the
+service never carried returns near-misses. So a leg that matched nothing out of a completely
+empty raw list is settled as inconclusive rather than as a confirmed miss, at the call site, via
+`_emptyResultIsError`. This matters most for a plugin whose transport **swallows errors**: Spotty's
+Pipeline hands an error hash to its extractor, which extracts to nothing, so a failed search is
+byte-identical to a clean zero-hit and `undef` can never reach us from it. **If your service's
+index is genuinely sparse — Bandcamp — say so and stay out of the rule**, or a permanently absent
+album retries on every cycle for ever.
 
 **MUST**
 
@@ -286,13 +315,28 @@ the registry, not work for an adapter author; close them as they come up.
 |---|---|---|---|
 | **LBF** | Qobuz, Bandcamp, TIDAL, Deezer, Spotify | About 200 lines: two legs, one pref default, one settings entry, one rebuild branch | Ready |
 | **PFR** | Qobuz, TIDAL, Deezer | About 100 lines (album leg only), plus a rebuild branch, plus the memo-key fix | Ready once the memo key is table-driven |
-| **LL** | qobuz, bandcamp, tidal, deezer, via a url-scheme map (`Sources.pm:26`) | Not a table entry — capability is expressed across roughly fifteen per-source branches in `Sources.pm` and `Plugin.pm` | Refactor first |
+| **LL** | qobuz, bandcamp, tidal, deezer, spotify, via a url-scheme map (`Sources.pm:26`) | About 150 lines across eight per-source branches in `Sources.pm` and `Plugin.pm`, plus a normalisation if the favurl is not a scheme url | Works; refactor still owed |
 
 LL works differently by design: it does not search a service, it **recognises** one from the
 url scheme of a row the user acted on, then replays it. Its contract is "recognise and
-replay" rather than "search and render". Partial support (recognising a new scheme and
-classifying album versus track) is a small change; full support (replay, playlist expansion,
-track counts) requires the branches to be collected into a sources table of coderefs first.
+replay" rather than "search and render".
+
+**Corrected by the Spotify build (LL 0.1.113).** This section previously said full support
+required collecting the branches into a sources table of coderefs *first*. That turned out
+to be wrong, and the estimate of "roughly fifteen" branches with it: Spotify was added with
+full parity — album replay, track saves, playlists, search fallback, release-type
+classification and artist backfill — in eight branches and no refactor, because the
+branches are each two or three lines selecting a coderef and a passthrough shape, and they
+are all named after the same source tag. The refactor is still worth doing and is still not
+a prerequisite; do not let it block the next service.
+
+What the branches are, so the next one can be counted rather than guessed at:
+`_streamingAlbumNode`, `_streamingPlaylistNode`, `_searchService`, `_serviceCan`,
+`_serviceCanPlaylist`, `classifyRelType` (only if the service states a type or count on its
+album object), `_backfillStreamingArtist` (only if its rows can arrive artist-less), and
+`%SUPPORTED_CMD` in `Plugin.pm`. Add `%SVC_ALIAS` if the service plugin's browse command is
+not its service's name — Spotty registers `tag => 'spotty'` for the source LL calls
+`spotify`.
 
 ---
 
