@@ -26,6 +26,14 @@ use constant WARM_INTERVAL   => 24 * 3600;   # daily
 # playlist, so it would stay wrong until the weekly mbid change. So defer the warm
 # while scanning and re-check on this interval.
 use constant WARM_SCAN_RETRY => 120;         # seconds between scan re-checks
+# Installed != ready: a service plugin's API handler lands after LMS has loaded it
+# (account read, token refresh, Spotty's helper starting), and the playlist resolve
+# runs ~60s into a boot. A search against a service that cannot answer is cached as
+# a confirmed no-match for a WEEK, so wait for the services rather than pin misses.
+# Capped: a service that never becomes ready (signed out, broken) must not hold the
+# warm for ever — past the cap we warm anyway and say so.
+use constant WARM_SVC_RETRY    => 30;        # seconds between readiness re-checks
+use constant WARM_SVC_MAX_WAIT => 300;       # give up waiting, warm anyway
 
 # ---------------------------------------------------------------------------
 # WARM STAGE TIMING — instrumentation only, no behaviour change.
@@ -755,6 +763,41 @@ sub _buildChanged {
 # Run the warm, then re-arm for the next day. Deferred while a library scan is in
 # progress (see WARM_SCAN_RETRY) so it never resolves against a half-scanned
 # library and caches an all-streaming result for owned tracks.
+
+# The playlist/follow/trending stage of the warm — the ONLY part that resolves
+# tracks against the streaming services — held until those services can actually
+# answer, then run.
+#
+# DELIBERATELY NOT IN _warmTick's DEFER. Waiting there would also hold the feeds
+# and the genre ladder, which touch no streaming API and are the two things a view
+# needs to render at all; the scan defer can hold everything because a half-scanned
+# library poisons the library tier the same way. This one waits for the stage that
+# is actually at risk, so a slow Spotty costs the playlists a few minutes and costs
+# All Releases nothing.
+#
+# $waited is threaded rather than kept in a file-scoped counter so the daily tick
+# starts from zero without anything having to reset it.
+sub _warmPlaylistsWhenReady {
+    my ($waited) = @_;
+    $waited ||= 0;
+
+    my @notReady = eval { Plugins::ListenBrainzFreshReleases::Browse::streamingNotReady() };
+    if (@notReady && $waited < WARM_SVC_MAX_WAIT) {
+        dbg("warm: streaming not ready (" . join(', ', @notReady) . ") — deferring " . WARM_SVC_RETRY . "s");
+        # setTimer hands the $obj back as the callback's first argument; the closure
+        # takes none, so the count is carried in the closure instead.
+        Slim::Utils::Timers::setTimer(undef, time() + WARM_SVC_RETRY,
+            sub { _warmPlaylistsWhenReady($waited + WARM_SVC_RETRY) });
+        return;
+    }
+    $log->warn("warm: streaming still not ready (" . join(', ', @notReady)
+             . ") after " . WARM_SVC_MAX_WAIT . "s — warming anyway") if @notReady;
+
+    eval {
+        Plugins::ListenBrainzFreshReleases::Browse::warmCache();
+        1;
+    } or $log->error("Playlist warm failed: $@");
+}
 sub _warmTick {
     if ( Slim::Music::Import->stillScanning() ) {
         dbg("warm: library scan in progress — deferring " . WARM_SCAN_RETRY . "s");
@@ -788,10 +831,7 @@ sub _warmTick {
     eval {
         require Plugins::ListenBrainzFreshReleases::Browse;
         Plugins::ListenBrainzFreshReleases::Browse::warmFeeds(sub {
-            eval {
-                Plugins::ListenBrainzFreshReleases::Browse::warmCache();
-                1;
-            } or $log->error("Playlist warm failed: $@");
+            _warmPlaylistsWhenReady(0);
         });
         1;
     } or $log->error("Feed warm failed: $@");

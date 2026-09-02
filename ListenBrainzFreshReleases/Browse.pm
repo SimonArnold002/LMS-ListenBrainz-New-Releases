@@ -144,11 +144,10 @@ sub _isBuilding    { return $BUILDING{ $_[0] // '' } ? 1 : 0 }
 use constant STREAM_FOUND_TTL   => 7 * 86400;
 use constant STREAM_NOMATCH_TTL => 1 * 86400;
 # A no-match where a service couldn't even be QUERIED (no API handler at search
-# time, a timeout, an error, or a broken/changed renderer that produced nothing
-# from a real match) is inconclusive — NOT a confirmed miss. Cache it only briefly
-# so it retries soon, rather than pinning a transient outage as "no match" for the
-# day. Mirrors the track path's TRACK_INCONCLUSIVE_TTL.
-use constant STREAM_INCONCLUSIVE_TTL => 1 * 3600;
+# time, a timeout, an error, or a broken/changed renderer that produced nothing from
+# a real match) is INCONCLUSIVE — not a confirmed miss. It is re-searched on
+# MISS_RETRY_SCHEDULE (below) and then accepted; there is no separate flat TTL for
+# it any more, because a flat one never stopped retrying.
 # A manually-found Bandcamp match has NO TTL at all any more: it is a row in the
 # `bandcamp_pin` table (see _pinBandcamp), because it is the only way a
 # Bandcamp-only release becomes playable and it has no automatic repopulation. It
@@ -181,12 +180,43 @@ use constant LIBRARY_TTL => 1 * 86400;
 # is wasted API calls for no real benefit.
 use constant TRACK_FOUND_TTL   => 30 * 86400;
 use constant TRACK_NOMATCH_TTL =>  7 * 86400;
-# A no-match where a streaming service couldn't even be QUERIED (API handler not
-# ready at resolve time, timeout, or error) is inconclusive — NOT a real miss.
-# Cache it only briefly so it retries soon instead of locking in a false "no
-# match" for the full week. (This is what left a playlist stuck on local-only
-# when its warm resolve ran before the streaming plugins' auth was ready.)
-use constant TRACK_INCONCLUSIVE_TTL => 1 * 3600;
+# Same on the track side: an inconclusive miss (a service not ready at resolve time,
+# a timeout, an error, or zero raw results) rides MISS_RETRY_SCHEDULE rather than a
+# flat short TTL. This is the case that left a playlist stuck on local-only when its
+# warm resolve ran before the streaming plugins' auth was ready.
+# ---------------------------------------------------------------------------
+# AN INCONCLUSIVE MISS IS RETRIED A BOUNDED NUMBER OF TIMES, THEN ACCEPTED.
+#
+# The two TTLs above say "retry soon", and on their own that is a retry that never
+# ends: a track genuinely on no service answers inconclusively (zero raw results
+# from a service that always has near-misses is our error signal), so it re-searches
+# every hour, for ever, and never converges to the durable no-match every other miss
+# gets. That is real load — the resolved LIST cache also stays short while any of
+# its tracks is inconclusive, so the whole playlist re-resolves on the same clock.
+#
+# So the retries are a BUDGET, not a state. Each attempt schedules the next one
+# further out, and when the schedule is spent the miss becomes an ordinary
+# confirmed no-match (TRACK_NOMATCH_TTL / STREAM_NOMATCH_TTL) like any other.
+# Three attempts spanning ~31 hours: long enough to ride out a service outage or a
+# rate-limit window, short enough that nothing retries indefinitely.
+#
+# The first step is deliberately the old flat TTL, so the FIRST retry behaves
+# exactly as it did before this became a budget — only the second and later ones
+# back off, and only the fourth is refused.
+#
+# A CONFIRMED miss (every service answered, nothing matched) never enters the
+# schedule at all: it is durable immediately, as it always was. Nothing about that
+# answer can change within a day, so retrying it would be pure waste.
+use constant MISS_RETRY_SCHEDULE => [ 1 * 3600, 6 * 3600, 24 * 3600 ];
+
+# When should this miss be re-searched, given how many times it already has been?
+# undef = never again on this schedule — accept it as a real no-match.
+sub _missRetryAt {
+    my ($tries) = @_;
+    my $sched = MISS_RETRY_SCHEDULE;
+    return undef if $tries >= scalar @$sched;
+    return time() + $sched->[$tries];
+}
 # Resolved whole-playlist cache. The JSPF content is IMMUTABLE for a given
 # mbid|last_modified, so there's no correctness reason to expire early — a new
 # week brings a new mbid (a fresh key) which re-resolves once. The Weekly Jams/
@@ -5754,6 +5784,7 @@ sub _streamingAdapters {
     push @adapters, {
         name => 'Qobuz', icon => _pluginIcon('Plugins::Qobuz::Plugin'),
         run => \&_searchQobuz, runTrack => \&_searchQobuzTrack, query_enc => 'chars',
+        ready => sub { Plugins::Qobuz::Plugin::getAPIHandler($_[0]) ? 1 : 0 },
     } if Plugins::Qobuz::Plugin->can('getAPIHandler')
       && Plugins::Qobuz::Plugin->can('_albumItem');
 
@@ -5765,6 +5796,7 @@ sub _streamingAdapters {
     push @adapters, {
         name => 'Tidal', icon => _pluginIcon('Plugins::TIDAL::Plugin'),
         run => \&_searchTidal, runTrack => \&_searchTidalTrack, query_enc => 'chars',
+        ready => sub { Plugins::TIDAL::Plugin::getAPIHandler($_[0]) ? 1 : 0 },
     } if Plugins::TIDAL::Plugin->can('getAPIHandler')
       && Plugins::TIDAL::Plugin->can('getAlbum')
       && Plugins::TIDAL::Plugin->can('_renderAlbum');
@@ -5779,6 +5811,7 @@ sub _streamingAdapters {
     push @adapters, {
         name => 'Deezer', icon => _pluginIcon('Plugins::Deezer::Plugin'),
         run => \&_searchDeezer, runTrack => \&_searchDeezerTrack, query_enc => 'bytes',
+        ready => sub { Plugins::Deezer::Plugin::getAPIHandler($_[0]) ? 1 : 0 },
     } if Plugins::Deezer::Plugin->can('getAPIHandler')
       && Plugins::Deezer::Plugin->can('_renderAlbum')
       && Plugins::Deezer::Plugin->can('_renderTrack')
@@ -5798,6 +5831,15 @@ sub _streamingAdapters {
     push @adapters, {
         name => 'Spotify', icon => _pluginIcon('Plugins::Spotty::Plugin'),
         run => \&_searchSpotify, runTrack => \&_searchSpotifyTrack, query_enc => 'chars',
+        # SIGNED OUT IS READY, NOT "NOT YET". getAPIHandler returns undef both for
+        # an account that will never exist and for one whose helper is still coming
+        # up after a restart; only the second is worth waiting for. Same reading as
+        # _searchSpotifyTrack's no-handler branch, which reports signed-out as a real
+        # no-match rather than pinning every miss to the inconclusive TTL for ever.
+        ready => sub {
+            return 1 if Plugins::Spotty::Plugin->getAPIHandler($_[0]);
+            return eval { Plugins::Spotty::AccountHelper->hasCredentials() } ? 0 : 1;
+        },
     } if Plugins::Spotty::Plugin->can('getAPIHandler')
       && Plugins::Spotty::OPML->can('_albumItem')
       && Plugins::Spotty::OPML->can('trackList')
@@ -5835,6 +5877,47 @@ sub _orderedAdapters {
     @_ADAPTERS_MEMO = @ordered;
     $_ADAPTERS_EXP  = time() + ADAPTER_MEMO_TTL;
     return @ordered;   # named array → safe count in scalar/boolean context
+}
+
+# WHICH ENABLED SERVICES ARE NOT YET ABLE TO ANSWER A SEARCH — names, or empty.
+#
+# Installed is not the same as ready. A service plugin registers (its ->can probes
+# pass) as soon as LMS loads it, but its API handler arrives later: an account has
+# to be read, a token refreshed, Spotty's helper binary has to come up. The warm
+# fires WARM_DELAY(60s) after startup and resolves the created-for playlists right
+# behind the feed chain, which lands squarely in that window — and a search against
+# a service that cannot answer is cached as a confirmed no-match for a WEEK
+# (TRACK_NOMATCH_TTL). Diagnosed 2026-09-02: 8 playlist tracks pinned as unmatched
+# by the first cold warm after an update, every one of them matching on a forced
+# re-match minutes later.
+#
+# WHAT THIS DOES NOT CATCH, so the caller must not treat it as a guarantee: a
+# handler that EXISTS but whose token is stale still reports ready, and nothing here
+# sees a rate limit. Those show up only at search time — which is what
+# _emptyResultIsError covers. The two are belt and braces for the same failure, not
+# alternatives.
+#
+# An adapter without a `ready` probe (Bandcamp — no handler concept) counts as
+# ready. No connected player means no resolve happens at all (warmCache skips the
+# playlist stage without one), so there is nothing to wait for either.
+sub streamingNotReady {
+    my ($client) = @_;
+    $client ||= (Slim::Player::Client::clients())[0];
+    return () unless $client;
+
+    my @notReady;
+    for my $a (_orderedAdapters()) {
+        next unless ref $a->{ready} eq 'CODE';
+        # A probe that dies is not a reason to hold the warm for ever — treat the
+        # service as ready and let the search path deal with it.
+        my $ok = eval { $a->{ready}->($client) };
+        if ($@) {
+            $log->warn("readiness probe for $a->{name} failed: $@");
+            next;
+        }
+        push @notReady, $a->{name} unless $ok;
+    }
+    return @notReady;
 }
 
 # Is a cached track match still serveable given the CURRENT service config?
@@ -6061,10 +6144,19 @@ sub _findPlayable {
     # the services are searched again. The id part stays album-specific (the query
     # itself is now artist-only).
     my $key = _streamKey($id);
+    # See the track path: a retryable miss is stored for the full no-match TTL with
+    # its own retry_at, so the count survives to be spent.
+    my $tries = 0;
     if (!$force && (my $c = $cache->get($key))) {
-        $log->info("play-via cache hit: $key (" . scalar(@{ $c->{items} || [] }) . " match(es))");
-        $callback->({ items => _streamResult($client, _rebuildStreamItems($c->{items}), \@bc) });
-        return;
+        my $miss = !@{ $c->{items} || [] };
+        if ($miss && $c->{retry_at} && time() >= $c->{retry_at}) {
+            $tries = $c->{tries} || 0;   # window open — search again, carrying the count
+        }
+        else {
+            $log->info("play-via cache hit: $key (" . scalar(@{ $c->{items} || [] }) . " match(es))");
+            $callback->({ items => _streamResult($client, _rebuildStreamItems($c->{items}), \@bc) });
+            return;
+        }
     }
 
     # Search every service in PARALLEL, but resolve to the highest-priority service
@@ -6088,13 +6180,25 @@ sub _findPlayable {
         # A miss caused (wholly or partly) by a service we couldn't query is
         # inconclusive → cache it briefly so it retries soon, rather than pinning a
         # transient outage as a confirmed no-match for the day (mirrors the track path).
-        my $ttl = @$items       ? STREAM_FOUND_TTL
-                : $inconclusive ? STREAM_INCONCLUSIVE_TTL
-                :                 STREAM_NOMATCH_TTL;
-        _cacheStream($key, $items, $ttl);
+        my $ttl   = @$items ? STREAM_FOUND_TTL : STREAM_NOMATCH_TTL;
+        my $extra = {};
+        my $note  = '';
+        if (!@$items && $inconclusive) {
+            my $at = _missRetryAt($tries);
+            if (defined $at) {
+                $extra = { tries => $tries + 1, retry_at => $at };
+                $note  = " ($inconclusive inconclusive — retry " . ($tries + 1) . " of "
+                       . scalar(@{ +MISS_RETRY_SCHEDULE }) . ")";
+            }
+            else {
+                $note = " ($inconclusive inconclusive — retry budget spent after $tries"
+                      . " attempt(s), accepting the no-match)";
+            }
+        }
+        _cacheStream($key, $items, $ttl, $extra);
         $log->info("play-via '$query': "
             . (defined $win ? "matched on $adapters[$win]{name} (" . scalar(@$items) . ")"
-                            : "no match on any service" . ($inconclusive ? " ($inconclusive inconclusive — short TTL)" : "")));
+                            : "no match on any service" . $note));
         $callback->({ items => _streamResult($client, $items, \@bc) });
     };
 
@@ -6169,8 +6273,12 @@ sub _findPlayable {
 # reattached per service on read by _rebuildStreamItems). Guarded: Storable dies
 # on unexpected nested coderefs/blessed refs and that must not stop the page.
 sub _cacheStream {
-    my ($key, $items, $ttl) = @_;
-    eval { $cache->set($key, { items => _stripStreamUrls($items) }, $ttl); 1 }
+    my ($key, $items, $ttl, $extra) = @_;
+    # $extra carries the retry budget on an inconclusive miss (tries / retry_at) —
+    # see MISS_RETRY_SCHEDULE. Nothing reads those keys but the read below, and
+    # _rebuildStreamItems only ever looks at `items`.
+    my %entry = ( items => _stripStreamUrls($items), %{ $extra || {} } );
+    eval { $cache->set($key, \%entry, $ttl); 1 }
         or $log->warn("play-via cache set failed: $@");
 }
 
@@ -6316,7 +6424,19 @@ sub _attachFavUrl {
     # albums/<id> API call errors → empty tracklist on replay. For Qobuz/Tidal/
     # Deezer there was no working favurl to preserve (their renderers leaked a
     # broken coderef — the reason this decorator exists), so only Spotify keeps
-    # its own. Nothing is lost: ListenLater has no spotify source support.
+    # its own.
+    #
+    # This used to add "nothing is lost: ListenLater has no spotify source support",
+    # which stopped being true when LL gained a Spotify adapter (LL 0.1.113). What an
+    # undecorated favurl costs is the handshake — '?cover=', '&a=', '&y=', '&rt=' —
+    # so an LBF Spotify row reaches LL with no artist, cover, year or release type.
+    # DELIBERATELY NOT FIXED HERE, and the alternative was weighed: decorating it
+    # would break Spotty's own natively-saved favourites (the greedy match above),
+    # and there is no separator that escapes a match running to end-of-string.
+    # LL recovers all four itself instead, from one Spotty album call keyed on the
+    # id in the clean favurl — which also works for Spotify rows that never came
+    # from here, so it is the better place for the fix rather than merely the only
+    # available one. Keep this exemption.
     return if $svc eq 'Spotify';
 
     my $id = $it->{_albumid};
@@ -6587,6 +6707,45 @@ sub _svcYear {
     return '';
 }
 
+# ---------------------------------------------------------------------------
+# ZERO RAW RESULTS FROM A SERVICE SEARCH IS AN ERROR SIGNAL, NOT AN EMPTY
+# CATALOGUE.
+#
+# Every search below sends "<artist> <title>" (or "<artist> <album>") to a FUZZY
+# catalogue index that answers with up to 20-200 rows. Even a release the service
+# has never carried comes back with SOMETHING it thinks is close — the Avalon
+# Emerson miss that prompted this returned 2 results and matched 0, which is the
+# shape of a genuine absence. A completely empty list is a different animal: it
+# almost always means the search never happened — a rate limit, an expired or
+# not-yet-loaded token, a service still waking up behind a server restart.
+#
+# Spotty makes this the ONLY signal available. Its Pipeline SWALLOWS API errors
+# (see the CAVEAT on _searchSpotify): _gotError feeds the extractor an error
+# HASH, which extracts to nothing, so a failed search arrives as the SAME empty
+# arrayref as a genuine zero-hit. undef never reaches us there, so without this
+# rule a Spotify outage is indistinguishable from "not in the catalogue".
+#
+# THE ASYMMETRY IS THE WHOLE ARGUMENT, AND THE COST IS BOUNDED. Calling a genuine
+# zero-hit inconclusive costs THREE re-searches spread over ~31 hours
+# (MISS_RETRY_SCHEDULE) for a track no service has, after which it becomes an
+# ordinary durable no-match. Calling a FAILED search a confirmed miss costs a WEEK
+# of "not on any service" (TRACK_NOMATCH_TTL) for a track every service has. The warm resolves the created-for playlists ~60s after startup, when a
+# service is at its most likely to be unready, so the cheap error is the one to
+# make. Diagnosed 2026-09-02: 8 playlist tracks pinned as unmatched by the first
+# cold warm after an update, all of them matching on a forced re-match minutes
+# later.
+#
+# NOT APPLIED TO BANDCAMP, deliberately. The rule rests on the index being dense
+# enough that a query always finds SOMETHING; Bandcamp's catalogue is genuinely
+# sparse, so an empty result there is a plausible real answer and would put a
+# permanently absent album on an hourly retry for ever.
+sub _emptyResultIsError {
+    my ($svc, $query, $rawCount) = @_;
+    return 0 if $rawCount;
+    $log->info("$svc search '$query': 0 results — treating as inconclusive, not a no-match");
+    return 1;
+}
+
 sub _searchQobuz {
     my ($client, $query, $artistNorm, $albumNorm, $svc, $collect, $albumRaw) = @_;
 
@@ -6602,9 +6761,13 @@ sub _searchQobuz {
         my $res = shift;
         # No response at all → the search errored, not "no results" → inconclusive.
         return $collect->(undef) unless defined $res;
+        # The RAW result list, kept in a variable so the tail can tell "the service
+        # answered with nothing" from "the service answered and nothing matched".
+        my $items = (ref $res eq 'HASH' && ref $res->{albums} eq 'HASH' && ref $res->{albums}{items} eq 'ARRAY')
+                      ? $res->{albums}{items} : [];
         my @out;
         my $rendererFailed = 0;
-        for my $album (@{ ($res && $res->{albums} && $res->{albums}{items}) || [] }) {
+        for my $album (@$items) {
             my $candArtist = ref $album->{artist} eq 'HASH' ? $album->{artist}{name} : '';
             next unless _albumMatches($artistNorm, $albumNorm, $candArtist, $album->{title}, $albumRaw);
             # Qobuz's catalogue sometimes carries a bogus partial/orphaned duplicate of a
@@ -6646,7 +6809,8 @@ sub _searchQobuz {
         # Matched the album but the renderer produced nothing usable → inconclusive
         # (the service HAD it; a broken/changed renderer mustn't cache a false
         # no-match for the day). A clean empty (nothing matched) stays a real miss.
-        return $collect->(undef) if !@out && $rendererFailed;
+        return $collect->(undef)
+            if !@out && ($rendererFailed || _emptyResultIsError('Qobuz', $query, scalar @$items));
         $collect->(\@out);
     }, lc($query), 'albums');
 }
@@ -6921,7 +7085,9 @@ sub _searchTidal {
         }
         # Matched the album but the renderer produced nothing usable → inconclusive
         # (see _searchQobuz). A clean empty (nothing matched) stays a real miss.
-        return $collect->(undef) if !@out && $rendererFailed;
+        return $collect->(undef)
+            if !@out && ($rendererFailed
+                || _emptyResultIsError('Tidal', $query, ref $albums eq 'ARRAY' ? scalar @$albums : 0));
         $collect->(\@out);
     }, { type => 'albums', search => $query, limit => 50 });   # artist-only search → fetch more so a prolific artist's target album isn't truncated
 }
@@ -6985,7 +7151,8 @@ sub _searchDeezer {
             push @out, $item;
         }
         # Matched but the renderer produced nothing usable → inconclusive (see _searchTidal).
-        return $collect->(undef) if !@out && $rendererFailed;
+        return $collect->(undef)
+            if !@out && ($rendererFailed || _emptyResultIsError('Deezer', $query, scalar @$albums));
         $collect->(\@out);
     }, { search => $query, type => 'album', strict => 'off', limit => 50 });
 }
@@ -7011,7 +7178,7 @@ sub _searchSpotify {
     # A missing handler is only INCONCLUSIVE (undef → 1h TTL) when Spotty COULD
     # have answered. With no credentials on the server at all it is PERMANENT —
     # getAccount returns undef on every call — so reporting it inconclusive would
-    # pin every genuine miss to STREAM_INCONCLUSIVE_TTL (1h instead of 24h) for
+    # put every genuine miss on the retry schedule (re-searched, then accepted) for
     # ever, 24x the re-search load on the other services. hasCredentials() with
     # no id is truthy iff any account exists, so signed-out → [] (real no-match).
     unless ($api) {
@@ -7057,7 +7224,8 @@ sub _searchSpotify {
             push @out, $item;
         }
         # Matched but the renderer produced nothing usable → inconclusive (see _searchTidal).
-        return $collect->(undef) if !@out && $rendererFailed;
+        return $collect->(undef)
+            if !@out && ($rendererFailed || _emptyResultIsError('Spotify', $query, scalar @$albums));
         $collect->(\@out);
     }, { query => $query, type => 'album', limit => 50 });
 }
@@ -7138,17 +7306,33 @@ sub _findPlayableTrack {
     my $key = Plugins::ListenBrainzFreshReleases::DB::kver("lbf:track:") . $svcOrder . ':' . ($recMbid || _norm($query));
     $key .= ":$libMode" unless $libMode eq 'first';
     utf8::encode($key) if utf8::is_utf8($key);
+    # How many times this miss has already been re-searched. A retryable entry is
+    # stored for the FULL no-match TTL with its own `retry_at` inside it, rather than
+    # on a short TTL — an expiring entry would take the count with it and the budget
+    # could never be spent, which is the loop this exists to bound.
+    my $tries = 0;
     if (!$force && (my $c = $cache->get($key))) {
         # 'exclude' mode caches an owned-track decision so the caller drops it
         # without a re-probe. Owned → excluded (not a stream miss).
         if ($c->{owned}) { $callback->(undef, 0, 1); return; }
         my $item = $c->{item};
+        # A no-match still on the retry schedule: serve it until its window opens,
+        # then fall through and search again, carrying the count. Reported as
+        # inconclusive while it is retryable so the caller's LIST cache stays short
+        # enough to actually reach the retry — and stops being short the moment the
+        # budget is spent, which is what makes the whole chain converge.
+        if (!$item && $c->{retry_at}) {
+            if (time() < $c->{retry_at}) { $callback->(undef, 1); return; }
+            $tries = $c->{tries} || 0;
+        }
+        else {
         # The service set is in the key, so a cached entry already matches the
         # current config; _cachedSvcUsable stays as a belt-and-braces guard for an
         # item whose service was uninstalled mid-TTL. Library / no-match always OK.
         if (!$item || _cachedSvcUsable($item->{_svc})) {
             $callback->($item);
             return;
+        }
         }
     }
 
@@ -7160,12 +7344,26 @@ sub _findPlayableTrack {
     # so they get the short LIBRARY_TTL; a streaming match is durable. A no-match is
     # kept a week UNLESS it's inconclusive (a service was unavailable), in which
     # case it retries within the hour rather than poisoning for the week.
+    # Set while this no-match is still on the retry schedule — see the cache read.
+    my $retryable = 0;
     my $cacheItem = sub {
         my $item = shift;
-        my $ttl = !$item ? ($inconclusive ? TRACK_INCONCLUSIVE_TTL : TRACK_NOMATCH_TTL)
+        my %entry = ( item => $item );
+        my $ttl = !$item ? TRACK_NOMATCH_TTL
                 : (($item->{_svc} // '') eq 'Library') ? LIBRARY_TTL
                 : TRACK_FOUND_TTL;
-        eval { $cache->set($key, { item => $item }, $ttl); 1 }
+        if (!$item && $inconclusive) {
+            my $at = _missRetryAt($tries);
+            if (defined $at) {
+                @entry{qw(tries retry_at)} = ($tries + 1, $at);
+                $retryable = 1;
+            }
+            else {
+                $log->info("track-match '$query': retry budget spent after $tries attempt(s)"
+                         . " — accepting the no-match");
+            }
+        }
+        eval { $cache->set($key, \%entry, $ttl); 1 }
             or $log->warn("track cache set failed: $@");
     };
 
@@ -7211,14 +7409,15 @@ sub _findPlayableTrack {
                     my $local = shift;
                     $item = $local if $local;
                     $cacheItem->($item);
-                    $callback->($item, (!$item && $inconclusive) ? 1 : 0);
+                    $callback->($item, (!$item && $retryable) ? 1 : 0);
                 });
                 return;
             }
             $cacheItem->($item);
-            # Tell the caller this no-match was inconclusive (a service couldn't be
-            # queried) so it can keep the resolved-playlist cache short too.
-            $callback->($item, (!$item && $inconclusive) ? 1 : 0);
+            # Tell the caller this no-match is still RETRYABLE (a service couldn't be
+            # queried, and the budget is not spent) so it keeps the resolved-playlist
+            # cache short too — and stops doing so once the miss is accepted.
+            $callback->($item, (!$item && $retryable) ? 1 : 0);
         };
 
         for my $i (0 .. $#adapters) {
@@ -7507,6 +7706,7 @@ sub _searchQobuzTrack {
             };
         }
         $log->info("Qobuz track-match '$query': " . scalar(@$items) . " results, " . scalar(@out) . " matched");
+        return $collect->(undef) if !@out && _emptyResultIsError('Qobuz', $query, scalar @$items);
         $collect->(\@out);
     }, lc($query), 'tracks');
 }
@@ -7540,6 +7740,8 @@ sub _searchTidalTrack {
             push @out, $item;
         }
         $log->info("Tidal track-match '$query': " . scalar(@{ $tracks || [] }) . " results, " . scalar(@out) . " matched");
+        return $collect->(undef)
+            if !@out && _emptyResultIsError('Tidal', $query, ref $tracks eq 'ARRAY' ? scalar @$tracks : 0);
         $collect->(\@out);
     }, { type => 'tracks', search => $query, limit => 20 });
 }
@@ -7583,6 +7785,8 @@ sub _searchDeezerTrack {
             push @out, $item;
         }
         $log->info("Deezer track-match '$query': " . scalar(@{ $tracks || [] }) . " results, " . scalar(@out) . " matched");
+        return $collect->(undef)
+            if !@out && _emptyResultIsError('Deezer', $query, ref $tracks eq 'ARRAY' ? scalar @$tracks : 0);
         $collect->(\@out);
     }, { search => $query, type => 'track', strict => 'off', limit => 20 });
 }
@@ -7640,6 +7844,7 @@ sub _searchSpotifyTrack {
             push @out, $item;
         }
         $log->info("Spotify track-match '$query': " . scalar(@$tracks) . " results, " . scalar(@out) . " matched");
+        return $collect->(undef) if !@out && _emptyResultIsError('Spotify', $query, scalar @$tracks);
         $collect->(\@out);
     }, { query => $query, type => 'track', limit => 20 });
 }

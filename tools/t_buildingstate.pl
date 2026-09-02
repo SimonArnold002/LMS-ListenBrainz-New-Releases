@@ -259,8 +259,16 @@ section '6. THE FEED CHAIN IS ORDERED, AND CANNOT STRAND THE REST';
         my $p = $ENV{LBF_PLUGIN_PM} || "$ROOT/ListenBrainzFreshReleases/Plugin.pm";
         open my $fh, '<', $p or die "$p: $!"; local $/; <$fh>
     };
-    ok(scalar($plugin =~ /warmFeeds\(sub \{[\s\S]{0,400}?warmCache\(\)/),
-       'Plugin.pm starts warmCache FROM warmFeeds\' callback, not in the same turn');
+    # PIN THE PROPERTY, NOT THE LINE. The callback no longer calls warmCache
+    # directly — since the streaming-readiness gate it calls _warmPlaylistsWhenReady,
+    # which waits for the services and then calls it (0.9.195). What must stay true is
+    # that the playlist warm is reached FROM the callback and is NOT fired in the same
+    # turn as warmFeeds, which is two assertions rather than one regex over both.
+    my ($tickBody) = $plugin =~ /\nsub _warmTick \{(.*?)\n\}\n/s;
+    ok(scalar($plugin =~ /warmFeeds\(sub \{[\s\S]{0,400}?(?:warmCache\(\)|_warmPlaylistsWhenReady\()/),
+       'Plugin.pm starts the playlist warm FROM warmFeeds\' callback, not in the same turn');
+    ok(defined $tickBody && scalar($tickBody !~ /Browse::warmCache\(/),
+       '...and _warmTick never calls warmCache directly (that IS the same-turn failure)');
 }
 
 section '7. THE FIRST OPENER GETS THE ROW TOO — the case 0.9.180 shipped broken';

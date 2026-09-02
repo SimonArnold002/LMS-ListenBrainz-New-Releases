@@ -205,6 +205,111 @@ part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
 
+**0.9.195** — built 2026-09-02, **NOT installed and NOT tested**. **A FAILED SERVICE SEARCH IS NO
+LONGER CACHED AS "THIS TRACK IS ON NO SERVICE".** Diagnosed live the same day, from the field:
+an update cleared every cache, the warm fired `WARM_DELAY`(60s) later, and the first resolve of
+the four created-for playlists pinned **8 tracks as unmatched**. A forced re-match seventeen
+minutes later matched **every one of them** — 4 on Qobuz, 4 on Spotify. Nothing was missing from
+any catalogue and `matcher_sync_check.py` was exiting 0 throughout. **TWO cache families bump**
+(`lbf:stream:` 28→29, `lbf:track:` 9→10) to clear the misses already pinned on users' servers;
+the four resolved-LIST layers re-key themselves off those (`_trackLayerTag`/`_streamLayerTag`),
+verified rather than assumed.
+
+**THE MISSES WERE NOT STALE — THEY WERE WRITTEN WRONG, AND THAT DISTINCTION IS THE WHOLE BUILD.**
+The caches really were cold: the same warm queued **147 cover requests across 49 releases** at
+17:41 and only **3 across 49** at 17:59 once populated, and the durable store was rebuilt at
+17:39:27. So nothing survived the clear. What happened is that the cold pass ran while the box
+was saturated — LBF's own ingest, the genre top-up, MusicBrainz 503 backoffs, and PFR's backfill
+hammering Qobuz at 50 albums a minute — and **at LBF's boundary a service that FAILED to search
+is indistinguishable from one that searched and found nothing.**
+
+That is documented in this plugin's own source and was read straight past: `_searchSpotify`'s
+CAVEAT records that Spotty's Pipeline **swallows API errors** — `_gotError` feeds the extractor an
+error HASH, which extracts to nothing — so a failed search arrives as the SAME empty arrayref as a
+genuine zero-hit. `_findPlayableTrack` treats only `undef` as inconclusive, so that empty arrayref
+was a confirmed miss at `TRACK_NOMATCH_TTL`: **a week of "not on any service" for a track every
+service has.**
+
+**FIX 1 — ZERO RAW RESULTS IS AN ERROR SIGNAL, NOT AN EMPTY CATALOGUE** (`_emptyResultIsError`,
+one carrier, called from all eight API-backed adapters — 4 album, 4 track). Every one of these
+searches sends "<artist> <title>" to a FUZZY index that answers with up to 20-200 rows; even a
+release the service has never carried returns near-misses (the Avalon Emerson miss that prompted
+this returned **2 results, 0 matched**, which is the shape of a genuine absence). A completely
+empty list almost always means the search never happened. **Spotty makes this the only signal
+available** — `undef` never reaches us there.
+- **EVERY call site is guarded by `!@out`.** A rule that could discard MATCHES would be far worse
+  than the bug being fixed, so it can only ever fire on a no-match.
+- **BANDCAMP IS DELIBERATELY EXCLUDED.** The rule rests on the index being dense enough that a
+  query always finds SOMETHING; Bandcamp's catalogue is genuinely sparse, so empty is a plausible
+  real answer there and gating it would put a permanently-absent album on a retry schedule for ever.
+
+**FIX 2 — THE RETRY IS A BUDGET, NOT A STATE (`MISS_RETRY_SCHEDULE`, and this is the correction
+that matters).** The first cut of fix 1 shipped the classic version of this mistake: it made an
+inconclusive miss retryable and stopped there. Simon caught it — *"we should not be waiting for
+ever for it to match, that will end up in a loop of it trying again and again infinitum"* — and he
+was right, because a track genuinely on no service answers inconclusively **every time**, so it
+re-searches on every expiry, for ever, and never converges to the durable no-match every other
+miss gets. Worse, the resolved LIST cache stays short while any of its tracks is inconclusive, so
+the whole playlist re-resolves on the same clock.
+- Now `[1h, 6h, 24h]`: three attempts over ~31 hours — long enough to ride out an outage or a
+  rate-limit window — and then the miss becomes an **ordinary durable no-match**. `_missRetryAt`
+  returns `undef` once the budget is spent, and that `undef` is the exit.
+- **THE ENTRY IS STORED AT THE FULL NO-MATCH TTL WITH ITS OWN `retry_at` INSIDE IT, NOT ON A SHORT
+  TTL.** This is the load-bearing part: a short TTL would take the attempt count with it when it
+  expired, so the budget could never be spent and **the loop would survive the fix meant to bound
+  it**. Anti-tested (`Browse_shortttl`).
+- **THE CALLER IS TOLD `retryable`, NOT `inconclusive`.** That is what lets the resolved-playlist
+  cache stop being short: while a track is still retryable the list re-resolves on the 1h clock,
+  and the moment the budget is spent it gets its normal TTL back. Without it every track could
+  settle and the LIST would still churn hourly for ever.
+- **A CONFIRMED miss never enters the schedule** — every service answered and nothing matched, so
+  it is durable immediately, as it always was. Nothing about that answer can change within a day.
+- `TRACK_INCONCLUSIVE_TTL` and `STREAM_INCONCLUSIVE_TTL` are **deleted**: they are the first step of
+  the schedule now, and two constants nothing reads is exactly what a review flags.
+  `PLAYLIST_INCONCLUSIVE_TTL` stays — it is the list layer, and it now converges too.
+
+**FIX 3 — THE WARM WAITS FOR THE STREAMING SERVICES, BUT NEVER FOR EVER.** Installed is not ready:
+a service plugin registers as soon as LMS loads it, but its API handler arrives later (account
+read, token refresh, Spotty's helper starting), and the playlist resolve runs ~60s into a boot —
+squarely in that window. `Browse::streamingNotReady()` probes each enabled adapter's new `ready`
+coderef; `Plugin::_warmPlaylistsWhenReady` re-checks every `WARM_SVC_RETRY`(30s) up to
+`WARM_SVC_MAX_WAIT`(300s), then **warms anyway with a warning**.
+- **SIGNED OUT IS READY, NOT "NOT YET".** Spotty's `getAPIHandler` returns undef both for an
+  account that will never exist and for one whose helper is still starting; waiting on the first
+  would defer the warm to the cap on **every boot** for a user who simply has no Spotify. The probe
+  consults `hasCredentials`, the same reading `_searchSpotifyTrack`'s no-handler branch already
+  takes. Bandcamp registers no probe at all (no handler concept) and counts as ready.
+- **THE WAIT IS SCOPED TO THE STREAMING STAGE, DELIBERATELY — it is NOT in `_warmTick`'s defer.**
+  Holding the whole tick would also hold `warmFeeds` and the genre ladder, which touch no streaming
+  API and are the two things a view needs to render at all. The scan defer can hold everything
+  because a half-scanned library poisons the library tier the same way; this one cannot.
+- **WHAT THE PROBE DOES NOT CATCH, so do not treat it as a guarantee:** a handler that EXISTS but
+  whose token is stale reports ready, and nothing here sees a rate limit. Those show up only at
+  search time — which is what fix 1 covers. **The two are belt and braces for one failure, not
+  alternatives.**
+
+**TESTS.** New `tools/t_coldwarm.pl` — **67 assertions** against the real subs, with
+`MISS_RETRY_SCHEDULE` and the two warm constants READ OUT of the sources rather than restated (a
+suite that pins its own copy of a cap cannot catch the cap changing). §7 pins TERMINATION directly:
+the attempt past the budget schedules nothing, it stays refused however many attempts are claimed,
+each retry backs off further than the last, and the read/write cycle terminates after exactly three.
+**Anti-tested seven ways** via `LBF_BROWSE=`/`LBF_PLUGIN=`: budget removed → **4 red**; short TTL →
+**1**; confirmed misses entering the schedule → **1**; rule neutered → **3**; call sites stripped
+(the pre-fix code) → **16**; readiness wait removed → **5**; cap removed → **5**; `!@out` guard
+dropped → **1**.
+
+**ONE EXISTING ASSERTION WAS CHANGED, and it is the class this file already warns about.**
+`t_buildingstate.pl:262` pinned the SOURCE SHAPE `warmFeeds(sub {…warmCache()` and went red on a
+correct change, because the callback now calls `_warmPlaylistsWhenReady`. It pins the PROPERTY in
+two halves instead: the playlist warm is reached FROM the callback, **and** `_warmTick` never calls
+`warmCache` directly — which is what "the same turn" actually means. Suite 75 → 77.
+
+**THE METHOD NOTE WORTH KEEPING, because it is why this took two passes.** The first diagnosis
+called the misses "stale" and attributed them to pre-update state. With the cache cleared that was
+impossible, and saying it out loud is what produced the real answer. Then the first fix retried for
+ever. **Both errors were caught by being asked "how?" rather than by re-reading the code** — the
+cover-warm counts (147 vs 3) settled the first, and one sentence from Simon settled the second.
+
 **0.9.194** — built 2026-09-02, **NOT installed and NOT tested**. **THE FLEET MATCHER SYNC —
 the hold is over and `matcher_sync_check.py` exits 0 again.** LBF takes the three
 Discography-origin rules that PFR took in 0.9.33, so DSC, PFR and LBF are now byte-identical
@@ -1943,6 +2048,12 @@ duplicate; `LBF_BROWSE=` points it at a mutated copy and each rule is anti-teste
 independently — 7/8/3 red. Section 4 is LBF-only and covers `_trackMatches`, which no other
 repo has and PFR's copy of this file therefore never exercises. It is the BEHAVIOURAL half of
 the fleet rule; `matcher_sync_check.py` is the textual half, and both must pass),
+`tools/t_coldwarm.pl` (the COLD-WARM NO-MATCH class — that a service answering with ZERO RAW
+RESULTS is treated as inconclusive rather than "not in the catalogue", that the rule fires ONLY on
+a no-match and never on Bandcamp, that the retry is a BOUNDED BUDGET which terminates, that the
+entry keeps the FULL no-match TTL so the count survives to be spent, that a CONFIRMED miss is
+durable at once, and that the warm waits for the streaming services without waiting for ever;
+`LBF_BROWSE=`/`LBF_PLUGIN=` point it at mutated copies, anti-tested seven ways),
 `tools/matcher_sync_check.py` (**exits 0 since 0.9.194** — the hold is over, so a non-zero exit
 is real drift again).
 
