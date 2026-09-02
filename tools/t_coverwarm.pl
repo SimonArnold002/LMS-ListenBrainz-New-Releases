@@ -38,7 +38,7 @@
 #                     extension, for all three specs.
 #   3. Queueing     — pref off, no artwork, the cap, the already-warm skip, the
 #                     cross-feed dedupe, newest-first ordering.
-#   4. The runner   — never more than COVER_CONCURRENCY in flight, the counter
+#   4. The runner   — never more than the idle width in flight, the counter
 #                     returning to zero, the marker written under the proxy's
 #                     own 30-day life, and an auth refusal abandoning the pass.
 #
@@ -51,6 +51,8 @@
 # Exit 0 = all good. Exit 1 = at least one regressed.
 use strict;
 use warnings;
+$| = 1;   # unbuffered: a hang must show WHERE it hung, not lose the output
+
 use File::Spec;
 
 my $ROOT   = File::Spec->rel2abs(File::Spec->catdir((File::Spec->splitpath($0))[1], File::Spec->updir));
@@ -66,11 +68,29 @@ my $DB     = $ENV{LBF_DB_SRC} || File::Spec->catfile($ROOT, 'ListenBrainzFreshRe
 
 my ($pass, $fail) = (0, 0);
 sub ok {
-    my ($cond, $what) = @_;
-    die "ok() called with no message\n" unless defined $what && length $what;
-    $cond ? ($pass++, print "  PASS  $what\n") : ($fail++, print "  FAIL  $what\n");
-    return $cond ? 1 : 0;
+    my ($cond, $msg) = @_;
+    # A MISSING MESSAGE IS A BUG IN THE TEST, AND IT IS REPORTED, NOT THROWN.
+    #
+    # It means a bare m// or grep landed in ok()'s LIST-context argument slot: on
+    # a MATCH it yields (1, $msg) and passes, on a FAILURE it yields () and the
+    # message slides into $cond, so the assertion silently tests its own label.
+    # This has now cost two suites in this repo, which is why it is caught here.
+    #
+    # It used to `die`, and that traded one hidden bug for another: the abort took
+    # every later assertion in the file with it, so a real regression reported one
+    # failure and concealed the rest. Fail loudly, keep going.
+    unless (defined $msg && length $msg) {
+        $fail++;
+        print "  FAIL  ok() called with no message — a bare m// or grep in the "
+            . "condition slot? wrap it in scalar(). (condition was: "
+            . (defined $cond ? "'$cond'" : 'undef') . ")\n";
+        return;
+    }
+    if ($cond) { $pass++; print "  PASS  $msg\n" }
+    else       { $fail++; print "  FAIL  $msg\n" }
+    return;
 }
+
 sub is_count {
     my ($got, $want, $what) = @_;
     return ok($got == $want, "$what (got $got)");
@@ -88,15 +108,23 @@ sub grab {
     my ($src, $name) = @_;
     $src =~ /^sub \Q$name\E\b\s*\{/mg or die "no sub $name\n";
     my $start = $-[0];
-    my $i     = pos($src);
+    my $end   = length($src);
     my $depth = 1;
-    while ($i < length($src) && $depth) {
-        my $c = substr($src, $i++, 1);
-        $depth++ if $c eq '{';
-        $depth-- if $c eq '}';
+
+    # BRACE-SCAN BY REGEX, NOT substr()-PER-CHARACTER, and the difference is not
+    # style. slurp() reads with ':encoding(UTF-8)', so $src is a CHARACTER string
+    # — and substr() on one is not O(1). The old per-character walk was therefore
+    # quadratic in file size, and Browse.pm is half a megabyte: once this suite
+    # grabbed a dozen subs it spent ~100 SECONDS here, which reads as a hang
+    # rather than as slowness. The //g picks up from the header match's pos, which
+    # is exactly where the body starts.
+    while ($src =~ /([{}])/g) {
+        $1 eq '{' ? $depth++ : $depth--;
+        next if $depth;
+        $end = pos($src);
+        last;
     }
-    pos($src) = undef;
-    return substr($src, $start, $i - $start) . "\n";
+    return substr($src, $start, $end - $start) . "\n";
 }
 
 my $bsrc = slurp($BROWSE);
@@ -154,7 +182,7 @@ section('1. every spec resolves to ONE source url, so the proxy can coalesce');
 
 ok($psrc !~ /getRightSize\(\$spec/,
    'the getRightSize size table is GONE from the handler');
-ok($psrc =~ /UNIVERSAL::can\('Slim::Web::ImageProxy',\s*'getRightSize'\)/,
+ok(scalar($psrc =~ /UNIVERSAL::can\('Slim::Web::ImageProxy',\s*'getRightSize'\)/),
    '...but the registration guard still probes for it as a version check');
 
 # THE REWRITE ITSELF, not just what it resolves to. Lifted VERBATIM from the
@@ -216,7 +244,7 @@ elsif (1) {
                    { caa_release_mbid => 'zz' });
     ok(caa_rewrite($live, '_600x600_f') ne $live,
        "the rewrite actually matches what coverArtUrl ships today ($live)");
-    ok(caa_rewrite($live, '_600x600_f') =~ m{/front-1200(\.\w+)?$},
+    ok(scalar(caa_rewrite($live, '_600x600_f') =~ m{/front-1200(\.\w+)?$}),
        '...and lands front-1200 at the end of the path');
     ok(caa_rewrite('https://coverartarchive.org/release/x/back-250.jpg', '_600x600_f')
          eq 'https://coverartarchive.org/release/x/back-250.jpg',
@@ -285,8 +313,27 @@ section('2. a warmed path is byte-identical to what Material will request');
     # stepped one request at a time.
     package Slim::Utils::Timers;
     our @PENDING;
-    sub setTimer { my (undef, undef, $cb) = @_; push @PENDING, $cb; return scalar @PENDING }
+    # REPLICATES LMS's CALLING CONVENTION, and that is not pedantry: setTimer
+    # invokes $cb->($obj, @args) — the first argument is HANDED BACK, not
+    # consumed — and a stub that drops it once let a chunk driver ship broken for
+    # two builds (0.9.178). $when is recorded too, so a deadline can be asserted
+    # rather than merely the fact that something was scheduled.
+    sub setTimer {
+        my ($obj, $when, $cb, @args) = @_;
+        push @PENDING, { when => $when, cb => $cb, obj => $obj, args => \@args };
+        return scalar @PENDING;
+    }
     sub killSpecific { 1 }
+    # SNAPSHOT, then fire. Draining as it goes would spin for ever once a fired
+    # callback schedules another timer — which the cover pump does by design
+    # whenever the browsing brake is on and work is left. "Fire the timers that
+    # were pending when I asked" is the semantics a test actually wants.
+    sub fire_all {
+        my @now = @PENDING;
+        @PENDING = ();
+        $_->{cb}->($_->{obj}, @{ $_->{args} }) for @now;
+        return scalar @now;
+    }
 }
 {
     # proxiedImage, transcribed from Slim/Web/ImageProxy.pm — the escape set and
@@ -357,7 +404,8 @@ my $LOG   = T::Log->new;
 # Constants are EVALLED FROM SOURCE, not restated: a hand-copied COVER_SPECS
 # would drift the moment the shipped list changed, and every path assertion
 # below would then be checking a spec nothing asks for.
-for my $c (qw(COVER_SPECS COVER_WARM_MAX COVER_CONCURRENCY COVER_WARM_TTL)) {
+for my $c (qw(COVER_SPECS COVER_WARM_MAX COVER_WARM_TTL
+              COVER_CONCURRENCY_IDLE COVER_CONCURRENCY_BROWSING COVER_BROWSE_QUIET)) {
     my ($line) = $bsrc =~ /^(use constant \Q$c\E\s*=>.*?;)$/ms
         or die "no constant $c in Browse.pm\n";
     eval "package T; $line 1;" or die "eval $c: $@";
@@ -369,11 +417,13 @@ for my $c (qw(COVER_SPECS COVER_WARM_MAX COVER_CONCURRENCY COVER_WARM_TTL)) {
 # measuring what it is actually for.
 { package T; sub _stage { } }
 
-for my $name (qw(_warmCovers _coverGroupsFor _coverTick _coverMaybeEnd _coverLaunch)) {
+for my $name (qw(_warmCovers _coverGroupsFor _coverTick _coverMaybeEnd _coverLaunch
+                 _noteBrowse _coverLimit _coverArmRestart)) {
     my $body = grab($bsrc, $name);
     eval "package T; use Time::HiRes (); our (\$cache, \$prefs, \$log); "
        . "our (\@coverQueue, \%coverQueued, \$coverRunning, \$coverPumping, \$coverStageOpen, "
-       . "\$coverFetched, \$coverSkipped, \$coverGroups, \$coverPeak); $body 1;"
+       . "\$coverFetched, \$coverSkipped, \$coverGroups, \$coverPeak, "
+       . "\$lastBrowseAt, \$coverRestartArmed); $body 1;"
         or die "eval $name: $@";
 }
 
@@ -389,6 +439,8 @@ sub reset_world {
     $T::coverGroups  = 0;
     $T::coverPeak    = 0;
     $T::coverStageOpen = 0;
+    $T::lastBrowseAt = 0;          # nobody browsing: every section below runs at the IDLE width
+    $T::coverRestartArmed = 0;
     @HTTP_GETS = (); @HTTP_PENDING = (); $HTTP_MODE = 'ok';
     @Slim::Utils::Timers::PENDING = ();
     $CACHE = T::Cache->new; $LOG = T::Log->new;
@@ -463,7 +515,7 @@ ok(!scalar(grep { /\Q$EXT\E_/ } @paths),
 # doubling the proxy cache again.
 ok($EXT eq '.jpg',
    "the proxied path is JPEG, not a re-encoded PNG (got $EXT)");
-ok($SRCURL =~ m{/front-\d+\.jpg$},
+ok(scalar($SRCURL =~ m{/front-\d+\.jpg$}),
    'coverArtUrl names an explicit .jpg on the CAA url — the thing that decides it');
 ok(!scalar(grep { /_1024x1024_f|_2048x2048_f/ } @paths),
    'the now-playing specs are deliberately not warmed');
@@ -519,7 +571,7 @@ ok(!scalar(grep { /_1024x1024_f|_2048x2048_f/ } @paths),
     reset_world(); $n = 0;
     T::_warmCovers([ map { rel() } 1 .. 20 ], 'test');
     my @q = map { @$_ } @T::coverQueue;
-    ok(scalar(@q) > 0, 'a pass larger than COVER_CONCURRENCY leaves entries queued');
+    ok(scalar(@q) > 0, 'a pass larger than the idle width leaves entries queued');
     ok(scalar(@q) == scalar(grep { $_->[1] eq $IMGWARM . $_->[0] } @q),
        'every queued marker key is its own path, so it cannot mark a different one warm');
     reset_world();
@@ -547,7 +599,7 @@ ok(warmed_count() == T::COVER_WARM_MAX() * 3,
 reset_world(); $n = 0;
 my @feed = (rel(date => '2026-08-01'), rel(date => '2026-08-31'), rel(date => '2026-08-15'));
 T::_warmCovers(\@feed, 'test');
-ok($HTTP_GETS[0] =~ /mbid-0002/,
+ok(scalar($HTTP_GETS[0] =~ /mbid-0002/),
    'the newest release is warmed first (2026-08-31, given to us out of order)');
 
 reset_world(); $n = 0;
@@ -587,22 +639,22 @@ ok($queued == 30, 'ten covers, thirty requests in total');
 # download — so the fan-out is 3x the bound in requests and exactly the bound in
 # downloads. Reading this in requests is how someone "tidying" the constant would
 # silently triple the load on the LMS handler pool.
-ok(scalar(@HTTP_GETS) == T::COVER_CONCURRENCY() * 3,
-   'the runner opens COVER_CONCURRENCY (' . T::COVER_CONCURRENCY() . ') RELEASES at once, i.e. '
-   . (T::COVER_CONCURRENCY() * 3) . ' requests');
-ok($T::coverRunning == T::COVER_CONCURRENCY(),
+ok(scalar(@HTTP_GETS) == T::COVER_CONCURRENCY_IDLE() * 3,
+   'the runner opens COVER_CONCURRENCY_IDLE (' . T::COVER_CONCURRENCY_IDLE() . ') RELEASES at once, i.e. '
+   . (T::COVER_CONCURRENCY_IDLE() * 3) . ' requests');
+ok($T::coverRunning == T::COVER_CONCURRENCY_IDLE(),
    '...and its in-flight counter agrees, counting releases');
 {
     # ...and those requests really are whole releases, not a slice across many:
     # three specs each, one source path each. This is the coalescing precondition.
     my %base;
     for my $u (@HTTP_GETS) { (my $b = $u) =~ s/_\d+x\d+_f//; $base{$b}++ }
-    is_count(scalar(keys %base), T::COVER_CONCURRENCY(),
+    is_count(scalar(keys %base), T::COVER_CONCURRENCY_IDLE(),
              'the in-flight requests cover exactly COVER_CONCURRENCY source urls');
     ok(!scalar(grep { $_ != 3 } values %base),
        '...and every one of them has all three of its specs in flight together');
 }
-ok($HTTP_GETS[0] =~ m{^http://127\.0\.0\.1:9000/imageproxy/},
+ok(scalar($HTTP_GETS[0] =~ m{^http://127\.0\.0\.1:9000/imageproxy/}),
    'it is addressed to our OWN server, on the configured http port');
 
 # THE BOUND, checked at every step of a full drain rather than once: a leak in
@@ -613,10 +665,10 @@ while (@HTTP_PENDING) {
     last if ++$guard > 200;
     http_settle();
     $peak = $T::coverRunning if $T::coverRunning > $peak;
-    (shift @Slim::Utils::Timers::PENDING)->() while @Slim::Utils::Timers::PENDING;
+    Slim::Utils::Timers::fire_all();
 }
-ok($peak == T::COVER_CONCURRENCY(),
-   "never more than COVER_CONCURRENCY in flight across a full drain (peak $peak)");
+ok($peak == T::COVER_CONCURRENCY_IDLE(),
+   "never more than the idle width in flight across a full drain (peak $peak)");
 ok(scalar(@HTTP_GETS) == $queued, 'every queued request is eventually made, and no more');
 ok($T::coverRunning == 0, 'the in-flight counter returns to zero — no leak');
 ok(scalar(@T::coverQueue) == 0, 'the queue drains completely');
@@ -624,7 +676,7 @@ ok(scalar(@T::coverQueue) == 0, 'the queue drains completely');
 # The marker, from the first completed request.
 ok(scalar(@{ $CACHE->{sets} }) == $queued, 'every completed request writes its warm marker');
 my ($mk, $mttl) = @{ $CACHE->{sets}[0] };
-ok($mk =~ /^\Q$IMGWARM\E/, "the marker is keyed under the versioned family ($IMGWARM)");
+ok(scalar($mk =~ /^\Q$IMGWARM\E/), "the marker is keyed under the versioned family ($IMGWARM)");
 ok($mttl && $mttl < 30 * 86400,
    'the marker expires INSIDE the proxy\'s own 30-day life, so it cannot outlive the image');
 
@@ -649,10 +701,10 @@ ok($mttl && $mttl < 30 * 86400,
 
 reset_world(); $n = 0;
 $HTTP_MODE = '401';
-my $N401 = T::COVER_CONCURRENCY() + 4;      # more releases than fit in one fan-out
+my $N401 = T::COVER_CONCURRENCY_IDLE() + 4;      # more releases than fit in one fan-out
 T::_warmCovers([ map { rel() } 1 .. $N401 ], 'test');
-is_count(scalar(@T::coverQueue), $N401 - T::COVER_CONCURRENCY(),
-   'the rest stay queued while COVER_CONCURRENCY releases are in flight');
+is_count(scalar(@T::coverQueue), $N401 - T::COVER_CONCURRENCY_IDLE(),
+   'the rest stay queued while COVER_CONCURRENCY_IDLE releases are in flight');
 http_settle();
 ok(scalar(@T::coverQueue) == 0,
    'a 401 from our own server abandons the whole pass rather than logging it 400 times');
@@ -660,7 +712,7 @@ ok(scalar(grep { /refused a local request/ } @{ $LOG->{info} }), '...and says so
 # The already-in-flight requests still land; what must NOT happen is the queue
 # being picked back up. Nothing beyond the initial fan-out is ever launched.
 http_settle() while @HTTP_PENDING;
-ok(scalar(@HTTP_GETS) == T::COVER_CONCURRENCY() * 3,
+ok(scalar(@HTTP_GETS) == T::COVER_CONCURRENCY_IDLE() * 3,
    'no further requests are made after the refusal — only the initial fan-out');
 
 # --------------------------------------------------------------------------
@@ -731,6 +783,178 @@ ok(scalar(@HTTP_GETS) == T::COVER_CONCURRENCY() * 3,
     is_count($T::coverRunning, 0, '...and the group completes cleanly afterwards');
     reset_world();
 }
+
+# ==========================================================================
+section('4b. the browsing brake — one compromise number becomes two');
+# ==========================================================================
+# THE REPORT THIS ANSWERS is "everything locks up when I move between views",
+# and it is not an artwork bug at all: the warm's requests go to OUR OWN server,
+# so each one holds an LMS HTTP handler slot that the browse is queued behind.
+# A single COVER_CONCURRENCY had to be both "fast enough to drain a feed" and
+# "polite enough not to be noticed", and could be neither.
+
+{
+    reset_world();
+    is_count(T::_coverLimit(), T::COVER_CONCURRENCY_IDLE(),
+             'nobody browsing -> the idle width');
+    T::_noteBrowse();
+    is_count(T::_coverLimit(), T::COVER_CONCURRENCY_BROWSING(),
+             'a browse tap -> the browsing width, immediately');
+    # The quiet window, driven by moving the marker rather than the clock.
+    $T::lastBrowseAt = time() - T::COVER_BROWSE_QUIET() + 2;
+    is_count(T::_coverLimit(), T::COVER_CONCURRENCY_BROWSING(),
+             '...still braked just inside the quiet window');
+    $T::lastBrowseAt = time() - T::COVER_BROWSE_QUIET() - 1;
+    is_count(T::_coverLimit(), T::COVER_CONCURRENCY_IDLE(),
+             '...and back to the idle width once the window has passed');
+    reset_world();
+}
+
+{
+    # A pass that STARTS while someone is browsing never opens wide.
+    reset_world(); $n = 0;
+    T::_noteBrowse();
+    T::_warmCovers([ map { rel() } 1 .. 20 ], 'test');
+    is_count($T::coverRunning, T::COVER_CONCURRENCY_BROWSING(),
+             'a warm started while browsing runs at the browsing width');
+    is_count(scalar(@HTTP_GETS), T::COVER_CONCURRENCY_BROWSING() * 3,
+             '...which is that many RELEASES, so that many times three requests');
+    reset_world();
+}
+
+{
+    # THE CASE THAT MATTERS MOST: a browse arriving MID-DRAIN. The limit must be
+    # re-read per pump, and — separately — nothing already in flight may be
+    # cancelled, because a cover is nearly always most of the way through a ~2s
+    # wait and throwing it away wastes the download rather than saving anything.
+    reset_world(); $n = 0;
+    T::_warmCovers([ map { rel() } 1 .. 30 ], 'test');
+    my $wide = $T::coverRunning;
+    is_count($wide, T::COVER_CONCURRENCY_IDLE(), 'the pass opens at the idle width');
+
+    T::_noteBrowse();
+    is_count($T::coverRunning, $wide,
+             'a browse mid-drain does NOT cancel anything already in flight');
+
+    # Drain the wide fan-out that was ALREADY out. The brake cannot narrow it —
+    # that is the previous assertion — so the measurement only begins once the
+    # pump has actually had to decide how many to launch NEXT.
+    my $guard = 0;
+    while (@HTTP_PENDING && $T::coverRunning > T::COVER_CONCURRENCY_BROWSING()
+           && ++$guard < 600) {
+        http_settle();
+        T::_noteBrowse();                       # the user keeps browsing
+    }
+
+    my $maxAfter = $T::coverRunning;
+    while (@HTTP_PENDING && ++$guard < 900) {
+        http_settle();
+        $maxAfter = $T::coverRunning if $T::coverRunning > $maxAfter;
+        T::_noteBrowse();
+    }
+    ok($maxAfter <= T::COVER_CONCURRENCY_BROWSING(),
+       "under continuous browsing the pass relaunches at the browsing width (peak $maxAfter)");
+    ok($T::coverRunning == 0 && !@T::coverQueue,
+       '...and it still drains completely rather than stalling under the brake');
+    reset_world();
+}
+
+{
+    # ONE RESTART TIMER, NOT ONE PER CALLBACK. Every landing re-enters _coverTick,
+    # so an unguarded arm would schedule one timer per request — 24 of them for a
+    # single fan-out, each waking the pump again.
+    reset_world(); $n = 0;
+    T::_noteBrowse();
+    T::_warmCovers([ map { rel() } 1 .. 30 ], 'test');
+    T::_coverTick() for 1 .. 5;
+    is_count(scalar(@Slim::Utils::Timers::PENDING), 1,
+             'repeated pumps under the brake arm exactly ONE restart timer');
+    # READ, DO NOT AUTOVIVIFY. Subscripting PENDING[0] when nothing is armed
+    # CREATES an empty hashref in the list, which fire_all() then calls as a
+    # coderef — so a failing assertion killed the run instead of reporting.
+    my $armed = $Slim::Utils::Timers::PENDING[0];
+    ok(ref $armed eq 'HASH' && defined $armed->{when}
+       && $armed->{when} <= $T::lastBrowseAt + T::COVER_BROWSE_QUIET(),
+       '...armed no later than the end of the quiet window');
+    # FIRING IT MUST NOT ACCUMULATE. The fired tick re-enters the pump, finds the
+    # user still browsing and work still queued, and arms again — that is correct
+    # and self-correcting, not a leak. What must never happen is two timers
+    # pending for one pass, which is what an unguarded arm produces.
+    Slim::Utils::Timers::fire_all();
+    is_count(scalar(@Slim::Utils::Timers::PENDING), 1,
+             'firing it re-arms exactly once — still one timer, never two');
+    is_count($T::coverRestartArmed, 1,
+             '...and the flag agrees with the timer that is actually pending');
+
+    # Let the quiet window pass, and it stops re-arming: the pass goes back to
+    # full width under its own steam, which is the whole point of the timer.
+    $T::lastBrowseAt = time() - T::COVER_BROWSE_QUIET() - 1;
+    Slim::Utils::Timers::fire_all();
+    is_count(scalar(@Slim::Utils::Timers::PENDING), 0,
+             'once the quiet window has passed it arms nothing further');
+    is_count($T::coverRestartArmed, 0, '...and the flag is clear');
+    reset_world();
+}
+
+{
+    # ...and NO timer when the pass merely runs out of slots at the idle width:
+    # the in-flight callbacks are the wake-up there, and a timer would be churn.
+    reset_world(); $n = 0;
+    T::_warmCovers([ map { rel() } 1 .. 30 ], 'test');
+    is_count(scalar(@Slim::Utils::Timers::PENDING), 0,
+             'a full-width pass arms no restart timer — the callbacks wake it');
+    reset_world();
+}
+
+# EVERY BROWSE ENTRY POINT MARKS THE BROWSE. Source-level, because there is no
+# return value to inspect and the defect is an entry point that was never wired —
+# exactly how the People You Follow section came to warm no artwork at all.
+{
+    my @entries = qw(topLevel fetchForYou fetchAll fetchPlaylists resolvePlaylist
+                     resolveFollowFeed resolveTrending resolveTrendingAlbums
+                     _releaseDetail);
+    my @missing = grep { grab($bsrc, $_) !~ /_noteBrowse\(\)/ } @entries;
+    ok(!@missing, 'every browse entry point calls _noteBrowse (' . scalar(@entries)
+                  . ' checked)' . (@missing ? ' — missing: ' . join(', ', @missing) : ''));
+    # The All Releases week drill is a coderef, not a sub, so it needs naming
+    # separately — and it is the level a user is most often sitting on while the
+    # warm runs.
+    ok(scalar(grab($bsrc, '_buildAllLanding') =~ /_noteBrowse\(\)/),
+       '...including the All Releases week drill, which is a coderef not a sub');
+}
+
+# ==========================================================================
+section('4c. the warm warms only what will be rendered');
+# ==========================================================================
+# The warm was handed the RAW feed while every render path applies
+# _filterSection first, so blocked artists, unticked release types and hidden
+# Various Artists rows were warmed and then never drawn — eating slots out of
+# COVER_WARM_MAX. _warmGenres has filtered first since it was written; this is
+# the same rule arriving at the covers. Source-level over the warm's call sites,
+# for the same reason as above: the bug is a call site that forgot.
+{
+    my $warm = grab($bsrc, 'warmFeeds');
+    $warm =~ s/^\s*#.*$//mg;                      # comments cannot satisfy this
+    my @calls = $warm =~ /_warmCovers\(([^,]+),/g;
+    is_count(scalar(@calls), 4, 'warmFeeds has four cover-warm call sites');
+    my @raw = grep { !/_filter(All|ForYou)\(/ } @calls;
+    ok(!@raw, 'every one of them filters the feed first'
+              . (@raw ? ' — raw: ' . join(' | ', @raw) : ''));
+    # And the right filter each: MuSpy rows are merged into For You, so they
+    # answer to that section's settings, not All Releases'.
+    ok(scalar($warm =~ /_warmCovers\(_filterForYou\(\$_\[0\]\), 'muspy'\)/),
+       'the MuSpy site filters through For You, whose feed its rows are merged into');
+    ok(scalar($warm =~ /_warmCovers\(_filterAll\(\$_\[0\]\), 'all releases'\)/),
+       'the All Releases sites filter through All Releases');
+}
+# NO BEHAVIOURAL CASE HERE, AND THAT IS A DECISION RATHER THAN AN OMISSION.
+# Driving a blocked artist end-to-end means lifting _filterSection and its five
+# dependencies — _allowedTypes, _blockedSet, _isBlocked, _isVariousArtists,
+# _typeMatches — which pull in _norm and %FOLD, i.e. the shared matcher. This
+# suite would then fail whenever the matcher moved, for reasons that have nothing
+# to do with cover art, and the fleet sync already owns that. What CHANGED here is
+# which argument the four call sites pass; _filterSection itself is unchanged and
+# covered where it belongs.
 
 # ==========================================================================
 section('5. people you follow — trending albums warm their covers too');
@@ -837,7 +1061,7 @@ section('5. people you follow — trending albums warm their covers too');
     my $n = () = $code =~ /_warmTrendingCovers\(/g;
     is_count($n, 2, 'both trending album ranges warm their covers');
     my ($builder) = $bsrc =~ /^sub _buildAlbumsData \{(.*?)^\}/ms;
-    ok(defined $builder && $builder =~ /\$onDone->\(\$data\);\s*return/,
+    ok(scalar(defined $builder && $builder =~ /\$onDone->\(\$data\);\s*return/),
        '...and _buildAlbumsData answers its callback on a CACHE HIT, so a warm still runs');
 }
 

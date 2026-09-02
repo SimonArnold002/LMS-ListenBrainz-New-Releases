@@ -1,7 +1,7 @@
 # LBF — the artwork pipeline and the event-loop stalls
 
-**Status: REVIEWED; §1.1 AND §1.2 BUILT (uncommitted, not installed, not tested on
-the box).** Measured 2026-09-02 against
+**Status: REVIEWED; STAGE 1 BUILT — §1.1–§1.4 (1.5 dropped). Not installed, not
+tested on the box.** Measured 2026-09-02 against
 `dev` at 0.9.195, live ListenBrainz feeds, and LMS `public/9.0` source. **Re-read
 against the source the same day (second pass); nine corrections are folded in below
 and each is marked `[review]`** — one of them (§1.2's marker check) is load-bearing
@@ -9,7 +9,7 @@ for stage 3, and one stage was dropped outright.
 
 | stage | what | state |
 |---|---|---|
-| 1 | Artwork: one upstream fetch per cover | **1.1 + 1.2 BUILT** (gate probed, passed); 1.3/1.4 next, 1.5 **dropped** |
+| 1 | Artwork: one upstream fetch per cover | **BUILT** — 1.1 (gate probed) + 1.2 + 1.3 + 1.4; 1.5 **dropped** |
 | 2 | Top level stops blocking; a building row for For You; Last.fm last in the warm | designed + reviewed; 2.1a memo key rebuilt, 2.2 **narrowed to For You** |
 | 3 | Page-aligned warming — the "gaps on re-entry" fix | designed; **its dependency (§1.2's marker move) is now BUILT** |
 | 4 | Remaining per-row SQLite work off the render path | designed + reviewed |
@@ -394,10 +394,56 @@ fail, which took every later assertion in the file with it. The rewrite is now c
 defensively and "it compiles depending on `$url` alone" is itself an assertion — which
 is the property the collapse actually buys.
 
-**Not built here, deliberately:** §1.3 (the browsing brake) and §1.4 (warm only what
-will be rendered). Landing them separately keeps the throughput measurement clean — a
-brake and a filter in the same build are two confounds in the number this stage exists
-to move.
+### As built — §1.3 and §1.4
+
+`COVER_CONCURRENCY` becomes `COVER_CONCURRENCY_IDLE` (8 releases) /
+`COVER_CONCURRENCY_BROWSING` (2) / `COVER_BROWSE_QUIET` (20s). `_noteBrowse()` marks
+the browse at **ten** sites — the nine subs the plan named plus the All Releases week
+drill, which is a coderef rather than a sub and is the level a user is most often
+sitting on while the warm runs. `_coverLimit()` is read **per pump**, never captured,
+so a browse arriving mid-drain takes effect at the next slot. `_coverArmRestart` is
+guarded by an armed-flag, as the review required.
+
+The four `warmFeeds` cover-warm call sites now filter first — MuSpy through
+`_filterForYou`, since its rows are merged into that feed. The release-FAMILY lens
+(`_viewFilter`) is deliberately **not** applied: it is a toggle the user flips from
+the list itself, so warming one side would make the other cold on every flip.
+
+**Suite: 78 → 101 assertions**, in two new sections. Anti-tested four more ways —
+brake removed **8 red**, one entry point unwired **1 red**, warm handed the raw feed
+**3 red**, restart timer unguarded **2 red** (arming six timers for one pass). Seven
+mutants total across stage 1, none of which abort the run.
+
+### Three test-harness defects surfaced by this work, all fixed
+
+None was caused by the change; all three were latent and this stage made them bite.
+Recorded because each is a class, not an incident.
+
+1. **`grab()` was quadratic, and it read as a hang.** Every suite's sub-extractor
+   walked the source one `substr($src, $i++, 1)` at a time — and `slurp` reads with
+   `:encoding(UTF-8)`, so the source is a *character* string, where `substr` is not
+   O(1). At half a megabyte of `Browse.pm` this had grown expensive enough that
+   `t_coverwarm.pl` took **101 seconds** and `t_trending_empty.pl` **85**. Replaced
+   with a regex brace-scan in **all eight** suites that carried it: `t_coverwarm.pl`
+   is now **0.13s**, `t_trending_empty.pl` 0s. *A test suite that is slow enough to
+   look hung is a test suite people stop running.*
+2. **`ok()` died on a missing message, which hid every later assertion.** The die was
+   added deliberately to catch a bare `m//` in the list-context argument slot — the
+   trap that has now cost this repo three suites. But dying traded one hidden bug for
+   another: an aborted run reports one failure and conceals the rest, which is the
+   *other* trap already recorded here. It now reports the missing message as a
+   failure and continues. Every bare match in the file was wrapped in `scalar()` at
+   the same time.
+3. **An assertion autovivified the thing it was asserting about.** Reading
+   `$PENDING[0]{when}` when no timer is armed *creates* an empty hashref in the list,
+   which `fire_all()` then calls as a coderef — so a failing assertion killed the run.
+   Read defensively; never subscript a structure you are asserting is empty.
+
+**And one stub gap, which is the class `perl -c` cannot see.** Adding `_noteBrowse()`
+to `_buildAllLanding`'s week coderef broke `t_review_fixes.pl`, which evals that
+coderef into its own package: `Undefined subroutine &F3::_noteBrowse`. Compilation was
+clean everywhere; only running the suite found it. **After adding a call to any sub
+from inside code a suite lifts, run every suite, not the obvious one.**
 
 ---
 

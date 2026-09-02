@@ -440,6 +440,7 @@ use constant VA_MBID => '89ad4ac3-39f7-470e-963a-56509c546377';
 # Top-level feed
 # ---------------------------------------------------------------------------
 sub topLevel {
+    _noteBrowse();
     my ($client, $callback, $args) = @_;
 
     my $username = $prefs->get('username') // '';
@@ -728,6 +729,7 @@ sub _stashSummary {
 # Fetch For You — applies For You prefs
 # ---------------------------------------------------------------------------
 sub fetchForYou {
+    _noteBrowse();
     my ($client, $callback, $args, $passDict) = @_;
 
     my $headers = _wantHeaders(ref $passDict eq 'HASH' ? $passDict->{features} : undef);
@@ -904,6 +906,7 @@ sub homeAllReleases {
 # Fetch All Releases — applies All Releases prefs
 # ---------------------------------------------------------------------------
 sub fetchAll {
+    _noteBrowse();
     my ($client, $callback, $args, $passDict) = @_;
 
     my $headers = _wantHeaders(ref $passDict eq 'HASH' ? $passDict->{features} : undef);
@@ -970,6 +973,7 @@ sub _refreshItem {
 # grid cover tile.
 # ===========================================================================
 sub fetchPlaylists {
+    _noteBrowse();
     my ($client, $callback, $args, $pass) = @_;
 
     Plugins::ListenBrainzFreshReleases::API->getCreatedForPlaylists(
@@ -1103,6 +1107,7 @@ sub _categoryCover {
 # Open a playlist → resolved, fully-streaming track list (cached as a unit so
 # revisits and play-by-item_id re-traversals are instant and quantity-stable).
 sub resolvePlaylist {
+    _noteBrowse();
     my ($client, $callback, $args, $pass) = @_;
 
     my $mbid    = ref $pass eq 'HASH' ? $pass->{mbid}          : undef;
@@ -1292,6 +1297,7 @@ sub _followTile {
 # Open the follow list → the resolved, owned-excluded, day-divided track list. Serves
 # the cached resolve while the recs are unchanged (same sig); else re-resolves.
 sub resolveFollowFeed {
+    _noteBrowse();
     my ($client, $callback, $args, $pass) = @_;
     my $feat = (ref $pass eq 'HASH') ? $pass->{features} : undef;
 
@@ -1907,6 +1913,7 @@ sub _trendingTile {
 
 # Open "What's Trending" → resolved, owned-excluded, breadth-ranked track list.
 sub resolveTrending {
+    _noteBrowse();
     my ($client, $callback, $args, $pass) = @_;
     my $feat = (ref $pass eq 'HASH') ? $pass->{features} : undef;
     _resolveTrending($client, $callback, 0, $feat);
@@ -2255,6 +2262,7 @@ sub _trendingAlbumsTile {
 }
 
 sub resolveTrendingAlbums {
+    _noteBrowse();
     my ($client, $callback, $args, $pass) = @_;
     my $range = (ref $pass eq 'HASH' && $pass->{range}) ? $pass->{range} : 'this_month';
     my $feat  = (ref $pass eq 'HASH') ? $pass->{features} : undef;
@@ -3261,7 +3269,10 @@ sub warmFeeds {
                 my $n = scalar(@{ $_[0] // [] });
                 _stage('end', 'muspy_feed', 'done', "$n releases");
                 _dbg("warm: muspy — $n stored");
-                _warmCovers($_[0], 'muspy');
+                # FILTER FIRST — same rule and same reason as _warmGenres above it.
+                # MuSpy rows are merged into For You, so they answer to that
+                # section's settings.
+                _warmCovers(_filterForYou($_[0]), 'muspy');
                 $finish->();
             },
         );
@@ -3280,7 +3291,7 @@ sub warmFeeds {
                 my $n = scalar(@{ $_[0] // [] });
                 _stage('end', 'all_feed', 'done', "$n releases");
                 _dbg("warm: all releases — $n stored");
-                _warmCovers($_[0], 'all releases');
+                _warmCovers(_filterAll($_[0]), 'all releases');
                 $muspy->();
             },
             # A warm failure is not the user's problem: they are not looking at
@@ -3310,7 +3321,7 @@ sub warmFeeds {
                 my $n = scalar(@{ $_[0] // [] });
                 _stage('end', 'all_feed', 'done', "$n releases");
                 _dbg("warm: all releases — $n stored");
-                _warmCovers($_[0], 'all releases');
+                _warmCovers(_filterAll($_[0]), 'all releases');
                 $finish->();
             },
             onError => sub {
@@ -3333,7 +3344,7 @@ sub warmFeeds {
             my $n = scalar(@{ $_[0] // [] });
             _stage('end', 'foryou_feed', 'done', "$n releases");
             _dbg("warm: for you — $n stored");
-            _warmCovers($_[0], 'for you');
+            _warmCovers(_filterForYou($_[0]), 'for you');
             $all->();
         },
         onError => sub {
@@ -3384,21 +3395,36 @@ use constant COVER_SPECS => [qw(_150x150_f _300x300_f _600x600_f)];
 # ~2.1s each. That is the "artwork is missing and then populates" report, and no
 # amount of speed fixes it while the cap is the binding constraint.
 #
-# Raised now because the pass is no longer serial (see COVER_CONCURRENCY): the
+# Raised now because the pass is no longer serial (see the concurrency pair): the
 # arithmetic that justified a small cap has changed by ~4x. Measured against the
 # live server, cold covers through the proxy: 0.40/s serial, 1.62/s at
 # concurrency 8. A whole 2,157-release feed is 3 x 2,157 = 6,471 requests, which
 # went from ~4.5 hours to ~1.1 hours of background work — and the markers hold
 # for COVER_WARM_TTL (25 days), so this is a first-run cost, not a nightly one.
 # Steady state is whatever is genuinely new.
+# WHAT IS WARMED IS WHAT WILL BE RENDERED (0.9.196). The warm used to be handed
+# the RAW feed while every render path applies _filterSection first, so blocked
+# artists, unticked release types and — where the user has turned them off —
+# Various Artists rows were all warmed and then never drawn, eating slots out of
+# this cap. _warmGenres has filtered first since it was written, and says why;
+# this is the same rule arriving at the covers.
+#
+# ONE CONSEQUENCE, STATED RATHER THAN DISCOVERED: newly-ticked types stay cold
+# until the next warm, because nothing warms them at the moment they are ticked.
+# The page-aligned warm removes that entirely; until then it is a settings change
+# behaving like a cold feed, once.
+#
+# NOTE the release FAMILY lens (_viewFilter, albums vs singles/EPs) is deliberately
+# NOT applied. It is a per-view toggle the user flips from the list itself, so
+# warming only the active side would make the other side cold on every flip.
 use constant COVER_WARM_MAX => 2000;
 
 # RELEASES in flight at once — NOT requests. Read the unit carefully.
 #
 # Since the ladder collapsed to one source URL per release, a release's three
 # specs are three LOCAL requests that share ONE upstream fetch (see the handler
-# in Plugin.pm). So this bound now governs 3x this many connections to our own
-# LMS server, and exactly this many downloads from Cover Art Archive.
+# in Plugin.pm). So these bounds govern 3x this many connections to our own LMS
+# server, and exactly this many downloads from Cover Art Archive.
 #
 # THE OLD VALUE WAS EFFECTIVELY 1, and the comment defending it said a parallel
 # burst was "neither faster for us nor kind to them". The first half is measured
@@ -3408,13 +3434,23 @@ use constant COVER_WARM_MAX => 2000;
 # 307s to an archive.org node with no CDN, ~2.1s to deliver 25-41 KB. That is
 # nearly all waiting, and waiting parallelises.
 #
-# WHY THE NUMBER DID NOT MOVE WHEN THE UNIT DID. Those measurements were taken in
-# REQUESTS, and they top out at 32. 8 releases is 24 local connections, which is
-# inside the measured range; 16 releases would be 48, which is not measured at
-# all. The binding constraint is not CAA — it is that these requests go to OUR
-# OWN server, so each occupies an LMS HTTP handler slot a browsing user might
-# want. Raise this only alongside a re-measurement in units of RELEASES.
-use constant COVER_CONCURRENCY => 8;
+# WHY THE IDLE NUMBER DID NOT MOVE WHEN THE UNIT DID. Those measurements were
+# taken in REQUESTS and top out at 32. 8 releases is 24 local connections, which
+# is inside the measured range; 16 releases would be 48, which is not measured at
+# all. Raise it only alongside a re-measurement in units of RELEASES.
+#
+# AND WHY THERE ARE TWO NUMBERS. The single value was a compromise between two
+# incompatible jobs, and it was set to 8 rather than 16 for a reason that has
+# nothing to do with CAA: these requests go to OUR OWN server, so each occupies an
+# LMS HTTP handler slot a browsing user might want. That is the "everything locks
+# up when I move between views" report — a background pass holding 24 two-second
+# connections against the same handler pool the browse is queued behind.
+#
+# One compromise number becomes two, and the READER WINS. Nobody is waiting on the
+# warm; somebody is always waiting on a browse.
+use constant COVER_CONCURRENCY_IDLE     => 8;    # releases: 24 local requests
+use constant COVER_CONCURRENCY_BROWSING => 2;    # releases: 6, while somebody is looking
+use constant COVER_BROWSE_QUIET         => 20;   # seconds of quiet before "idle" again
 
 # How long we remember that a path is warm. Deliberately UNDER the proxy's own 30d
 # (Slim::Web::ImageProxy::Cache is constructed with 86400*30), so our marker can
@@ -3427,8 +3463,10 @@ use constant COVER_WARM_TTL => 25 * 86400;
 # so the image proxy can coalesce them into a single download (see _coverLaunch).
 my @coverQueue;      # [ [ [$path,$key], ... ], ... ] — one entry per release
 my %coverQueued;     # $path => 1 while queued, so two feeds can't queue it twice
-my $coverRunning = 0;   # RELEASES currently in flight (0 .. COVER_CONCURRENCY)
+my $coverRunning = 0;   # RELEASES currently in flight (0 .. _coverLimit())
 my $coverPumping = 0;   # re-entrancy guard on _coverTick's launch loop
+my $lastBrowseAt = 0;   # epoch of the last browse tap — see _noteBrowse
+my $coverRestartArmed = 0;   # one restart timer at a time, never a queue of them
 # Instrumentation only. The queue is SHARED by all three feeds, so the covers
 # stage spans from the first path any of them queues to the moment the queue
 # drains — it is deliberately one row rather than three, because that is how the
@@ -3534,7 +3572,50 @@ sub _coverGroupsFor {
     return (\@groups, $seen);
 }
 
-# Keep COVER_CONCURRENCY RELEASES in flight, refilling a slot the moment one
+# Somebody is looking. Called at the top of every browse entry point — cheap
+# enough to be unconditional (one assignment), which is the only way a marker like
+# this stays correct as entry points are added.
+sub _noteBrowse { $lastBrowseAt = time(); return }
+
+# How wide the cover pass may run right now. Read fresh on every pump rather than
+# captured, so a browse that arrives mid-drain takes effect at the next slot
+# instead of at the end of the pass.
+sub _coverLimit {
+    return COVER_CONCURRENCY_BROWSING
+        if $lastBrowseAt && (time() - $lastBrowseAt) < COVER_BROWSE_QUIET;
+    return COVER_CONCURRENCY_IDLE;
+}
+
+# A DROPPING LIMIT NEVER KILLS ANYTHING IN FLIGHT — the launch loop simply stops
+# launching, and the requests already out land normally. Cancelling them would
+# waste a download that is nearly always most of the way through a ~2s wait.
+#
+# The timer exists for one case the callbacks cannot cover: the queue is running
+# at the browsing width, the user stops, and the requests in flight are slow (up
+# to the 30s timeout). Without it the pass stays narrow until one of them lands,
+# well past the quiet window. ONE timer at a time — every landing callback
+# re-enters _coverTick, so an unguarded arm would schedule one per request.
+# Re-arming after a firing is correct and self-correcting: if the user is still
+# browsing, the tick re-arms at the NEW deadline.
+sub _coverArmRestart {
+    return if $coverRestartArmed;
+    $coverRestartArmed = 1;
+    my $when = $lastBrowseAt + COVER_BROWSE_QUIET;
+    my $now  = time();
+    $when = $now + 1 if $when <= $now;
+    # NB setTimer hands the $obj back as the callback's FIRST argument; _coverTick
+    # takes none, so the undef is simply ignored.
+    eval {
+        Slim::Utils::Timers::setTimer(undef, $when, sub {
+            $coverRestartArmed = 0;
+            _coverTick();
+        });
+        1;
+    } or $coverRestartArmed = 0;
+    return;
+}
+
+# Keep up to _coverLimit() RELEASES in flight, refilling a slot the moment one
 # lands. No inter-request timer: with a bounded number in flight the pacing IS
 # the bound, and a gap between launches only lengthened an already-serial pass.
 #
@@ -3547,9 +3628,15 @@ sub _coverGroupsFor {
 sub _coverTick {
     return if $coverPumping;
     $coverPumping = 1;
+    my $limit = _coverLimit();
     _coverLaunch(shift @coverQueue)
-        while $coverRunning < COVER_CONCURRENCY && @coverQueue;
+        while $coverRunning < $limit && @coverQueue;
     $coverPumping = 0;
+
+    # Stopped with work left AND the brake on: nothing in flight is guaranteed to
+    # wake us inside the quiet window, so arm the restart. Stopped with work left
+    # at the IDLE width needs no timer — the callbacks are the wake-up.
+    _coverArmRestart() if @coverQueue && $limit < COVER_CONCURRENCY_IDLE;
 
     # Checked here rather than inside $done: with several in flight, "the queue is
     # empty" is not the same as "the pass is over", and ending the stage on the
@@ -3634,7 +3721,7 @@ sub _coverLaunch {
 
         # ONCE-ONLY PER REQUEST. Both SimpleAsyncHTTP callbacks and the inline
         # failure path route here; a double call would decrement $outstanding
-        # twice and let the pass run more than COVER_CONCURRENCY releases wide.
+        # twice and let the pass run wider than the current limit allows.
         my $fired = 0;
         my $done  = sub {
             return if $fired++;
@@ -5026,6 +5113,7 @@ sub _buildAllLanding {
             passthrough => [{}],
             url         => sub {
                 my ($c, $cb) = @_;
+                _noteBrowse();
                 # Sort by the SHARED, durable All Releases sort (all_sort) — the
                 # same order in every week, and it sticks across visits/restarts —
                 # then cap at PAGE_SIZE with the "Show more"/"Show all" reveal (an
@@ -5358,6 +5446,7 @@ sub _buildReleaseItem {
 # Either async source can fail/empty without breaking the page.
 # ---------------------------------------------------------------------------
 sub _releaseDetail {
+    _noteBrowse();
     my ($rel, $client, $callback, $useH) = @_;
     $useH = 1 unless defined $useH;   # the detail page is a Material experience by default
 

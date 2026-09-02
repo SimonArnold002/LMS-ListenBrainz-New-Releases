@@ -60,13 +60,21 @@ sub grab {
     my ($src, $name) = @_;
     $src =~ /^sub \Q$name\E\b\s*\{/mg or die "no sub $name\n";
     my $start = $-[0];
-    my $i     = pos($src);
     my $depth = 1;
-    while ($i < length($src) && $depth) {
-        my $c = substr($src, $i++, 1);
-        $depth++ if $c eq '{';
-        $depth-- if $c eq '}';
+    my $end   = length($src);
+    # BRACE-SCAN BY REGEX, NOT substr()-PER-CHARACTER. The source is read with an
+    # ':encoding(UTF-8)' layer, so it is a CHARACTER string — and substr() on one
+    # is not O(1). The old per-character walk was therefore quadratic in file
+    # size, and Browse.pm is half a megabyte: several suites had grown to spend
+    # minutes here, which reads as a hang rather than as slowness. The //g picks
+    # up from the header match's pos, which is exactly where the body starts.
+    while ($src =~ /([{}])/g) {
+        $1 eq '{' ? $depth++ : $depth--;
+        next if $depth;
+        $end = pos($src);
+        last;
     }
+    my $i = $end;
     pos($src) = undef;
     return substr($src, $start, $i - $start) . "\n";
 }
@@ -291,6 +299,8 @@ sub _weekLabel { 'W/C ' . \$_[1] }
 sub _weekBadgeImage { 'badge.png' }
 sub _effectiveView { ('singles_eps', 1, 1) } # user is on Singles & EPs, both families ticked
 sub _warmArtistSorts { }
+sub _noteBrowse { }                          # 0.9.196: the week drill marks the browse
+                                             # so the cover warm can yield to it
 sub _pageSection { (\$_[2], []) }            # no paging in this fixture
 sub _buildReleaseItem { { name => \$_[0]{release_name}, type => 'link' } }
 sub _sectionHeader { { name => \$_[1], type => 'header' } }
