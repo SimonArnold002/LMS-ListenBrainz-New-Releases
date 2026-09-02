@@ -56,12 +56,20 @@ does not cover. Say which ledger entry you are challenging and what changed.
 
 ### B. KNOWN-OPEN AND ACCEPTED — do not re-report as new
 
-- **`matcher_sync_check.py` exits 1.** This is a KNOWN, DELIBERATE hold, not a
-  regression: DSC carries provisional `_albumMatches` (alias pass) and `_norm` /
-  `%FOLD` changes that Simon chose to prove in the field before porting. See
-  LMS-Discography's CLAUDE.md. The port to LBF/PFR/LL is outstanding work with an
-  owner — reporting "the matcher has drifted" adds nothing. Reporting a NEW sub
-  that has drifted does.
+- ~~**`matcher_sync_check.py` exits 1.**~~ **CLOSED in 0.9.194** — the hold was
+  lifted 2026-08-29 and the sync is done (PFR 0.9.33, LBF 0.9.194). **The check
+  now exits 0, and a non-zero exit is a real finding again.** Search Hub is
+  pinned in `VARIANTS` as a deliberate frozen variant, not removed from the
+  comparison. See the Shared Matching Engine section.
+- **`GENRE_FACT_VERSION` is NOT bumped for the 0.9.194 `_norm` change — deliberate,
+  and it is a MERGE-GATE item, not a defect.** The `artist` table keys rows
+  `n:<_norm(name)>`, so the names whose fold changed (apostrophes, the ~80 new
+  `%FOLD` letters) have their old rows orphaned. Weighed and left: the ladder
+  already re-asks and re-files a missing artist on the next warm — the store's own
+  comment says refilling is the correct answer because the tags ride a bulk request
+  the plugin already makes — so a global genre wipe would clear EVERY user's store
+  to fix a subset. `DEV_BUILD` clears genres on every dev build anyway, so the
+  question only really arises **at the merge to main**; decide it there.
 
 ### C. CLOSED FINDINGS
 
@@ -196,6 +204,76 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
+
+**0.9.194** — built 2026-09-02, **NOT installed and NOT tested**. **THE FLEET MATCHER SYNC —
+the hold is over and `matcher_sync_check.py` exits 0 again.** LBF takes the three
+Discography-origin rules that PFR took in 0.9.33, so DSC, PFR and LBF are now byte-identical
+on all nine shared subs. **No schema change. FIVE cache families bump** — see below, and the
+fifth is the one worth reading.
+
+**THE THREE RULES, each pinned by the field failure that motivated it** (full reasoning lives
+at each site in `Browse.pm`, ported verbatim so the copies stay diffable):
+
+1. **Apostrophes ELIDE, they do not become a space** (DSC 0.44.26). Spacing keyed
+   "Jane's Addiction" as `jane s addiction` against `janes addiction`; `_artistMatch` is an
+   exact-token SUBSET test behind a MANDATORY artist gate, so the act matched **nothing** from
+   any source. Same for O'Connor/OConnor, D'Angelo, The B-52's. **The `'n'` contraction is
+   guarded** — there the mark joins two WORDS rather than sitting inside one, and all three
+   spellings of `Rock'n'Roll` currently agree; eliding blindly would key the first `rocknroll`
+   and break a set that works.
+2. **`%FOLD` 10 → ~90 entries** (DSC 0.44.26). The short table covered Latin-script BAND names;
+   extended-Latin and IPA letters survived NFD as themselves and then met the `[^\p{Alnum}]`
+   pass as ordinary alnum characters, keying a name one way from one source and another from
+   the next.
+3. **Compound-word collapse in `_albumMatches`** (DSC 0.50.6). MB "England's Newest Hit Makers"
+   vs the services' "…Hitmakers". **EXACT space-collapsed equality, never a prefix** — collapsing
+   spaces destroys the word boundary the prefix tiers rely on, so a prefix rule here would let
+   "hitmakers…" swallow an unrelated title. Length-gated at ≥6.
+
+**FIVE CACHE FAMILIES BUMP, AND THE RULE IS NOT "BUMP THE MATCH CACHES".** It is: *a family
+moves if `_norm` decided what is stored, OR if `_norm` built the key it is stored under.*
+`lbf:stream:` 27→28 and `lbf:track:` 8→9 are the decisions; `lbf:artistmbid:` 2→3 and
+`lbf:rgbyname:` 1→2 are decisions one layer out (both accept through `API::_foldEq`, and a
+cached MISS is the stale one that matters — a name the new fold accepts would keep answering
+"not found" for the whole TTL). **`lbf:hdisco:` 1→2 is the one that is easy to miss:** its
+cache KEY is `lc($artist)` and does not move, so the entry still HITS — but its VALUE is a map
+**keyed by `_foldKey($title)`**, i.e. by `_norm` output, so every lookup folded the new way
+misses inside a map written the old way. Silent, and it would have made the 0.9.179 hosted
+resolver fall back to MusicBrainz for exactly the titles this sync fixes. **When `_norm`
+changes, grep for `_foldKey` and `_foldEq` as well as for the matcher's own callers** — that
+rule is now recorded above `KEY_VERSIONS` in `DB.pm`.
+
+**`lbf:pl:resolved:` and the three resolved-LIST families are NOT bumped by hand, and that is
+correct now.** The layered-cache rule became STRUCTURAL: each outer key embeds the inner
+version via `_trackLayerTag()` / `_streamLayerTag()`, so bumping `lbf:track:` necessarily
+re-keys the playlist, follow and trending-resolved lists, and `lbf:stream:` re-keys the
+trending-albums aggregate. Verified all four outer keys carry their tag rather than trusting
+it ([[lbf-bump-every-cache-layer]] is the trap this engineered away). **`lbf:bcmatch:` is not
+in `KEY_VERSIONS` at all** — a hand-curated Bandcamp pin is a table, not a cache, so the bump
+question cannot arise.
+
+**SEARCH HUB IS EXCLUDED AND PINNED** (Simon, 2026-08-29 — on hold, no development). Its
+`_norm` and `%FOLD` are pinned in `matcher_sync_check.py`'s `VARIANTS` **rather than removed
+from `REPOS`**: pinning keeps SH compared and keeps the alarm if it ever moves without a
+conscious re-pin, where deleting it would lose that for good.
+
+**TESTS.** New `tools/t_matchersync.pl` — **46 assertions**, PFR's 41 ported verbatim (same
+assertions, same order, only the module path and env override changed, so the two files stay
+diffable) plus **an LBF-only section 4**. That section earns its place: `_trackMatches` is
+LBF's alone, so the fleet check cannot say a word about it and PFR's copy never exercises it —
+it pins that rules 1 and 2 reach the playlists / follow feed / DSTM mixers, and that the
+compound tier deliberately does NOT apply to tracks. `%FOLD` and every sub are GRABBED from
+`Browse.pm`, never retyped, since a hand-copied table is exactly the drift the suite exists to
+catch. **Anti-tested per rule, independently: 7 / 8 / 3 red** — rule 1 is 7 rather than PFR's 6
+precisely because the LBF-only track assertion goes red with it. Every mutant fails only its
+own rule's assertions.
+
+**ONE HARNESS TRAP, carried from PFR and worth reusing:** Perl sets the UTF8 flag on a literal
+only once it carries a codepoint above U+00FF, and `_norm` folds only inside
+`if ($HAVE_NFD && utf8::is_utf8($s))` — so a fixture like `"\x{f0}ark"` silently SKIPS the fold
+and fails against perfectly good code, while `"\x{283}ine"` passes. The fixtures are
+`utf8::upgrade`d, which reproduces production (live input is decoded from service JSON and
+always arrives flagged) rather than papering over it.
 
 **0.9.193** — built 2026-09-02, **NOT installed and NOT tested**. Both findings of the 0.9.192
 code review (`docs/code-review-0.9.192.md`), each with its mechanism, its guard and its
@@ -1857,7 +1935,16 @@ first, so a guard set to the WRONG number fails before it can pass vacuously),
 the warmed path must equal what Material requests, down to the EXTENSION, which decides
 whether the proxy caches JPEG or re-encodes every cover as PNG;
 `LBF_PLUGIN=`/`LBF_BROWSE=`/`LBF_API=`/`LBF_DB_SRC=` point it at mutated copies),
-`tools/t_statsratelimit.pl` (the follower stats burst — the shared backoff on `_getUserStats` and the serialised follower chain; `LBF_API=`/`LBF_BROWSE=` point it at mutated copies, anti-tested two ways), `tools/bench_store.pl` (the feed store's blocking cost — ingest and read, against real DBD::SQLite at a real feed size; RUN IT after any change to `ingestFeed`/`feedReleases`, and it is what set `INGEST_CHUNK`), `tools/t_ingestchunk.pl` (the chunked ingest's SAFETY property — rotation and coverage only on a complete pass, identical store either way, merge across a chunk boundary, synchronous refusal; `LBF_DB=` points it at a mutated copy, anti-tested two ways), `tools/t_warmstats.pl` (the warm-stage instrument — that it records the OVERLAP between stages and not merely their durations, and that the warm subs actually CALL it; `LBF_PLUGIN=`/`LBF_BROWSE=` point it at mutated copies, anti-tested five ways), `tools/t_feedsingleflight.pl` (the COLD feed path fetches ONCE however many browse walks arrive, AND — since 0.9.190 — that the WARM's `force => 1` bypasses both the memo and the store short-circuit so it warms what actually arrived rather than the stored copy, degrading to stored only when the fetch fails; `LBF_API=`/`LBF_BROWSE=` point it at mutated copies — behavioural, driven through a suspending HTTP stub because the property is "how many requests went out and who was called back", which no pattern match shows; also that BOTH outcomes fan out, that waiters get the same STRING shape as the primary on error, and that the key is the REQUEST (memo key + headers) so a token holder is never multiplexed onto an anonymous fetch. `LBF_API=` points it at a mutated copy, anti-tested five ways), `tools/t_buildingstate.pl` (the in-flight guard and the building row — that the flag is TAKEN before a fan-out, RELEASED on every exit via a single wrapper rather than at each of 8 returns, never released by a caller that did not take it, and that "building" is signalled as `undef` and never as an empty list; also that the feed chain's error paths all advance it and that `_warmTick` waits on its callback. `LBF_BROWSE=` points it at a mutated copy, anti-tested five ways), `tools/t_rgresolver.pl` (the hosted `/discography` release-group tier — that a hit returns a release-GROUP id and never asks MB, that it is ONE call per artist not per album, that `?mbid=` reaches BOTH cache keys, which of several same-titled groups wins, and that EVERY non-hit falls back to MusicBrainz; `LBF_API=` points it at a mutated copy, anti-tested five ways. **Its cache lever is `DB::store`, not `Slim::Utils::Cache`** — API.pm holds the plugin's own store, and a first cut that stubbed the wrong one failed ten assertions because nothing could be observed or reset between sections; the suite now dies loudly if the override is not in effect rather than running vacuous), `tools/t_weekwindow.pl` (the whole-week release window — that the edges are real Mondays and Sundays on EVERY day of the week and for every legal (past, future) pair; **the Friday test**, run across a real week, that a Friday release is still in scope on Saturday and Sunday with earlier weeks OFF and leaves on the next MONDAY rather than at midnight; that the four-week budget survives a hand-edited 52/52; that the derived LB `days=` never exceeds 27, is never 0, and reports `future=true` with zero later weeks; that the gate fallbacks in `%WEEK_GATES` are DERIVED from Plugin.pm's `$prefs->init` rather than restated; that the feed memo key has ONE builder both fetchers and both halves of `clearFeedCache` go through; and that the checkbox-coercion sentinel names a field `settings.html` actually posts. `LBF_API=`/`LBF_DB=`/`LBF_BROWSE=` point it at mutated copies, anti-tested three ways — a today-relative window, the sentinel left on `pref_days`, and `foryou_future` drifting back to `// 0`), `tools/matcher_sync_check.py` (currently exits 1 — see the hold).
+`tools/t_statsratelimit.pl` (the follower stats burst — the shared backoff on `_getUserStats` and the serialised follower chain; `LBF_API=`/`LBF_BROWSE=` point it at mutated copies, anti-tested two ways), `tools/bench_store.pl` (the feed store's blocking cost — ingest and read, against real DBD::SQLite at a real feed size; RUN IT after any change to `ingestFeed`/`feedReleases`, and it is what set `INGEST_CHUNK`), `tools/t_ingestchunk.pl` (the chunked ingest's SAFETY property — rotation and coverage only on a complete pass, identical store either way, merge across a chunk boundary, synchronous refusal; `LBF_DB=` points it at a mutated copy, anti-tested two ways), `tools/t_warmstats.pl` (the warm-stage instrument — that it records the OVERLAP between stages and not merely their durations, and that the warm subs actually CALL it; `LBF_PLUGIN=`/`LBF_BROWSE=` point it at mutated copies, anti-tested five ways), `tools/t_feedsingleflight.pl` (the COLD feed path fetches ONCE however many browse walks arrive, AND — since 0.9.190 — that the WARM's `force => 1` bypasses both the memo and the store short-circuit so it warms what actually arrived rather than the stored copy, degrading to stored only when the fetch fails; `LBF_API=`/`LBF_BROWSE=` point it at mutated copies — behavioural, driven through a suspending HTTP stub because the property is "how many requests went out and who was called back", which no pattern match shows; also that BOTH outcomes fan out, that waiters get the same STRING shape as the primary on error, and that the key is the REQUEST (memo key + headers) so a token holder is never multiplexed onto an anonymous fetch. `LBF_API=` points it at a mutated copy, anti-tested five ways), `tools/t_buildingstate.pl` (the in-flight guard and the building row — that the flag is TAKEN before a fan-out, RELEASED on every exit via a single wrapper rather than at each of 8 returns, never released by a caller that did not take it, and that "building" is signalled as `undef` and never as an empty list; also that the feed chain's error paths all advance it and that `_warmTick` waits on its callback. `LBF_BROWSE=` points it at a mutated copy, anti-tested five ways), `tools/t_rgresolver.pl` (the hosted `/discography` release-group tier — that a hit returns a release-GROUP id and never asks MB, that it is ONE call per artist not per album, that `?mbid=` reaches BOTH cache keys, which of several same-titled groups wins, and that EVERY non-hit falls back to MusicBrainz; `LBF_API=` points it at a mutated copy, anti-tested five ways. **Its cache lever is `DB::store`, not `Slim::Utils::Cache`** — API.pm holds the plugin's own store, and a first cut that stubbed the wrong one failed ten assertions because nothing could be observed or reset between sections; the suite now dies loudly if the override is not in effect rather than running vacuous), `tools/t_weekwindow.pl` (the whole-week release window — that the edges are real Mondays and Sundays on EVERY day of the week and for every legal (past, future) pair; **the Friday test**, run across a real week, that a Friday release is still in scope on Saturday and Sunday with earlier weeks OFF and leaves on the next MONDAY rather than at midnight; that the four-week budget survives a hand-edited 52/52; that the derived LB `days=` never exceeds 27, is never 0, and reports `future=true` with zero later weeks; that the gate fallbacks in `%WEEK_GATES` are DERIVED from Plugin.pm's `$prefs->init` rather than restated; that the feed memo key has ONE builder both fetchers and both halves of `clearFeedCache` go through; and that the checkbox-coercion sentinel names a field `settings.html` actually posts. `LBF_API=`/`LBF_DB=`/`LBF_BROWSE=` point it at mutated copies, anti-tested three ways — a today-relative window, the sentinel left on `pref_days`, and `foryou_future` drifting back to `// 0`), `tools/t_matchersync.pl` (the FLEET MATCHER SYNC gate — the three Discography-origin rules
+ported into LBF in 0.9.194: apostrophe elision + its `'n'` guard, the ~90-entry `%FOLD`, and
+the compound-word collapse in `_albumMatches`. Every sub AND `%FOLD` are grabbed from the real
+`Browse.pm`, never retyped, so a change to either fails here instead of passing against a stale
+duplicate; `LBF_BROWSE=` points it at a mutated copy and each rule is anti-tested
+independently — 7/8/3 red. Section 4 is LBF-only and covers `_trackMatches`, which no other
+repo has and PFR's copy of this file therefore never exercises. It is the BEHAVIOURAL half of
+the fleet rule; `matcher_sync_check.py` is the textual half, and both must pass),
+`tools/matcher_sync_check.py` (**exits 0 since 0.9.194** — the hold is over, so a non-zero exit
+is real drift again).
 
 - **Listen Later release-type handshake — `&rt=` on the favurl (0.9.141).** LL 0.1.86 stores a
   release type per row (`album|ep|single`) and drives its glyph, its Played thresholds (single = 1
@@ -3357,24 +3444,37 @@ Detected in `_isVariousArtists()`:
 
 ## Shared Matching Engine — FLEET SYNC RULE (2026-07-10)
 
-> ### ⏸ SYNC IS ON HOLD (2026-07-29) — `matcher_sync_check.py` exits 1 BY DESIGN
+> ### ✅ THE HOLD IS OVER — `matcher_sync_check.py` EXITS 0 AGAIN (LBF 0.9.194, 2026-09-02)
 >
-> **Discography's matcher is mid-rework and very much WIP, so nothing is being pushed across
-> the fleet until DSC settles.** Right now the check reports drift on `_norm`: DSC carries an
-> apostrophe / `'n'` fold (`rock 'n' roll` → `rock n roll`, and a bare apostrophe strip) that
-> LBF, PFR and Search Hub do not.
+> The 2026-07-29 hold (Discography's matcher mid-rework, DSC deliberately ahead) was **lifted
+> by Simon on 2026-08-29** — *"work on Discography is on hold so updates to that have stopped,
+> now is a good time to update the fleet"* — and the sync ran **repo by repo** at his
+> instruction: **PFR 0.9.33** took the three DSC-origin rules, **LBF 0.9.194** is this one.
+> DSC, PFR and LBF are now byte-identical on all nine shared subs.
 >
-> **This is expected. Do NOT "fix" it by porting DSC's `_norm` outward**, and do not treat a
-> non-zero exit as a blocker on unrelated work — it is currently the normal state. What the
-> rule below still means while the hold is on:
-> - Do not make the drift WORSE. A new matching change of your own still has to land in every
->   repo that carries the affected sub, in the same session, exactly as written below.
-> - When DSC lands, the apostrophe rule (and anything else DSC has grown meanwhile) gets
->   synced outward in ONE dedicated session, and the check must exit 0 again before that
->   session is called done.
-> - The separate, older `_norm` "!"-fold gap (a decorative "!" makes *Panic! At The Disco* /
->   *Godspeed You!* unfindable when typed without it — Search Hub patched at its own gate in
->   0.2.1) is ALSO waiting on that session. Don't do it piecemeal.
+> **A non-zero exit is NO LONGER the normal state. Treat one as real drift again.**
+>
+> The three rules that came across, each pinned by the field failure that motivated it:
+> 1. **Apostrophes ELIDE** rather than becoming a space (DSC 0.44.26) — spacing keyed
+>    "Jane's Addiction" as `jane s addiction` against `janes addiction`, and `_artistMatch`
+>    is an exact-token SUBSET test behind a MANDATORY artist gate, so the act matched nothing
+>    from any source. The `'n'` contraction is guarded (it joins two WORDS) so
+>    `Rock'n'Roll` / `Rock 'n' Roll` / `Rock N Roll` keep agreeing.
+> 2. **`%FOLD` 10 → ~90 entries** (DSC 0.44.26) — extended-Latin and IPA letters survived NFD
+>    as themselves and then met `[^\p{Alnum}]` as ordinary alnum characters.
+> 3. **Compound-word collapse in `_albumMatches`** (DSC 0.50.6) — MB "England's Newest Hit
+>    Makers" vs the services' "…Hitmakers". EXACT space-collapsed equality, never a prefix.
+>
+> **SEARCH HUB IS EXCLUDED AND PINNED, DELIBERATELY** — Simon, 2026-08-29: *"ignore Search Hub
+> from any changes, it's on hold with no development."* It keeps the pre-sync `_norm` and the
+> 10-entry `%FOLD`. It is **pinned in `VARIANTS`, not removed from `REPOS`**, and that
+> distinction is load-bearing: dropping it would silence the alarm for good, so a later edit
+> there could drift unnoticed and search would start disagreeing with the matcher about what
+> "the same name" means — the exact failure SH was added to this rule to prevent. **If SH is
+> ever unfrozen, take the fleet copy and DELETE its two pins rather than re-pinning them.**
+>
+> The old `_norm` "!"-fold gap referenced here is **CLOSED** (fleet-wide, 2026-07-21) — see
+> [[norm-exclamation-fold-hole]]. It is not outstanding work.
 
 
 The artist/album/track matcher (`_norm`, `%FOLD`, `_artistMatch`, `_albumMatches`,

@@ -55,6 +55,18 @@ REPOS = {
     # same name" means: if they diverge, search hands a consumer an artist the
     # matcher then refuses to match.
     'SH':  'LMS-Search-Hub/SearchHub/Text.pm',
+    # LL's fold table lives in DB.pm, not beside its matcher (LL 0.1.112): DB::_norm
+    # builds the dedupe_key, a UNIQUE column on every stored row, and a ->can fallback
+    # there would write a WRONG KEY permanently, where the same fallback on the live
+    # matching path is only a worse match. The authority sits with the irreversible
+    # consumer, and Sources reaches it through ->can.
+    #
+    # Scanned as its own tag so %FOLD stays under this alarm — without it LL's copy of
+    # the ~90-entry table would be the one place in the fleet nothing watches. The
+    # _norm it also finds here is DB::_norm, a genuinely different sub that happens to
+    # share the name (it KEEPS "(Deluxe)" so editions dedupe apart), so it is pinned as
+    # a variant rather than being expected to match.
+    'LLDB': 'LMS-Listen-to-Later/ListenLater/DB.pm',
 }
 
 # The engine's parts. Order = report order. %FOLD is the diacritic map used
@@ -68,14 +80,45 @@ SUBS = [
 # hash is reported as a documented variant, not drift. A pinned copy whose
 # hash STOPPED matching = drift (the variant changed without re-pinning).
 VARIANTS = {
-    # LL's matcher predates the folding work AND is deliberately lenient:
-    # it re-finds a SAVED item (exact saved title, artist metadata may be
-    # EMPTY on streaming Now-Playing adds - LL 0.1.66), so empty artist must
-    # match, and the primitive ASCII _norm has never bitten there. Candidate
-    # for a dedicated modernisation - align _norm, keep the lenient gates.
-    ('_norm', 'LL'):         ('92c2a19a0832', 'LL legacy ASCII norm (pre-folding); modernisation candidate'),
+    # LL's matcher is deliberately LENIENT: it re-finds a SAVED item (exact saved
+    # title, artist metadata may be EMPTY on streaming Now-Playing adds - LL 0.1.66),
+    # so an empty artist must match. That leniency is the pin; it is NOT drift.
+    #
+    # THE FOLD IS NO LONGER BEHIND THE FLEET (LL 0.1.112). _norm took the apostrophe
+    # elision and the ~90-entry %FOLD, so it agrees with DSC/PFR/LBF about what a NAME
+    # is; what stays different is the punctuation pass and the lenient gates. The
+    # compound-word tier was deliberately NOT taken - it only reaches LL's replay gate,
+    # where _bestMatches re-ranks afterwards.
+    #
+    # LL's fold lives in DB.pm, not beside the matcher, because DB::_norm builds the
+    # dedupe_key - a UNIQUE column on every stored row. That is also why a fold change
+    # there is a MIGRATION rather than a cache bump; see LL's _migrateRefold.
+    ('_norm', 'LL'):         ('a054575b2b5b', 'LL lenient variant: fleet fold (0.1.112) + LL punctuation pass; strips (...) for the fuzzy gate, unlike DB::_norm'),
     ('_albumMatches', 'LL'): ('2bf38f346e0f', 'LL lenient: empty artist accepts (saved-item replay, LL 0.1.66) + self-titled exact rule (fleet sync from DSC 0.11.1)'),
     ('_artistMatch', 'LL'):  ('ac8401597520', 'LL lenient: empty side matches; length-based short/long split'),
+
+    # NOT the matcher's _norm — a DIFFERENT sub that shares the name. DB::_norm builds
+    # LL's dedupe_key and must KEEP "(Deluxe)"/"(LP4)" so editions dedupe apart, which
+    # is the exact opposite of what the fuzzy match gate needs. It IS folded the same
+    # way (it calls foldLatin, whose %FOLD is compared above and must match the fleet);
+    # only the punctuation pass differs. Pinned so that shared fold cannot drift
+    # unnoticed while the two subs stay legitimately different.
+    ('_norm', 'LLDB'):       ('451b0041d305', 'LL dedupe-key normaliser (not the matcher): folds like the fleet, KEEPS bracketed qualifiers'),
+
+    # SEARCH HUB IS FROZEN BEHIND THE FLEET, DELIBERATELY — Simon, 2026-08-29:
+    # "ignore Search Hub from any changes, it's on hold with no development."
+    # So it keeps the pre-sync _norm (no apostrophe elision) and the 10-entry
+    # %FOLD, while DSC/PFR/LBF carry the DSC-origin rules.
+    #
+    # PINNED rather than removed from REPOS, and that distinction is the point:
+    # dropping SH from the comparison would silence the alarm for good, so a
+    # future edit there could drift unnoticed and search would start disagreeing
+    # with the matcher about what "the same name" means — the exact failure SH
+    # was added to this rule to prevent. A pin keeps SH compared; it just says
+    # "this difference is a decision". If SH is ever unfrozen, take the fleet
+    # copy and DELETE these two lines rather than re-pinning them.
+    ('_norm', 'SH'):  ('cad4e0da7af2', 'Search Hub on hold 2026-08-29, deliberately behind the fleet (no apostrophe rule)'),
+    ('%FOLD', 'SH'):  ('293c91ea0e59', 'Search Hub on hold 2026-08-29, deliberately behind the fleet (10-entry table)'),
 }
 
 

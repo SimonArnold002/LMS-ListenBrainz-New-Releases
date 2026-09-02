@@ -866,14 +866,41 @@ sub store { return bless {}, 'Plugins::ListenBrainzFreshReleases::DB::Store' }
 # NOT LISTED HERE, DELIBERATELY: 'lbf:bcmatch:' — a hand-curated Bandcamp pin is
 # not a cache, it is a table (below), and it must have no version in its identity
 # at all so the question of bumping it cannot come up again.
+#
+# ---------------------------------------------------------------------------
+# WHICH FAMILIES A `_norm` CHANGE MOVES, and it is more than the match caches.
+# Recorded at the fleet matcher sync (the three DSC-origin rules), where five
+# families bumped together: stream, track, artistmbid, rgbyname and hdisco.
+#
+# The rule is NOT "bump the match caches". It is: **a family moves if `_norm`
+# decided what is stored, OR if `_norm` built the key it is stored under.**
+#
+#   * 'lbf:stream:' / 'lbf:track:' — the DECISION. A cached match (or no-match)
+#     was reached with the old normaliser. The resolved-LIST families wrapping
+#     them re-key for free through the layer tags above.
+#   * 'lbf:artistmbid:' / 'lbf:rgbyname:' — also the decision, one layer out:
+#     both accept a candidate through API::_foldEq, which delegates to `_norm`.
+#     A cached MISS is the stale one that matters — a name the new fold accepts
+#     would keep answering "not found" for the whole TTL.
+#   * 'lbf:hdisco:' — THE ONE THAT IS EASY TO MISS, and the reason this note
+#     exists. Its VALUE is a map **keyed by `_foldKey($title)`**, i.e. by `_norm`
+#     output. The cache key does not move (it is `lc($artist)`), so the entry
+#     still HITS — and then every lookup, folded the new way, misses inside a map
+#     written the old way. Silent: the resolver just falls back to MusicBrainz
+#     for exactly the titles the fold change was meant to fix. A family whose
+#     CONTENT is fold-keyed has to bump even though its own key is untouched.
+#
+# So when `_norm` changes, grep for `_foldKey` and `_foldEq` as well as for the
+# matcher's own callers.
+# ---------------------------------------------------------------------------
 use constant KEY_VERSIONS => {
-    'lbf:artistmbid:'        => 2,
+    'lbf:artistmbid:'        => 3,
     'lbf:bcdone:'            => 6,   # the "searched Bandcamp, found nothing" marker IS disposable
     # 'lbf:bio:' removed 0.9.186 with the detail page's Last.fm bio fallback (MAI's
     # own sources already include Last.fm). Like the two genre families below it
     # lived in Slim::Utils::Cache rather than kv, so there is nothing here to
     # retire — stale entries age out on their own TTL and nothing reads them.
-    'lbf:hdisco:'            => 1,   # hosted /discography, folded title -> rg answer, per ARTIST
+    'lbf:hdisco:'            => 2,   # hosted /discography, folded title -> rg answer, per ARTIST
     # 'lbf:hgenres:' and 'lbf:rggenres:' removed 0.9.185 with the detail page's two
     # on-demand genre fetches (API.pm's tombstones carry the measurements). Both
     # lived in Slim::Utils::Cache rather than kv, so there is nothing here to
@@ -891,9 +918,9 @@ use constant KEY_VERSIONS => {
     # cold on first sight — the exact failure the warm exists to prevent.
     'lbf:imgwarm:'           => 2,
     'lbf:lastlisten:'        => 1,
-    'lbf:rgbyname:'          => 1,
-    'lbf:stream:'            => 27,
-    'lbf:track:'             => 8,
+    'lbf:rgbyname:'          => 2,
+    'lbf:stream:'            => 28,
+    'lbf:track:'             => 9,
     'lbf:pl:resolved:'       => 8,
     'lbf:follow:resolved:'   => 5,
     'lbf:trending:resolved:' => 8,
