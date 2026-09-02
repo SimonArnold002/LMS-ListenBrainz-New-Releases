@@ -1,7 +1,10 @@
 # LBF — the artwork pipeline and the event-loop stalls
 
-**Status: REVIEWED; STAGE 1 BUILT AND VERSIONED as 0.9.196 — §1.1–§1.4 (1.5
-dropped). Not installed, not tested on the box.** Measured 2026-09-02 against
+**Status: REVIEWED; STAGE 1 BUILT, VERSIONED as 0.9.196, INSTALLED AND VERIFIED
+LIVE 2026-09-03 — §1.1–§1.4 (1.5 dropped). Session paused here; Stage 2 is next.**
+See CLAUDE.md's 0.9.196 entry for the live verification numbers (the `warmstats`
+covers-stage ratio, `cachestats` marker count, timing, and the live Qobuz-handler
+comparison) — not repeated here to avoid two copies drifting. Measured 2026-09-02 against
 `dev` at 0.9.195, live ListenBrainz feeds, and LMS `public/9.0` source. **Re-read
 against the source the same day (second pass); nine corrections are folded in below
 and each is marked `[review]`** — one of them (§1.2's marker check) is load-bearing
@@ -9,7 +12,7 @@ for stage 3, and one stage was dropped outright.
 
 | stage | what | state |
 |---|---|---|
-| 1 | Artwork: one upstream fetch per cover | **BUILT** — 1.1 (gate probed) + 1.2 + 1.3 + 1.4; 1.5 **dropped** |
+| 1 | Artwork: one upstream fetch per cover | **BUILT + VERIFIED LIVE** — 1.1 (gate probed) + 1.2 + 1.3 + 1.4; 1.5 **dropped** |
 | 2 | Top level stops blocking; a building row for For You; Last.fm last in the warm | designed + reviewed; 2.1a memo key rebuilt, 2.2 **narrowed to For You** |
 | 3 | Page-aligned warming — the "gaps on re-entry" fix | designed; **its dependency (§1.2's marker move) is now BUILT** |
 | 4 | Remaining per-row SQLite work off the render path | designed + reviewed |

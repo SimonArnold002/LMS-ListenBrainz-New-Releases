@@ -205,13 +205,67 @@ part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
 
-**0.9.196** — built 2026-09-02, **NOT installed and NOT tested**. **STAGE 1 of the
-artwork/event-loop rework** (`docs/artwork-and-event-loop-rework.md`): the Cover Art
-Archive ladder collapses to one source URL per cover, the warm groups a release's
-three specs into one launch, a browsing-aware concurrency brake, and the warm now
-filters before it fetches. No schema change, **no cache bump** — `coverArtUrl`'s
-output is unchanged, so existing `lbf:imgwarm:` markers and existing proxy
-renditions all stay valid.
+**0.9.196** — built 2026-09-02, **INSTALLED AND VERIFIED LIVE 2026-09-03.** **STAGE 1
+of the artwork/event-loop rework** (`docs/artwork-and-event-loop-rework.md`): the
+Cover Art Archive ladder collapses to one source URL per cover, the warm groups a
+release's three specs into one launch, a browsing-aware concurrency brake, and the
+warm now filters before it fetches. No schema change, **no cache bump** —
+`coverArtUrl`'s output is unchanged, so existing `lbf:imgwarm:` markers and existing
+proxy renditions all stay valid.
+
+**LIVE VERIFICATION, 2026-09-03 — WORKS AS DESIGNED, MEASURED, NOT ASSUMED.** First
+install after the bump wiped `lbf:imgwarm:` (the dev-build derived-cache wipe on a
+version change), so the very first tick warmed essentially the whole catalogue from
+empty — the best possible test, nothing to skip. `["lbf","warmstats"]`'s covers
+stage, on completion:
+
+```
+"3996 request(s) / 1332 release(s), 63 already warm, peak 8 in flight"
+```
+
+Three separate facts confirmed by that one line, none assumable from the code alone:
+- **`3996 / 1332 = exactly 3.0`** — every release that needed fetching got all three
+  specs launched as one atomic group, never a partial split (the 63 "already warm"
+  skips are exactly `21 x 3`, i.e. whole releases skipped entirely, not partial
+  specs). Proves `_coverLaunch`'s grouping held across a pass of this size, not just
+  a handful of releases.
+- **`peak 8 in flight`, not ~2-3.** Under the OLD request-counted concurrency, a
+  limit of 8 requests would cap out around 2-3 releases in flight (8÷3). A clean 8
+  is only possible if the unit genuinely changed to releases, confirming
+  `COVER_CONCURRENCY_IDLE` and `_coverLimit()` are bounding by release as designed.
+- **`["lbf","cachestats"]` afterwards: `lbf:imgwarm:` 4,065 rows**, matching
+  `(1332 + 21) x 3 = 4059` almost exactly (the small gap is `_warmTrendingCovers`
+  sharing the same marker family later in the same tick) — the persisted state
+  agrees with the in-flight report, not just a snapshot artefact.
+
+**Timing:** the covers stage took **8m47s** for 1,332 genuinely cold releases
+(~2.5 releases/sec, with `genres_lastfm_all` competing for the same event loop
+throughout); the whole warm tick **~10m6s**. Against the plan's own baseline (~1.1hr
+for a single 2,157-release feed at the old per-request concurrency of 8), this
+covered a comparable scope in well under a sixth of the time.
+
+**Confirmed §1.4's filtering is why the number is 1,332 and not ~4,000+**: the raw
+All Releases feed that tick was 4,099 releases; `_filterAll` (type checkboxes —
+default only Album+Compilation ON — plus artwork-only, VA, blocked artists) cut
+that down before the covers builder ever saw it, exactly as designed. Excluded
+releases are not merely unwarmed, they are **also not rendered** under current
+settings — same filter, same population, no visible gap. The one caveat, stated
+plainly and not yet fixed: a release that becomes newly visible via a LATER
+settings change (ticking a type, widening the genre picker) was never warmed and
+renders bare until the sweep or a manual re-warm reaches it — this is exactly what
+Stage 3 (page-aligned warming, not yet built) exists to close.
+
+**Cross-checked against Qobuz's own imageproxy handler** (`plugin-Qobuz` `Plugin.pm`
+`_imgProxy`, pulled live from `LMS-Community/plugin-Qobuz`): Qobuz uses the *same*
+per-spec size-ladder LBF used to have — every Material spec maps to a different
+`static.qobuz.com` URL, never collapsed to one. That's fine for Qobuz and was never
+fine for LBF because the origins differ by ~30x: `static.qobuz.com` is a real CDN
+(~0.05-0.09s/fetch, measured earlier in this project), Cover Art Archive has none
+(~2.1s/fetch, 2 redirects through archive.org). Multiplying a 0.07s fetch by three
+is free; multiplying a 2.1s fetch by three is six-plus seconds per cover. The
+collapse-to-one-URL trick is a lever that only pays off when the origin is slow —
+worth remembering before "just do what Qobuz does" is proposed for anything else in
+this fleet.
 
 **THE THREE-FETCH FINDING.** `Slim::Web::ImageProxy::getImage` queues by the
 REWRITTEN SOURCE URL and resizes every waiting spec from one download — LBF's size
@@ -306,7 +360,24 @@ left unwired 1 red, warm handed the raw feed 3 red, restart timer left unguarded
 
 **NOT YET BUILT of stage 1 (the plan is otherwise done): nothing** — 1.1–1.4 are
 all in; only 1.5 was dropped. Stages 2–5 of the plan are designed and reviewed,
-not started.
+not started. **PICK UP HERE: Stage 2** (`docs/artwork-and-event-loop-rework.md`
+§"Stage 2 — The top level stops blocking") is next, already reviewed with two
+corrections folded in — §2.1a's landing memo needs a real invalidation key (ref
+identity / feed `ok_at`, not prefs alone, or a Refresh can't bust it), and §2.2's
+building row is narrowed to **For You only**, citing the 0.9.184 ledger entry it
+challenges (For You chains LB → MuSpy so it's two `FEED_TIMEOUT` windows, not one;
+`fetchAll` is a single fetch and keeps the existing behaviour). Read the doc's Stage
+2 section fresh before writing anything — do not re-derive the review from this
+summary alone.
+
+**ALSO PARKED, RAISED DURING STAGE 1'S VERIFICATION, NOT YET SCOPED FOR BUILD:**
+`docs/overnight-detail-prewarm.md` — the overnight warm should pre-resolve a new
+release's tracklist and streaming matches too, not just covers/genres, so a user
+never triggers a live fetch by opening something that matches their current
+settings. On-demand stays as the correctness path; this is additive. Needs its own
+investigation (MusicBrainz rate-limit participation, `_findPlayable` fan-out cost
+at scale) before a design exists — see the doc, and CLAUDE.md's PLANNED WORK list
+below for the same pointer.
 
 **0.9.195** — built 2026-09-02, **NOT installed and NOT tested**. **A FAILED SERVICE SEARCH IS NO
 LONGER CACHED AS "THIS TRACK IS ON NO SERVICE".** Diagnosed live the same day, from the field:
