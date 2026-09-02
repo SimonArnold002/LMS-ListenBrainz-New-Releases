@@ -188,7 +188,75 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
-**0.9.189** — built 2026-09-02, **NOT installed and NOT tested**. **The cover warm stops being
+**0.9.190** — built 2026-09-02, **NOT installed and NOT tested**. **The nightly warm was
+warming yesterday's feed.** Both release feeds (and MuSpy) now take `force => 1`, and
+`warmFeeds` passes it. No schema change, no cache bump.
+
+**0.9.190 — "IT ONLY UPDATES WHEN I OPEN IT" WAS NEVER A SCHEDULING PROBLEM.**
+
+The tick fired every night. It warmed the wrong list.
+
+`getFreshReleasesForUser` / `getFreshReleasesAll` both short-circuit on the store:
+
+```perl
+my ($stored, $stale) = _feedFromStore($feed, $from, $to, 1);
+if ($stored) {
+    $args{onDone}->(_memoSet($memoKey, $stored));   # fires NOW, with the OLD list
+    _fetchReleaseFeed(...) if $stale;               # revalidates — nobody waits
+    return;
+}
+```
+
+That is right for a BROWSE and is what makes an open instant. It was wrong for the WARM, the
+one caller whose entire purpose is to act on what actually arrived. `onDone` fired with the
+stored list, so `_warmCovers` and `_warmGenres` never saw a release that landed today; the
+revalidation ingested it, and its cover was warmed no earlier than the NEXT night's tick.
+Visible in `warmstats` all along and read straight past: **foryou_feed 0.00s, all_feed 0.02s**
+— no HTTP on a nightly tick. Neither sub accepted `force` at all; the word appears throughout
+the warm for playlists, follow and trending, which is what made its absence here easy to miss.
+
+Forced, the call goes to the fetch path WITH an `onDone`: answered with what came back,
+single-flighted like any foreground open, memo refreshed for the browse that follows. Failure
+needed no new code — `_fetchReleaseFeed`'s failure path already serves the stored copy to
+`onDone` — so an outage still warms the stored list rather than warming nothing. MuSpy takes it
+too (it has no store short-circuit, so gating its memo is the whole of it). **Only the warm
+passes it.** Every browse path keeps stale-while-revalidate.
+
+**MEASURED, AND THE ANSWER TO TWO OTHER QUESTIONS ASKED AT THE SAME TIME.**
+
+*The 4-week All Releases window, covers probed warm-vs-cold before this build:* W/C 14 Sep 9/10
+warm, W/C 7 Sep 9/10, W/C 31 Aug 3/10, **W/C 24 Aug 0/10**. That is the 150-release cap sorted
+newest-first against 2,157 releases, and it is what 0.9.189 raises. Re-run it after installing.
+
+*Why Qobuz "seems pre-cached" and we never do:* it isn't cached — **it has a CDN and Cover Art
+Archive does not.** Same measurement, origin only: `static.qobuz.com` **0.05-0.09s**, 0
+redirects; `coverartarchive.org` **2.2-2.5s**, TTFB 2.08-2.35s, **2 redirects** (CAA ->
+archive.org/download -> a `dn*.archive.org` node). Qobuz's COLD fetch is ~30x faster than ours
+and is indistinguishable from a cache hit, so the Qobuz plugin does no warming at all. **There
+is no strategy there to copy.** Bypassing the redirect chain was checked and rejected: the
+final node is itself 1.0-1.3s, so it saves ~45% and the node hostname is not stable. CAA is
+simply slow, which is why "an hour" — it is 2.1s x N of origin latency, not our processing.
+Parallelism and warming ahead are the only levers, which is what 0.9.189 does.
+
+**TESTS.** `t_feedsingleflight.pl` 37 -> 55, with a new section that installs a store which
+ANSWERS (the rest of the file stubs it empty, since "cold" is what the single-flight race needs)
+and pins: unforced + fresh store makes NO request and answers from the store; forced goes to the
+network and answers with **what the fetch returned, not the stored copy**; a forced fetch that
+FAILS still answers, degrading to the stored list; and forced skips the memo. Plus the half a
+test of API.pm alone cannot see — that `warmFeeds` actually passes it, counted over
+comment-stripped source at every feed call site. `LBF_BROWSE` override added so that check can
+be anti-tested. Four mutants, each failing on its own property.
+
+**TWO TRAPS THIS SECTION COST A PASS EACH, worth recording.** `_feedMemoKey` covers
+(section, sort, wp, wf) and `WEEKS_MAX_SIDE` is **3** — so the legal week space is ten pairs,
+the earlier sections use most of them, and `_clampWeeks` silently folds an out-of-range pair
+onto one already taken: `(4,0)` became `(3,0)`, the new section read ANOTHER section's memo, and
+it passed for the wrong reason. Vary the **sort** instead; it is part of the key and has no
+clamp. And an assertion that fails must not then `die` on the empty `@REQUESTS` it was
+asserting about — that took every later assertion in the file with it, so a real regression
+reported two failures and hid the rest.
+
+**0.9.189** — superseded by 0.9.190. **The cover warm stops being
 the bottleneck.** Three changes to the same pass: it runs 8 requests wide instead of one, it
 covers 2,000 releases per feed instead of 150, and it walks the queue SPEC-first so the first
 third of the work gives every row its list-row cover. No schema change, no cache bump.
@@ -1556,7 +1624,7 @@ first, so a guard set to the WRONG number fails before it can pass vacuously),
 the warmed path must equal what Material requests, down to the EXTENSION, which decides
 whether the proxy caches JPEG or re-encodes every cover as PNG;
 `LBF_PLUGIN=`/`LBF_BROWSE=`/`LBF_API=`/`LBF_DB_SRC=` point it at mutated copies),
-`tools/t_statsratelimit.pl` (the follower stats burst — the shared backoff on `_getUserStats` and the serialised follower chain; `LBF_API=`/`LBF_BROWSE=` point it at mutated copies, anti-tested two ways), `tools/bench_store.pl` (the feed store's blocking cost — ingest and read, against real DBD::SQLite at a real feed size; RUN IT after any change to `ingestFeed`/`feedReleases`, and it is what set `INGEST_CHUNK`), `tools/t_ingestchunk.pl` (the chunked ingest's SAFETY property — rotation and coverage only on a complete pass, identical store either way, merge across a chunk boundary, synchronous refusal; `LBF_DB=` points it at a mutated copy, anti-tested two ways), `tools/t_warmstats.pl` (the warm-stage instrument — that it records the OVERLAP between stages and not merely their durations, and that the warm subs actually CALL it; `LBF_PLUGIN=`/`LBF_BROWSE=` point it at mutated copies, anti-tested five ways), `tools/t_feedsingleflight.pl` (the COLD feed path fetches ONCE however many browse walks arrive — behavioural, driven through a suspending HTTP stub because the property is "how many requests went out and who was called back", which no pattern match shows; also that BOTH outcomes fan out, that waiters get the same STRING shape as the primary on error, and that the key is the REQUEST (memo key + headers) so a token holder is never multiplexed onto an anonymous fetch. `LBF_API=` points it at a mutated copy, anti-tested five ways), `tools/t_buildingstate.pl` (the in-flight guard and the building row — that the flag is TAKEN before a fan-out, RELEASED on every exit via a single wrapper rather than at each of 8 returns, never released by a caller that did not take it, and that "building" is signalled as `undef` and never as an empty list; also that the feed chain's error paths all advance it and that `_warmTick` waits on its callback. `LBF_BROWSE=` points it at a mutated copy, anti-tested five ways), `tools/t_rgresolver.pl` (the hosted `/discography` release-group tier — that a hit returns a release-GROUP id and never asks MB, that it is ONE call per artist not per album, that `?mbid=` reaches BOTH cache keys, which of several same-titled groups wins, and that EVERY non-hit falls back to MusicBrainz; `LBF_API=` points it at a mutated copy, anti-tested five ways. **Its cache lever is `DB::store`, not `Slim::Utils::Cache`** — API.pm holds the plugin's own store, and a first cut that stubbed the wrong one failed ten assertions because nothing could be observed or reset between sections; the suite now dies loudly if the override is not in effect rather than running vacuous), `tools/t_weekwindow.pl` (the whole-week release window — that the edges are real Mondays and Sundays on EVERY day of the week and for every legal (past, future) pair; **the Friday test**, run across a real week, that a Friday release is still in scope on Saturday and Sunday with earlier weeks OFF and leaves on the next MONDAY rather than at midnight; that the four-week budget survives a hand-edited 52/52; that the derived LB `days=` never exceeds 27, is never 0, and reports `future=true` with zero later weeks; that the gate fallbacks in `%WEEK_GATES` are DERIVED from Plugin.pm's `$prefs->init` rather than restated; that the feed memo key has ONE builder both fetchers and both halves of `clearFeedCache` go through; and that the checkbox-coercion sentinel names a field `settings.html` actually posts. `LBF_API=`/`LBF_DB=`/`LBF_BROWSE=` point it at mutated copies, anti-tested three ways — a today-relative window, the sentinel left on `pref_days`, and `foryou_future` drifting back to `// 0`), `tools/matcher_sync_check.py` (currently exits 1 — see the hold).
+`tools/t_statsratelimit.pl` (the follower stats burst — the shared backoff on `_getUserStats` and the serialised follower chain; `LBF_API=`/`LBF_BROWSE=` point it at mutated copies, anti-tested two ways), `tools/bench_store.pl` (the feed store's blocking cost — ingest and read, against real DBD::SQLite at a real feed size; RUN IT after any change to `ingestFeed`/`feedReleases`, and it is what set `INGEST_CHUNK`), `tools/t_ingestchunk.pl` (the chunked ingest's SAFETY property — rotation and coverage only on a complete pass, identical store either way, merge across a chunk boundary, synchronous refusal; `LBF_DB=` points it at a mutated copy, anti-tested two ways), `tools/t_warmstats.pl` (the warm-stage instrument — that it records the OVERLAP between stages and not merely their durations, and that the warm subs actually CALL it; `LBF_PLUGIN=`/`LBF_BROWSE=` point it at mutated copies, anti-tested five ways), `tools/t_feedsingleflight.pl` (the COLD feed path fetches ONCE however many browse walks arrive, AND — since 0.9.190 — that the WARM's `force => 1` bypasses both the memo and the store short-circuit so it warms what actually arrived rather than the stored copy, degrading to stored only when the fetch fails; `LBF_API=`/`LBF_BROWSE=` point it at mutated copies — behavioural, driven through a suspending HTTP stub because the property is "how many requests went out and who was called back", which no pattern match shows; also that BOTH outcomes fan out, that waiters get the same STRING shape as the primary on error, and that the key is the REQUEST (memo key + headers) so a token holder is never multiplexed onto an anonymous fetch. `LBF_API=` points it at a mutated copy, anti-tested five ways), `tools/t_buildingstate.pl` (the in-flight guard and the building row — that the flag is TAKEN before a fan-out, RELEASED on every exit via a single wrapper rather than at each of 8 returns, never released by a caller that did not take it, and that "building" is signalled as `undef` and never as an empty list; also that the feed chain's error paths all advance it and that `_warmTick` waits on its callback. `LBF_BROWSE=` points it at a mutated copy, anti-tested five ways), `tools/t_rgresolver.pl` (the hosted `/discography` release-group tier — that a hit returns a release-GROUP id and never asks MB, that it is ONE call per artist not per album, that `?mbid=` reaches BOTH cache keys, which of several same-titled groups wins, and that EVERY non-hit falls back to MusicBrainz; `LBF_API=` points it at a mutated copy, anti-tested five ways. **Its cache lever is `DB::store`, not `Slim::Utils::Cache`** — API.pm holds the plugin's own store, and a first cut that stubbed the wrong one failed ten assertions because nothing could be observed or reset between sections; the suite now dies loudly if the override is not in effect rather than running vacuous), `tools/t_weekwindow.pl` (the whole-week release window — that the edges are real Mondays and Sundays on EVERY day of the week and for every legal (past, future) pair; **the Friday test**, run across a real week, that a Friday release is still in scope on Saturday and Sunday with earlier weeks OFF and leaves on the next MONDAY rather than at midnight; that the four-week budget survives a hand-edited 52/52; that the derived LB `days=` never exceeds 27, is never 0, and reports `future=true` with zero later weeks; that the gate fallbacks in `%WEEK_GATES` are DERIVED from Plugin.pm's `$prefs->init` rather than restated; that the feed memo key has ONE builder both fetchers and both halves of `clearFeedCache` go through; and that the checkbox-coercion sentinel names a field `settings.html` actually posts. `LBF_API=`/`LBF_DB=`/`LBF_BROWSE=` point it at mutated copies, anti-tested three ways — a today-relative window, the sentinel left on `pref_days`, and `foryou_future` drifting back to `// 0`), `tools/matcher_sync_check.py` (currently exits 1 — see the hold).
 
 - **Listen Later release-type handshake — `&rt=` on the favurl (0.9.141).** LL 0.1.86 stores a
   release type per row (`album|ep|single`) and drives its glyph, its Played thresholds (single = 1

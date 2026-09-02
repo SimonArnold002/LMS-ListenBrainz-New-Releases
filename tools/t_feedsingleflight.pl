@@ -23,7 +23,7 @@
 #   Behavioural, not source-matching: the whole property is "how many requests went
 #   out and who got called back", which no pattern match can show.
 #
-# ANTI-TEST: point LBF_API at a mutated copy.
+# ANTI-TEST: point LBF_API / LBF_BROWSE at a mutated copy.
 #   - remove the $INFLIGHT park           -> section 1 red (3 requests, not 1)
 #   - drop $fanout from $done             -> section 2 red (waiters never answered)
 #   - drop $fanout from the failure path  -> section 3 red (waiters hang on an error)
@@ -37,6 +37,11 @@ use File::Temp qw(tempdir);
 
 my $ROOT = File::Spec->rel2abs(File::Spec->catdir(dirname(__FILE__), File::Spec->updir));
 my $API  = $ENV{LBF_API} || "$ROOT/ListenBrainzFreshReleases/API.pm";
+# Browse.pm joined this suite when it grew the check that warmFeeds actually
+# PASSES force. It needs its own override for the same reason API.pm has one:
+# without it the anti-test reads the pristine copy and a mutated warmFeeds goes
+# on passing, which is exactly the failure this file exists to prevent.
+my $BROWSE = $ENV{LBF_BROWSE} || "$ROOT/ListenBrainzFreshReleases/Browse.pm";
 
 my ($pass, $fail) = (0, 0);
 sub ok {
@@ -473,6 +478,137 @@ section '8. THE LEAK WATCHDOG — a result that NEVER ARRIVES still frees the ke
     @REQUESTS = ();
     open_feed(wp => 2, wf => 2);
     is(scalar(@REQUESTS), 1, 'and the freed key lets the next open reach the network');
+}
+
+# ==========================================================================
+section('THE WARM FETCHES; IT DOES NOT READ THE STORE');
+# ==========================================================================
+# WHAT THIS PINS, and it was a silent, permanent defect rather than a race.
+# Both feed subs short-circuit on the store: if there are rows, `onDone` fires
+# with THEM and returns, and the stale branch kicks a revalidation whose result
+# reaches nobody. That is correct and deliberate for a BROWSE — it is what makes
+# an open instant. It was catastrophic for the WARM, which is the one caller that
+# exists to act on what actually arrived: `_warmCovers` and `_warmGenres` ran
+# against the stored list every night, so a release that appeared today had its
+# cover warmed no earlier than tomorrow's tick. Observed live as `foryou_feed
+# 0.00s / all_feed 0.02s` in warmstats — no HTTP at all on a nightly tick.
+#
+# The store is stubbed empty for the rest of this file (that is what "cold"
+# means), so these sections install a store that ANSWERS — the state in which the
+# short-circuit exists at all.
+{
+    my @stored = ({ release_name => 'STORED', artist_credit_name => 'B',
+                    release_date => '2026-08-01', release_group_mbid => 'rg-s',
+                    release_mbid => 'r-s' });
+    my $coverage = { any => 1, complete => 1, days => 28, covered => 28, ok_at => time() };
+    no warnings 'redefine', 'once';
+    local *Plugins::ListenBrainzFreshReleases::DB::feedReleases = sub { [ @stored ] };
+    local *Plugins::ListenBrainzFreshReleases::DB::feedCoverage = sub { $coverage };
+
+    # --- unforced: the browse behaviour, unchanged -------------------------
+    @REQUESTS = ();
+    my $r = { done => [], error => [] };
+    {
+        $api->getFreshReleasesAll(sort => 'warm-unforced',
+            onDone => sub { push @{ $r->{done} }, $_[0] });
+    }
+    is(scalar(@REQUESTS), 0, 'unforced + a fresh store makes NO request (the browse path)');
+    is(scalar(@{ $r->{done} }), 1, '...and answers immediately');
+    is((($r->{done}[0] || [])->[0] || {})->{release_name}, 'STORED',
+       '...from the store');
+
+    # --- forced: the warm behaviour ---------------------------------------
+    @REQUESTS = ();
+    my $w = { done => [], error => [] };
+    {
+        $api->getFreshReleasesAll(sort => 'warm-forced', force => 1,
+            onDone => sub { push @{ $w->{done} }, $_[0] });
+    }
+    is(scalar(@REQUESTS), 1, 'forced goes to the network even with a fresh store');
+    is(scalar(@{ $w->{done} }), 0, '...and does NOT answer from the store first');
+    # Guarded: without a request to answer this would die on undef and take every
+    # remaining assertion in the file with it, so a real regression would report
+    # two failures and hide the rest.
+    answer_ok($REQUESTS[0], $PAYLOAD) if @REQUESTS;
+    is(scalar(@{ $w->{done} }), 1, '...it answers once the fetch lands');
+    is((($w->{done}[0] || [])->[0] || {})->{release_name}, 'A',
+       '...with what the FETCH returned, not the stored copy — the whole point');
+
+    # --- forced, and the fetch fails --------------------------------------
+    # The warm must still warm SOMETHING: a ListenBrainz outage should degrade to
+    # the stored list, not to warming nothing. This needs no code of its own —
+    # _fetchReleaseFeed's failure path already serves the stored copy to onDone —
+    # but that is a dependency worth pinning, because it is the reason the forced
+    # branch passes its error handling straight through.
+    @REQUESTS = ();
+    my $f = { done => [], error => [] };
+    {
+        $api->getFreshReleasesAll(sort => 'warm-forced-fail', force => 1,
+            onDone  => sub { push @{ $f->{done} },  $_[0] },
+            onError => sub { push @{ $f->{error} }, $_[0] });
+    }
+    is(scalar(@REQUESTS), 1, 'forced fetch issued');
+    answer_fail($REQUESTS[0], '503 Service Unavailable') if @REQUESTS;
+    is(scalar(@{ $f->{error} }), 0, 'a failed forced fetch surfaces no error while the store has rows');
+    is(scalar(@{ $f->{done} }), 1, '...it still answers');
+    is((($f->{done}[0] || [])->[0] || {})->{release_name}, 'STORED',
+       '...degrading to the stored list, so the warm warms something');
+}
+
+# THESE SECTIONS KEY OFF `sort`, NOT THE WEEK PREFS, and that is deliberate.
+# `_feedMemoKey` covers (section, sort, wp, wf), and WEEKS_MAX_SIDE is 3 — so the
+# legal week space is ten pairs, the earlier sections use most of them, and
+# _clampWeeks silently folds an out-of-range pair onto one already taken ((4,0)
+# became (3,0), and this section then read ANOTHER section's memo and passed for
+# the wrong reason). Varying the sort gives an unbounded key space with no clamp
+# to reason about. Cost a debugging pass.
+#
+# THE MEMO IS SKIPPED TOO. A browse that ran minutes before the tick leaves the
+# feed memoed; without this gate the warm would be handed that copy and never
+# reach either the store branch or the network.
+{
+    @REQUESTS = ();
+    my $a = { done => [] };
+    {
+        $api->getFreshReleasesAll(sort => 'warm-memo',
+            onDone => sub { push @{ $a->{done} }, $_[0] });
+        is(scalar(@REQUESTS), 1, 'cold open fetches');
+        answer_ok($REQUESTS[0], $PAYLOAD) if @REQUESTS;
+        is(scalar(@{ $a->{done} }), 1, '...and populates the memo');
+
+        @REQUESTS = ();
+        my $b = { done => [] };
+        $api->getFreshReleasesAll(sort => 'warm-memo',
+            onDone => sub { push @{ $b->{done} }, $_[0] });
+        is(scalar(@REQUESTS), 0, 'a second unforced open is served from the memo');
+
+        @REQUESTS = ();
+        my $c = { done => [] };
+        $api->getFreshReleasesAll(sort => 'warm-memo', force => 1,
+            onDone => sub { push @{ $c->{done} }, $_[0] });
+        is(scalar(@REQUESTS), 1, 'a FORCED open ignores the memo and fetches');
+        answer_ok($REQUESTS[0], $PAYLOAD) if @REQUESTS;
+    }
+}
+
+# AND THE WARM ACTUALLY PASSES IT. The three call sites live in Browse::warmFeeds,
+# and a `force` that no caller sets is worth nothing — this is the half that a
+# test of API.pm alone cannot see.
+{
+    my $bsrc = do {
+        open(my $fh, '<:encoding(UTF-8)', $BROWSE) or die $!;
+        local $/; <$fh>;
+    };
+    my ($warm) = $bsrc =~ /^sub warmFeeds \{(.*?)^\}/ms;
+    ok(defined $warm && length $warm, 'warmFeeds located in Browse.pm');
+    # COMMENTS STRIPPED FIRST. The block comments explaining this change quote
+    # `force => 1` in prose, so counting the raw source counted them too and the
+    # assertion read 7 against 4 calls. Count code.
+    (my $code = $warm) =~ s/^\s*#.*$//mg;
+    my $calls  = () = $code =~ /getFreshReleases(?:ForUser|All)\(|getMuSpyReleases\(/g;
+    my $forced = () = $code =~ /force\s*=>\s*1/g;
+    ok($calls > 0, "warmFeeds makes $calls feed call(s)");
+    is($forced, $calls, 'EVERY feed call in warmFeeds passes force => 1');
 }
 
 printf "\n%s\n%d passed, %d failed.\n", '=' x 74, $pass, $fail;

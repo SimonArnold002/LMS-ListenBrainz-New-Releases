@@ -3161,6 +3161,9 @@ sub warmFeeds {
     my $muspy = sub {
         _stage('start', 'muspy_feed');
         Plugins::ListenBrainzFreshReleases::API->getMuSpyReleases(
+            # force => 1: the warm must warm what ARRIVED, not what a browse left
+            # in the memo. See the block comment on the sub.
+            force  => 1,
             onDone => sub {
                 my $n = scalar(@{ $_[0] // [] });
                 _stage('end', 'muspy_feed', 'done', "$n releases");
@@ -3175,6 +3178,11 @@ sub warmFeeds {
         _stage('start', 'all_feed');
         Plugins::ListenBrainzFreshReleases::API->getFreshReleasesAll(
             sort   => 'release_date',
+            # force => 1: WITHOUT THIS THE WARM WARMED YESTERDAY'S FEED. The store
+            # short-circuit answered in ~0.00s with the stored list and the
+            # revalidation's result reached nobody, so _warmCovers below never saw
+            # a release that arrived today. See API::getFreshReleasesAll.
+            force  => 1,
             onDone => sub {
                 my $n = scalar(@{ $_[0] // [] });
                 _stage('end', 'all_feed', 'done', "$n releases");
@@ -3204,6 +3212,7 @@ sub warmFeeds {
         _stage('start', 'all_feed');
         Plugins::ListenBrainzFreshReleases::API->getFreshReleasesAll(
             sort   => 'release_date',
+            force  => 1,   # see the chained branch above
             onDone => sub {
                 my $n = scalar(@{ $_[0] // [] });
                 _stage('end', 'all_feed', 'done', "$n releases");
@@ -3224,6 +3233,9 @@ sub warmFeeds {
     _stage('start', 'foryou_feed');
     Plugins::ListenBrainzFreshReleases::API->getFreshReleasesForUser(
         sort   => 'release_date',
+        # force => 1: same reason as All Releases below — the warm must see the
+        # releases that actually arrived, not the stored copy.
+        force  => 1,
         onDone => sub {
             my $n = scalar(@{ $_[0] // [] });
             _stage('end', 'foryou_feed', 'done', "$n releases");

@@ -818,8 +818,35 @@ sub USER_AGENT {
 # SENT when one happens to be set (same shape as getFollowing) — harmless, and it
 # keeps the request identical for anyone who has one configured.
 # ---------------------------------------------------------------------------
+# `force => 1` — THE BACKGROUND WARM'S FETCH, AND THE REASON IT HAD TO EXIST.
+#
+# Without it this sub answers a warm tick out of the STORE and returns in ~0.00s
+# (visible as exactly that in `warmstats`: foryou_feed 0.00s, all_feed 0.02s — no
+# HTTP happened at all). The stale branch does kick a revalidation, but it is a
+# BACKGROUND one whose result reaches nobody: `onDone` has already fired with the
+# stored list. So `_warmCovers` and `_warmGenres` both ran against YESTERDAY'S
+# releases, every night, for ever.
+#
+# The consequence is the one users actually report: a release that arrives today
+# is ingested only when a render happens to trigger revalidation, and its cover is
+# not warmed until the NEXT night's tick at the earliest — so new rows arrive cold
+# and fill in front of you, and the plugin looks like it only updates when you open
+# it. It was never a scheduling problem. The tick fired; it warmed the wrong list.
+#
+# Forced, we go straight to the fetch path WITH an onDone, which means: the caller
+# is answered with what actually came back, the fetch is single-flighted like any
+# foreground open, and the memo is refreshed for the browse that follows. Nothing
+# extra is needed for failure — `_fetchReleaseFeed`'s own failure path already
+# serves the stored copy to `onDone` when there is one, so a ListenBrainz outage
+# still warms the stored list rather than warming nothing. That is why the error
+# handling below is simply passed through.
+#
+# ONLY THE WARM PASSES IT. Every browse path must keep the stale-while-revalidate
+# behaviour — that is what makes an open instant.
 sub getFreshReleasesForUser {
     my ($class, %args) = @_;
+
+    my $force = $args{force} ? 1 : 0;
 
     my $username = $prefs->get('username') // '';
     my $token    = $prefs->get('token')    // '';
@@ -844,7 +871,7 @@ sub getFreshReleasesForUser {
     my $feed     = 'user:' . $username;
     my $memoKey  = _feedMemoKey('foryou', $sort, $wp, $wf);
 
-    if (my $memo = _memoGet($memoKey)) {
+    if (!$force && (my $memo = _memoGet($memoKey))) {
         $args{onDone}->($memo);
         return;
     }
@@ -859,7 +886,7 @@ sub getFreshReleasesForUser {
     push @headers, ('Authorization' => "Token $token") if $token;
 
     my ($stored, $stale) = _feedFromStore($feed, $from, $to, 1);
-    if ($stored) {
+    if ($stored && !$force) {
         $args{onDone}->(_memoSet($memoKey, $stored));
         _fetchReleaseFeed(feed => $feed, url => $url, headers => \@headers, memoKey => $memoKey,
                           from => $from, to => $to, label => 'for-you') if $stale;
@@ -874,8 +901,35 @@ sub getFreshReleasesForUser {
 # ---------------------------------------------------------------------------
 # GET /1/explore/fresh-releases/  (global, no auth needed)
 # ---------------------------------------------------------------------------
+# `force => 1` — THE BACKGROUND WARM'S FETCH, AND THE REASON IT HAD TO EXIST.
+#
+# Without it this sub answers a warm tick out of the STORE and returns in ~0.00s
+# (visible as exactly that in `warmstats`: foryou_feed 0.00s, all_feed 0.02s — no
+# HTTP happened at all). The stale branch does kick a revalidation, but it is a
+# BACKGROUND one whose result reaches nobody: `onDone` has already fired with the
+# stored list. So `_warmCovers` and `_warmGenres` both ran against YESTERDAY'S
+# releases, every night, for ever.
+#
+# The consequence is the one users actually report: a release that arrives today
+# is ingested only when a render happens to trigger revalidation, and its cover is
+# not warmed until the NEXT night's tick at the earliest — so new rows arrive cold
+# and fill in front of you, and the plugin looks like it only updates when you open
+# it. It was never a scheduling problem. The tick fired; it warmed the wrong list.
+#
+# Forced, we go straight to the fetch path WITH an onDone, which means: the caller
+# is answered with what actually came back, the fetch is single-flighted like any
+# foreground open, and the memo is refreshed for the browse that follows. Nothing
+# extra is needed for failure — `_fetchReleaseFeed`'s own failure path already
+# serves the stored copy to `onDone` when there is one, so a ListenBrainz outage
+# still warms the stored list rather than warming nothing. That is why the error
+# handling below is simply passed through.
+#
+# ONLY THE WARM PASSES IT. Every browse path must keep the stale-while-revalidate
+# behaviour — that is what makes an open instant.
 sub getFreshReleasesAll {
     my ($class, %args) = @_;
+
+    my $force = $args{force} ? 1 : 0;
 
     my $sort = $args{sort} // 'release_date';
 
@@ -890,7 +944,7 @@ sub getFreshReleasesAll {
 
     my $memoKey = _feedMemoKey('all', $sort, $wp, $wf);
 
-    if (my $memo = _memoGet($memoKey)) {
+    if (!$force && (my $memo = _memoGet($memoKey))) {
         $args{onDone}->($memo);
         return;
     }
@@ -899,7 +953,7 @@ sub getFreshReleasesAll {
         BASE_URL, $sort, $past, $future, $days, $today);
 
     my ($stored, $stale) = _feedFromStore($feed, $from, $to, 1);
-    if ($stored) {
+    if ($stored && !$force) {
         $args{onDone}->(_memoSet($memoKey, $stored));
         _fetchReleaseFeed(feed => $feed, url => $url, memoKey => $memoKey,
                           from => $from, to => $to, label => 'all releases') if $stale;
@@ -1086,8 +1140,14 @@ sub _ingestNoteFailure {
 # against the ListenBrainz releases. Best-effort: ANY failure (no userid,
 # transport error, unparseable body) resolves onDone with the last good copy or
 # an empty list — it must never blank the LB feed. No onError path by design.
+# `force => 1` is honoured here for the same reason as the two LB feeds — the warm
+# is a caller, and the memo would otherwise hand it whatever a browse left behind.
+# MuSpy has no store short-circuit (it always fetches), so gating the memo is the
+# whole of it.
 sub getMuSpyReleases {
     my ($class, %args) = @_;
+
+    my $force = $args{force} ? 1 : 0;
 
     my $userid = $prefs->get('muspy_userid') // '';
     $userid =~ s/^\s+|\s+$//g;
@@ -1104,7 +1164,7 @@ sub getMuSpyReleases {
     # STABLE across the re-walks of one interaction — which is what lets Browse's
     # derived-section memo recognise the For You inputs as unchanged (_mergeMuSpy
     # builds a fresh arrayref from them, so identity has to come from the sources).
-    if (my $memo = _memoGet($memoKey)) {
+    if (!$force && (my $memo = _memoGet($memoKey))) {
         $args{onDone}->($memo);
         return;
     }
