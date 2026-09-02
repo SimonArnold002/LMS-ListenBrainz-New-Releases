@@ -205,6 +205,109 @@ part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
 
+**0.9.196** — built 2026-09-02, **NOT installed and NOT tested**. **STAGE 1 of the
+artwork/event-loop rework** (`docs/artwork-and-event-loop-rework.md`): the Cover Art
+Archive ladder collapses to one source URL per cover, the warm groups a release's
+three specs into one launch, a browsing-aware concurrency brake, and the warm now
+filters before it fetches. No schema change, **no cache bump** — `coverArtUrl`'s
+output is unchanged, so existing `lbf:imgwarm:` markers and existing proxy
+renditions all stay valid.
+
+**THE THREE-FETCH FINDING.** `Slim::Web::ImageProxy::getImage` queues by the
+REWRITTEN SOURCE URL and resizes every waiting spec from one download — LBF's size
+ladder mapped each of Material's three specs to a DIFFERENT CAA size, so a
+release's three specs were always three different source URLs and could never
+coalesce. A 2,000-release pass issued ~6,000 upstream fetches where it needed
+2,000. `Plugin.pm`'s handler now rewrites every spec to `front-1200` (the only CAA
+size that never upscales Material's largest ask, `_600x600_f`, and — because the
+cost here is latency, not bytes — also the fewest bytes overall); the `getRightSize`
+table is gone.
+
+**PROBED BEFORE SHIPPING, because collapsing to one size makes artwork failure
+all-or-nothing** — `_gotArtworkError` flushes a release's whole request bucket, so
+one missing size would cost a row all three renditions where three independent
+requests would not, and this is a fresh-releases plugin, whose population is
+disproportionately newly-uploaded, partially-derived art. The newest 24 releases
+on the live feed, all three sizes each: **22 answered 200 at every size, 2
+answered 404 at every size, ZERO disagreed.** IA derives the thumbnails as one
+task; asking only for 1200 cannot lose a cover 250 would have found.
+
+**Browse.pm: the queue holds one GROUP per release, not one entry per spec.**
+`_coverGroupsFor` builds them (shared with the page-aligned warm this stage is
+designed to unblock); `_coverLaunch` fires a whole group in one synchronous turn
+so all three land in the image proxy's `%queue` bucket together, which is what
+lets them share the download. `COVER_CONCURRENCY` splits into `_IDLE` (8) and
+`_BROWSING` (2), read fresh **per pump** via `_coverLimit()` so a browse arriving
+mid-drain takes effect at the next slot without cancelling anything already in
+flight — cancelling would waste a download nearly always most of the way through
+a ~2s wait. `_noteBrowse()` marks the ten browse entry points (the nine subs plus
+the All Releases week drill, a coderef rather than a sub). A restart timer covers
+the one case the callbacks cannot — the pass is narrow, the user stops, and the
+requests already out are slow — guarded by an armed-flag, since every landing
+re-enters the pump and an unguarded arm schedules one timer per request.
+
+**AND A STALL NOBODY HAD COUNTED, found while moving the marker check for the
+page-aligned warm's sake.** The queue builder did one `$cache->get` per PATH
+inside a feed's `onDone` — up to `COVER_WARM_MAX` x 3 = **6,000 synchronous
+SQLite reads in one turn of the event loop**, on the loop that streams audio and
+serves the image proxy. Same hazard class as the 16,000-statement ingest
+(0.9.176), unnoticed for eight builds because nothing had counted it. The check
+now lives in `_coverLaunch` — one read per launch, spread across the pump — and
+the builder is asserted to read the store **zero** times.
+
+**THE WARM ALSO NOW FILTERS BEFORE IT FETCHES.** The four `warmFeeds` call sites
+were handing `_warmCovers` the RAW feed while every render path applies
+`_filterSection` first, so blocked artists, unticked release types and hidden
+Various Artists rows were warmed and then never drawn — eating slots out of
+`COVER_WARM_MAX` for rows nobody sees. `_warmGenres` has filtered since it was
+written; this is the same rule arriving at the covers. MuSpy filters through For
+You, whose feed its rows are merged into. **Deliberately NOT applied: the release
+FAMILY lens** (`_viewFilter`, Albums vs Singles & EPs) — it is a toggle the user
+flips from the list itself, so warming only the active side would make the other
+side cold on every flip. One stated consequence: a newly-ticked type stays cold
+until the next warm, which the page-aligned warm (stage 3, not yet built) removes
+entirely.
+
+**DROPPED FROM THE PLAN, not built: stage 1.5** (warming follower/playlist/
+trending-track rows). It would have reversed a measured 0.9.191 finding — those
+rows resolve to streaming-CDN or local-library art, ~0.05s origin, "nothing there
+worth warming" — and the mechanism was actively wrong for the commonest row:
+`prefer_library` defaults ON, and a library row's `image` is a LOCAL
+`/music/<id>/cover.jpg` path, which `proxiedImage` (built for remote URLs) turns
+into the LMS **no-artwork placeholder**, not the cover. See
+[[lms-imageproxy-local-path]].
+
+**THREE TEST-HARNESS DEFECTS, ALL LATENT, ALL FIXED, RECORDED BECAUSE EACH IS A
+CLASS.** (1) The suites' shared `grab()` sub-extractor walked source one
+`substr($src,$i++,1)` at a time over a `:encoding(UTF-8)` — i.e. CHARACTER —
+string, so it was quadratic; at `Browse.pm`'s current size `t_coverwarm.pl` had
+grown to **101 seconds** and read as a hang. Replaced with a regex brace-scan in
+all eight suites carrying it; `t_coverwarm.pl` is now 0.13s.
+[[test-suite-grab-quadratic]]. (2) `ok()` DIED on a missing message — the guard
+added for the list-context trap — which took every LATER assertion in the file
+with it on a real failure; it now reports and continues. (3) An assertion
+autovivified the empty structure it was asserting about
+(`$PENDING[0]{when}` with nothing armed), which a snapshot-then-fire timer helper
+then called as a coderef. Plus one `perl -c`-invisible gap: adding `_noteBrowse()`
+inside a coderef a suite `eval`s into its own package broke that suite with
+`Undefined subroutine` — compilation was clean everywhere else.
+
+**TESTS.** `t_coverwarm.pl` 66 → **101** assertions. Section 1 inverted — it used
+to assert the ladder picked the right size per spec; it now asserts the table is
+gone and all three specs rewrite to ONE url, with the old ladder kept live as a
+pinned demonstration that it produces three. New sections for the marker-in-
+launcher property, the browsing brake, and the filtered warm. **Anti-tested
+seven ways:** ladder reinstated 9 red, marker check moved back into the builder 2
+red (reporting 90 store reads on a 30-release fixture — the defect at test
+scale), spec-major ordering restored 11 red, brake removed 8 red, one entry point
+left unwired 1 red, warm handed the raw feed 3 red, restart timer left unguarded
+2 red (arming six timers for one pass). All 26 suites exit 0;
+`matcher_sync_check.py` and `singleflight_sync_check.py` both exit 0.
+
+**NOT YET BUILT of stage 1 (the plan is otherwise done): nothing** — 1.1–1.4 are
+all in; only 1.5 was dropped. Stages 2–5 of the plan are designed and reviewed,
+not started.
+
 **0.9.195** — built 2026-09-02, **NOT installed and NOT tested**. **A FAILED SERVICE SEARCH IS NO
 LONGER CACHED AS "THIS TRACK IS ON NO SERVICE".** Diagnosed live the same day, from the field:
 an update cleared every cache, the warm fired `WARM_DELAY`(60s) later, and the first resolve of

@@ -1,7 +1,7 @@
 # LBF — the artwork pipeline and the event-loop stalls
 
-**Status: REVIEWED; STAGE 1 BUILT — §1.1–§1.4 (1.5 dropped). Not installed, not
-tested on the box.** Measured 2026-09-02 against
+**Status: REVIEWED; STAGE 1 BUILT AND VERSIONED as 0.9.196 — §1.1–§1.4 (1.5
+dropped). Not installed, not tested on the box.** Measured 2026-09-02 against
 `dev` at 0.9.195, live ListenBrainz feeds, and LMS `public/9.0` source. **Re-read
 against the source the same day (second pass); nine corrections are folded in below
 and each is marked `[review]`** — one of them (§1.2's marker check) is load-bearing
