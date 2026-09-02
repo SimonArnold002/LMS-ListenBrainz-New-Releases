@@ -128,8 +128,12 @@ binding constraint is **LMS's own HTTP handler slots** (warm requests go to
 After Stage 1 the remaining cost is pure Cover Art Archive origin latency, ~2s per
 cover, with no CDN in front of it. Every faster origin was checked and every one fails
 for a reason recorded at the end of this document. The honest levers that remain are
-two, and Stage 1 uses both: **fewer fetches** (3→1) and **more at once when nobody is
-looking** (8→16). Stage 3 adds the third that actually changes the felt experience —
+two, and Stage 1 uses both: **fewer fetches** (3→1) and **wider when nobody is
+looking, narrower when someone is** — **[as built]** this landed as 8 releases idle
+(unchanged from the old value, now correctly counted in releases rather than
+requests — the review found 16 was never actually measured, see §1.3's As-built
+note) / 2 while browsing (new), not the "8→16" this line originally proposed before
+review. Stage 3 adds the third lever that actually changes the felt experience —
 **fetch the page in front of the user first**.
 
 ---
@@ -586,11 +590,24 @@ There is **no** on-demand cover warm anywhere; all five `_warmCovers` call sites
 the nightly tick. Genres have `_kickGenreFill` (Browse.pm:8581); covers do not, and
 CLAUDE.md:717-719 already names this as the remaining piece.
 
-Add `_warmCoversNow($rels)` — same group-building loop as `_warmCovers`, factored into
-a shared `_coverGroupsFor($rels)` so the two cannot drift — which **unshifts** groups
-to the *front* of `@coverQueue`, with no cap and no `_stage` (it is not a warm stage).
-Rate-gate it like `_kickGenreFill` (`COVER_NOW_GAP => 5`) so paging cannot unshift
-faster than the pump drains.
+**[as built, §1.2] `_coverGroupsFor($rels, $cap)` already exists (Browse.pm:3523) —
+do not recreate it.** The plan below originally called for factoring it out as part
+of Stage 3; that factoring happened during Stage 1 instead (it was needed there
+too, to share the group-building loop cleanly).
+
+**Checked its cap semantics before writing this note, because guessing here would
+be exactly the trap this section warns about: `$cap => 0` returns ZERO groups, not
+"unbounded".** The loop is `last if $seen >= $cap` with `$seen` starting at 0, so a
+cap of 0 fires immediately. There is no "no cap" sentinel — the caller must pass a
+real ceiling. For Stage 3's use (a page's visible slice, tens of releases, never
+thousands) pass `scalar(@$rels)` — i.e. "don't cap below what I'm handing you" —
+never `0`.
+
+Add `_warmCoversNow($rels)` as a **thin wrapper**: call the existing
+`_coverGroupsFor($rels, scalar @$rels)` and **unshift** its groups to the *front*
+of `@coverQueue`, with no `_stage` (it is not a warm stage). Rate-gate it like
+`_kickGenreFill` (`COVER_NOW_GAP => 5`) so paging cannot unshift faster than the
+pump drains.
 
 **[review] "No `_stage`" is not the same as "invisible to the stage".** These requests
 still run through `_coverLaunch`, so they still increment `$coverFetched` — the counter
@@ -609,23 +626,21 @@ origin or a local file; neither wants page-aligned warming. **Stage 3 is release
 only** — which is also exactly the population `coverArtUrl` and the `lbf:imgwarm:`
 markers describe, so the stage keeps one mechanism instead of two.
 
-> **Hazard the Plan pass caught:** the build loop runs inside a *browse callback*, so
-> it must stay allocation-only. Do **not** do the `$cache->get` marker check inline —
-> that is ~90 store reads for a 30-row page, the exact class of blocking 0.9.130
-> removed. Unshift unchecked and let `_coverLaunch` skip an already-marked path.
+> **Hazard the Plan pass caught, and [RESOLVED] as of §1.2 (built, verified live
+> 2026-09-03) — kept here as history, not as an open blocker.** The original worry:
+> the build loop runs inside a *browse callback*, so it must stay allocation-only,
+> and doing the `$cache->get` marker check inline there would be ~90 store reads
+> for a 30-row page, the exact class of blocking 0.9.130 removed.
 >
-> **[review] THAT LAST SENTENCE WAS FALSE WHEN IT WAS WRITTEN, and it is this stage's
-> load-bearing assumption.** `_coverLaunch` (Browse.pm:3529-3577) never reads the
-> marker — it only *writes* it on success. The single marker read in the file is inside
-> `_warmCovers`' build loop (Browse.pm:3478), the very line this hazard forbids. Left
-> uncorrected, this stage re-queues ~30 rows × 3 specs of already-warm covers on every
-> page render: cheap per request, ~90 needless local requests per render, and it
-> removes the reason the markers exist.
->
-> **The fix belongs in §1.2, not here** — move the check into `_coverLaunch` and drop
-> it from the build loop, so the shared `_coverGroupsFor` can be shared without one
-> caller doing store reads on the render path. **Stage 3 must not ship before that
-> lands.** Then this sentence becomes true and the unshift is genuinely free.
+> That worry was well-founded but the plan's proposed fix ("unshift unchecked and
+> let `_coverLaunch` skip an already-marked path") was describing behaviour that
+> **did not exist yet** — `_coverLaunch` originally only wrote the marker, never
+> read it. §1.2 built exactly this: `_coverGroupsFor` (Browse.pm:3523) is
+> allocation-only (asserted by a passing test that counts store reads and requires
+> zero — `t_coverwarm.pl` §"THE MARKER CHECK LIVES IN THE LAUNCHER"), and
+> `_coverLaunch` (Browse.pm:3674) now does the `$cache->get` per path, one read per
+> launch, spread across the pump. **Stage 3 can unshift unchecked exactly as
+> originally described — that dependency is satisfied, nothing left to do here.**
 
 ---
 
@@ -707,11 +722,11 @@ assert `request(s) ≈ 3 × source url(s)`. Before the change the ratio is 1.0.
 queue — otherwise this ratio measures a mixture of warm, skip and page-aligned work.
 Report skips and page-aligned launches as their own numbers.
 
-**[review] The `front-1200` availability probe — do this BEFORE writing §1.1.** Take
-the newest ~50 `caa_release_mbid`s off the live feed and request all three sizes for
-each, comparing status codes. Expected: they agree. If 1200 is ever absent where 250 is
-present, §1.1 and §1.2 together turn one missing size into a row with no artwork at
-all, and both need rethinking before either is written.
+**[DONE — see §1.1's own "PROBED 2026-09-02" block for the result.** The
+`front-1200` availability probe ran before §1.1 was written, as this note originally
+instructed: 24 releases, all three sizes each, zero disagreements. Left here only so
+the reasoning for *why* the probe mattered stays next to the Verification list it
+came from — the actual result lives with §1.1, not here.]
 
 **Browse latency under load.** `time_total` on a jsonrpc top-level POST while a cover
 pass runs, before vs after 1.3. This is the number the user is actually feeling.
@@ -735,24 +750,37 @@ source-size choice needs re-measuring on this box.
 `/imageproxy/.*image_(\d+)x\1_f` and count by spec, to decide whether `_150x150_f`
 can leave `COVER_SPECS` (see 1.0).
 
-**Tests.** `tools/t_coverwarm.pl` — §1 asserts the size table verbatim (update it, and
-keep the anti-test that restoring `250 => '250'` fails); §2 asserts the warmed string
-is byte-identical to what the client requests — leave it as-is, since `coverArtUrl`
-does not change; §3 add blocked/unticked rows queueing nothing; §4 add "all three
-specs of a release appear in one in-flight set" and the browsing/idle limit
-transitions; new §5 for `_warmCoversNow` ordering and its gap gate.
-**[review] §4 also needs the marker skip asserted behaviourally** — a queued path whose
-`lbf:imgwarm:` marker is already set must issue **no** HTTP request and must free its
-slot, since that property moved out of the build loop and into `_coverLaunch` and
-nothing else in the suite covers it. Anti-test it by deleting the check: the assertion
-should go red on request *count*, which is the only thing that sees it. `bench_walk.pl` —
-which already caught the `_lbArtistGenres` per-row regression — gains a top-level walk
-and a Playlists walk, asserting zero payload deserialisations at the top level.
-`t_buildingstate.pl` gains `fetchForYou` — **[review] not `fetchAll`**, which keeps its
-0.9.184 behaviour, and the suite should pin that it has *no* building row so the
-narrowing cannot be quietly undone. `matcher_sync_check.py` must
-still exit 0. `perl -c` every touched module **and actually call** any renamed or moved
-sub in a test — `perl -c` passes on calls to subs that no longer exist.
+**Tests — [as built] `tools/t_coverwarm.pl` is 66 → 101 assertions, not the shape
+originally sketched here.** The plan below described "update §1's size-table
+assertion." What actually happened is bigger: the table itself is GONE (§1.1), so
+§1 was **inverted** — it now asserts the table is absent and that all three specs
+collapse to one url, with the old ladder kept as a live anti-test proving it would
+produce three. Actual current sections, for when Stage 2+ needs to add to this file
+(section 5 is already taken — a new stage's tests need §6, not §5):
+
+1. every spec resolves to ONE source url, so the proxy can coalesce (was: size table)
+2. a warmed path is byte-identical to what Material will request — unchanged, as
+   this note predicted (`coverArtUrl` didn't change)
+3. what gets queued, and what does not (blocked/unticked rows — built as planned)
+4. the runner (concurrency bound, ordering)
+4b. the browsing brake — §1.3, not in the original per-section list at all
+4c. the warm warms only what will be rendered — §1.4, likewise not in the original list
+5. people you follow / trending albums (pre-existing, not part of this rework)
+
+**The marker-skip behavioural assertion this section called for was built** —
+`t_coverwarm.pl` §"THE MARKER CHECK LIVES IN THE LAUNCHER" (see §1.2's As-built
+note) asserts zero store reads during allocation and that an already-warm path
+issues no request, anti-tested by moving the check back into the builder (2 red,
+reporting 90 reads on a 30-release fixture).
+
+**Not yet built, still accurate as forward-looking TODOs for Stage 2+:**
+`bench_walk.pl` gaining a top-level walk + Playlists walk; `t_buildingstate.pl`
+gaining `fetchForYou` (not `fetchAll` — narrowed per §2.2's review) with an
+assertion that `fetchAll` still has *no* building row. `matcher_sync_check.py`
+exits 0 today (checked as part of Stage 1's build) and must keep doing so.
+`perl -c` every touched module **and actually call** any renamed or moved sub in a
+test — `perl -c` passes on calls to subs that no longer exist. New §"5" for
+`_warmCoversNow` will collide with the existing §5 above — call it §6.
 
 **Build hygiene.** Dev build bumps the version in `install.xml` + `repo.xml`,
 recomputes the sha, and clears all plugin caches. Nothing here needs a
