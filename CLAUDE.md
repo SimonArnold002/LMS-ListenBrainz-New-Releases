@@ -1057,6 +1057,17 @@ forces an edit OUTSIDE `_streamingAdapters` — the `_rebuildStreamItems` chain,
 Spotify exemption, the Bandcamp auto-search opt-out and the four hand-maintained service lists —
 with the registry field that closes each — registry work, not adapter work.
 
+**THIS REPO HOLDS THE CANONICAL COPY, and the spec is carried VERBATIM in PFR and LL — so an
+edit here is only half the job.** Commit 41768bf edited it without re-copying, and the three
+repos sat drifted until it was noticed from the LL side on 2026-09-03, in a review round that
+was not looking for it. There is no check that catches this; `shasum -a1 */docs/streaming-
+adapter-spec.md` across the three repos is the whole test, and it belongs in the same session
+as the edit. The file is a STRAIGHT copy with no per-repo sections — section 9's per-plugin
+table covers all three plugins in every copy — so the three shasums must match exactly, and
+any difference is drift rather than a local customisation. What legitimately differs is each
+repo's own CLAUDE.md paragraph pointing AT the spec, which names that plugin's out-of-adapter
+sites (LL's ten, PFR's two); keep those in step with section 9 by hand.
+
 **0.9.186** — superseded by 0.9.187. **The seven findings of the 0.9.184 code review,
 all fixed** (`docs/code-review-0.9.184.md` — every one carries its mechanism, its guard
 and its anti-test), plus **the removal of the detail page's two remaining Last.fm calls**.
