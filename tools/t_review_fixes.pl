@@ -302,6 +302,13 @@ sub _warmArtistSorts { }
 sub _noteBrowse { }                          # 0.9.196: the week drill marks the browse
                                              # so the cover warm can yield to it
 sub _pageSection { (\$_[2], []) }            # no paging in this fixture
+# 0.9.197: the week drill orders through _frozenOrder, which replays the order a
+# rendered page is holding so an item_id can't resolve to a different album. This
+# fixture is about the empty-week guard, not the freeze, so it stands in as a plain
+# pass-through to the real sort — exactly what the coderef did before. The freeze
+# itself, and the fact that the week really does call it, are pinned by
+# tools/t_orderfreeze.pl (its section 8 is the call-site half).
+sub _frozenOrder { my (undef, \$mode, undef, \$set) = \@_; return _sortWithin(\$set, \$mode) }
 sub _buildReleaseItem { { name => \$_[0]{release_name}, type => 'link' } }
 sub _sectionHeader { { name => \$_[1], type => 'header' } }
 sub _viewToggle { ({ name => 'PLUGIN_LBF_SHOWING', type => 'link' }) }

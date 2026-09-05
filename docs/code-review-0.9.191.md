@@ -42,6 +42,14 @@ site; both are two frames down, in decisions made about `$bg`.
 - **`_coverTick` / `_coverLaunch`.** The `$coverPumping` re-entrancy guard and the once-only
   `$fired` guard are both correct, and `_coverMaybeEnd` cannot close the stage while requests
   are outstanding.
+  > **⚠️ DO NOT CITE THIS AS COVER FOR THE PUMP AS IT STANDS TODAY — the code it cleared is not
+  > the code that shipped.** This review predates 0.9.196, which made a queue element a GROUP and
+  > moved the marker check into `_coverLaunch`. That combination let a group complete WITHOUT
+  > occupying a slot, so the launch loop ran to the end of the queue in one turn — 900 store reads
+  > measured for 300 all-warm releases, brake on or off. Fixed in 0.9.197 by `COVER_SCAN_BUDGET`.
+  > The finding above is still accurate about RECURSION, which is what it was looking at; the
+  > defect was ITERATION, which no assertion here or in `t_coverwarm.pl` was counting.
+  > See [[skipped-work-escapes-a-concurrency-bound]].
 - **Completion-hook coverage.** Every terminal in `_resolveTrending` reaches `$finish`
   (including the overridden `getFollowing` `onError`); `_buildAlbumsData`'s wrapper covers all
   twelve early returns; `warmFeeds`' chain advances on both `onDone` and `onError` and is

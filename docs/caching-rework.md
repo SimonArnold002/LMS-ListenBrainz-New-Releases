@@ -398,6 +398,12 @@ capture; cannot be re-derived once events leave LB's 75-event window), and `lbf:
 - **`feed_member`** keyed `(feed, rel_id)` — deliberately *not* `(feed, position)` as PFR does.
   LBF's order is re-derived per walk by `_sortReleases`/`_sortWithin`, so position is provenance,
   not data; keying on it would rewrite every row whenever one insertion shifts the rest.
+  *(0.9.197: still true of the STORE, and now doubly so. An All Releases week's rendered order is
+  additionally frozen per browse session by `Browse::_frozenOrder`, because XMLBrowser addresses a
+  row by position and re-resolves that position against a freshly rebuilt feed — so a re-derived
+  order was opening the wrong album. That freeze is in-process view state and never reaches this
+  schema, which is exactly why keying `feed_member` on position would have been the wrong place to
+  solve it. See [[xmlbrowser-positional-crumb-order]].)*
 - **`feed_day`** has no PFR counterpart and is what makes a window change free: coverage becomes a
   query instead of something encoded in a cache key.
 - **`release_group` stays separate from `release`** — several releases share a group, so genres on

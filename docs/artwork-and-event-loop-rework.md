@@ -2,6 +2,15 @@
 
 **Status: REVIEWED; STAGE 1 BUILT, VERSIONED as 0.9.196, INSTALLED AND VERIFIED
 LIVE 2026-09-03 — §1.1–§1.4 (1.5 dropped). Session paused here; Stage 2 is next.**
+
+> **READ THE TWO ⚠️ BLOCKS BEFORE STARTING STAGE 2 OR 3 (added 2026-09-04).** §1.2's
+> "As built" note and Stage 3's `[RESOLVED]` hazard both asserted something that turned
+> out to be true only for COLD covers: the 6,000-reads-in-one-turn stall was not
+> removed by moving the marker check, it moved from the queue builder into the pump,
+> where nothing was counting. Measured at 900 reads for 300 all-warm releases, brake on
+> or off. Fixed in 0.9.197 (`COVER_SCAN_BUDGET`); **Stage 3's dependency was only half
+> satisfied until then**, and building it on the 0.9.196 pump would have put that stall
+> on the render path.
 See CLAUDE.md's 0.9.196 entry for the live verification numbers (the `warmstats`
 covers-stage ratio, `cachestats` marker count, timing, and the live Qobuz-handler
 comparison) — not repeated here to avoid two copies drifting. Measured 2026-09-02 against
@@ -12,9 +21,9 @@ for stage 3, and one stage was dropped outright.
 
 | stage | what | state |
 |---|---|---|
-| 1 | Artwork: one upstream fetch per cover | **BUILT + VERIFIED LIVE** — 1.1 (gate probed) + 1.2 + 1.3 + 1.4; 1.5 **dropped** |
+| 1 | Artwork: one upstream fetch per cover | **BUILT + VERIFIED LIVE** — 1.1 (gate probed) + 1.2 + 1.3 + 1.4; 1.5 **dropped**. ⚠️ **§1.2 CORRECTED in 0.9.197** — the stall it removed from the queue builder had moved into the pump; see its correction block |
 | 2 | Top level stops blocking; a building row for For You; Last.fm last in the warm | designed + reviewed; 2.1a memo key rebuilt, 2.2 **narrowed to For You** |
-| 3 | Page-aligned warming — the "gaps on re-entry" fix | designed; **its dependency (§1.2's marker move) is now BUILT** |
+| 3 | Page-aligned warming — the "gaps on re-entry" fix | designed; its dependency was **half** satisfied by §1.2's marker move and is **fully** satisfied only with 0.9.197's `COVER_SCAN_BUDGET` — read the reopened block before starting |
 | 4 | Remaining per-row SQLite work off the render path | designed + reviewed |
 | 5 | Last.fm album tier becomes a bulk read | designed + reviewed |
 
@@ -387,6 +396,48 @@ store reads during a build and requires **zero**. The anti-test that moves the c
 back into the builder reports **90 reads** for a 30-release fixture — the same defect
 at test scale.
 
+> ### ⚠️ CORRECTION (0.9.197) — THE STALL DID NOT GO AWAY, IT MOVED. And the assertion above is why nobody saw it.
+>
+> **Everything in the two paragraphs above is true and the fix was the right one; the
+> claim that follows from them is not.** "One read per launch, spread across the pump"
+> holds only while covers are **cold**. Warm is the steady state, and there the pump
+> does not spread anything:
+>
+> `_coverLaunch` on a group whose paths are already marked increments `$coverRunning`,
+> reads its three markers, decrements it again and returns — **nothing goes in flight**.
+> So `$coverRunning < $limit` is unchanged, and `_coverTick`'s `while` shifts the next
+> group, and the next, **to the end of the queue, in one turn**. Measured against the
+> shipped 0.9.196 using this repo's own harness:
+>
+> ```
+> all-warm, 300 releases : 900 store reads in ONE _coverTick, queue drained, 0 requests
+> brake ON (browsing)    : 900 — identical
+> mixed 200 warm + 2 cold: 243 reads in one turn to reach the 2 cold ones
+> ```
+>
+> Linear in queue length, so at `COVER_WARM_MAX` it is the same **6,000 reads in one
+> turn** this section says were removed. **The brake does not bound it** — a skipped
+> group never occupies a slot, so the concurrency width has nothing to bind on. That is
+> also why the budget below is a second bound and not a duplicate of `_coverLimit()`.
+>
+> **WHY THE SUITE STAYED GREEN, and it is the general lesson.** The counting assertion
+> is scoped to the **builder** ("the queue builder reads the store ZERO times"). Nothing
+> counted reads during a **tick**, so the defect migrated from the measured half of the
+> mechanism into the unmeasured half and the same 90 reads the anti-test reports for a
+> 30-release fixture are the 90 the pump now performs for it. *Moving work between two
+> places counts as new information about both — re-point the counter, or it measures the
+> place the work left.*
+>
+> **FIXED in 0.9.197 by `COVER_SCAN_BUDGET` (25 groups per turn)**: the launch loop
+> stops when the turn is full and re-enters through `_coverArmResume`, a zero-delay
+> timer — distinct from `_coverArmRestart`, which waits out the quiet window because the
+> brake is on, where this must fire on the very next pass because there is nothing to
+> wait for. New `t_coverwarm.pl` §4d asserts reads **per turn** (the assertion that was
+> missing), that the queue still drains across the resumes, that one pump arms one
+> timer, and that the bound holds with the brake on. Anti-tested three ways: budget
+> removed **7 red** (reporting 300 reads for a 75-cap turn — the defect at test scale),
+> never resuming **4 red**, resume flag unguarded **1 red**.
+
 **Suite: `t_coverwarm.pl` 66 → 78 assertions**, and section 1 inverted — it used to
 assert the ladder picked the right size per spec; it now asserts the table is gone and
 that all three specs rewrite to **one** url, with the old ladder kept live as a pinned
@@ -641,6 +692,32 @@ markers describe, so the stage keeps one mechanism instead of two.
 > `_coverLaunch` (Browse.pm:3674) now does the `$cache->get` per path, one read per
 > launch, spread across the pump. **Stage 3 can unshift unchecked exactly as
 > originally described — that dependency is satisfied, nothing left to do here.**
+>
+> ### ⚠️ REOPENED AND RE-CLOSED (0.9.197). The dependency was HALF satisfied, and stage 3 is the half it was missing.
+>
+> The marker move made the check exist. It did **not** make it cheap per turn — see
+> §1.2's correction block: an all-warm queue was scanned end-to-end in ONE turn, 900
+> reads measured for 300 releases, brake or no brake. **That is precisely the shape
+> stage 3 produces**, and it is worse here than in the nightly warm:
+>
+> * a page render unshifts ~30 unchecked groups and pumps, **on the render path**;
+> * on a warm page every one of those is a skip, so the pump scans them and, with
+>   slots still free, **carries on into the rest of the nightly queue**;
+> * `COVER_NOW_GAP` (5s) rate-gates the *unshifting*, not the *scan* — so it does not
+>   bound this at all;
+> * and it happens while the user is browsing, which is exactly when the brake is on
+>   and exactly when the brake turns out not to bind.
+>
+> Built on the 0.9.196 pump, stage 3 would have reintroduced the 0.9.130 class of
+> blocking on a page render — the thing this stage exists to remove — while looking
+> like it had a guard.
+>
+> **NOW GENUINELY SATISFIED, by `COVER_SCAN_BUDGET` in 0.9.197 rather than by the
+> marker move alone.** Stage 3 can unshift unchecked as described, because a turn is
+> now bounded whether the groups it dequeues go in flight or are skipped. **When
+> building it, add the counting assertion in the shape §4d uses — per TURN, not per
+> pass — for the page-aligned path too**; a per-pass count is identical either way,
+> which is how this survived the first time.
 
 ---
 

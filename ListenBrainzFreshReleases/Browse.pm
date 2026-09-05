@@ -59,6 +59,17 @@ sub _plResolvedKey {
 my %pageState;
 sub _cid { my ($client) = @_; return $client ? $client->id : '_none' }
 
+# The frozen row ORDER for an All Releases week: { <freeze-key> => { at, ids } }.
+# NOT per player — the order is derived from GLOBAL prefs (all_sort, all_view, the
+# genre selection), so two players looking at one week must agree about it, and the
+# key already carries every one of those inputs.
+#
+# In-process and not in `kv` for the same reason %pageState is: it is transient view
+# state, it must not outlive a restart, and — the part that matters here — a store
+# WRITE on this path would be synchronous SQLite inside the browse callback, which
+# is the one thing the render path is not allowed to do.
+my %ORDER_FREEZE;
+
 # Route warm/resolve lifecycle events through the plugin's dedicated debug log
 # (server.log at info always; lbf-debug.log too when the debug_log pref is on).
 sub _dbg { Plugins::ListenBrainzFreshReleases::Plugin::dbg(@_) }
@@ -421,6 +432,11 @@ use constant PAGE_MORE     => IMG_BASE . 'lbf-more_MTL_icon_unfold_more.png';
 use constant PAGE_LESS     => IMG_BASE . 'lbf-less_MTL_icon_unfold_less.png';
 # Rows shown per All Releases week before "Show more" (and the step it grows by).
 use constant PAGE_SIZE     => 30;
+# How long a week's frozen row ORDER survives with nobody looking at it. SLIDING:
+# every walk of the week re-stamps it, so a week you are browsing stays frozen for
+# as long as you stay on it, and one you walk away from re-derives this long after
+# your last look. See _frozenOrder for what the freeze is for.
+use constant ORDER_FREEZE_TTL => 900;   # 15 minutes
 # All Releases per-week covers — branded cover + a relative-week badge. Past weeks
 # (This Week / Last Week / Earlier) and, when "Include Upcoming" is on, future weeks
 # (Next Week / Next Fortnight / Further, on a "Future Releases" cover). Literal dates
@@ -959,6 +975,10 @@ sub _refreshItem {
             }
             else {
                 Plugins::ListenBrainzFreshReleases::API->clearFeedCache($w);
+                # The week lists' frozen row order is derived from this feed, so it
+                # goes with it — otherwise Refresh would fetch new releases and then
+                # replay them into the old order.
+                _dropOrderFreeze() if $w eq 'all';
             }
             $cb->({ items => [] });
         },
@@ -3452,6 +3472,23 @@ use constant COVER_CONCURRENCY_IDLE     => 8;    # releases: 24 local requests
 use constant COVER_CONCURRENCY_BROWSING => 2;    # releases: 6, while somebody is looking
 use constant COVER_BROWSE_QUIET         => 20;   # seconds of quiet before "idle" again
 
+# GROUPS a single pump may take off the queue, and it is the CONCURRENCY BOUND'S
+# BLIND SPOT, not a second copy of it.
+#
+# The two bounds stop different things. _coverLimit() bounds how many releases are
+# in flight — but a group whose paths are ALREADY WARM never goes in flight: it
+# reads its markers, hands its slot straight back, and the launch loop's condition
+# is unchanged, so the loop shifts the next group, and the next, to the END OF THE
+# QUEUE, in one turn of the event loop. At COVER_WARM_MAX that is 2,000 x 3 = 6,000
+# synchronous store reads with no yield — the exact stall 0.9.196 moved OUT of the
+# queue builder and, unnoticed, into the pump. Measured against the shipped code at
+# 900 reads for 300 all-warm releases, with the brake ON as well as off.
+#
+# AND WARM IS THE STEADY STATE, so this is the normal case, not the edge one: the
+# claim that the marker check is "one read per launch, spread across the pump" is
+# only true while covers are cold. This is what makes it true the rest of the time.
+use constant COVER_SCAN_BUDGET          => 25;   # groups dequeued per turn
+
 # How long we remember that a path is warm. Deliberately UNDER the proxy's own 30d
 # (Slim::Web::ImageProxy::Cache is constructed with 86400*30), so our marker can
 # never outlive the entry it describes. Note this is the PLUGIN's store, whose
@@ -3467,6 +3504,7 @@ my $coverRunning = 0;   # RELEASES currently in flight (0 .. _coverLimit())
 my $coverPumping = 0;   # re-entrancy guard on _coverTick's launch loop
 my $lastBrowseAt = 0;   # epoch of the last browse tap — see _noteBrowse
 my $coverRestartArmed = 0;   # one restart timer at a time, never a queue of them
+my $coverResumeArmed  = 0;   # ditto for the budget continuation — see _coverArmResume
 # Instrumentation only. The queue is SHARED by all three feeds, so the covers
 # stage spans from the first path any of them queues to the moment the queue
 # drains — it is deliberately one row rather than three, because that is how the
@@ -3615,6 +3653,32 @@ sub _coverArmRestart {
     return;
 }
 
+# The budget continuation: a zero-delay timer, so the pump gives the event loop a
+# turn and then picks the queue up where it left off.
+#
+# DISTINCT FROM _coverArmRestart, and not foldable into it. That one waits out the
+# QUIET WINDOW because the brake is on and nothing in flight will wake us in time;
+# this one must fire on the very next pass, because there is nothing to wait for —
+# the queue is full of work we simply refused to do in one turn. Folding them would
+# make a warm queue drain at one budget per COVER_BROWSE_QUIET.
+#
+# Own flag, for the reason the restart has one: every landing re-enters _coverTick,
+# so an unguarded arm schedules one timer per request.
+sub _coverArmResume {
+    return if $coverResumeArmed;
+    $coverResumeArmed = 1;
+    # time() (not +1): LMS fires a timer once now >= when, so this is "the next pass
+    # of the loop", which is exactly the yield being bought.
+    eval {
+        Slim::Utils::Timers::setTimer(undef, time(), sub {
+            $coverResumeArmed = 0;
+            _coverTick();
+        });
+        1;
+    } or $coverResumeArmed = 0;
+    return;
+}
+
 # Keep up to _coverLimit() RELEASES in flight, refilling a slot the moment one
 # lands. No inter-request timer: with a bounded number in flight the pacing IS
 # the bound, and a gap between launches only lengthened an already-serial pass.
@@ -3628,15 +3692,31 @@ sub _coverArmRestart {
 sub _coverTick {
     return if $coverPumping;
     $coverPumping = 1;
-    my $limit = _coverLimit();
+    my $limit  = _coverLimit();
+    # && SHORT-CIRCUITS, and that is what makes the test below exact: the budget is
+    # only decremented when the first two conditions passed, so it can go negative
+    # ONLY when it is the thing that stopped the loop. A budget spent on a turn that
+    # was going to stop anyway would arm a resume with nothing to resume.
+    my $budget = COVER_SCAN_BUDGET;
     _coverLaunch(shift @coverQueue)
-        while $coverRunning < $limit && @coverQueue;
+        while $coverRunning < $limit && @coverQueue && $budget-- > 0;
+    my $turnFull = ($budget < 0);
     $coverPumping = 0;
 
+    if ($turnFull && @coverQueue) {
+        # Stopped because the TURN was full, not the queue or the width: come back
+        # on the next pass of the event loop. This is the whole point of the budget
+        # — an all-warm queue drains at COVER_SCAN_BUDGET groups per turn instead of
+        # in one uninterrupted block. No restart timer here: the resume covers it,
+        # and arming both would put a redundant one on the quiet-window deadline.
+        _coverArmResume();
+    }
     # Stopped with work left AND the brake on: nothing in flight is guaranteed to
     # wake us inside the quiet window, so arm the restart. Stopped with work left
     # at the IDLE width needs no timer — the callbacks are the wake-up.
-    _coverArmRestart() if @coverQueue && $limit < COVER_CONCURRENCY_IDLE;
+    elsif (@coverQueue && $limit < COVER_CONCURRENCY_IDLE) {
+        _coverArmRestart();
+    }
 
     # Checked here rather than inside $done: with several in flight, "the queue is
     # empty" is not the same as "the pass is over", and ending the stage on the
@@ -4313,6 +4393,115 @@ sub _sortWithin {
     }
     # release_date, newest first
     return [ sort { ($b->{release_date} // '') cmp ($a->{release_date} // '') } @$releases ];
+}
+
+# A release's stable identity, for the frozen order below. The MBID when there is
+# one — on the All Releases path there always is (the 0.4.4 invariant: release_mbid
+# is present on every feed row) — else the same artist|album|date shape
+# _dedupeReleases keys on, which is what makes the set unique in the first place.
+sub _relKey {
+    my ($rel) = @_;
+    my $m = $rel->{release_mbid};
+    return "m:$m" if defined $m && length $m;
+    return 't:' . join('|',
+        _norm(_pickValue($rel, 'artist_credit_name', 'artist_name', 'artist')),
+        _norm(_pickValue($rel, 'release_name', 'title', 'name')),
+        ($rel->{release_date} // ''));
+}
+
+# ---------------------------------------------------------------------------
+# THE ROW ORDER OF AN ALREADY-RENDERED WEEK MUST NOT MOVE UNDER THE USER.
+#
+# XMLBrowser addresses a row by its POSITION (item_id '6.57'), and this plugin's
+# top level is coderef-driven, so no session cache is minted and the WHOLE tree is
+# rebuilt from topLevel down on every click ([[xmlbrowser-no-session-cache]]). So
+# '6.57' does not mean "the row you tapped" — it means "whatever is 57th when the
+# click is resolved". That is only safe while the list is deterministic, and this
+# one is not: BOTH of its ordering inputs are cache-only PEEKS that a background
+# warm is actively filling.
+#
+#   - Artist sort reads peekArtistSorts (_sortWithin). A name not yet warm falls
+#     back to the display credit, so "Panda Bear" sorts under P and then, once MB
+#     answers, under B — hundreds of places away.
+#   - The genre filter buckets on peeked genre facts, and _kickGenreFill tops them
+#     up in the background. A release with no genre yet is filtered OUT; when its
+#     genre lands it is filtered IN, shifting every row after it.
+#
+# Field symptom: search-in-list on an expanded week, tap the highlighted row, get a
+# completely different album. Search is the interaction slow enough for the warm to
+# land in between — Material's "search within list" is purely client-side (it scrolls
+# and highlights, it never re-fetches), so the client is holding an order the server
+# has already changed.
+#
+# THE FIX IS TO FREEZE THE ORDER, NOT TO CHASE THE WARMS. This replays the order
+# first computed for (week, view, sort, genre selection) over the CURRENT set:
+#   - a row that reordered is put back where the user last saw it;
+#   - a row that ARRIVED (the genre-warm case, which can only ever add to a filtered
+#     set) is APPENDED, so it cannot shift an index the client already holds;
+#   - a row that VANISHED is simply gone, and everything after it does shift by one.
+#     Not fixable without rendering a release the filter has excluded — and it is not
+#     the live case: a warm adds, it does not remove.
+# The ids are re-stamped every walk, so the frozen order is EXTENDED and never
+# reshuffled until it expires. Tapping Refresh drops it (see _refreshItem).
+# ---------------------------------------------------------------------------
+sub _frozenOrder {
+    my ($ws, $mode, $view, $set) = @_;
+
+    # The natural order, computed as before. This is what a first look freezes, and
+    # what a returning row is ranked against.
+    my $sorted = _sortWithin($set, $mode);
+    return $sorted unless defined $ws && length $ws;
+
+    # EVERY input that legitimately changes the order is in the key, so flipping the
+    # sort, the family lens or the genre picker re-derives by construction rather
+    # than needing the freeze dropped.
+    my $key = join('|', $ws, ($view // ''), ($mode // ''),
+                        join(',', sort @{ _selectedGenres('all') }));
+    my $now = time();
+
+    # Sweep on write: the key space is small (weeks x lenses x modes x genre sets)
+    # but it is not fixed, so an abandoned combination must not sit here for ever.
+    for my $k (keys %ORDER_FREEZE) {
+        delete $ORDER_FREEZE{$k} if ($now - $ORDER_FREEZE{$k}{at}) > ORDER_FREEZE_TTL;
+    }
+
+    my $ent = $ORDER_FREEZE{$key};
+    unless ($ent) {
+        $ORDER_FREEZE{$key} = { at => $now, ids => [ map { _relKey($_) } @$sorted ] };
+        return $sorted;
+    }
+
+    # Rank by the frozen position; anything unranked sorts to the floor and keeps its
+    # natural order among its peers. A Schwartzian transform for the same reason
+    # _sortWithin uses one — the comparator runs O(n log n) times and _relKey must be
+    # computed exactly once per row. $i is the tie-break, so two rows that somehow
+    # share an id stay in a defined order rather than swapping between walks.
+    my %rank;
+    my $r = 0;
+    $rank{$_} = $r++ for @{ $ent->{ids} };
+    my $floor = scalar @{ $ent->{ids} };
+
+    my $i = 0;
+    my @out = map  { $_->[2] }
+              sort { $a->[0] <=> $b->[0] || $a->[1] <=> $b->[1] }
+              map  { my $k = _relKey($_);
+                     [ (exists $rank{$k} ? $rank{$k} : $floor), $i++, $_ ] } @$sorted;
+
+    # SLIDING, and re-stamped with the order actually served: a week being browsed
+    # stays put, arrivals keep the position they were appended at, and departures
+    # leave for good.
+    $ORDER_FREEZE{$key} = { at => $now, ids => [ map { _relKey($_) } @out ] };
+    return \@out;
+}
+
+# Tapping Refresh is the user asking for the feed as it is NOW, so the frozen order
+# goes with the feed cache. Everything else that changes the order re-keys instead.
+# NB written over two lines deliberately: the test suites lift a sub with
+# /\nsub NAME \{.*?\n\}\n/, and a one-line body has no closing brace of its own to
+# stop at, so it silently swallows whatever sub comes next.
+sub _dropOrderFreeze {
+    %ORDER_FREEZE = ();
+    return;
 }
 
 # A cycling "Sorted by <mode> (tap to change)" row for the Options section. $pref
@@ -5146,7 +5335,11 @@ sub _buildAllLanding {
                 # slices and counts, so it behaves identically given releases.
                 my $render = sub {
                     my ($set) = @_;
-                    my ($visRel, $pgRows) = _pageSection($c, $key, _sortWithin($set, $mode));
+                    # _frozenOrder, not _sortWithin: the position IS the address a tap
+                    # sends back, so the order a rendered page is holding must survive
+                    # until that tap resolves. See the block comment on _frozenOrder.
+                    my ($visRel, $pgRows) = _pageSection($c, $key,
+                                                _frozenOrder($ws, $mode, $view, $set));
                     # Cache ONLY (peek): a week draws immediately with the genres
                     # already known and tops the rest up in the background, instead of
                     # holding the page open on a metadata request.

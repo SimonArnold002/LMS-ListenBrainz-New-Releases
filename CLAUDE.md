@@ -78,6 +78,18 @@ with its mechanism, its guard and its test. Check there before reporting: the
 0.9.174, 0.9.184, 0.9.191 and 0.9.192 findings are all fixed and verified. Do not
 re-derive them.
 
+**CLOSED IN 0.9.197 — two field bugs, both fixed, both pinned. Do not re-report:**
+- **An All Releases week's row order moving between render and click** (the
+  wrong-row-on-tap report). Fixed by `_frozenOrder`; `tools/t_orderfreeze.pl`,
+  23 assertions, five anti-tests. **The residual is STATED, not missed:** a row that
+  LEAVES the set still shifts the rows after it. Not fixable without rendering a
+  release the filter excluded, and not the live case — a warm ADDS to a filtered set,
+  it does not remove. Do not re-report that as an incomplete fix.
+- **`_coverTick` scanning an all-warm queue end-to-end in one turn.** Fixed by
+  `COVER_SCAN_BUDGET`; `t_coverwarm.pl` §4d, three anti-tests. **This is the 0.9.196
+  claim corrected, not a new mechanism** — see the ⚠️ blocks in
+  `docs/artwork-and-event-loop-rework.md`.
+
 **A closed finding is not a closed MECHANISM.** Both 0.9.192 findings were
 second-order consequences of the 0.9.191 fixes — not regressions of old code, and
 not re-reports either. A fix that changes WHO participates in a mechanism (which
@@ -204,6 +216,143 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
+
+**0.9.197** — built 2026-09-05, **NOT installed and NOT tested.** Two field bugs, both
+diagnosed from the running server and both fixed with the assertion that was missing.
+**No schema change and no cache bump** — nothing here changes the SHAPE of a stored
+value; the version bump alone triggers `_buildChanged`, which clears the derived tier
+([[dev-builds-clear-caches]]).
+
+**0.9.197 — "SEARCH IN LIST ON AN EXPANDED WEEK OPENS COMPLETELY THE WRONG ROW."**
+
+**Material's "Search within list" is NOT the culprit and does not filter anything.**
+`lms-search-list` (read from the shipped bundle) scans `view.items`, emits
+`scrollTo(index)` and sets a highlight class; the click still passes the item OBJECT
+and drills by that item's own `item_id`. It never re-fetches. So the client is holding
+an order the SERVER has already changed — and search is simply the interaction slow
+enough (type, 500ms debounce, arrow, tap) for that change to land in between.
+
+**THE CAUSE IS THAT A WEEK'S ROW ORDER IS NOT DETERMINISTIC, and it cannot be.**
+`item_id` is a positional crumb (`6.57`), and because the top level is coderef-driven
+no session cache is minted, so the whole tree is rebuilt from `topLevel` down on every
+click ([[xmlbrowser-no-session-cache]]). `6.57` therefore means *"whatever is 57th when
+the click is resolved"*. That is only safe while the list is stable, and **both of its
+ordering inputs are cache-only PEEKS that a background warm is actively filling**:
+- **artist sort** — `_sortWithin` reads `peekArtistSorts`. An unwarmed name falls back
+  to the display credit, so *Panda Bear* sorts under P and, once MB answers, under B.
+- **the genre filter** — `_genreSelectFilter` buckets on peeked genre facts while
+  `_kickGenreFill` tops them up. A release with no genre yet is filtered OUT and
+  filtered back IN when its genre lands, shifting every row after it.
+
+Both were live on the test server at diagnosis (`Sorted by Artist`, `Genres (7)`), and
+the log shows the mechanism plainly: an expanded week walk at 21:18:59 logged
+`genres: background top-up for 313 release(s)`, and ten seconds later
+`warm: last.fm filled 24 artist(s)`.
+
+**FIXED BY FREEZING THE ORDER, NOT BY CHASING THE WARMS** (`_frozenOrder`, keyed on
+week + family lens + sort mode + genre selection, sliding `ORDER_FREEZE_TTL` 15
+minutes). It replays the order a rendered page is holding over the CURRENT set:
+- a row that reordered goes back where the user last saw it;
+- **a row that ARRIVED is APPENDED**, so it cannot shift an index the client already
+  holds — and arriving is the only thing a warm does to a filtered set;
+- a row that VANISHED is gone and everything after it shifts by one. **Stated, not
+  missed**: the alternative is rendering a release the filter has excluded.
+The ids are re-stamped every walk, so the order is EXTENDED and never reshuffled.
+
+**IN-PROCESS, NOT `kv`, AND THAT IS THE ARTWORK REWORK'S RULE ARRIVING HERE.** It is
+transient view state (the `%pageState` class) and must not outlive a restart — but the
+deciding reason is that a store WRITE here would be synchronous SQLite inside the
+browse callback, which is exactly what stages 1 and 4 of the rework exist to remove.
+
+**SLIDING, deliberately.** A week you keep looking at stays frozen; one you walk away
+from re-derives 15 minutes later. A fixed expiry would drop the freeze mid-session,
+which is the one moment it is for.
+
+**WHAT DROPS IT AND WHAT DOES NOT.** Refresh drops it (`_dropOrderFreeze`) — the user
+asking for the feed as it is now, and without that Refresh would fetch new releases
+and replay them into the old order. The sort toggle, the family lens and the genre
+picker need nothing: they are IN the key, so they re-derive by construction.
+
+**Also fixes "the ordering moves when you collapse down again"** — same defect, seen
+from the other end. Expand/collapse was never a wrong-row risk (`nextWindow=>'refresh'`
+re-fetches, so client and server re-sync) but it did visibly reshuffle; with the freeze
+a collapse is a stable prefix of the same order.
+
+**TESTS.** New `tools/t_orderfreeze.pl`, **23 assertions**, and the shape is the point:
+every section walks TWICE with the world changed in between, because the sort was never
+*wrong* — it was merely *different on the second walk*, which a sorting test cannot see.
+**Anti-tested five ways** via `LBF_BROWSE=`: freeze neutered **5 red**, not sliding
+**1**, Refresh not dropping **1**, call site reverted to `_sortWithin` **2**, arrivals
+sorted home instead of appended **3**.
+**A FIXTURE BUG WAS CAUGHT BY ITS OWN CONTROL, and it is worth keeping.** The first cast
+(Acua / Panda Bear / Zakè) put the MB sort-name back in the same slot, so the natural
+order did not move and every assertion would have passed against a freeze that did
+nothing. The control assertion — *"the NATURAL order really did move, else this proves
+nothing"* — is what failed. **Any test of "X did not change" needs a live assertion that
+X would otherwise have changed.**
+
+**0.9.197 — AND THE STALL 0.9.196 SAID IT HAD REMOVED HAD ONLY MOVED.**
+
+Raised while answering whether the same refactor explained a second report (Material
+sitting on its three dots when expanding/collapsing a view). **That report is NOT
+confirmed as this** — on a fully-warm box nothing reproduces (browse 0.08s idle, 0.16s
+under a 24-connection cover burst, no cover pass in the last 8,000 log lines) — but the
+defect underneath is real, measured, and new in 0.9.196.
+
+`_coverLaunch` on an already-warm group increments `$coverRunning`, reads its three
+markers, decrements it and returns — **nothing goes in flight**. So `$coverRunning <
+$limit` is unchanged and `_coverTick`'s `while` shifts the next group, and the next, to
+the end of the queue, in ONE turn. Measured against the shipped code with this repo's
+own harness: **900 store reads in one `_coverTick` for 300 all-warm releases**, and
+**identical with the brake ON** — a skipped group never occupies a slot, so the
+concurrency width has nothing to bind on. Linear in queue length, so at
+`COVER_WARM_MAX` it is the same **6,000 reads in one turn** §1.2 says were removed. And
+**warm is the steady state**, so that was the normal case, not the edge one.
+
+**WHY THE SUITE STAYED GREEN — the lesson is bigger than the bug.** 0.9.196 pinned the
+fix with a counter scoped to the **queue builder** ("reads the store ZERO times").
+Nothing counted reads during a **TICK**. The work moved from the measured half of the
+mechanism into the unmeasured half, and the 90 reads its anti-test reports for a
+30-release fixture are the 90 the pump now performs for it. **Moving work between two
+places is new information about BOTH — re-point the counter, or it measures the place
+the work left.**
+
+**FIXED by `COVER_SCAN_BUDGET` (25 groups per turn):** the launch loop stops when the
+turn is full and re-enters via `_coverArmResume`, a zero-delay timer. **Not foldable
+into `_coverArmRestart`** — that one waits out `COVER_BROWSE_QUIET` because the brake is
+on and nothing in flight will wake us in time; this must fire on the very next pass,
+because there is nothing to wait for. Folding them would drain a warm queue at one
+budget per 20 seconds. Own armed-flag, for the reason the restart has one.
+**`&&` short-circuits, and that is what makes the stop-reason test exact:** the budget
+is decremented only when the first two conditions passed, so it can go negative ONLY
+when it is the thing that stopped the loop — a resume is never armed for a turn that
+was going to stop anyway.
+
+**STAGE 3 OF THE ARTWORK PLAN WAS THE REAL EXPOSURE, and its `[RESOLVED]` block is
+reopened and re-closed in the doc.** Page-aligned warming unshifts ~30 unchecked groups
+and pumps **on every page render**; on a warm page every one is a skip, so the pump
+scans them and carries on into the nightly queue, with `COVER_NOW_GAP` gating the
+unshift but not the scan — on the render path, while the user is browsing, which is
+exactly when the brake turns out not to bind. Built on the 0.9.196 pump it would have
+reintroduced the 0.9.130 class of blocking while looking like it had a guard.
+
+**TESTS.** `t_coverwarm.pl` 101 → **111**, new §4d asserting reads **per TURN** (the
+assertion that was missing), that an all-warm queue is not drained in one turn, that it
+still drains across the resumes, that five pumps arm ONE timer, that a short queue arms
+none, and that the bound holds with the brake ON. One existing assertion changed
+honestly: "the pass still drains completely" now fires the resume timers first, because
+a budget that stopped and never came back would stall the queue for ever — worse than
+the stall being fixed. **Anti-tested three ways:** budget removed **7 red** (reporting
+300 reads against a 75 cap — the defect at test scale), never resuming **4 red**, resume
+flag unguarded **1 red**.
+**`t_review_fixes.pl` needed a stub, and it is the `perl -c`-invisible class again** —
+it evals the week coderef into its own package, so adding a `_frozenOrder` call inside
+that coderef killed it with `Undefined subroutine`, exit 255 and **no FAIL line**, which
+reads like a pass. Exactly the trap 0.9.196 recorded for `_noteBrowse`. **After adding a
+call from inside code a suite lifts, run EVERY suite and check the EXIT CODE, not the
+last line.**
+
+All 26 suites exit 0; `matcher_sync_check.py` and `singleflight_sync_check.py` both 0.
 
 **0.9.196** — built 2026-09-02, **INSTALLED AND VERIFIED LIVE 2026-09-03.** **STAGE 1
 of the artwork/event-loop rework** (`docs/artwork-and-event-loop-rework.md`): the

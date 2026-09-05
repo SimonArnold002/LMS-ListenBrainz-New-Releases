@@ -405,7 +405,8 @@ my $LOG   = T::Log->new;
 # would drift the moment the shipped list changed, and every path assertion
 # below would then be checking a spec nothing asks for.
 for my $c (qw(COVER_SPECS COVER_WARM_MAX COVER_WARM_TTL
-              COVER_CONCURRENCY_IDLE COVER_CONCURRENCY_BROWSING COVER_BROWSE_QUIET)) {
+              COVER_CONCURRENCY_IDLE COVER_CONCURRENCY_BROWSING COVER_BROWSE_QUIET
+              COVER_SCAN_BUDGET)) {
     my ($line) = $bsrc =~ /^(use constant \Q$c\E\s*=>.*?;)$/ms
         or die "no constant $c in Browse.pm\n";
     eval "package T; $line 1;" or die "eval $c: $@";
@@ -418,12 +419,12 @@ for my $c (qw(COVER_SPECS COVER_WARM_MAX COVER_WARM_TTL
 { package T; sub _stage { } }
 
 for my $name (qw(_warmCovers _coverGroupsFor _coverTick _coverMaybeEnd _coverLaunch
-                 _noteBrowse _coverLimit _coverArmRestart)) {
+                 _noteBrowse _coverLimit _coverArmRestart _coverArmResume)) {
     my $body = grab($bsrc, $name);
     eval "package T; use Time::HiRes (); our (\$cache, \$prefs, \$log); "
        . "our (\@coverQueue, \%coverQueued, \$coverRunning, \$coverPumping, \$coverStageOpen, "
        . "\$coverFetched, \$coverSkipped, \$coverGroups, \$coverPeak, "
-       . "\$lastBrowseAt, \$coverRestartArmed); $body 1;"
+       . "\$lastBrowseAt, \$coverRestartArmed, \$coverResumeArmed); $body 1;"
         or die "eval $name: $@";
 }
 
@@ -441,6 +442,7 @@ sub reset_world {
     $T::coverStageOpen = 0;
     $T::lastBrowseAt = 0;          # nobody browsing: every section below runs at the IDLE width
     $T::coverRestartArmed = 0;
+    $T::coverResumeArmed  = 0;
     @HTTP_GETS = (); @HTTP_PENDING = (); $HTTP_MODE = 'ok';
     @Slim::Utils::Timers::PENDING = ();
     $CACHE = T::Cache->new; $LOG = T::Log->new;
@@ -694,8 +696,14 @@ ok($mttl && $mttl < 30 * 86400,
     T::_warmCovers([ map { rel() } 1 .. 60 ], 'test');   # 180 requests
     ok(!scalar(grep { /Deep recursion/i } @warn),
        'a run of launch failures does not recurse the pump (the re-entrancy guard)');
+    # 0.9.197: the drain now SPANS TURNS — 60 releases against COVER_SCAN_BUDGET is
+    # more than one turn's worth, and stopping is the point. So the pass completes
+    # across the resume timers rather than in one block, and firing them is part of
+    # the assertion: a budget that stopped and never came back would stall the queue
+    # for ever, which is worse than the stall it exists to fix.
+    Slim::Utils::Timers::fire_all() for 1 .. 20;
     ok($T::coverRunning == 0 && !@T::coverQueue,
-       '...and the pass still drains completely');
+       '...and the pass still drains completely, across the budget\'s resume timers');
     reset_world();
 }
 
@@ -921,6 +929,120 @@ section('4b. the browsing brake — one compromise number becomes two');
     # warm runs.
     ok(scalar(grab($bsrc, '_buildAllLanding') =~ /_noteBrowse\(\)/),
        '...including the All Releases week drill, which is a coderef not a sub');
+}
+
+# ==========================================================================
+section('4d. the pump yields — store reads per TURN, not per pass');
+# ==========================================================================
+# THE ASSERTION 0.9.196 WAS MISSING, and the reason it was missing is worth as much
+# as the fix. That build moved the marker check out of the queue builder to stop
+# 6,000 synchronous store reads landing in one turn of the event loop, and pinned it
+# with a counter — but the counter was scoped to the BUILDER (section above: "the
+# queue builder reads the store ZERO times"). Nothing counted reads during a TICK.
+#
+# So the stall did not go away, it MOVED. A group whose paths are already warm never
+# goes in flight: _coverLaunch reads its markers, decrements the counter it just
+# incremented and returns, leaving `$coverRunning < $limit` unchanged — so the
+# launch loop shifts the next group, and the next, to the end of the queue, in one
+# turn. Measured against the shipped 0.9.196: 900 reads for 300 all-warm releases.
+# And WARM IS THE STEADY STATE, so that was the normal case.
+#
+# The property is therefore not "how many reads" but "how many reads BEFORE THE LOOP
+# GETS A TURN". Only a per-tick count sees it; a per-pass count is identical either
+# way, which is exactly how this survived.
+{
+    reset_world(); $n = 0;
+    my $N = T::COVER_SCAN_BUDGET() * 4;          # comfortably more than one turn
+    my @feed = map { rel() } 1 .. $N;
+    # Every spec of every release already warm — the steady state after a warm pass.
+    for my $r (@feed) {
+        my $src  = Plugins::ListenBrainzFreshReleases::API->coverArtUrl($r);
+        my $base = Slim::Web::ImageProxy::proxiedImage($src);
+        for my $spec (@{ +T::COVER_SPECS() }) {
+            (my $path = $base) =~ s/(\.\w+)$/$spec$1/;
+            $CACHE->set($IMGWARM . $path, 1, 100);
+        }
+    }
+    my ($groups) = T::_coverGroupsFor(\@feed, T::COVER_WARM_MAX());
+    push @T::coverQueue, @$groups;
+
+    $CACHE->{gets} = 0;
+    T::_coverTick();
+    my $first = $CACHE->{gets};
+    ok($first <= T::COVER_SCAN_BUDGET() * scalar(@{ +T::COVER_SPECS() }),
+       "one turn reads at most the budget's worth ($first, cap "
+       . (T::COVER_SCAN_BUDGET() * scalar(@{ +T::COVER_SPECS() })) . ')');
+    ok(scalar(@T::coverQueue) > 0,
+       '...so an all-warm queue is NOT drained in a single turn');
+    ok($T::coverResumeArmed, '...and a resume is armed to carry on');
+
+    # It really does carry on — a budget that stopped and never came back would
+    # stall the queue for ever, which is worse than the stall being fixed.
+    my ($turns, $worst) = (1, $first);
+    while (@T::coverQueue && $turns < 200) {
+        $CACHE->{gets} = 0;
+        Slim::Utils::Timers::fire_all();
+        $turns++;
+        $worst = $CACHE->{gets} if $CACHE->{gets} > $worst;
+    }
+    ok(!scalar(@T::coverQueue), 'the queue still drains completely, over several turns');
+    ok($turns > 1, "...and it took more than one ($turns)");
+    ok($worst <= T::COVER_SCAN_BUDGET() * scalar(@{ +T::COVER_SPECS() }),
+       "no single turn exceeds the budget across the whole drain (worst $worst)");
+    is_count(scalar(@HTTP_GETS), 0, '...and nothing was fetched — every group was warm');
+    reset_world();
+}
+{
+    # THE BRAKE DOES NOT COVER THIS, which is why the budget is a second bound and
+    # not a duplicate of _coverLimit(). A skipped group never occupies a slot, so
+    # the concurrency width has nothing to bind on: pre-fix this read all 900 with
+    # the brake ON.
+    reset_world(); $n = 0;
+    my @feed = map { rel() } 1 .. (T::COVER_SCAN_BUDGET() * 4);
+    for my $r (@feed) {
+        my $src  = Plugins::ListenBrainzFreshReleases::API->coverArtUrl($r);
+        my $base = Slim::Web::ImageProxy::proxiedImage($src);
+        for my $spec (@{ +T::COVER_SPECS() }) {
+            (my $path = $base) =~ s/(\.\w+)$/$spec$1/;
+            $CACHE->set($IMGWARM . $path, 1, 100);
+        }
+    }
+    my ($groups) = T::_coverGroupsFor(\@feed, T::COVER_WARM_MAX());
+    push @T::coverQueue, @$groups;
+    $T::lastBrowseAt = time();                    # somebody is browsing: brake ON
+    $CACHE->{gets} = 0;
+    T::_coverTick();
+    ok($CACHE->{gets} <= T::COVER_SCAN_BUDGET() * scalar(@{ +T::COVER_SPECS() }),
+       'the budget bounds the turn with the brake ON too (' . $CACHE->{gets} . ')');
+    reset_world();
+}
+{
+    # ONE resume timer, not one per skipped group — the trap the restart timer
+    # already carries a flag for.
+    reset_world(); $n = 0;
+    my @feed = map { rel() } 1 .. (T::COVER_SCAN_BUDGET() * 3);
+    for my $r (@feed) {
+        my $src  = Plugins::ListenBrainzFreshReleases::API->coverArtUrl($r);
+        my $base = Slim::Web::ImageProxy::proxiedImage($src);
+        for my $spec (@{ +T::COVER_SPECS() }) {
+            (my $path = $base) =~ s/(\.\w+)$/$spec$1/;
+            $CACHE->set($IMGWARM . $path, 1, 100);
+        }
+    }
+    my ($groups) = T::_coverGroupsFor(\@feed, T::COVER_WARM_MAX());
+    push @T::coverQueue, @$groups;
+    T::_coverTick() for 1 .. 5;
+    is_count(scalar(@Slim::Utils::Timers::PENDING), 1,
+             'five pumps arm ONE resume timer, not five');
+    reset_world();
+}
+{
+    # A queue SHORTER than the budget must not arm anything: the resume exists for
+    # work left behind, and arming with an empty queue would be a wake-up for nobody.
+    reset_world(); $n = 0;
+    T::_warmCovers([ map { rel() } 1 .. 2 ], 'test');
+    ok(!$T::coverResumeArmed, 'a queue that fits in one turn arms no resume');
+    reset_world();
 }
 
 # ==========================================================================
