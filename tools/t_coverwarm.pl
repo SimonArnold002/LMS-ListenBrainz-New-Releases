@@ -416,13 +416,31 @@ for my $c (qw(COVER_SPECS COVER_WARM_MAX COVER_WARM_TTL
 # the covers stage, so the harness has to answer the call, but nothing here
 # asserts on it (t_warmstats.pl owns that). A no-op stub keeps this suite
 # measuring what it is actually for.
-{ package T; sub _stage { } }
+{ package T; sub _stage { } sub _cid { "test" } sub _queueReleaseDetails {}
 
-for my $name (qw(_warmCovers _coverGroupsFor _coverTick _coverMaybeEnd _coverLaunch
+  # The weekly level's row builders. They decide what a row LOOKS like, and this
+  # suite is about which release a row HOLDS, so they are stubbed — but
+  # _sortWithin is stubbed as a REORDERER on purpose. It is one of the two things
+  # that move a release away from its position in the input list (the week divider
+  # is the other), so a stub that returned the list untouched would let the focus
+  # map pass while ignoring the sort entirely. 'artist' reverses; the default
+  # date mode is the identity, which is its real contract on an already-sorted list.
+  use constant ICON => 'lbf-icon.png';   # the divider's image; not asserted here
+  sub _headerType { 'header-basic' }
+  sub _weekLabel  { "W/C $_[1]" }
+  sub _buildReleaseItem { { name => $_[0]{caa_release_mbid} } }
+  sub _sortWithin {
+      my ($rels, $mode) = @_;
+      return [ reverse @$rels ] if ($mode // '') eq 'artist';
+      return $rels;
+  }
+}
+
+for my $name (qw(_coverWeekOrder _weekStart _orderCoverQueue _focusReleaseCovers _renderSlots _weekGroups _buildWeekly _warmCovers _coverGroupsFor _coverTick _coverMaybeEnd _coverLaunch
                  _noteBrowse _coverLimit _coverArmRestart _coverArmResume)) {
     my $body = grab($bsrc, $name);
-    eval "package T; use Time::HiRes (); our (\$cache, \$prefs, \$log); "
-       . "our (\@coverQueue, \%coverQueued, \$coverRunning, \$coverPumping, \$coverStageOpen, "
+    eval "package T; use Time::HiRes (); use Time::Local (); our (\$cache, \$prefs, \$log); "
+       . "our (\@coverQueue, \%coverQueued, \%_WEEK_START, \%coverRank, \%coverFocus, \%coverReveal, \$coverSequence, \$coverRunning, \$coverPumping, \$coverStageOpen, "
        . "\$coverFetched, \$coverSkipped, \$coverGroups, \$coverPeak, "
        . "\$lastBrowseAt, \$coverRestartArmed, \$coverResumeArmed); $body 1;"
         or die "eval $name: $@";
@@ -433,6 +451,7 @@ sub reset_world {
     no warnings 'once';
     @T::coverQueue  = ();
     %T::coverQueued = ();
+    %T::coverRank = (); %T::coverFocus = (); %T::coverReveal = (); $T::coverSequence = 0;
     $T::coverRunning = 0;
     $T::coverPumping = 0;
     $T::coverFetched = 0;
@@ -927,7 +946,7 @@ section('4b. the browsing brake — one compromise number becomes two');
     # The All Releases week drill is a coderef, not a sub, so it needs naming
     # separately — and it is the level a user is most often sitting on while the
     # warm runs.
-    ok(scalar(grab($bsrc, '_buildAllLanding') =~ /_noteBrowse\(\)/),
+    ok(scalar(grab($bsrc, '_buildAllWeekItems') =~ /_noteBrowse\(\)/),
        '...including the All Releases week drill, which is a coderef not a sub');
 }
 
@@ -1185,6 +1204,127 @@ section('5. people you follow — trending albums warm their covers too');
     my ($builder) = $bsrc =~ /^sub _buildAlbumsData \{(.*?)^\}/ms;
     ok(scalar(defined $builder && $builder =~ /\$onDone->\(\$data\);\s*return/),
        '...and _buildAlbumsData answers its callback on a CACHE HIT, so a warm still runs');
+}
+
+section('adaptive view priority');
+reset_world();
+{
+    local $T::coverPumping = 1; # inspect pending work without launching it
+    my $old = rel(mbid => 'older', date => '2026-08-10');
+    my $other = rel(mbid => 'other', date => '2026-08-17');
+    my $personal = rel(mbid => 'personal', date => '2026-08-01');
+    T::_warmCovers([$old, $other], 'all releases');
+    T::_warmCovers([$personal], 'for you');
+    ok(scalar($T::coverQueue[0][0][0] =~ /personal/), 'For You precedes queued All Releases');
+    my $count = scalar @T::coverQueue;
+    T::_warmCovers([$old], 'all releases', 1);
+    ok(scalar($T::coverQueue[0][0][0] =~ /older/), 'opening a week promotes an already queued cover');
+    is_count(scalar(@T::coverQueue), $count, 'promotion does not duplicate queued work');
+    ok(scalar($T::coverQueue[1][0][0] =~ /personal/), 'unfinished For You resumes immediately after focused work');
+    T::_warmCovers([$other], 'all releases', 1);
+    ok(scalar($T::coverQueue[0][0][0] =~ /other/), 'switching weeks replaces the previous focus');
+    ok(scalar($T::coverQueue[1][0][0] =~ /personal/), 'old focus returns to its background priority');
+}
+reset_world();
+{
+    local $T::coverPumping = 1;
+    my @rows = map { rel(mbid => "reveal-$_", date => '2026-08-10') } 0..89;
+    # An All Releases week: releases drawn FLAT under the Options block, so the
+    # single group carries no `ws` and contributes no divider slot.
+    my $flat = sub { T::_renderSlots(5, [{ rels => $_[0] }]) };
+    T::_focusReleaseCovers(undef, 'arweek:test', $flat->([@rows[0..29]]), {});
+    T::_focusReleaseCovers(undef, 'arweek:test', $flat->([@rows[0..59]]), {});
+    ok(scalar($T::coverQueue[0][0][0] =~ /reveal-30\D/), 'Show more prioritises the first newly revealed row');
+    T::_focusReleaseCovers(undef, 'arweek:test', $flat->(\@rows), {});
+    ok(scalar($T::coverQueue[0][0][0] =~ /reveal-60\D/), 'Show all prioritises the newly revealed tail');
+    T::_focusReleaseCovers(undef, 'arweek:test', $flat->(\@rows), {index => 45, quantity => 10});
+    ok(scalar($T::coverQueue[0][0][0] =~ /reveal-40\D/), 'requested range takes priority after accounting for options');
+    is_count(scalar(@T::coverQueue), 90, 'range changes preserve all unfinished releases exactly once');
+}
+
+# ==========================================================================
+# 4e. THE FOR YOU LEVEL — the rows are NOT the releases
+# ==========================================================================
+# The All Releases week above draws its releases flat, so a single scalar offset
+# was enough there and that call site was always correct. For You is the level
+# that broke: _buildWeekly draws a divider before EVERY week and re-sorts inside
+# each one, so Material's row index drifts from the release position by one per
+# divider above it, and under the artist/album sorts the release at a given row
+# is not the one at that position in the input list at all.
+#
+# Every assertion here is about WHICH release a given ROW holds, so each one is
+# paired with the item _buildWeekly actually emits at that row — the two are read
+# from the same groups, which is the property the fix rests on.
+reset_world();
+{
+    local $T::coverPumping = 1;
+    my $OPTIONS = 5;                       # Options header + its four rows
+    # Two weeks: 12 releases in W/C 4 Aug, 6 in W/C 11 Aug.
+    my @rows = map { rel(mbid => "fy-$_", date => $_ < 12 ? '2026-08-06' : '2026-08-13') } 0..17;
+
+    # The renderer and the focus map must be read from ONE grouping, exactly as
+    # fetchForYou does it — a second call would be a second answer.
+    my $groups = T::_weekGroups(\@rows, 'artist');
+    my $slots  = T::_renderSlots($OPTIONS, $groups);
+    my @items  = ((undef) x $OPTIONS, @{ T::_buildWeekly($groups, undef, 1, undef) });
+
+    is_count(scalar @$slots, scalar @items, 'one slot per rendered row, dividers included');
+    my @dividers = grep { !defined $slots->[$_] && $_ >= $OPTIONS } 0 .. $#$slots;
+    is_count(scalar @dividers, 2, 'a divider slot for each week');
+    ok(scalar(!grep { defined $slots->[$_] } @dividers), 'a divider slot holds no release');
+
+    # THE CONTROL. Without it every assertion below would also pass against a
+    # focus map built from the ungrouped list, because the two only diverge where
+    # the render moved something. Assert that it really did move.
+    ok($slots->[$OPTIONS + 1]{caa_release_mbid} ne $rows[0]{caa_release_mbid},
+       'the render really did reorder — else the rest of this section proves nothing');
+
+    # Rows the focus must resolve, taken from the render rather than restated:
+    #   first release row of week 1, and the first of week 2 (two dividers above).
+    my $wk1 = $OPTIONS + 1;
+    my $wk2 = $OPTIONS + 1 + scalar(@{ $groups->[0]{rels} }) + 1;
+
+    for my $case ([$wk1, 'the first row of the first week'],
+                  [$wk2, 'the first row of the second week']) {
+        my ($row, $what) = @$case;
+        reset_world();
+        $T::coverPumping = 1;   # reset_world clears it, and a drained queue asserts nothing
+        T::_focusReleaseCovers(undef, 'foryou', $slots, {index => $row, quantity => 4});
+        my $want = $slots->[$row]{caa_release_mbid};
+        ok(scalar($T::coverQueue[0][0][0] =~ /\Q$want\E\D/),
+           "$what promotes the release drawn there ($want)");
+        ok(scalar($items[$row]{name} eq $want),
+           "$what is the same release _buildWeekly drew");
+        is_count(scalar(@T::coverQueue), scalar(@rows),
+           "$what leaves every release queued exactly once");
+    }
+
+    # A window that SPANS a divider covers fewer releases than it does rows, so
+    # counting rows as releases would run the focus past the requested page.
+    reset_world();
+    $T::coverPumping = 1;
+    my $span = $wk2 - 2;                   # two release rows, then the divider
+    T::_focusReleaseCovers(undef, 'foryou', $slots, {index => $span, quantity => 4});
+    my @want = map  { $slots->[$_]{caa_release_mbid} }
+               grep { defined $slots->[$_] } $span .. $span + 3;
+    is_count(scalar @want, 3, 'a four-row window across a divider holds three releases');
+    my @got = map { $T::coverQueue[$_][0][0] } 0 .. 2;
+    ok(scalar(!grep { $got[$_] !~ /\Q$want[$_]\E\D/ } 0 .. 2),
+       'a window spanning a divider promotes exactly the releases on those rows');
+}
+
+{
+    my @today = localtime(time());
+    my $date = sprintf('%04d-%02d-%02d', $today[5]+1900, $today[4]+1, $today[3]);
+    my @past = localtime(time() - 14*86400);
+    my @future = localtime(time() + 14*86400);
+    my $before = sprintf('%04d-%02d-%02d', $past[5]+1900, $past[4]+1, $past[3]);
+    my $after = sprintf('%04d-%02d-%02d', $future[5]+1900, $future[4]+1, $future[3]);
+    my $ordered = T::_coverWeekOrder([
+        {release_date => $after}, {release_date => ''},
+        {release_date => $before}, {release_date => $date}]);
+    ok(join(',', map { $_->{release_date} } @$ordered) eq "$date,$before,$after,",
+       'default All Releases preparation starts this week, then past, future and undated');
 }
 
 # ==========================================================================

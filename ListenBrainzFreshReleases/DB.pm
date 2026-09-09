@@ -40,21 +40,19 @@ package Plugins::ListenBrainzFreshReleases::DB;
 #      Bandcamp pins with no automatic repopulation), `lbf:follow:accum:` (builds
 #      forward from first capture; unrecoverable once events leave ListenBrainz's
 #      75-event window) and `lbf:artistsort:` (re-derivable only at 100 artists a
-#      pass, serially). They get TABLES, so the dev-build wipe can be a single
-#      unconditional `DELETE FROM kv` with no allowlist to get wrong.
+#      pass, serially). They get TABLES so their lifetime is governed by their
+#      own fact versions rather than by a disposable derived-cache key.
 #
 # THE RULE THAT MAKES THE TIERS SELF-ENFORCING:
 #
 #     IF IT IS IN `kv` IT IS DISPOSABLE. IF IT MUST SURVIVE, IT NEEDS A TABLE.
 #
 #   BASE    release, feed_member, feed_day, feed_meta, bandcamp_pin, follow_item
-#           invalidated by a BASE_VERSION bump only; never wiped by a dev build.
+#           invalidated by a BASE_VERSION bump only.
 #   FACTS   release_group, recording, artist
-#           invalidated per table by its own *_FACT_VERSION; a dev build clears
-#           only the genre columns, so years, types, MBIDs and sort-names survive
-#           and a genre change never re-inflicts a multi-day artist-sort
-#           reconvergence.
-#   DERIVED kv — match decisions, resolved lists, text, markers. Wiped wholesale.
+#           invalidated per table by its own *_FACT_VERSION.
+#   DERIVED kv — match decisions, resolved lists, text, markers. Each family owns
+#           a key version; wiped wholesale only for an explicit clean-load test.
 #
 # A CORRECTION TO CARRY INTO THE REST OF THIS WORK: a naive per-row port of the
 # Pitchfork plugin's DB would likely be SLOWER TO READ than today's single blob —
@@ -81,9 +79,9 @@ use Slim::Utils::Prefs;
 
 my $log = Slim::Utils::Log::logger('plugin.listenbrainzfreshreleases');
 
-# The ONLY plugin pref this module touches, and it is here rather than in `kv`
-# for the reason set out at IMPORT_DEADLINE_PREF: the dev-build wipe is one
-# unconditional `DELETE FROM kv`, so a deadline stored there resets itself.
+# The ONLY plugin pref this module touches. See IMPORT_DEADLINE_PREF: the deadline
+# is durable state, not a cache entry, and an explicit clean-load reset must not
+# restart its clock.
 my $prefs = preferences('plugin.listenbrainzfreshreleases');
 
 my $dbh;      # lazily-opened handle
@@ -497,9 +495,9 @@ CREATE TABLE IF NOT EXISTS feed_day (
 )
 SQL
 
-    # `generation` moves only when content actually moved, which is what gives
-    # %FEED_MEMO / %SECTION_MEMO a validity better than their present 5-second
-    # expiry: they can hold for minutes without masking a refresh.
+    # `generation` moves only when content actually moved. The 30-minute decoded
+    # feed memo checks it directly, and the processed-section memo inherits the
+    # resulting stable source identity, so neither can mask a refresh.
     $h->do(<<'SQL');
 CREATE TABLE IF NOT EXISTS feed_meta (
     feed       TEXT PRIMARY KEY,
@@ -721,7 +719,16 @@ sub _execBlob {
     return 1;
 }
 
-sub _freeze { return Storable::nfreeze({ v => $_[0] }) }
+sub _freeze {
+    # Canonical hash ordering makes the frozen bytes a stable content signature
+    # as well as a storage representation. ingestFeed compares an incoming
+    # payload with the bytes already stored so a long-lived decoded-feed memo can
+    # be invalidated on ANY payload change, not only on the handful of columns we
+    # mirror for SQL queries. Existing non-canonical rows simply register one
+    # change on their first re-ingest and are canonical from then on.
+    local $Storable::canonical = 1;
+    return Storable::nfreeze({ v => $_[0] });
+}
 
 sub _thaw {
     my ($blob, $what) = @_;
@@ -950,8 +957,8 @@ sub kverNum { return KEY_VERSIONS->{ $_[0] // '' } // 0 }
 #
 # A pin comes back ONLY from a manual "Search Bandcamp" tap, and for a
 # Bandcamp-only release it is the album's sole playable entry. As a kv row it was
-# one `DELETE FROM kv` away from being destroyed, which is why the dev-build wipe
-# could not be unconditional until this existed.
+# one explicit derived-cache reset away from being destroyed, which is why it
+# could never remain in the disposable tier.
 #
 # The payload is the same `{ items => [...] }` hash `_cacheStream` wrote, so a pin
 # imported from the old cache and a pin made after this change are the same value.
@@ -1083,8 +1090,8 @@ sub followCount {
 # blob under a key containing TODAY'S DATE, so at every local midnight the entire
 # ~3,255-release structure was re-fetched, re-parsed and re-frozen — and again on
 # any change to the window or the past/future prefs — even though almost none of
-# those releases had moved for weeks. Two 5-second in-process memos exist purely
-# to blunt the cost of DESERIALISING that blob on every XMLBrowser walk.
+# those releases had moved for weeks. Two generation-backed 30-minute in-process
+# memos now blunt the cost of DESERIALISING those rows on every XMLBrowser walk.
 #
 # Coverage becomes a QUERY over `feed_day` instead of something encoded in a
 # cache key that a new window invalidates wholesale. Shrinking the window costs
@@ -1120,7 +1127,7 @@ use constant BASE_VERSION => 1;
 # is deliberately NOT the plugin version.
 #
 # WHY IT IS NOT THE PLUGIN VERSION, learned the hard way in 0.9.166/0.9.167: the
-# dev-build wipe cleared every genre on EVERY install. Two builds in one afternoon
+# build-change wipes cleared every genre on EVERY install. Two builds in one afternoon
 # therefore threw away the whole genre store twice, and refilling it is the single
 # most expensive thing this plugin does — 66 rate-limited ListenBrainz batches plus
 # a per-artist hosted pass, spread over a warm that runs once a day. The result
@@ -1128,10 +1135,9 @@ use constant BASE_VERSION => 1;
 # worst possible failure mode for a diagnostic tool.
 #
 # §2.3 of docs/caching-rework.md already specified this mechanism ("bumped when the
-# parser changes"); the build-change wipe was a blunt duplicate of it. The dev-build
-# wipe still clears ALL of `kv` unconditionally — every match decision, resolved
-# list and marker — which is what the fleet "dev builds clear caches" rule is
-# actually protecting. Genres are not a decision; they are expensive upstream fact.
+# parser changes"); the build-change wipe was a blunt duplicate of it. Ordinary
+# builds now preserve `kv` as well; its individual families invalidate through
+# their own key versions. Genres are expensive upstream fact, not a build artefact.
 use constant GENRE_FACT_VERSION => 1;
 
 # ---------------------------------------------------------------------------
@@ -1324,6 +1330,75 @@ sub feedCoverage {
     return $out;
 }
 
+# The cheap validity read for API's decoded-feed memo. A memo hit must not pay
+# feedCoverage's day scan or feedReleases' N payload thaws merely to learn whether
+# its source changed. A missing feed row is generation zero, but a database error
+# returns undef so the caller can fail closed instead of trusting an unverifiable
+# in-memory copy. A memo cannot survive restart, so no separate boot identity is
+# needed.
+sub feedGeneration {
+    my ($feed) = @_;
+    my $h = dbh() or return undef;
+    return undef unless defined $feed && length $feed;
+    my $generation = eval {
+        $h->selectrow_array('SELECT generation FROM feed_meta WHERE feed = ?', undef, $feed)
+    };
+    return undef if $@;
+    return int($generation // 0);
+}
+
+# The cheap top-level view of a feed. The browse menu needs to know which week
+# folders exist, not the complete payload of every release inside them. Keep this
+# query on the mirrored/indexed columns so opening the plugin does no Storable
+# work. `count` is deliberately the RAW stored count; Browse does not display it,
+# because the exact visible count depends on payload-only filters.
+sub feedWeeks {
+    my ($feed, $from, $to) = @_;
+    my $h = dbh() or return [];
+    return [] unless defined $feed && length $feed;
+
+    my ($sql, @args) = (
+        'SELECT r.week_start, COUNT(*) AS count
+           FROM feed_member m JOIN release r ON r.rel_id = m.rel_id
+          WHERE m.feed = ? AND r.base_version = ?', $feed, BASE_VERSION);
+    if ($from && $to) {
+        $sql .= " AND (r.rel_date = '' OR (r.rel_date >= ? AND r.rel_date <= ?))";
+        push @args, $from, $to;
+    }
+    $sql .= ' GROUP BY r.week_start ORDER BY r.week_start DESC';
+
+    my $rows = eval { $h->selectall_arrayref($sql, { Slice => {} }, @args) };
+    return [] if $@ || ref $rows ne 'ARRAY';
+    return [ map { +{ week_start => ($_->{week_start} // ''), count => int($_->{count} // 0) } }
+             @$rows ];
+}
+
+# Exact-week payload read for a selected All Releases folder. Unlike
+# feedReleases($from,$to), this does NOT include every dateless row alongside a
+# dated week: the empty week_start is its own "Unknown date" folder.
+sub feedWeekReleases {
+    my ($feed, $weekStart) = @_;
+    my $h = dbh() or return [];
+    return [] unless defined $feed && length $feed;
+    return [] unless defined $weekStart
+                      && ($weekStart eq '' || $weekStart =~ /^\d{4}-\d{2}-\d{2}$/);
+
+    my $rows = eval {
+        $h->selectall_arrayref(
+            'SELECT r.payload
+               FROM feed_member m JOIN release r ON r.rel_id = m.rel_id
+              WHERE m.feed = ? AND r.base_version = ? AND r.week_start = ?
+              ORDER BY r.rel_date DESC',
+            { Slice => {} }, $feed, BASE_VERSION, $weekStart)
+    } || [];
+    my @out;
+    for my $r (@$rows) {
+        my ($ok, $v) = _thaw($r->{payload}, "release payload");
+        push @out, $v if $ok && ref $v eq 'HASH';
+    }
+    return \@out;
+}
+
 # Read the feed back. ONE statement and ONE thaw per release — which is more work
 # than the single Storable::thaw of the old blob, and the plan says so plainly: the
 # win here is that the base stops being re-minted and the window became queryable,
@@ -1457,7 +1532,7 @@ sub ingestFeed {
     }
 
     my ($added, $changed, $removed, $stored) = (0, 0, 0, 0);
-    my %perDay;
+    my (%perDay, %sharedChanged);
 
     # ---- one chunk of rows, in its own transaction --------------------------
     # Returns 1 on success, 0 on failure. Everything it accumulates ($added,
@@ -1474,17 +1549,19 @@ sub ingestFeed {
         # _execBlob onto prepare_cached — the cost of GETTING a value there is
         # what the per-row review missed.
         my $selRel = $h->prepare_cached(
-            'SELECT rel_date, week_start, rg_mbid, artist_mbids, caa_rel_mbid, dedupe_key, base_version
+            'SELECT payload, rel_date, week_start, rg_mbid, artist_mbids, caa_rel_mbid, dedupe_key, base_version
                FROM release WHERE rel_id = ?');
         my $selMem = $h->prepare_cached('SELECT 1 FROM feed_member WHERE feed = ? AND rel_id = ?');
         my $insMem = $h->prepare_cached('INSERT OR REPLACE INTO feed_member (feed, rel_id, seen_at) VALUES (?, ?, ?)');
+        my $selFeeds = $h->prepare_cached('SELECT feed FROM feed_member WHERE rel_id = ?');
 
         for my $rel (@{$releases}[$from_i .. $to_i]) {
             next unless ref $rel eq 'HASH';
             my $id = eval { relId($rel) } // '';
             next unless length $id;
 
-            my $cols = _relCols($rel);
+            my $cols    = _relCols($rel);
+            my $payload = _freeze($rel);
             $perDay{ $cols->{rel_date} }++ if length $cols->{rel_date};
 
             $selRel->execute($id);
@@ -1497,7 +1574,7 @@ sub ingestFeed {
                                           rg_mbid, artist_mbids, caa_rel_mbid, dedupe_key,
                                           first_seen, seen_at)
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                    3, $id, BASE_VERSION, _freeze($rel),
+                    3, $id, BASE_VERSION, $payload,
                     @{$cols}{qw(rel_date week_start rg_mbid artist_mbids caa_rel_mbid dedupe_key)},
                     $now, $now);
                 $changed++;
@@ -1508,22 +1585,33 @@ sub ingestFeed {
                 for my $c (qw(rel_date week_start rg_mbid artist_mbids caa_rel_mbid dedupe_key)) {
                     $merged{$c} = length($cols->{$c} // '') ? $cols->{$c} : ($old->{$c} // '');
                 }
-                # Generation tracks the QUERYABLE shape of the feed — the member set
-                # and the mirrored columns. A payload edit that moves none of them
-                # (LB filling a field nothing queries) deliberately does not move it;
-                # the memos it guards are second-scale, so that cannot go stale
-                # visibly, and reading 3,255 blobs back to compare them would cost
-                # more than the whole ingest.
-                $changed++ if int($old->{base_version} // -1) != BASE_VERSION
-                           || grep { ($old->{$_} // '') ne $merged{$_} }
-                                   qw(rel_date rg_mbid caa_rel_mbid dedupe_key);
+                # Generation now guards a minutes-long decoded-feed memo, so it
+                # tracks the WHOLE payload rather than only the mirrored/queryable
+                # columns. The payload is already selected and frozen for the
+                # update; canonical bytes make this a comparison, not N thaws.
+                #
+                # Releases are shared across feeds. If MuSpy (or the other LB feed)
+                # improves a row that All Releases also references, All Releases'
+                # memo must move too even though its membership did not. Capture
+                # every existing owner here and bump each once in the finish step.
+                my $payloadChanged = int($old->{base_version} // -1) != BASE_VERSION
+                                  || !defined($old->{payload})
+                                  || $old->{payload} ne $payload;
+                if ($payloadChanged) {
+                    $changed++;
+                    $selFeeds->execute($id);
+                    while (my $row = $selFeeds->fetchrow_arrayref) {
+                        $sharedChanged{ $row->[0] } = 1;
+                    }
+                    $selFeeds->finish;
+                }
 
                 _execBlob($h,
                     'UPDATE release SET base_version = ?, payload = ?, rel_date = ?, week_start = ?,
                                         rg_mbid = ?, artist_mbids = ?, caa_rel_mbid = ?,
                                         dedupe_key = ?, seen_at = ?
                       WHERE rel_id = ?',
-                    2, BASE_VERSION, _freeze($rel),
+                    2, BASE_VERSION, $payload,
                     @merged{qw(rel_date week_start rg_mbid artist_mbids caa_rel_mbid dedupe_key)},
                     $now, $id);
             }
@@ -1579,6 +1667,14 @@ sub ingestFeed {
         my ($gen) = $h->selectrow_array('SELECT generation FROM feed_meta WHERE feed = ?', undef, $feed);
         $gen = int($gen // 0);
         $gen++ if $added || $removed || $changed;
+
+        # A changed release may already belong to other feeds. Their decoded
+        # arrays contain the old payload too, so invalidate those generations in
+        # the same transaction. The current feed is assigned explicitly below
+        # and must not be incremented twice.
+        for my $other (grep { $_ ne $feed } keys %sharedChanged) {
+            $h->do('UPDATE feed_meta SET generation = generation + 1 WHERE feed = ?', undef, $other);
+        }
 
         $h->do('INSERT OR REPLACE INTO feed_meta (feed, fetched_at, ok_at, generation, n_items)
                 VALUES (?, ?, ?, ?, ?)', undef, $feed, $now, $now, $gen, $total);
@@ -2019,18 +2115,16 @@ sub retirePrefixes {
 # Wipes
 # ---------------------------------------------------------------------------
 
-# THE DEV-BUILD WIPE. One unconditional statement with no allowlist to get wrong —
-# which is only safe because anything that must survive has a table. Do not add
-# exceptions here; move the data instead.
+# The explicit clean-load reset for disposable derived data. Ordinary builds do
+# not call this; individual cache families retire themselves with key versions.
 sub wipeDerived {
     my $h = dbh() or return 0;
     my $n = eval { $h->do('DELETE FROM kv') } || 0;
     return int($n);
 }
 
-# The dev-build wipe's FACTS half: genres only. Years, types, MBIDs and
-# sort-names survive deliberately, so a genre change never re-inflicts a
-# multi-day artist-sort reconvergence.
+# The genre-parser/reset half. Years, types, MBIDs and sort-names survive so a
+# genre change never re-inflicts a multi-day artist-sort reconvergence.
 sub wipeGenres {
     my $h = dbh() or return 0;
     my $n = 0;
@@ -2129,7 +2223,7 @@ sub lfmPut {
 # after an import that, being lazy, is never finished; a deadline says the honest
 # thing — after IMPORT_WINDOW the old cache has aged out anyway, so stop paying a
 # read for it. Until then the cost is one extra local read on a MISS only. The
-# deadline lives in a PREF so the dev-build wipe cannot reset it — see
+# deadline lives in a PREF so an explicit clean-load reset cannot reset it — see
 # IMPORT_DEADLINE_PREF.
 #
 # WHY IT LIVES HERE AND NOT IN Plugin.pm: this is the last place in the plugin that
@@ -2140,13 +2234,13 @@ sub lfmPut {
 # thaw, a missing username — each skips that item, never the rest.
 # ---------------------------------------------------------------------------
 # THE DEADLINE IS A PREF, NOT A `kv` ROW, and that is not a style choice. The
-# dev-build wipe is one unconditional `DELETE FROM kv` (wipeDerived), so a deadline
-# kept there is deleted by every build and re-minted at `time() + 180 days` on the
-# next miss — a window that can never elapse, and therefore an extra
+# explicit derived-cache reset is one unconditional `DELETE FROM kv`
+# (`wipeDerived`), so a deadline kept there would be re-minted at
+# `time() + 180 days` after every clean-load test, and therefore add an extra
 # Slim::Utils::Cache read on every store miss FOR EVER. That is precisely the cost
 # IMPORT_WINDOW exists to stop paying. It is also what this module's own header
 # rule says: IF IT IS IN `kv` IT IS DISPOSABLE, and this is not. _buildChanged's
-# marker is a pref for the identical reason.
+# marker is a pref for the identical durability reason.
 use constant IMPORT_DEADLINE_PREF => 'legacy_import_until';
 use constant IMPORT_WINDOW        => 180 * 86400;
 

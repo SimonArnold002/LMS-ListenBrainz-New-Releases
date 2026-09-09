@@ -1004,7 +1004,7 @@ impromptu	?
 indeterminacy	?
 indian classical	Classical
 indian pop	Pop
-indie	-
+indie	?
 indie folk	Folk
 indie pop	Pop
 indie rock	Rock

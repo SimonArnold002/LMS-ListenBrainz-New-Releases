@@ -16,7 +16,8 @@
 # store, and since 0.9.166 the feed IS the store — so the two synchronous stretches
 # below are on the All Releases path and have never been measured:
 #
-#   READ  (every open)  feedReleases: one SELECT, then Storable::thaw PER ROW.
+#   READ  (full-feed paths) feedReleases: one SELECT, then Storable::thaw PER ROW.
+#   ROOT  feedWeeks: indexed week/count rows only, with no payload or thaw.
 #   WRITE (a cold open / a revalidation) ingestFeed: ONE transaction, one upsert
 #         per release, run inside an async HTTP callback — which is the worst
 #         possible place for it, because nothing can interleave.
@@ -93,7 +94,9 @@ sub mkrel {
 
 my @rels = map { mkrel($_) } 1 .. $N;
 printf "Feed size: %d releases   (live All Releases measured 3,255)\n", $N;
-printf "Perl %vd, DBD::SQLite %s\n\n", $^V, $DBD::SQLite::VERSION;
+eval { require DBD::SQLite; 1 };
+my $sqlite_driver_version = $DBD::SQLite::VERSION // 'unknown';
+printf "Perl %vd, DBD::SQLite %s\n\n", $^V, $sqlite_driver_version;
 
 my ($from, $to) = ('2026-08-01', '2026-08-28');
 
@@ -119,9 +122,27 @@ my $covms = (time - $t) * 1000;
 printf "%-52s %10.1f %9s\n", 'feedCoverage (the freshness query)', $covms, '-';
 
 $t = time;
+my $gen;
+$gen = $NS->can('feedGeneration')->('all') for 1 .. 1000;
+my $genms = (time - $t) * 1000 / 1000;
+printf "%-52s %10.3f %9s\n", 'feedGeneration (decoded-memo validity SELECT)', $genms, '-';
+
+$t = time;
+my $weeks = $NS->can('feedWeeks')->('all', $from, $to);
+my $weekms = (time - $t) * 1000;
+printf "%-52s %10.1f %9s\n", 'feedWeeks (ROOT — no payloads or thaws)', $weekms, '-';
+
+my $oneWeekStart = $weeks->[0]{week_start};
+$t = time;
+my $oneWeek = $NS->can('feedWeekReleases')->('all', $oneWeekStart);
+my $oneWeekMs = (time - $t) * 1000;
+printf "%-52s %10.1f %9.3f ms\n", 'feedWeekReleases (selected week only)',
+       $oneWeekMs, @$oneWeek ? $oneWeekMs / @$oneWeek : 0;
+
+$t = time;
 my $got = $NS->can('feedReleases')->('all', $from, $to);
 my $read = (time - $t) * 1000;
-printf "%-52s %10.1f %9.3f ms\n", 'feedReleases (EVERY OPEN — SELECT + thaw per row)',
+printf "%-52s %10.1f %9.3f ms\n", 'feedReleases (full feed — SELECT + thaw per row)',
        $read, $read / $N;
 
 printf "%s\n", '-' x 76;
@@ -197,10 +218,14 @@ printf "read back %d of %d releases, coverage %s\n\n",
 print "\n";
 print "WHAT THIS MEANS\n", '-' x 76, "\n";
 printf "A browse tap produces THREE OR MORE XMLBrowser walks from the root, and the\n"
-     . "root builds BOTH sections. %%FEED_MEMO (5s) collapses those to one read per\n"
-     . "feed per interaction, so the figure that matters is ONE feedReleases: %.0f ms\n"
-     . "here, and a Pi is roughly 10x slower -> ~%.0f ms of unbroken blocking.\n\n",
-       $read, $read * 10;
+     . "root builds BOTH sections. The root now reads %d compact week summaries in\n"
+     . "%.1f ms without selecting or thawing %d payloads. Opening week %s decodes\n"
+     . "%d releases in %.1f ms instead of decoding the whole feed.\n\n"
+     . "On full-feed paths, the generation-backed %%FEED_MEMO (30m) replaces\n"
+     . "each repeated feedReleases with one indexed scalar validity SELECT: %.3f ms\n"
+     . "here, versus %.0f ms for SELECT + %d thaws (~%.0f ms projected on a Pi).\n\n",
+       scalar(@$weeks), $weekms, $N, $oneWeekStart, scalar(@$oneWeek), $oneWeekMs,
+       $genms, $read, $N, $read * 10;
 printf "A COLD open (or any revalidation) additionally pays ingestFeed INSIDE the\n"
      . "HTTP callback: %.0f ms here, ~%.0f ms on a Pi, with nothing able to interleave.\n\n",
        $ingest, $ingest * 10;

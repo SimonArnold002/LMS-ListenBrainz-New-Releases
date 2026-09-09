@@ -404,7 +404,7 @@ print "-" x 74, "\n";
 
     # The barrier must now count exactly the four surviving tasks. A stale term
     # here is the hang a careless deletion produces.
-    my ($sum) = $browse_src =~ /my \$pending = ([^;]+);/;
+    my ($sum) = grab($browse_src, '_releaseDetail') =~ /my \$pending = ([^;]+);/;
     ok(defined $sum && $sum !~ /\$wantLastfm/,
        'the render barrier no longer counts a Last.fm task');
     ok(defined $sum && $sum =~ /\$wantStream/ && $sum =~ /\$wantGenres/

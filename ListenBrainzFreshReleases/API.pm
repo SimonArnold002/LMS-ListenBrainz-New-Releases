@@ -243,7 +243,11 @@ sub _feedMemoKey {
     my ($which, $sort, $wp, $wf) = @_;
     $sort ||= 'release_date';
     return 'lbf:feed:all:' . join('|', $sort, $wp, $wf, _today()) if $which eq 'all';
-    return 'lbf:feed:user:' . join('|', ($prefs->get('username') // ''), $sort, $wp, $wf);
+    # The user route has no explicit release_date parameter, but its symmetric
+    # `days=` window is still relative to today. A five-second memo could omit the
+    # date; a minutes-long one would otherwise survive a day/week rollover and
+    # keep handing Browse the previous window's arrayref.
+    return 'lbf:feed:user:' . join('|', ($prefs->get('username') // ''), $sort, $wp, $wf, _today());
 }
 
 # The same window as ('YYYY-MM-DD','YYYY-MM-DD') — what _windowSpan and the MuSpy
@@ -849,7 +853,6 @@ sub USER_AGENT {
 # feed was unreachable without a credential it never needed. The token is still
 # SENT when one happens to be set (same shape as getFollowing) — harmless, and it
 # keeps the request identical for anyone who has one configured.
-# ---------------------------------------------------------------------------
 # `force => 1` — THE BACKGROUND WARM'S FETCH, AND THE REASON IT HAD TO EXIST.
 #
 # Without it this sub answers a warm tick out of the STORE and returns in ~0.00s
@@ -903,7 +906,7 @@ sub getFreshReleasesForUser {
     my $feed     = 'user:' . $username;
     my $memoKey  = _feedMemoKey('foryou', $sort, $wp, $wf);
 
-    if (!$force && (my $memo = _memoGet($memoKey))) {
+    if (!$force && (my $memo = _memoGet($memoKey, $feed))) {
         $args{onDone}->($memo);
         return;
     }
@@ -919,7 +922,7 @@ sub getFreshReleasesForUser {
 
     my ($stored, $stale) = _feedFromStore($feed, $from, $to, 1);
     if ($stored && !$force) {
-        $args{onDone}->(_memoSet($memoKey, $stored));
+        $args{onDone}->(_memoSet($memoKey, $stored, $feed));
         _fetchReleaseFeed(feed => $feed, url => $url, headers => \@headers, memoKey => $memoKey,
                           from => $from, to => $to, label => 'for-you') if $stale;
         return;
@@ -933,6 +936,31 @@ sub getFreshReleasesForUser {
 # ---------------------------------------------------------------------------
 # GET /1/explore/fresh-releases/  (global, no auth needed)
 # ---------------------------------------------------------------------------
+# One builder for the All Releases request. The full-feed reader, the cheap week
+# summary and background revalidation must describe exactly the same date window;
+# copying this URL arithmetic would let the menu advertise weeks from a different
+# request than the one which refreshes them.
+sub _allFeedRequest {
+    my ($sort) = @_;
+    $sort ||= 'release_date';
+
+    my ($wp, $wf)   = sectionWeeks('all');
+    my ($from, $to) = _feedWindow($wp, $wf);
+    my ($days, $p, $f) = _feedRequestDays($from, $to);
+    my $past   = $p ? 'true' : 'false';
+    my $future = $f ? 'true' : 'false';
+    my $today  = _today();
+
+    return {
+        feed    => 'all',
+        from    => $from,
+        to      => $to,
+        memoKey => _feedMemoKey('all', $sort, $wp, $wf),
+        url     => sprintf('%s/1/explore/fresh-releases/?sort=%s&past=%s&future=%s&days=%d&release_date=%s',
+                           BASE_URL, $sort, $past, $future, $days, $today),
+    };
+}
+
 # `force => 1` — THE BACKGROUND WARM'S FETCH, AND THE REASON IT HAD TO EXIST.
 #
 # Without it this sub answers a warm tick out of the STORE and returns in ~0.00s
@@ -962,31 +990,21 @@ sub getFreshReleasesAll {
     my ($class, %args) = @_;
 
     my $force = $args{force} ? 1 : 0;
+    my $q     = _allFeedRequest($args{sort} // 'release_date');
+    my $feed  = $q->{feed};
+    my $from  = $q->{from};
+    my $to    = $q->{to};
+    my $url   = $q->{url};
+    my $memoKey = $q->{memoKey};
 
-    my $sort = $args{sort} // 'release_date';
-
-    my ($wp, $wf)   = sectionWeeks('all');
-    my ($from, $to) = _feedWindow($wp, $wf);
-    my ($days, $p, $f) = _feedRequestDays($from, $to);
-    my $past   = $p ? 'true' : 'false';
-    my $future = $f ? 'true' : 'false';
-
-    my $today = _today();
-    my $feed  = 'all';
-
-    my $memoKey = _feedMemoKey('all', $sort, $wp, $wf);
-
-    if (!$force && (my $memo = _memoGet($memoKey))) {
+    if (!$force && (my $memo = _memoGet($memoKey, $feed))) {
         $args{onDone}->($memo);
         return;
     }
 
-    my $url = sprintf('%s/1/explore/fresh-releases/?sort=%s&past=%s&future=%s&days=%d&release_date=%s',
-        BASE_URL, $sort, $past, $future, $days, $today);
-
     my ($stored, $stale) = _feedFromStore($feed, $from, $to, 1);
     if ($stored && !$force) {
-        $args{onDone}->(_memoSet($memoKey, $stored));
+        $args{onDone}->(_memoSet($memoKey, $stored, $feed));
         _fetchReleaseFeed(feed => $feed, url => $url, memoKey => $memoKey,
                           from => $from, to => $to, label => 'all releases') if $stale;
         return;
@@ -995,6 +1013,71 @@ sub getFreshReleasesAll {
     _fetchReleaseFeed(feed => $feed, url => $url, memoKey => $memoKey,
                       from => $from, to => $to, label => 'all releases',
                       onDone => $args{onDone}, onError => $args{onError});
+}
+
+# The top-level All Releases menu needs only its week folders. Answer from the
+# indexed week_start column without selecting or thawing release payloads, then
+# preserve the full feed's stale-while-revalidate policy behind that answer.
+#
+# A genuinely cold store answers [] immediately so Browse can render its existing
+# drill-tile fallback. The detached fetch fills the store; the next root walk can
+# then render week links. Nothing on the top level waits for the network.
+sub getFreshReleaseWeeksAll {
+    my ($class, %args) = @_;
+    my $q = _allFeedRequest($args{sort} // 'release_date');
+
+    my $cov = eval {
+        Plugins::ListenBrainzFreshReleases::DB::feedCoverage($q->{feed}, $q->{from}, $q->{to})
+    } || {};
+    my $summaryKey = $q->{memoKey} . ':weeks';
+    my $weeks = $cov->{any} ? _memoGet($summaryKey, $q->{feed}) : undef;
+    unless (ref $weeks eq 'ARRAY') {
+        $weeks = eval {
+            Plugins::ListenBrainzFreshReleases::DB::feedWeeks($q->{feed}, $q->{from}, $q->{to})
+        } || [];
+        $weeks = [] unless ref $weeks eq 'ARRAY';
+        _memoSet($summaryKey, $weeks, $q->{feed}) if $cov->{any};
+    }
+
+    $args{onDone}->($weeks);
+
+    my $age   = $cov->{ok_at} ? (time() - $cov->{ok_at}) : (FEED_STALE_AFTER + 1);
+    my $stale = !$cov->{any} || !$cov->{complete} || $age > FEED_STALE_AFTER;
+    if ($stale) {
+        _fetchReleaseFeed(feed => $q->{feed}, url => $q->{url}, memoKey => $q->{memoKey},
+                          from => $q->{from}, to => $q->{to}, label => 'all releases');
+    }
+    return;
+}
+
+# Read one selected week only. Its memo carries the same feed generation as the
+# full decoded feed, so an ingest invalidates it immediately; manual Refresh also
+# drops every week key before marking the store stale.
+sub getFreshReleasesAllWeek {
+    my ($class, %args) = @_;
+    my $week = defined $args{week_start} ? $args{week_start} : '';
+    unless ($week eq '' || $week =~ /^\d{4}-\d{2}-\d{2}$/) {
+        $args{onError}->('Invalid release week') if ref $args{onError} eq 'CODE';
+        return;
+    }
+
+    my $q    = _allFeedRequest('release_date');
+    my $feed = $q->{feed};
+    my $key  = $q->{memoKey} . ':week|' . $week;
+    if (my $memo = _memoGet($key, $feed)) {
+        $args{onDone}->($memo);
+        return;
+    }
+
+    my $rels = eval {
+        Plugins::ListenBrainzFreshReleases::DB::feedWeekReleases($feed, $week)
+    };
+    unless (ref $rels eq 'ARRAY') {
+        $args{onError}->('Stored release week could not be read') if ref $args{onError} eq 'CODE';
+        return;
+    }
+    $args{onDone}->(_memoSet($key, $rels, $feed));
+    return;
 }
 
 # ---------------------------------------------------------------------------
@@ -1160,7 +1243,7 @@ sub _fetchReleaseFeed {
             # `if ($p{onDone})` because a BACKGROUND fetch can reach here now, holding
             # foreground waiters and no callback of its own; they are answered by the
             # $fanout below with the same arrayref _memoSet hands back.
-            my $rels = $p{memoKey} ? _memoSet($p{memoKey}, $stored) : $stored;
+            my $rels = $p{memoKey} ? _memoSet($p{memoKey}, $stored, $feed) : $stored;
             if ($p{onDone}) {
                 eval { $p{onDone}->($rels); 1 }
                     or $log->error("feed caller (onDone, stored copy) raised: $@");
@@ -1198,7 +1281,7 @@ sub _fetchReleaseFeed {
                         my ($stored) = _feedFromStore($feed, $p{from}, $p{to}, 0);
                         $releases = $stored if $stored;
                     }
-                    _memoSet($p{memoKey}, $releases) if $p{memoKey};
+                    _memoSet($p{memoKey}, $releases, $feed) if $p{memoKey};
                     $done->($releases);
                 },
                 sub { $failed->($resp) },
@@ -1253,7 +1336,7 @@ sub getMuSpyReleases {
     # STABLE across the re-walks of one interaction — which is what lets Browse's
     # derived-section memo recognise the For You inputs as unchanged (_mergeMuSpy
     # builds a fresh arrayref from them, so identity has to come from the sources).
-    if (!$force && (my $memo = _memoGet($memoKey))) {
+    if (!$force && (my $memo = _memoGet($memoKey, $feed))) {
         $args{onDone}->($memo);
         return;
     }
@@ -1280,7 +1363,7 @@ sub getMuSpyReleases {
     # ------------------------------------------------------------------
     my ($stored, $stale) = _feedFromStore($feed, undef, undef, 0);
     if ($stored && !$stale && !$force) {
-        $args{onDone}->(_memoSet($memoKey, $stored));
+        $args{onDone}->(_memoSet($memoKey, $stored, $feed));
         return;
     }
 
@@ -1303,7 +1386,7 @@ sub getMuSpyReleases {
         my ($fallback) = @_;
         my ($rels) = _feedFromStore($feed, undef, undef, 0);
         $rels = $fallback if !($rels && @$rels) && $fallback && @$fallback;
-        $args{onDone}->($rels && @$rels ? _memoSet($memoKey, $rels) : []);
+        $args{onDone}->($rels && @$rels ? _memoSet($memoKey, $rels, $feed) : []);
     };
 
     my $http = Slim::Networking::SimpleAsyncHTTP->new(
@@ -1422,31 +1505,55 @@ sub _padDate {
 # times, and any in-place toggle (sort, Albums/Singles) did it twice over. On a
 # Pi that is the sluggishness, not the network: the requests were already cached.
 #
-# So hold the LAST decoded copy per key for a few seconds. That is far shorter
-# than any feed TTL and covers exactly one user interaction's worth of re-walks;
-# it can't mask a Refresh (clearFeedCache drops the memo too) and it can't survive
-# a settings change (the prefs are all in the key).
-our %FEED_MEMO;                         # key => [ expiry, $releases ]  (package-scoped so tests can age it)
-use constant FEED_MEMO_TTL => 5;
+# Hold the last decoded copy for a useful interaction window. Validity is the
+# STORE GENERATION, not the clock: DB increments it when membership or any shared
+# release payload changes, so an ingest cannot be hidden for 30 minutes. Refresh
+# still drops the relevant memo explicitly before marking the store stale.
+#
+# The TTL only bounds memory and old date/window keys. Every LB key also names
+# today, preventing a day or Monday rollover from retaining the prior window.
+our %FEED_MEMO;                 # key => [ expiry, feed generation, $releases ]
+use constant FEED_MEMO_TTL => 30 * 60;
 
 sub _memoGet {
-    my ($key) = @_;
+    my ($key, $feed) = @_;
     my $e = $FEED_MEMO{$key} or return undef;
     if ($e->[0] < time()) { delete $FEED_MEMO{$key}; return undef }
-    return $e->[1];
+    if (defined $feed && length $feed) {
+        my $generation = eval { Plugins::ListenBrainzFreshReleases::DB::feedGeneration($feed) };
+        if (!defined($generation) || ($e->[1] // 0) != $generation) {
+            delete $FEED_MEMO{$key};
+            return undef;
+        }
+    }
+    return $e->[2];
 }
 
 sub _memoSet {
-    my ($key, $data) = @_;
+    my ($key, $data, $feed) = @_;
     # Drop anything expired while we're here — the plugin only ever holds a
     # handful of keys, so this is cheaper than a timer and can't grow unbounded.
     my $now = time();
     delete @FEED_MEMO{ grep { $FEED_MEMO{$_}[0] < $now } keys %FEED_MEMO };
-    $FEED_MEMO{$key} = [ $now + FEED_MEMO_TTL, $data ];
+    my $hasFeed = defined $feed && length $feed;
+    my $generation = $hasFeed
+        ? eval { Plugins::ListenBrainzFreshReleases::DB::feedGeneration($feed) }
+        : 0;
+    # No database version means no proof the decoded copy is current. Return the
+    # caller's data, but do not leave an unverifiable memo behind.
+    if ($hasFeed && !defined $generation) {
+        delete $FEED_MEMO{$key};
+        return $data;
+    }
+    $FEED_MEMO{$key} = [ $now + FEED_MEMO_TTL, $generation, $data ];
     return $data;
 }
 
 sub _memoDrop { delete $FEED_MEMO{ $_[0] } }
+sub _memoDropPrefix {
+    my ($prefix) = @_;
+    delete @FEED_MEMO{ grep { index($_, $prefix) == 0 } keys %FEED_MEMO };
+}
 
 # The "Refresh (force update now)" row. $which is 'user' or 'all'.
 #
@@ -1476,7 +1583,9 @@ sub clearFeedCache {
     # _feedMemoKey + sectionWeeks, never a second copy of either: the key dropped
     # here MUST be the key the fetcher minted (see _feedMemoKey).
     if ($which eq 'all') {
-        _memoDrop(_feedMemoKey('all', $sort, sectionWeeks('all')));
+        my $allKey = _feedMemoKey('all', $sort, sectionWeeks('all'));
+        _memoDrop($allKey);
+        _memoDropPrefix($allKey . ':');   # its week-summary and exact-week children
         $invalidate->('all');
     }
     else {
@@ -3201,9 +3310,8 @@ sub _foldEq {
 # THIS IS ONE OF THE THREE THINGS THAT WERE NEVER CACHES, so it lives in the
 # `artist` TABLE, not in `kv`. Re-deriving it costs SORT_WARM_MAX(100) artists per
 # pass, serially, with a 1.1s courtesy gap on public MusicBrainz — a multi-day
-# reconvergence on a 2,900-release feed. A dev build wipes `kv` wholesale and
-# clears only the GENRE columns of the facts tables, which is precisely so a genre
-# change can never cost this.
+# reconvergence on a 2,900-release feed. It survives ordinary builds and an
+# explicit clean-load reset alike; a genre-parser change clears only genre fields.
 #
 # STALENESS IS AN AGE POLICY ON `fetched_at`, NOT A TTL. Nothing here hands a
 # duration to anyone, so no value can mean 1970. `sort_src` records which tier
@@ -3375,6 +3483,38 @@ sub peekArtistGenresBulk {
 sub _artistGenresFresh {
     my ($row, $col, $foundAge, $emptyAge) = @_;
     return _answerFresh($row, "n_$col", "${col}_at", $foundAge, $emptyAge);
+}
+
+# Bulk checkpoint for the background Last.fm artist rung.  Presence in the
+# returned map means the answer is still fresh; the value may deliberately be
+# an empty arrayref.  That distinction keeps a recent "Last.fm knows no usable
+# tags" answer from entering the one-request-per-second worker again merely
+# because it cannot produce a displayable genre.
+sub peekLastfmArtistGenresBulk {
+    my ($class, $keys, $accept) = @_;
+    my %want = map { defined($_) && length($_) ? ($_ => 1) : () } @{ $keys || [] };
+    return {} unless %want;
+
+    my $rows = Plugins::ListenBrainzFreshReleases::DB::artistGet([ keys %want ]);
+    my %out;
+    for my $key (keys %$rows) {
+        my $row = $rows->{$key};
+        my $raw = ref $row->{lastfm_genres} eq 'ARRAY' ? $row->{lastfm_genres} : [];
+        my @genres = ref $accept eq 'CODE' ? grep { $accept->($_) } @$raw : @$raw;
+
+        # Freshness follows what the LIST CAN USE, not whether Last.fm returned
+        # any arbitrary tag.  A response containing only `usa`, `seen live`, or
+        # another rejected tag used to have n_lastfm_genres > 0 and was therefore
+        # held for the 30-day FOUND age even though it rendered exactly like an
+        # empty answer.  Treat rejected-only as the negative it is: remember it
+        # for one day, then let the worker ask again.
+        my $n = $row->{n_lastfm_genres};
+        next unless defined $n && $n >= 0;
+        my $age = time() - ($row->{lastfm_genres_at} || 0);
+        next unless $age < (@genres ? LFM_FOUND_TTL : LFM_EMPTY_TTL);
+        $out{$key} = \@genres;
+    }
+    return \%out;
 }
 
 # Fill the artist-genre cache for @$mbids, then hand back everything known as
@@ -3917,6 +4057,8 @@ sub validateToken {
 # release detail page. On-demand (one release at a time), so the anonymous
 # 1 req/sec MusicBrainz rate limit is not a concern.
 # ---------------------------------------------------------------------------
+my $releaseDetailFlights;
+my $releaseDetailNextAt = 0;
 sub getReleaseDetails {
     my ($class, $mbid, $onDone, $onError) = @_;
 
@@ -3933,6 +4075,17 @@ sub getReleaseDetails {
         return;
     }
 
+    require Plugins::ListenBrainzFreshReleases::SingleFlight;
+    $releaseDetailFlights ||= Plugins::ListenBrainzFreshReleases::SingleFlight->new(name => 'tracklist', max => 120, log => $log);
+    my $flightKey = _mbBase() . '|' . $mbid;
+    my ($answer, $error) = ($onDone, $onError);
+    my $live = 1;
+    return unless $releaseDetailFlights->join($flightKey,
+        onDone => sub { $live = 0; $answer->($_[0]) },
+        onError => sub { $live = 0; $error->($_[0]) if ref $error eq 'CODE' });
+    $onDone = sub { return unless $live; $releaseDetailFlights->resolve($flightKey, $_[0]) };
+    $onError = sub { return unless $live; $releaseDetailFlights->reject($flightKey, $_[0]) };
+
     (my $safe = $mbid) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
     # recordings = tracklist. Genres come from the release-GROUP
     # (getReleaseGroupGenres) — release-level genres are almost always empty.
@@ -3942,7 +4095,9 @@ sub getReleaseDetails {
 
     my $http = Slim::Networking::SimpleAsyncHTTP->new(
         sub {
+            return unless $live;
             my $resp = shift;
+            _mbNoteOk() if _mbThrottled();
             my $data = eval { from_json($resp->content) };
             if ($@) {
                 $log->error("MusicBrainz JSON parse error: $@");
@@ -3958,14 +4113,33 @@ sub getReleaseDetails {
                 or $log->warn("release detail cache set failed: $@");
             $onDone->($parsed);
         },
-        sub { _handleError(shift, $onError) },
+        sub {
+            return unless $live;
+            my $resp = shift;
+            _mbNoteLimit() if _mbThrottled() && _mbIsRateLimited($resp);
+            _handleError($resp, $onError);
+        },
         { timeout => 15 }
     );
 
-    $http->get($url,
-        'Accept'     => 'application/json',
-        'User-Agent' => USER_AGENT,
-    );
+    # Public MusicBrainz misses are spaced; mirrors bypass the courtesy gap.
+    # Re-check the shared backoff at dispatch time, since another request can
+    # receive a rate limit while this one is waiting.
+    my $send;
+    $send = sub {
+        unless ($live) { undef $send; return }
+        my $wait = _mbThrottled() ? _mbWait() : 0;
+        my $gap = $releaseDetailNextAt - Time::HiRes::time();
+        $wait = $gap if _mbThrottled() && $gap > $wait;
+        if ($wait > 0) {
+            Slim::Utils::Timers::setTimer(undef, Time::HiRes::time() + $wait, $send);
+            return;
+        }
+        $releaseDetailNextAt = Time::HiRes::time() + 1.1 if _mbThrottled();
+        $http->get($url, 'Accept' => 'application/json', 'User-Agent' => USER_AGENT);
+        undef $send;
+    };
+    $send->();
 }
 
 # ---------------------------------------------------------------------------
@@ -4207,7 +4381,7 @@ sub peekLastfmTags {
 }
 
 sub getLastfmTags {
-    my ($class, $artist, $album, $onDone, $onError) = @_;
+    my ($class, $artist, $album, $onDone, $onError, $force) = @_;
 
     my $key = $prefs->get('lastfm_api_key');
     unless ($key && length($artist // '')) {
@@ -4222,7 +4396,12 @@ sub getLastfmTags {
 
     my $lfmKey = _lfmKey($artist, $album);
     my $row    = Plugins::ListenBrainzFreshReleases::DB::lfmGet($lfmKey);
-    if (_lfmFresh($row)) {
+    # The artist worker owns a displayable-genre checkpoint separately from this
+    # raw Last.fm response cache.  When that checkpoint expires, `force` must
+    # really reach Last.fm: otherwise a rejected non-empty raw tag list remains a
+    # 30-day cache hit and the one-day negative retry only reclassifies the same
+    # stale response without ever asking upstream again.
+    if (!$force && _lfmFresh($row)) {
         $onDone->($row->{tags} || []);
         return;
     }

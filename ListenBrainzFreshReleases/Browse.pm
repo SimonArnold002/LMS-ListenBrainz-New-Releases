@@ -250,13 +250,6 @@ use constant PLAYLIST_CONCURRENCY => 6;
 # Overall watchdog for resolving a playlist, so a hung service search can't leave
 # the playlist page spinning forever.
 use constant PLAYLIST_TIMEOUT => 45;
-# The top-level menu inlines the All Releases weeks from an async feed fetch (usually a
-# cache hit → synchronous). On a cold miss a slow ListenBrainz would otherwise hold the
-# WHOLE menu (Created for You, People You Follow AND Settings) until the feed's own 10s
-# timeout. This local watchdog renders the menu with the drill-tile fallback first if the
-# fetch hasn't returned quickly, so navigation (esp. Settings) never waits on the network.
-use constant TOPLEVEL_ALL_WAIT => 5;
-
 # The warm's feed chain (For You -> All Releases -> MuSpy) runs the three feeds in
 # priority order instead of firing them together. Ordering them creates a failure
 # the concurrent version could not have: one hung feed starves playlists and
@@ -455,9 +448,137 @@ use constant VA_MBID => '89ad4ac3-39f7-470e-963a-56509c546377';
 # ---------------------------------------------------------------------------
 # Top-level feed
 # ---------------------------------------------------------------------------
+# Explicit release actions avoid XMLBrowser's positional walk through a live
+# feed. Keep a bounded in-memory target map; an expired target fails closed and
+# asks for a refreshed list, never opens whichever album now occupies its index.
+my %releaseTargets;
+my $releaseTargetSweep = 0;
+use constant RELEASE_TARGET_TTL => 86400;
+use constant RELEASE_TARGET_MAX => 10000;
+
+sub _releaseTarget {
+    my ($rel) = @_;
+    my $key = _relKey($rel);
+    utf8::encode($key) if utf8::is_utf8($key);
+    my $token = Digest::MD5::md5_hex($key);
+    my $now = time();
+    if ($now >= $releaseTargetSweep || (!exists $releaseTargets{$token} && scalar(keys %releaseTargets) >= RELEASE_TARGET_MAX)) {
+        delete $releaseTargets{$_} for grep { $releaseTargets{$_}{expires} <= $now } keys %releaseTargets;
+        if (scalar(keys %releaseTargets) >= RELEASE_TARGET_MAX && !exists $releaseTargets{$token}) {
+            my @oldest = sort { $releaseTargets{$a}{expires} <=> $releaseTargets{$b}{expires} } keys %releaseTargets;
+            delete $releaseTargets{shift @oldest};
+        }
+        $releaseTargetSweep = $now + 60;
+    }
+    $releaseTargets{$token} = { expires => $now + RELEASE_TARGET_TTL, rel => { %$rel } };
+    return $token;
+}
+
+sub _releaseAction {
+    my ($token, $path, $method) = @_;
+    return {
+        command => ['listenbrainzfreshreleases', $method eq 'items' ? ('items') : ('playlist', $method)],
+        fixedParams => { lbf_release => $token, (defined $path ? (item_id => $path) : ()) },
+    };
+}
+
+# Week folders have the same identity requirement as the release rows below
+# them. XMLBrowser otherwise re-walks the live root by item_id, so a newly
+# inserted week can turn a tap on W/C A into W/C B. The week start is already a
+# durable natural key; carry it through the registered plugin command instead of
+# inventing another positional or in-memory target.
+sub _weekAction {
+    my ($week) = @_;
+    return {
+        command     => ['listenbrainzfreshreleases', 'items'],
+        fixedParams => { lbf_week => defined $week ? $week : '' },
+    };
+}
+
+sub _weekTargetFeed {
+    my ($client, $callback, $args) = @_;
+    my $week = $args->{params}{lbf_week};
+    unless (defined $week && ($week eq '' || $week =~ /^\d{4}-\d{2}-\d{2}$/)) {
+        $callback->({ items => [{ type => 'text', name => cstring($client, 'PLUGIN_LBF_VIEW_EXPIRED') }], cachetime => 0 });
+        return;
+    }
+
+    # Reuse the one exact-week implementation used by the main menu, the
+    # full-feed fallback and the Material home shelf. Keeping its coderef on the
+    # row preserves legacy clients; this explicit route is what Material actions
+    # use when the root has changed since render.
+    my $rows = _buildAllWeekItems(
+        [{ week_start => $week }], $client, _wantHeaders(_featuresOf($args)));
+    my $open = ref $rows eq 'ARRAY' && ref $rows->[0] eq 'HASH' ? $rows->[0]{url} : undef;
+    unless (ref $open eq 'CODE') {
+        $callback->({ items => [{ type => 'text', name => cstring($client, 'PLUGIN_LBF_VIEW_EXPIRED') }], cachetime => 0 });
+        return;
+    }
+    $open->($client, sub {
+        my $data = shift;
+        $data = { items => $data } if ref $data eq 'ARRAY';
+        $data = { items => [] } unless ref $data eq 'HASH';
+        $data->{query} = { lbf_week => $week };
+        $data->{cachetime} = 0;
+        $callback->($data);
+    }, $args);
+}
+
+# Keep the release context on subsequent detail actions, including context-menu
+# playback: XMLBrowser's _makePlayAction does not copy the root query parameters.
+sub _bindReleaseContext {
+    my ($data, $token, $parent) = @_;
+    my $items = ref $data eq 'ARRAY' ? $data : ref $data eq 'HASH' ? $data->{items} : undef;
+    return $data unless ref $items eq 'ARRAY';
+    $items = [ @$items ];
+    $data = ref $data eq 'ARRAY' ? $items : { %$data, items => $items };
+    for my $i (0 .. $#$items) {
+        my $item = $items->[$i];
+        next unless ref $item eq 'HASH';
+        $item = $items->[$i] = { %$item, itemActions => { %{ $item->{itemActions} || {} } } };
+        my $path = length($parent // '') ? "$parent.$i" : "$i";
+        if (ref $item->{url} eq 'CODE') {
+            my $url = $item->{url};
+            $item->{url} = sub {
+                my ($c, $cb, @rest) = @_;
+                $url->($c, sub { $cb->(_bindReleaseContext($_[0], $token, $path)) }, @rest);
+            };
+            $item->{itemActions}{items} ||= _releaseAction($token, $path, 'items')
+                unless ($item->{type} // '') eq 'audio';
+        }
+        if ($item->{play} || $item->{playlist} || ($item->{type} // '') =~ /^(?:audio|playlist)$/) {
+            $item->{itemActions}{$_} ||= _releaseAction($token, $path, $_) for qw(play add insert);
+        }
+        _bindReleaseContext($item, $token, $path) if ref $item->{items} eq 'ARRAY';
+    }
+    return $data;
+}
+
+sub _releaseTargetFeed {
+    my ($client, $callback, $args) = @_;
+    my $token = $args->{params}{lbf_release} // '';
+    my $entry = $releaseTargets{$token};
+    unless ($entry && $entry->{expires} > time()) {
+        $callback->({ items => [{ type => 'text', name => cstring($client, 'PLUGIN_LBF_VIEW_EXPIRED') }], cachetime => 0 });
+        return;
+    }
+    $entry->{expires} = time() + RELEASE_TARGET_TTL;
+    _releaseDetail($entry->{rel}, $client, sub {
+        my $data = _bindReleaseContext($_[0], $token, '');
+        $data = { items => $data } if ref $data eq 'ARRAY';
+        $data->{query} = { lbf_release => $token };
+        $data->{cachetime} = 0;
+        $callback->($data);
+    }, _wantHeaders(_featuresOf($args)));
+}
+
 sub topLevel {
     _noteBrowse();
     my ($client, $callback, $args) = @_;
+    return _releaseTargetFeed($client, $callback, $args)
+        if ref $args->{params} eq 'HASH' && exists $args->{params}{lbf_release};
+    return _weekTargetFeed($client, $callback, $args)
+        if ref $args->{params} eq 'HASH' && exists $args->{params}{lbf_week};
 
     my $username = $prefs->get('username') // '';
     my $token    = $prefs->get('token')    // '';
@@ -512,27 +633,22 @@ sub topLevel {
     } if $username;
 
     # --- assemble with Material section headers --------------------------
-    # The static sections build synchronously; the All Releases weeks are fetched and
-    # inlined DIRECTLY under their header (no intermediate tile/folder). The feed is
-    # cached (24h) + warm-fetched, so this is usually instant; on a cold miss it costs
-    # one fetch, and on error we fall back to the old drill tile so the menu still works.
+    # All Releases contributes only its indexed week summaries here. No release
+    # payload is selected or thawed merely to build the root; a week reads its own
+    # payloads only when selected. On a genuinely cold store the existing drill
+    # tile is shown immediately while API fills the store in the background.
     #
     # SECTION ORDER: Created for You -> All Releases -> People You Follow ->
-    # Settings. Only the FIRST of those can be assembled here, because the All
-    # Releases weeks are inlined from an async feed fetch and everything after
-    # them has to be emitted on the far side of that callback. So @head is the
-    # part that precedes All Releases, and $finish emits the rest in order — the
-    # People section moved into $finish for no reason other than that it now
-    # sits below a section which is only known asynchronously.
+    # Settings. The summary callback is normally synchronous, but the assembly
+    # remains callback-shaped so storage failures keep the same fallback path.
     my @head;
     push @head, _sectionHeader($client, 'PLUGIN_LBF_SECTION_CREATED_FOR_YOU', $useH, \@createdFor), @createdFor;
 
-    my ($finished, $watchdog);
+    my $finished;
     my $finish = sub {
         my ($allRows) = @_;
-        return if $finished;   # idempotent: whichever of feed / fallback / watchdog wins renders once
+        return if $finished;
         $finished = 1;
-        Slim::Utils::Timers::killSpecific($watchdog) if $watchdog;
         my @items = @head;
         push @items, _sectionHeader($client, 'PLUGIN_LBF_ALL_RELEASES', $useH, $allRows), @$allRows;
         # People You Follow sits BELOW All Releases and above Settings — last of
@@ -547,29 +663,17 @@ sub topLevel {
         $callback->({ items => \@items, cachetime => 0 });
     };
 
-    # If the feed fetch is slow (cold cache), render the menu with the drill-tile fallback
-    # so Settings et al. aren't held hostage to the network; the inlined weeks then appear
-    # on the next open (the feed populates its own cache meanwhile).
-    $watchdog = Slim::Utils::Timers::setTimer(undef, time() + TOPLEVEL_ALL_WAIT, sub {
-        $finish->([ _categoryTile($client, 'all', MENU_ALL, \&fetchAll, $feat) ]);
-    });
-
-    Plugins::ListenBrainzFreshReleases::API->getFreshReleasesAll(
+    Plugins::ListenBrainzFreshReleases::API->getFreshReleaseWeeksAll(
         sort   => 'release_date',
         onDone => sub {
-            my $releases = _allSection(shift);
-            _stashSummary('all', $releases);
-            # No inline Refresh row at the top level (it's cluttered there); All Releases
-            # refreshes on its own 24h cadence, and each week drill carries the Options
-            # section — family selector, sort toggle AND Refresh. (Until 0.9.127 that
-            # last one was missing, so inlining the weeks here left the feed with no
-            # reachable Refresh: fetchAll's row is only seen via the fallback tile.)
-            $finish->([ @{ _buildAllLanding($releases, $client, $useH) } ]);
-        },
-        onError => sub {
-            $log->error("top-level All Releases fetch error: " . (shift // ''));
-            # Fall back to the drill tile so the section still works.
-            $finish->([ _categoryTile($client, 'all', MENU_ALL, \&fetchAll, $feat) ]);
+            my $weeks = shift;
+            # No inline Refresh row at the top level (it's cluttered there); each
+            # week drill carries Options and Refresh. With no stored summary yet,
+            # retain the category tile while the detached first fetch fills it.
+            my $rows = ref $weeks eq 'ARRAY' && @$weeks
+                ? _buildAllSummaryLanding($weeks, $client, $useH)
+                : [ _categoryTile($client, 'all', MENU_ALL, \&fetchAll, $feat) ];
+            $finish->($rows);
         },
     );
 }
@@ -815,8 +919,15 @@ sub fetchForYou {
                     # BEFORE rendering. For You is one native-windowed level, so the
                     # whole list is already filled and this costs nothing extra.
                     my $shown = _genreSelectFilter($releases, 'foryou', $meta);
+                    # Group ONCE and hand the same groups to both the focus map and
+                    # the renderer. This level draws a week divider before every
+                    # week and re-sorts inside each one, so Material's row index
+                    # does not address $shown — it addresses the rows _weekGroups
+                    # produced, which is what _renderSlots spells out.
+                    my $groups = _weekGroups($shown, $mode);
+                    _focusReleaseCovers($client, 'foryou', _renderSlots(scalar(@opt) + 1, $groups), $args);
                     my @items = ( _sectionHeader($client, 'PLUGIN_LBF_SECTION_OPTIONS', $headers, \@opt),
-                                  @opt, @{ _buildItems($shown, $client, $headers, $mode, $meta) } );
+                                  @opt, @{ _buildItems($groups, $client, $headers, $meta) } );
                     $callback->({ items => \@items, cachetime => 0 });
                 }, $gmax, peek => 1);
             },
@@ -896,24 +1007,22 @@ sub homePlaylists {
     );
 }
 
-# Material home-page row for All Releases. Shows the FLATTENED first level — the
-# "All releases" entry plus one card per week-commencing (This/Last/Earlier) — so
-# the carousel is a jump-off into a section rather than the full (large) release
-# list. The landing is a small fixed list (well under 50) so it's the same at
-# every request quantity (carousel vs "show all"), keeping deep drill-in stable.
+# Material home-page row for All Releases. Shows the FLATTENED first level — one
+# card per week-commencing (This/Last/Earlier) — so the carousel is a jump-off
+# into a section rather than the full (large) release list. The landing is a small
+# fixed list (well under 50) so it's the same at every request quantity (carousel
+# vs "show all"), keeping deep drill-in stable.
 sub homeAllReleases {
     my ($client, $cb, $args) = @_;
 
-    Plugins::ListenBrainzFreshReleases::API->getFreshReleasesAll(
+    Plugins::ListenBrainzFreshReleases::API->getFreshReleaseWeeksAll(
         sort    => 'release_date',
         onDone  => sub {
-            my $releases = _allSection(shift);
-            _stashSummary('all', $releases);
-            $cb->({ items => _buildAllLanding($releases, $client, 0), cachetime => 0 });
-        },
-        onError => sub {
-            $log->error("Home All Releases fetch error: " . (shift // ''));
-            $cb->({ items => [], cachetime => 0 });
+            my $weeks = shift;
+            $cb->({ items => ref $weeks eq 'ARRAY' && @$weeks
+                              ? _buildAllSummaryLanding($weeks, $client, 0)
+                              : [],
+                    cachetime => 0 });
         },
     );
 }
@@ -1338,11 +1447,13 @@ sub resolveFollowFeed {
 # Each matched item is tagged with its source rec's `created` (in _resolveTracks) so the
 # day dividers can be built at render time (see _followResult).
 sub _resolveFollow {
-    my ($client, $store, $callback, $force, $feat) = @_;
+    my ($client, $store, $callback, $force, $feat, $onDone) = @_;
+    $onDone ||= sub {};
 
     my $tracks = $store->{tracks} || [];
     unless (@$tracks) {
         $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_NO_FOLLOW'), type => 'text' }], cachetime => 0 }) if $callback;
+        $onDone->();
         return;
     }
 
@@ -1352,6 +1463,7 @@ sub _resolveFollow {
         if (($c->{sig} // '') eq $sig) {
             _dbg("follow feed cache hit ($c->{matched}/$c->{total})");
             $callback->(_followResult($client, $c, $feat)) if $callback;
+            $onDone->();
             return;
         }
     }
@@ -1364,6 +1476,7 @@ sub _resolveFollow {
     if (_isBuilding($bkey)) {
         _dbg("follow feed: a resolve is already in flight — rendering the building row");
         $callback->(_buildingRow($client)) if $callback;
+        $onDone->();
         return;
     }
     my $owns     = _buildingStart($bkey);
@@ -1399,6 +1512,7 @@ sub _resolveFollow {
         _dbg("resolved follow feed: $payload->{matched}/$payload->{total} new ($owned owned excluded, $lib library)"
             . ($inconclusive ? " ($inconclusive inconclusive — short TTL)" : ""));
         $release->();
+        $onDone->();
         $callback->(_followResult($client, $payload, $feat)) if $callback;
     }, 'exclude', $force);
     });
@@ -1633,9 +1747,11 @@ sub _dayDivider {
 # context). Refreshes the store, then resolves the whole list if its sig changed. A
 # forced warm always re-resolves.
 sub _warmFollow {
-    my ($client, $force) = @_;
+    my ($client, $force, $onDone) = @_;
+    $onDone ||= sub {};
     unless (($prefs->get('token') // '') ne '') {
         _stage('end', 'follow_feed', 'skipped', 'no token');
+        $onDone->();
         return;
     }
 
@@ -1650,31 +1766,32 @@ sub _warmFollow {
             unless (@$tracks) {
                 _stage('end', 'follow_feed', 'done', 'empty');
                 _dbg("warm: follow feed empty");
-                return;
+                $onDone->();
+            return;
             }
             unless ($client) {   # no player → resolve on first open instead
                 _stage('end', 'follow_feed', 'skipped', 'no player');
-                return;
+                $onDone->();
+            return;
             }
 
             my $c = $cache->get(_followResolvedKey());
             if (!$force && $c && ($c->{sig} // '') eq _followSig($tracks)) {
                 _stage('end', 'follow_feed', 'cache-hit', 'unchanged');
                 _dbg("warm: follow feed unchanged — skip");
-                return;
+                $onDone->();
+            return;
             }
-            # NB the resolve is async and this stage's end is recorded HERE, at the
-            # hand-off, not at its completion — `_resolveFollow` has no completion
-            # callback on the warm path. So this row measures the FETCH, and the
-            # resolve it kicks off runs on past it. Worth knowing when reading the
-            # table: a short follow_feed does not mean the follow work is finished.
-            _stage('end', 'follow_feed', 'done', scalar(@$tracks) . ' track(s), resolve started');
-            _resolveFollow($client, $store, undef, $force);
+            _resolveFollow($client, $store, undef, $force, undef, sub {
+                _stage('end', 'follow_feed', 'done', scalar(@$tracks) . ' track(s), processed');
+                $onDone->();
+            });
         },
         onError => sub {
             my $err = shift // '';
             _stage('end', 'follow_feed', 'failed', $err);
             $log->info("warm: follow feed fetch failed: $err");
+            $onDone->();
         },
     );
 }
@@ -2856,10 +2973,12 @@ sub _warmTrendingCovers {
 # album aggregates (no player needed), so the section opens instantly. Chained after
 # the follow-feed warm in warmCache.
 sub _warmTrending {
-    my ($client, $force) = @_;
+    my ($client, $force, $onDone) = @_;
+    $onDone ||= sub {};
     unless (($prefs->get('username') // '') ne '') {
         _stage('end', $_, 'skipped', 'no username')
             for qw(trending_tracks trending_month trending_year);
+        $onDone->();
         return;
     }
 
@@ -2887,6 +3006,7 @@ sub _warmTrending {
         _buildAlbumsData($client, 'this_year', sub {
             _stage('end', 'trending_year', 'done', scalar(@{ $_[0] // [] }) . ' album(s)');
             _warmTrendingCovers($_[0], 'trending albums · this year');
+            $onDone->();
         }, $force);
     };
 
@@ -3249,15 +3369,47 @@ sub _resolveTracks {
 #
 # They used to fire all three at once. On a WARM store that costs nothing (measured:
 # all three ended within 0.01s, served from the feed store) — but a cold store is
-# exactly when the ordering matters, and a cold store is what a new user and every
-# dev build has. "New Releases should populate first, then All releases" is the
+# exactly when the ordering matters, and a cold store is what a new user or an
+# explicit clean-load test has. "New Releases should populate first, then All releases" is the
 # stated priority; concurrent starts cannot honour it.
 #
 # COVERS STAY FIRE-AND-FORGET off each feed as it lands, deliberately. Chaining the
 # next feed behind ~450 cover fetches would make the ordering worse, not better, and
 # artwork appearing promptly is its own requirement.
+# Last.fm is optional enrichment. Reservations cover core warm chains; artwork
+# and active browsing are checked separately at each Last.fm request boundary.
+my %lastfmHolds;
+my $lastfmHoldId = 0;
+my $lastfmRequestBusy = 0;
+my $lastfmNextAt = 0;
+my $lastfmWarmPending = 0;  # whole warm passes, including their courtesy gaps
+my $detailMainReady = 0;    # reset for each feed warm; set after both genre tails
+my %lastfmSettledArtists;   # successful shared checkpoints, for overlapping passes
+use constant LASTFM_CORE_MAX => 3600;
+use constant LASTFM_SETTLED_TTL => 86400; # no longer than the shortest DB checkpoint
+
+sub _holdLastfm {
+    my $id = ++$lastfmHoldId;
+    $lastfmHolds{$id} = time() + LASTFM_CORE_MAX;
+    return sub { delete $lastfmHolds{$id} };
+}
+
+sub _holdLastfmForDetail {
+    return sub {} unless $_[0];
+    my $release = _holdLastfm();
+    my $settled = 0;
+    return sub {
+        return if $settled++;
+        $release->();
+    };
+}
+
 sub warmFeeds {
     my ($onDone) = @_;
+    # Jobs are admitted as each feed lands, but cannot run during the possible
+    # streaming-readiness wait before warmCache starts the main genre phase.
+    $detailMainReady = 0;
+    my $releaseLastfm = _holdLastfm();
 
     # A CHAIN NEEDS A WATCHDOG — this is the failure mode the old fire-and-forget
     # did not have. With the stages independent, one feed hanging cost only that
@@ -3268,6 +3420,7 @@ sub warmFeeds {
     my $finish = sub {
         return if $fired++;
         Slim::Utils::Timers::killSpecific($wdog) if $wdog;
+        $releaseLastfm->();
         $onDone->() if ref $onDone eq 'CODE';
     };
     $wdog = Slim::Utils::Timers::setTimer(undef, time() + WARM_FEED_CHAIN_MAX, sub {
@@ -3293,6 +3446,7 @@ sub warmFeeds {
                 # MuSpy rows are merged into For You, so they answer to that
                 # section's settings.
                 _warmCovers(_filterForYou($_[0]), 'muspy');
+                _queueReleaseDetails(_filterForYou($_[0]), 'muspy');
                 $finish->();
             },
         );
@@ -3312,6 +3466,7 @@ sub warmFeeds {
                 _stage('end', 'all_feed', 'done', "$n releases");
                 _dbg("warm: all releases — $n stored");
                 _warmCovers(_filterAll($_[0]), 'all releases');
+                _queueReleaseDetails(_filterAll($_[0]), 'all releases');
                 $muspy->();
             },
             # A warm failure is not the user's problem: they are not looking at
@@ -3342,6 +3497,7 @@ sub warmFeeds {
                 _stage('end', 'all_feed', 'done', "$n releases");
                 _dbg("warm: all releases — $n stored");
                 _warmCovers(_filterAll($_[0]), 'all releases');
+                _queueReleaseDetails(_filterAll($_[0]), 'all releases');
                 $finish->();
             },
             onError => sub {
@@ -3365,6 +3521,7 @@ sub warmFeeds {
             _stage('end', 'foryou_feed', 'done', "$n releases");
             _dbg("warm: for you — $n stored");
             _warmCovers(_filterForYou($_[0]), 'for you');
+            _queueReleaseDetails(_filterForYou($_[0]), 'for you');
             $all->();
         },
         onError => sub {
@@ -3499,6 +3656,10 @@ use constant COVER_WARM_TTL => 25 * 86400;
 # ladder collapse all resolve to the same source URL. They are launched together
 # so the image proxy can coalesce them into a single download (see _coverLaunch).
 my @coverQueue;      # [ [ [$path,$key], ... ], ... ] — one entry per release
+my %coverRank;       # path => default [section, arrival] priority
+my %coverFocus;      # path => rank in the most recently requested view
+my $coverSequence = 0;
+my %coverReveal;     # player/view => previous reveal count
 my %coverQueued;     # $path => 1 while queued, so two feeds can't queue it twice
 my $coverRunning = 0;   # RELEASES currently in flight (0 .. _coverLimit())
 my $coverPumping = 0;   # re-entrancy guard on _coverTick's launch loop
@@ -3521,16 +3682,207 @@ my $coverSkipped   = 0;
 my $coverGroups    = 0;
 my $coverPeak      = 0;
 
+# Current week first, then earlier weeks newest-first, then upcoming weeks.
+sub _coverWeekOrder {
+    my ($rels) = @_;
+    my @t = localtime(time());
+    my $week = _weekStart(sprintf('%04d-%02d-%02d', $t[5]+1900, $t[4]+1, $t[3]));
+    my (%buckets, @out);
+    push @{ $buckets{_weekStart($_->{release_date} // '')} }, $_ for @$rels;
+    my @weeks = (grep { $_ eq $week } keys %buckets);
+    push @weeks, sort { $b cmp $a } grep { length && $_ lt $week } keys %buckets;
+    push @weeks, sort grep { $_ gt $week } keys %buckets;
+    push @weeks, '' if exists $buckets{''};
+    push @out, sort { ($b->{release_date} // '') cmp ($a->{release_date} // '') }
+                    @{ $buckets{$_} } for @weeks;
+    return \@out;
+}
+
+sub _orderCoverQueue {
+    @coverQueue = sort {
+        my ($ap, $bp) = ($a->[0][0], $b->[0][0]);
+        my ($af, $bf) = ($coverFocus{$ap}, $coverFocus{$bp});
+        (defined $af ? 0 : 1) <=> (defined $bf ? 0 : 1)
+        || (defined $af && defined $bf ? $af <=> $bf : 0)
+        || ($coverRank{$ap}[0] // 2) <=> ($coverRank{$bp}[0] // 2)
+        || ($coverRank{$ap}[1] // 0) <=> ($coverRank{$bp}[1] // 0)
+    } @coverQueue;
+}
+
+# XMLBrowser supplies index/quantity for requested ranges, not viewport scroll
+# events. On an expanded full-list refresh, start with newly revealed rows.
+my $detailWarmer;
+
+sub detailWarmStats {
+    my $stats = $detailWarmer ? $detailWarmer->stats() : {
+        pending => 0, active => 0, completed => 0, deferred => 0, failed => 0,
+        cache_checks => 0, cache_hits => 0, fetches => 0,
+    };
+    $stats->{main_ready} = $detailMainReady ? 1 : 0;
+    return $stats;
+}
+
+sub _queueReleaseDetails {
+    my ($rels, $label, $focus) = @_;
+    return unless ref $rels eq 'ARRAY' && @$rels;
+    require Plugins::ListenBrainzFreshReleases::DetailWarm;
+    $detailWarmer ||= Plugins::ListenBrainzFreshReleases::DetailWarm->new(
+        key => \&_relKey, pause => \&_detailPriorityBusy,
+        run => \&_warmReleaseDetails, log => $log);
+    $rels = _coverWeekOrder($rels) if !$focus && $label eq 'all releases';
+    $detailWarmer->enqueue($rels, $label =~ /for you|muspy/ ? 0 : 1, $focus);
+}
+
+sub _warmReleaseDetails {
+    my ($rel, $done, $sources) = @_;
+    my %work = (cache_checks => 0, cache_hits => 0, fetches => 0);
+    # Settings/window changes must also apply to work already in the queue.
+    if ($sources) {
+        my $eligible = 0;
+        for my $source (@$sources) {
+            my $section = $source == 0 ? 'foryou' : 'all';
+            my $filtered = $source == 0 ? _filterForYou([$rel]) : _filterAll([$rel]);
+            next unless @$filtered;
+            # _sectionBounds, NOT sectionWindow: priority 0 carries MuSpy as well as
+            # For You, and MuSpy's future gate is its own.
+            my ($from, $to) = _sectionBounds($section);
+            my $date = $rel->{release_date} // '';
+            $eligible = 1 if !$date || ($date ge $from && $date le $to);
+        }
+        unless ($eligible) { $done->(0, 'outside current filters/window', \%work); return }
+    }
+    my $artist = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist') // '';
+    my $album = _pickValue($rel, 'release_name', 'title', 'name') // '';
+    my $mbid = $rel->{release_mbid} // '';
+    my $retry = 0;
+    my $stream = sub {
+        unless ($prefs->get('play_via') && length $album &&
+                grep { $_->{name} ne 'Bandcamp' } _orderedAdapters()) {
+            $done->($retry, $retry ? 'tracklist retry queued' : 'tracklist cached; streaming not enabled', \%work);
+            return;
+        }
+        my $key = _streamKey(_streamId($artist, $album, $mbid));
+        $work{cache_checks}++;
+        my $cached = $cache->get($key);
+        if ($cached && (!$cached->{retry_at} || $cached->{retry_at} > time())) {
+            $work{cache_hits}++;
+            my $delay = $cached->{retry_at} ? $cached->{retry_at} - time() : 0;
+            $delay = $retry if $retry > $delay;
+            $done->($delay, $delay ? 'retry scheduled' : 'details already cached', \%work);
+            return;
+        }
+        my $client = (Slim::Player::Client::clients())[0];
+        unless ($client && !streamingNotReady()) {
+            $done->(300, 'waiting for a streaming player', \%work);
+            return;
+        }
+        my $year = ($rel->{release_date} // '') =~ /^(\d{4})/ ? $1 : undef;
+        $work{fetches}++;
+        _findPlayable($client, sub {
+            my $response = shift;
+            # Completion is proven by the SAME cache that a detail open reads,
+            # not by a second marker that could survive an unsuccessful write.
+            my $value = $cache->get($key);
+            my $delay = !$value ? 300 : $value->{retry_at} ? $value->{retry_at} - time() : 0;
+            $delay = 1 if $value && $value->{retry_at} && $delay < 1;
+            $delay = $retry if $retry > $delay;
+            # Foreground rendering may finish on the highest-priority match
+            # before slower adapters settle. Keep the worker slot until their
+            # normal callbacks/timeouts finish, so warm fan-outs cannot pile up.
+            my $pending = ref $response eq 'HASH' ? $response->{_warm_pending} : undef;
+            my $finish;
+            $finish = sub {
+                if (ref $pending eq 'SCALAR' && $$pending > 0) {
+                    Slim::Utils::Timers::setTimer(undef, Time::HiRes::time() + 0.1, $finish);
+                    return;
+                }
+                $done->($delay, $delay ? 'detail retry queued' : 'tracklist and streaming cached', \%work);
+                undef $finish;
+            };
+            $finish->();
+        }, $artist, $album, $mbid, undef, $year, $rel->{release_group_primary_type});
+    };
+    if ($mbid) { $work{cache_checks}++ }
+    my $trackCached = $mbid ? $cache->get('lbf:mb:' . $mbid) : undef;
+    $work{cache_hits}++ if $trackCached;
+    if ($mbid && !$trackCached) {
+        $work{fetches}++;
+        Plugins::ListenBrainzFreshReleases::API->getReleaseDetails($mbid,
+            sub { $retry = 300 unless $cache->get('lbf:mb:' . $mbid); $stream->() },
+            sub { $retry = 300; $stream->() });
+    }
+    else { $stream->() }
+}
+
+# $slots is _renderSlots' output — one entry per RENDERED ROW — and taking it
+# rather than a release list is the whole point. XMLBrowser's index/quantity count
+# rows, and a level's rows are not its releases: the Options block sits above them
+# and (on the weekly levels) a divider precedes every week, so the drift between
+# the two indexes GROWS with each week the request starts past. Subtracting a
+# single options offset was right only for a level that draws neither, and under
+# the artist/album sorts even a one-week list is re-ordered inside the week, so
+# there is no scalar offset that could have worked.
+sub _focusReleaseCovers {
+    my ($client, $key, $slots, $args) = @_;
+    my @rels = grep { defined } @$slots;
+    return unless @rels;
+    my $id = _cid($client) . '|' . $key;
+    my $old = $coverReveal{$id} || 0;
+    $coverReveal{$id} = scalar @rels;
+    my $index = ref $args eq 'HASH' ? ($args->{index} // 0) : 0;
+    my $quantity = ref $args eq 'HASH' ? ($args->{quantity} // 0) : 0;
+    $index = scalar @$slots if $index > @$slots;
+    # Rows above the request that hold no release simply don't count towards it.
+    my $start = scalar grep { defined $slots->[$_] } (0 .. $index - 1);
+    $start = $old if !$start && $old && @rels > $old;
+    $start = 0 if $start >= @rels;
+    # Likewise the requested span: a window of N rows covers fewer than N releases
+    # when it spans a divider.
+    my $count = scalar @rels;
+    if ($quantity > 0) {
+        my $lastRow = $index + $quantity - 1;
+        $lastRow = $#$slots if $lastRow > $#$slots;
+        $count = scalar grep { defined $slots->[$_] } ($index .. $lastRow);
+    }
+    $count = scalar @rels if $count < 1 || $count > @rels;
+    my $end = $start + $count - 1;
+    $end = $#rels if $end > $#rels;
+    my @focus = (@rels[$start .. $end], @rels[0 .. $start-1]);
+    push @focus, @rels[$end+1 .. $#rels] if $end < $#rels;
+    _warmCovers(\@focus, $key eq 'foryou' ? 'for you' : 'all releases', 1);
+}
+
 sub _warmCovers {
-    my ($releases, $label) = @_;
+    my ($releases, $label, $focus) = @_;
 
     return unless $prefs->get('warm_covers') // 1;
     return unless ref $releases eq 'ARRAY' && @$releases;
 
-    my ($groups, $seen) = _coverGroupsFor($releases, COVER_WARM_MAX) or return;
-    return unless @$groups;
-
+    $releases = _coverWeekOrder($releases) if !$focus && $label eq 'all releases';
+    my ($groups, $seen) = _coverGroupsFor($releases, COVER_WARM_MAX, $focus || $label eq 'all releases') or return;
+    # Include already queued paths in the focus: deduplication must not prevent
+    # promotion of a release the overnight pass queued before the user opened it.
+    if ($focus) {
+        %coverFocus = ();
+        my $rank = 0;
+        for my $rel (@$releases) {
+            my $url = Plugins::ListenBrainzFreshReleases::API->coverArtUrl($rel) or next;
+            my $base = Slim::Web::ImageProxy::proxiedImage($url) or next;
+            for my $spec (@{ +COVER_SPECS }) {
+                (my $path = $base) =~ s/(\.\w+)$/$spec$1/ or next;
+                $coverFocus{$path} = $rank++;
+            }
+        }
+    }
+    for my $group (@$groups) {
+        my $path = $group->[0][0];
+        # For You (including MuSpy) precedes All Releases when nobody is looking.
+        my $section = $label =~ /for you|muspy/ ? 0 : $label =~ /all releases/ ? 1 : 2;
+        $coverRank{$path} = [$section, ++$coverSequence];
+    }
     push @coverQueue, @$groups;
+    _orderCoverQueue();
+    return unless @coverQueue;
 
     unless ($coverStageOpen) {
         $coverStageOpen = 1;
@@ -3559,14 +3911,15 @@ sub _warmCovers {
 #
 # $cap bounds RELEASES, not paths, so it means the same thing it always did.
 sub _coverGroupsFor {
-    my ($releases, $cap) = @_;
+    my ($releases, $cap, $keepOrder) = @_;
 
     eval { require Slim::Web::ImageProxy; 1 } or return;
     return unless Slim::Web::ImageProxy->can('proxiedImage');
 
     # Newest first, which is the order every view renders in — so a capped pass
     # warms the covers that are actually at the top of the list.
-    my @rels = sort { ($b->{release_date} // '') cmp ($a->{release_date} // '') } @$releases;
+    my @rels = $keepOrder ? @$releases
+             : sort { ($b->{release_date} // '') cmp ($a->{release_date} // '') } @$releases;
 
     # RELEASE-MAJOR, and this REVERSES the spec-major order 0.9.189 introduced.
     #
@@ -3608,6 +3961,32 @@ sub _coverGroupsFor {
     }
 
     return (\@groups, $seen);
+}
+
+sub _lastfmPriorityBusy {
+    my $now = time();
+    for my $id (keys %lastfmHolds) {
+        next if $lastfmHolds{$id} > $now;
+        delete $lastfmHolds{$id};
+        _dbg("warm: Last.fm core reservation expired; allowing retries");
+    }
+    return 1 if %lastfmHolds || %BUILDING;
+    # An unchecked queue entry is not proof of network work: on a preserved
+    # restart it is commonly only a warm-marker verification.  _coverTick starts
+    # cold groups before Last.fm can run, so actual artwork downloads remain the
+    # priority while all-warm scans no longer masquerade as downloads.
+    return 1 if $coverRunning;
+    return 1 if $lastBrowseAt && $now - $lastBrowseAt < COVER_BROWSE_QUIET;
+    return 0;
+}
+
+sub _detailPriorityBusy {
+    # General detail preparation is the remainder phase.  It begins only after
+    # every Last.fm warm pass (and its final courtesy interval) has drained.
+    return 1 unless $detailMainReady;
+    return 1 if _lastfmPriorityBusy();
+    return 1 if $lastfmWarmPending || $lastfmRequestBusy;
+    return 0;
 }
 
 # Somebody is looking. Called at the top of every browse entry point — cheap
@@ -3769,6 +4148,8 @@ sub _coverLaunch {
         my ($path, $key) = @$ent;
         if (eval { $cache->get($key) }) {
             delete $coverQueued{$path};
+            delete $coverRank{$path};
+            delete $coverFocus{$path};
             $coverSkipped++;
             next;
         }
@@ -3806,6 +4187,8 @@ sub _coverLaunch {
         my $done  = sub {
             return if $fired++;
             delete $coverQueued{$path};
+            delete $coverRank{$path};
+            delete $coverFocus{$path};
             $coverFetched++;
             $groupDone->();
         };
@@ -3832,6 +4215,8 @@ sub _coverLaunch {
                                  . " skipping the cover warm");
                         @coverQueue  = ();
                         %coverQueued = ();
+                        %coverRank = ();
+                        %coverFocus = ();
                     }
                     $done->();
                 },
@@ -3848,41 +4233,9 @@ sub warmCache {
     my ($client, %opts) = @_;
     my $force = $opts{force} ? 1 : 0;   # force => 1: re-resolve even already-cached playlists (manual refresh)
 
-    # ORDER WITHIN THE WARM: FIRST, a reversal of the original with a reason.
-    #
-    # It used to run LAST, chained behind the created-for playlists (every track in
-    # them resolved against the streaming services), the follow feed, and the whole
-    # People-You-Follow trending build (follower fan-out, per-user stats, a streaming
-    # gate over 50 albums). The comment justifying that called genres "the least
-    # urgent". That was true when a genre was a nice-to-have on a row; it is exactly
-    # backwards now. **Genres are the one thing that must be ready before a view
-    # opens** — everything queued ahead of them only matters once the user presses
-    # play — and the ladder's own tail is slow by design (Last.fm is paced at one
-    # request per second). Measured on the live server: the ladder did not start
-    # until many minutes into the tick, so every view opened bare in the meantime,
-    # which is what "it still renders when it has none" actually was.
-    #
-    # Started here rather than chained, so it runs ALONGSIDE the streaming work
-    # instead of after it. That does not undo the original concern — which was that
-    # the playlist/follow/trending stages must not hit the STREAMING APIs all at once
-    # — because the genre ladder touches none of them: ListenBrainz bulk metadata,
-    # the community API, then Last.fm. Their order relative to each other is
-    # unchanged. Every stage of the ladder is on idle ticks and yields, so it cannot
-    # hold the event loop while the resolves run.
-    #
-    # GENRES BEFORE THE USERNAME GATE, because ALL RELEASES NEEDS NO ACCOUNT.
-    # This call used to sit below the early return, so an account-less user never
-    # reached it — and `_warmGenres`'s own no-username branch, which skips the two
-    # For You stages and warms All Releases for everyone, was dead code. The
-    # consequence was the genre half of exactly the bug `_warmTick`'s comment
-    # describes about feeds: All Releases was fetched and stored by `warmFeeds`
-    # (which runs ahead of us for that very reason) but its genres were never
-    # pre-warmed, so the view opened bare and could only fill from the
-    # `_kickGenreFill` top-up — a page at a time, 120s apart.
-    #
-    # `_warmGenres` reads the username itself and decides per feed, so the gate
-    # below stays where it is: everything under it (playlists, the follow feed,
-    # the trending builds) genuinely does need an account.
+    # ListenBrainz metadata stays early. Only Last.fm waits for core processing
+    # and artwork, including Last.fm jobs submitted by a browse top-up.
+    my $releaseLastfm = _holdLastfm();
     _warmGenres();
 
     unless (($prefs->get('username') // '') ne '') {
@@ -3892,6 +4245,7 @@ sub warmCache {
         # wrong outcome, which is worse than the missing warm was.
         _stage('end', $_, 'skipped', 'no username')
             for qw(playlists follow_feed trending_tracks trending_month trending_year);
+        $releaseLastfm->();
         return;
     }
 
@@ -3928,8 +4282,10 @@ sub warmCache {
                     # Skipped entirely when the section is disabled — no following/stats/
                     # feed calls, no resolve, no cache writes for it.
                     if ($prefs->get('people_follow')) {
-                        _warmFollow($client, $force);
-                        _warmTrending($client, $force);
+                        my $pending = 2; # set before either synchronous cache hit
+                        my $finished = sub { $releaseLastfm->() unless --$pending };
+                        _warmFollow($client, $force, $finished);
+                        _warmTrending($client, $force, $finished);
                     }
                     else {
                         # The master switch off is the one case where the whole
@@ -3938,6 +4294,7 @@ sub warmCache {
                         # a follower stage that hung and never recorded an end.
                         _stage('end', $_, 'skipped', 'people_follow off')
                             for qw(follow_feed trending_tracks trending_month trending_year);
+                        $releaseLastfm->();
                     }
                     # NB genres are NOT started here — they were kicked off at the
                     # top of warmCache, before any of this. See the comment there;
@@ -3993,6 +4350,7 @@ sub warmCache {
             _stage('end', $_, 'skipped', 'playlist listing failed')
                 for qw(follow_feed trending_tracks trending_month trending_year);
             $log->info("warm: playlist list fetch failed: $err");
+            $releaseLastfm->();
         },
     );
 }
@@ -4099,32 +4457,38 @@ sub _filterAll    { _filterSection(shift, 'all') }
 # same interaction: the input is the same arrayref and the prefs that shape it
 # haven't moved.
 #
-# Validity is by IDENTITY of the source arrayref(s), not a content hash — the feed
-# memo hands back the same ref for its whole TTL, and a Refresh (clearFeedCache →
-# _memoDrop) forces a re-fetch that necessarily produces a NEW ref, so a refresh can
-# never be masked. The memo holds those refs itself, which is what makes `==`
-# sound: an address can't be recycled by a different array while we're still
-# pointing at it. Everything else that shapes the result is prefs, so those go in a
-# signature — a settings change lands on the very next walk.
+# Validity is by IDENTITY of the source arrayref(s), not a content hash. API now
+# keeps that identity stable while DB::feedGeneration is unchanged, and replaces
+# it as soon as membership or ANY shared release payload changes. A Refresh drops
+# the API memo explicitly, so it also necessarily produces a NEW ref and cannot be
+# masked. The memo holds those refs itself, which is what makes `==` sound: an
+# address can't be recycled by a different array while we're still pointing at it.
+# Everything else that shapes the result is prefs/window state, so those go in a
+# signature and a settings/day change lands on the very next walk.
 #
 # For You needs TWO sources: _mergeMuSpy builds a fresh arrayref every call, so the
 # identity has to come from the LB feed and the MuSpy list separately (which is why
 # getMuSpyReleases is memoed too).
-use constant SECTION_MEMO_TTL => 5;
+use constant SECTION_MEMO_TTL => 30 * 60;
 my %SECTION_MEMO;    # prefix => [ expiry, sig, [ source refs ], result ]
 
 # Every pref that can change what a section's derived list contains: the type
-# checkboxes, the Various-Artists and artwork gates, the blocklist, and the MuSpy
-# merge window (For You). The LB feed's own window prefs are already in the feed's
-# cache key, so a change there arrives as a different source ref — but the MuSpy
-# merge is applied HERE, from the same week prefs, so those have to be in the
-# signature too or a widened window leaves the merged list five seconds stale.
+# checkboxes, the Various-Artists and artwork gates, the blocklist, and the exact
+# date bounds the section's rows can occupy (_sectionBounds — For You that is the
+# For You window unioned with MuSpy's). The LB source identity already changes with
+# its dated memo key, but recording the effective window here too makes the
+# processed-list cache independently safe across Monday and preference rollovers.
+# Artist-sort and genre facts are deliberately absent: neither is baked into this
+# list. _sortWithin and _withGenres re-read them downstream on every render, so a
+# newly landed enrichment is visible without throwing away filtering/dedupe work.
 sub _sectionSig {
     my ($prefix) = @_;
     my @v = map { $prefs->get("${prefix}_type_$_") ? 1 : 0 } @RELEASE_TYPES;
     push @v, ($prefs->get("${prefix}_artwork_only") // 1) ? 1 : 0;
     push @v, ($prefs->get("${prefix}_various")      // 1) ? 1 : 0;
-    push @v, map { $prefs->get($_) // '' } qw(foryou_past muspy_future weeks_past weeks_future);
+    push @v, map { $prefs->get($_) // '' }
+        qw(foryou_past foryou_future all_past all_future muspy_future weeks_past weeks_future);
+    push @v, _sectionBounds($prefix);
     my $blocked = $prefs->get('blocked_artists');
     push @v, ref $blocked eq 'ARRAY'
         ? join(',', map { ref $_ eq 'HASH' ? (($_->{mbid} // '') . '/' . ($_->{name} // '')) : '' } @$blocked)
@@ -4162,7 +4526,12 @@ sub _sectionList {
 # hand, or the walk pays for the pipeline again.
 sub _allSection {
     my ($feed) = @_;
-    return _sectionList('all', [$feed], sub { _sortReleases(_filterAll($feed)) });
+    # Cross-date MuSpy overlap is a For You concern. The durable release table is
+    # shared by feeds, so a release also seen through MuSpy can carry its source
+    # marker when read through All Releases; do not let that storage detail collapse
+    # two legitimate All Releases dates (or make exact-week reads differ from the
+    # former whole-feed path).
+    return _sectionList('all', [$feed], sub { _sortReleases(_filterAll($feed), 0) });
 }
 
 sub _forYouSection {
@@ -4199,6 +4568,34 @@ sub _forYouSection {
 # on and it appears. Rows age out on `seen_at` in DB::feedSweep at 120 days, and
 # upcoming releases sit at the top of MuSpy's newest-first list, so they keep being
 # refreshed while they wait.
+# THE DATE BOUNDS A SECTION'S ROWS CAN OCCUPY — one carrier, because three places
+# outside the merge below have to answer this and two of them used to answer it
+# with the For You window alone.
+#
+# For You renders TWO sources with INDEPENDENT future gates: the LB feed on API's
+# 'foryou' prefix and MuSpy on 'muspy' (the same past gate, its own future one —
+# see %WEEK_GATES). The section's bounds are therefore the UNION of the two, and
+# that is not rounding up: with foryou_future off and muspy_future on, the merge
+# below KEEPS an upcoming MuSpy release that the For You window alone calls out of
+# range — which is exactly how a visible release lost its detail prewarm.
+#
+# The union rather than a per-release test, because the detail-warm queue cannot
+# tell the two apart: both feeds enqueue at priority 0 and DetailWarm keys its
+# sources set by priority, while $job->{rel} is replaced by whichever enqueue
+# landed last. Over-accepting costs one prewarm nobody reads; under-accepting
+# costs the user a cold tap on a release that is on screen.
+sub _sectionBounds {
+    my ($section) = @_;
+
+    my ($from, $to) = Plugins::ListenBrainzFreshReleases::API->sectionWindow($section);
+    return ($from, $to) unless $section eq 'foryou';
+
+    # Zero-padded, so a lexical compare is a chronological one (as in the merge).
+    my ($mFrom, $mTo) = Plugins::ListenBrainzFreshReleases::API->sectionWindow('muspy');
+    return ((defined $mFrom && $mFrom lt $from ? $mFrom : $from),
+            (defined $mTo   && $mTo   gt $to   ? $mTo   : $to));
+}
+
 sub _mergeMuSpy {
     my ($lb, $muspy) = @_;
     $lb = [] unless ref $lb eq 'ARRAY';
@@ -4231,8 +4628,9 @@ sub _mergeMuSpy {
 # on normalised artist + album + date rather than MBID. Keep the copy with cover
 # art where one of the pair has it.
 sub _dedupeReleases {
-    my ($releases) = @_;
+    my ($releases, $crossSource) = @_;
     return $releases unless ref $releases eq 'ARRAY';
+    $crossSource = 1 unless defined $crossSource;
 
     my %idx;      # full key (artist|album|date) -> index in @out
     my %aaSeen;   # dateless key (artist|album)  -> index in @out
@@ -4259,7 +4657,7 @@ sub _dedupeReleases {
         # by date are left as separate entries (neither is MuSpy), preserving the
         # long-standing behaviour.
         my $j = $aaSeen{$aaKey};
-        if (defined $j
+        if ($crossSource && defined $j
             && ( ($rel->{_source} // '') eq 'muspy' || ($out[$j]{_source} // '') eq 'muspy' )) {
             $out[$j] = $rel
                 if !Plugins::ListenBrainzFreshReleases::API->coverArtUrl($out[$j])
@@ -4275,10 +4673,10 @@ sub _dedupeReleases {
 }
 
 sub _sortReleases {
-    my ($releases) = @_;
+    my ($releases, $crossSource) = @_;
     return $releases unless ref $releases eq 'ARRAY';
 
-    $releases = _dedupeReleases($releases);
+    $releases = _dedupeReleases($releases, $crossSource);
 
     # Always newest-first by release date. This is the order the week-bucketing
     # relies on (same-week rows adjacent, weeks newest-first); the per-view Options
@@ -4798,18 +5196,20 @@ sub _wantHeaders {
 }
 
 sub _buildItems {
-    my ($releases, $client, $headers, $mode, $meta) = @_;   # $meta: genre map (see _withGenres)
+    my ($groups, $client, $headers, $meta) = @_;   # $groups: _weekGroups; $meta: genre map
 
-    unless ($releases && scalar @$releases) {
+    unless ($groups && scalar @$groups) {
         return [{ name => cstring($client, 'PLUGIN_LBF_NO_RESULTS'), type => 'text' }];
     }
 
     # For You is ALWAYS the weekly view now — W/C material headers, newest week
     # first — as a single level Material windows natively (its in-list filter spans
-    # every item). The Options sort ($mode) reorders releases inside each week; the
-    # week grouping is unconditional (the old week_dividers/group_by_artist toggles
-    # were retired in 0.9.97).
-    return _buildWeekly($releases, $client, $headers, $mode, $meta);
+    # every item). The Options sort reorders releases inside each week; the week
+    # grouping is unconditional (the old week_dividers/group_by_artist toggles were
+    # retired in 0.9.97). Both of those already happened in _weekGroups, whose
+    # output the caller ALSO turned into the artwork-focus slot map — one grouping,
+    # so the rows drawn here and the rows warmed cannot describe different lists.
+    return _buildWeekly($groups, $client, $headers, $meta);
 }
 
 # ---------------------------------------------------------------------------
@@ -5268,41 +5668,34 @@ sub _pageRow {
 # drills into just that week's releases. Weeks run newest-first (the input is
 # already date-sorted) and carry a release count.
 # ---------------------------------------------------------------------------
-sub _buildAllLanding {
-    my ($releases, $client, $headers) = @_;
+sub _buildAllWeekItems {
+    my ($weeks, $client, $headers) = @_;
+    return [{ name => cstring($client, 'PLUGIN_LBF_NO_RESULTS'), type => 'text' }]
+        unless ref $weeks eq 'ARRAY' && @$weeks;
 
-    unless ($releases && scalar @$releases) {
-        return [{ name => cstring($client, 'PLUGIN_LBF_NO_RESULTS'), type => 'text' }];
-    }
-
-    # The landing is just the per-week sections — one drill-in per week-commencing,
-    # each paged 30-at-a-time. The old "Show all" entry was removed (0.9.87): it
-    # duplicated the same releases the dated weeks already cover, but as one
-    # unpaged full-list dump, so it was the path that still flooded. The dated
-    # weeks with "Show more" serve the same purpose and stay manageable.
     my @items;
-
-    # Group into weeks (input already date-sorted → same-week rows are adjacent
-    # and week order is preserved).
-    my @order;
-    my %bucket;
-    for my $rel (@$releases) {
-        my $ws = _weekStart($rel->{release_date} // '');
-        push @order, $ws unless exists $bucket{$ws};
-        push @{ $bucket{$ws} }, $rel;
-    }
-
-    for my $ws (@order) {
-        my $rels  = $bucket{$ws};
+    for my $week (@$weeks) {
+        next unless ref $week eq 'HASH';
+        my $ws       = $week->{week_start} // '';
+        my $prepared = $week->{prepared} ? 1 : 0;
+        my $held     = $week->{releases};
         my $key   = "arweek:$ws";
         push @items, {
             name        => _weekLabel($client, $ws),
             type        => 'link',
             image       => _weekBadgeImage($ws),
+            itemActions => { items => _weekAction($ws) },
             passthrough => [{}],
             url         => sub {
-                my ($c, $cb) = @_;
+                my ($c, $cb, $a) = @_;
                 _noteBrowse();
+                my $open = sub {
+                my $rels = shift;
+                $rels = [] unless ref $rels eq 'ARRAY';
+                # A summary-backed row receives raw stored releases only after it
+                # is opened. Apply the same filter/dedupe/date ordering which the
+                # old whole-feed path applied before it built its week buckets.
+                $rels = _sortReleases(_filterAll($rels), 0) unless $prepared;
                 # Sort by the SHARED, durable All Releases sort (all_sort) — the
                 # same order in every week, and it sticks across visits/restarts —
                 # then cap at PAGE_SIZE with the "Show more"/"Show all" reveal (an
@@ -5321,8 +5714,8 @@ sub _buildAllLanding {
                 # Refresh belongs HERE, not only in fetchAll. Since the top-level menu
                 # started inlining these week rows directly (0.9.99–0.9.119), fetchAll —
                 # the only other place with a Refresh row — is reached only via the
-                # watchdog/error fallback tile, so in normal use the All Releases feed
-                # had NO reachable Refresh at all. The week drill is the level a user is
+                # cold-store fallback tile, so in normal use the All Releases feed had
+                # NO reachable Refresh at all. The week drill is the level a user is
                 # actually looking at when the feed looks wrong, so it carries it.
                 my @opt = ( _viewToggle($c, 'all_view', $view, $vHasAlb, $vHasSing),
                             _genresRow($c, 'all', $rows),
@@ -5334,16 +5727,16 @@ sub _buildAllLanding {
                 # 30-row page instead of one for the whole week. _pageSection only
                 # slices and counts, so it behaves identically given releases.
                 my $render = sub {
-                    my ($set) = @_;
+                    my ($set, $knownMeta) = @_;
                     # _frozenOrder, not _sortWithin: the position IS the address a tap
                     # sends back, so the order a rendered page is holding must survive
                     # until that tap resolves. See the block comment on _frozenOrder.
                     my ($visRel, $pgRows) = _pageSection($c, $key,
                                                 _frozenOrder($ws, $mode, $view, $set));
-                    # Cache ONLY (peek): a week draws immediately with the genres
-                    # already known and tops the rest up in the background, instead of
-                    # holding the page open on a metadata request.
-                    _withGenres($visRel, sub {
+                    # A single group with no `ws`: this level draws its releases
+                    # flat under the Options block, with no dividers among them.
+                    _focusReleaseCovers($c, $key, _renderSlots(scalar(@opt) + 1, [{ rels => $visRel }]), $a);
+                    my $draw = sub {
                         my $meta  = shift;
                         my @tiles = map { _buildReleaseItem($_, $c, $meta) } @$visRel;
 
@@ -5358,7 +5751,20 @@ sub _buildAllLanding {
                             unless @tiles;
                         $cb->({ items => [ _sectionHeader($c, 'PLUGIN_LBF_SECTION_OPTIONS', $headers, \@opt),
                                            @opt, @tiles, @$pgRows ] });
-                    }, undef, peek => 1);
+                    };
+
+                    # A filtered week already loaded metadata for the WHOLE week so
+                    # the filter could run before paging. Reuse that same map for the
+                    # tiles: asking again for only the visible rows applies the
+                    # GENRE_FETCH_MAX cap a second time, which made known genres past
+                    # row 150 render blank in Show All. Unfiltered weeks retain the
+                    # cheap visible-page cache read and background top-up.
+                    if (ref $knownMeta eq 'HASH') {
+                        $draw->($knownMeta);
+                    }
+                    else {
+                        _withGenres($visRel, $draw, undef, peek => 1);
+                    }
                 };
 
                 # A genre filter has to be applied BEFORE paging, or a page of 30
@@ -5369,17 +5775,67 @@ sub _buildAllLanding {
                 if (@{ _selectedGenres('all') }) {
                     _withGenres($rows, sub {
                         my $meta = shift;
-                        $render->(_genreSelectFilter($rows, 'all', $meta));
+                        $render->(_genreSelectFilter($rows, 'all', $meta), $meta);
                     }, GENRE_WARM_MAX, peek => 1);
                 }
                 else {
                     $render->($rows);
                 }
+                };
+
+                if (ref $held eq 'ARRAY') {
+                    $open->($held);
+                    return;
+                }
+                Plugins::ListenBrainzFreshReleases::API->getFreshReleasesAllWeek(
+                    week_start => $ws,
+                    onDone     => $open,
+                    onError    => sub {
+                        $log->error("All releases week '$ws' read error: " . (shift // ''));
+                        $cb->({ items => [{ name => cstring($c, 'PLUGIN_LBF_ERROR'), type => 'text' }],
+                                   cachetime => 0 });
+                    },
+                );
             },
         };
     }
 
-    return \@items;
+    return @items ? \@items
+                  : [{ name => cstring($client, 'PLUGIN_LBF_NO_RESULTS'), type => 'text' }];
+}
+
+sub _buildAllLanding {
+    my ($releases, $client, $headers) = @_;
+
+    unless ($releases && scalar @$releases) {
+        return [{ name => cstring($client, 'PLUGIN_LBF_NO_RESULTS'), type => 'text' }];
+    }
+
+    # The full-feed paths still arrive here already filtered/deduped/sorted. Turn
+    # that list into the same week descriptor shape as the cheap summary path.
+    my (@order, %bucket);
+    for my $rel (@$releases) {
+        my $ws = _weekStart($rel->{release_date} // '');
+        push @order, $ws unless exists $bucket{$ws};
+        push @{ $bucket{$ws} }, $rel;
+    }
+    return _buildAllWeekItems(
+        [ map { +{ week_start => $_, releases => $bucket{$_}, prepared => 1 } } @order ],
+        $client, $headers);
+}
+
+# Top-level/home landing from DB::feedWeeks. These descriptors carry no payloads;
+# selecting a row asks API for that exact week, so root navigation never thaws the
+# whole All Releases feed merely to discover which folders exist.
+sub _buildAllSummaryLanding {
+    my ($weeks, $client, $headers) = @_;
+    $weeks = [] unless ref $weeks eq 'ARRAY';
+    my @valid = grep {
+        ref $_ eq 'HASH'
+            && defined $_->{week_start}
+            && ($_->{week_start} eq '' || $_->{week_start} =~ /^\d{4}-\d{2}-\d{2}$/)
+    } @$weeks;
+    return _buildAllWeekItems(\@valid, $client, $headers);
 }
 
 # ---------------------------------------------------------------------------
@@ -5387,13 +5843,16 @@ sub _buildAllLanding {
 # chronological feed is easier to scan. Assumes releases are already sorted
 # newest-first; weeks run Monday–Sunday.
 # ---------------------------------------------------------------------------
-sub _buildWeekly {
-    my ($releases, $client, $headers, $mode, $meta) = @_;
-
-    # Real header item for Material (bold, accent colour); plain text elsewhere.
-    # _headerType() => 'header-basic' on Material 6.4.3+ (a non-actionable divider,
-    # so the week row isn't drawn as a grid card), else the long-standing 'header'.
-    my $divType = $headers ? _headerType() : 'text';
+# THE WEEKLY RENDER ORDER, IN ONE PLACE. It is not only what _buildWeekly draws:
+# _focusReleaseCovers has to address the very same rows by their rendered
+# POSITION, and a second copy of the grouping is a second copy of the answer. The
+# two pieces that move a release away from its position in the input list both
+# live here — the divider row each week contributes, and _sortWithin reordering
+# inside a week under the artist/album sorts.
+#
+# Returns [ { ws => 'YYYY-MM-DD', rels => [...] }, ... ], newest week first.
+sub _weekGroups {
+    my ($releases, $mode) = @_;
 
     # Group into weeks (input is already date-sorted, so same-week rows are
     # adjacent and week order is preserved).
@@ -5405,11 +5864,42 @@ sub _buildWeekly {
         push @{ $bucket{$ws} }, $rel;
     }
 
+    # Sort the releases WITHIN each week by the chosen Options mode; the week
+    # buckets themselves stay in date order (newest week first).
+    return [ map { { ws => $_, rels => _sortWithin($bucket{$_}, $mode) } } @order ];
+}
+
+# One entry per RENDERED ROW: the release drawn on that row, or undef for a row
+# that draws no release — the Options header and its rows ($lead of them), and
+# every week divider. This is the mapping _focusReleaseCovers needs, because
+# XMLBrowser's index/quantity count ROWS while the warm queue takes RELEASES, and
+# the two only coincide on a level that draws neither dividers nor options.
+#
+# $groups is _weekGroups' output; a level that draws no dividers passes a single
+# group with no `ws` and its releases in rendered order.
+sub _renderSlots {
+    my ($lead, $groups) = @_;
+
+    my @slots = (undef) x $lead;
+    for my $g (@$groups) {
+        push @slots, undef if defined $g->{ws};   # the divider row holds no release
+        push @slots, @{ $g->{rels} };
+    }
+    return \@slots;
+}
+
+sub _buildWeekly {
+    my ($groups, $client, $headers, $meta) = @_;
+
+    # Real header item for Material (bold, accent colour); plain text elsewhere.
+    # _headerType() => 'header-basic' on Material 6.4.3+ (a non-actionable divider,
+    # so the week row isn't drawn as a grid card), else the long-standing 'header'.
+    my $divType = $headers ? _headerType() : 'text';
+
     my @items;
-    for my $ws (@order) {
-        # Sort the releases WITHIN this week by the chosen Options mode; the week
-        # buckets themselves stay in date order (newest week first).
-        my $rels = _sortWithin($bucket{$ws}, $mode);
+    for my $g (@$groups) {
+        my $ws   = $g->{ws};
+        my $rels = $g->{rels};
 
         # Give the header an image. Material's grid detection counts headers too
         # (older versions: image-less item → haveWithoutIcons → grid/list toggle
@@ -5531,12 +6021,13 @@ sub _dateSpan {
 # forward $days; both → either side; neither → today only.
 sub _windowSpan {
     my ($which) = @_;
-    # The SAME window the fetch will ask for, from API::sectionWindow — not a
+    # The SAME bounds the section's rows can occupy, from _sectionBounds — not a
     # second computation from the same prefs. The tile subtitle is the one place
     # a drifting copy would be invisible: it would simply state a span the feed
-    # never had.
-    my ($from, $to) = Plugins::ListenBrainzFreshReleases::API->sectionWindow(
-        $which eq 'user' ? 'foryou' : 'all');
+    # never had. For You takes the bounds rather than API::sectionWindow('foryou')
+    # because the MuSpy rows merged into it answer to their own future gate, and
+    # a subtitle that stops short of them describes a feed the user isn't looking at.
+    my ($from, $to) = _sectionBounds($which eq 'user' ? 'foryou' : 'all');
     return _dateSpan($from, $to);
 }
 
@@ -5624,6 +6115,7 @@ sub _buildReleaseItem {
     # absent (see _releaseDetail's $wantTracks gate).
     if ($mbid || $rgMbid) {
         $item->{type} = 'link';
+        $item->{itemActions}{items} = _releaseAction(_releaseTarget($rel), undef, 'items');
         $item->{url}  = sub {
             my ($client, $callback) = @_;
             _releaseDetail($rel, $client, $callback);
@@ -5683,6 +6175,10 @@ sub _releaseDetail {
     my $pending = $wantStream + $wantGenres + $wantTracks + $wantArtist;
     my $done    = 0;
     my $watchdog;
+    # This is the only detail-driven Last.fm hold.  List opens/paging focus
+    # artwork only; clicking one release holds the background genre worker until
+    # that release's foreground fan-out completes or its watchdog renders.
+    my $releaseLastfm = _holdLastfmForDetail($pending);
 
     my $finish = sub {
         my ($force) = @_;
@@ -5690,6 +6186,7 @@ sub _releaseDetail {
         return if !$force && $pending > 0;   # $force (watchdog) renders regardless
         $done = 1;
         Slim::Utils::Timers::killSpecific($watchdog) if $watchdog;   # cancel the unused watchdog
+        $releaseLastfm->();
         # ONE "Genres" line, and ONE source for it: the ladder's answer, peeked out
         # of the store below. There is no second genre lookup on this page — the
         # ladder's own last rung IS Last.fm, so asking Last.fm again here could only
@@ -6447,6 +6944,7 @@ sub _bcMarkerKey {
 # Find the release on installed streaming services and present each service's
 # matching album as a directly-playable node (one tap to play / add), using
 # each plugin's own search API rather than a generic search drill-down.
+my $albumDetailFlights;
 sub _findPlayable {
     my ($client, $callback, $artist, $album, $mbid, $force, $year, $type) = @_;
 
@@ -6542,6 +7040,16 @@ sub _findPlayable {
         }
     }
 
+    require Plugins::ListenBrainzFreshReleases::SingleFlight;
+    $albumDetailFlights ||= Plugins::ListenBrainzFreshReleases::SingleFlight->new(name => 'album details', max => 90, log => $log);
+    my $flightKey = join('|', $key, _cid($client), $year // '', $type // '', $force ? 1 : 0);
+    my $answer = $callback;
+    my $live = 1;
+    return unless $albumDetailFlights->join($flightKey,
+        onDone => sub { $live = 0; $answer->($_[0]) },
+        onError => sub { $live = 0; $answer->({items => []}) });
+    $callback = sub { return unless $live; $albumDetailFlights->resolve($flightKey, $_[0]) };
+
     # Search every service in PARALLEL, but resolve to the highest-priority service
     # that matched, as soon as that's decided — i.e. once every higher-priority
     # service has come back (matched or not). Each service has its own timeout so a
@@ -6549,6 +7057,7 @@ sub _findPlayable {
     # service's matches (or an empty result if nothing matched) are cached.
     my @result       = map { undef } @adapters;   # undef = pending, [] = miss, [..] = match
     my $resolved     = 0;
+    my $servicesPending = scalar @adapters;
     my $inconclusive = 0;   # services that couldn't be queried (no handler / timeout / error)
 
     my $resolve = sub {
@@ -6582,7 +7091,7 @@ sub _findPlayable {
         $log->info("play-via '$query': "
             . (defined $win ? "matched on $adapters[$win]{name} (" . scalar(@$items) . ")"
                             : "no match on any service" . $note));
-        $callback->({ items => _streamResult($client, $items, \@bc) });
+        $callback->({ items => _streamResult($client, $items, \@bc), _warm_pending => \$servicesPending });
     };
 
     for my $i (0 .. $#adapters) {
@@ -6593,9 +7102,11 @@ sub _findPlayable {
         my $settled = 0;
         my $svcTimer;
         my $settle  = sub {
-            return if $settled || $resolved;
+            return if $settled;
             $settled = 1;
+            $servicesPending--;
             Slim::Utils::Timers::killSpecific($svcTimer) if $svcTimer;   # cancel this service's timeout
+            return if $resolved; # still release the background tail counter
             # undef arg = the service couldn't be queried (no API handler / timeout /
             # error / broken renderer) → contributes no match, but INCONCLUSIVELY (a
             # short-TTL retry), not a confirmed miss. Same signal as the track path.
@@ -6639,8 +7150,8 @@ sub _findPlayable {
         # Per-service timeout → inconclusive (not a confirmed miss) so a slow/hung
         # service retries soon rather than caching a false no-match for the day.
         $svcTimer = Slim::Utils::Timers::setTimer(undef, time() + STREAM_SVC_TIMEOUT, sub {
-            return if $settled || $resolved;
-            $log->warn("play-via $svc timed out");
+            return if $settled;
+            $log->warn("play-via $svc timed out") unless $resolved;
             $settle->(undef);
         });
 
@@ -9057,11 +9568,20 @@ sub _warmLastfm {
     my ($releases, $meta, $done, $max) = @_;   # $max: the warm passes the whole-feed bound
     $done ||= sub {};
     $max ||= LFM_WARM_MAX;
-    unless (($prefs->get('lastfm_api_key') // '') ne '') { $done->(); return }
+    unless (($prefs->get('lastfm_api_key') // '') ne '') {
+        $done->({ enabled => 0 });
+        return;
+    }
 
-    my (@queue, %seenArtist);
+    # This map is only a same-process concurrency checkpoint. The durable store
+    # remains authoritative across restarts; pruning at pass admission keeps the
+    # helper bounded even when the artist population turns over.
+    my $now = time();
+    delete $lastfmSettledArtists{$_}
+        for grep { $lastfmSettledArtists{$_} <= $now } keys %lastfmSettledArtists;
+
+    my (@candidates, %seenArtist);
     for my $rel (@{ $releases || [] }) {
-        last if @queue >= $max;
         next if _genresFor($rel, $meta);          # a cheaper tier already answered
         my $artist = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist') or next;
         next if $seenArtist{ lc $artist }++;
@@ -9072,42 +9592,157 @@ sub _warmLastfm {
         # an artist's three releases only the one that seeded the warm could ever
         # read the answer, and the other two consumed the allowance again next
         # night. An empty album goes straight to artist.gettoptags.
-        push @queue, $artist;
+        push @candidates, $artist;
     }
-    unless (@queue) { _dbg("warm: last.fm — nothing to fill"); $done->(); return }
+
+    # A displayable genre and a settled Last.fm answer are different facts.  In
+    # particular, fresh empty and vocabulary-rejected answers are valid negative
+    # checkpoints until their short TTL expires.  Classify ALL candidates with
+    # one store read before applying the request bound.  Applying `$max` first
+    # stranded every artist after the first 400: the same fresh checkpoints filled
+    # those 400 candidate slots on every pass, were discarded here, and left only
+    # a handful of actual requests.  The live symptom was a nominally complete
+    # 5.24-second All Releases Last.fm stage with 4,508 artist rows never asked.
+    # The bound is a bound on upstream REQUESTS, not on cheap store checkpoints.
+    my %artistKey;
+    for my $artist (@candidates) {
+        my $key = Plugins::ListenBrainzFreshReleases::API->artistKeyForName($artist);
+        $artistKey{$artist} = $key if defined $key && length $key;
+    }
+    my $fresh = Plugins::ListenBrainzFreshReleases::API->peekLastfmArtistGenresBulk(
+        [ values %artistKey ], sub { _genreKnown($_[0]) });
+    my @queue = grep {
+        my $key = $artistKey{$_};
+        !$key || !exists $fresh->{$key};
+    } @candidates;
+
+    my $stats = {
+        enabled    => 1,
+        candidates => scalar @candidates,
+        fresh      => scalar(keys %$fresh),
+        requested  => 0,
+        filled     => 0,
+        empty      => 0,
+        rejected   => 0,
+        failed     => 0,
+        deferred   => 0,
+    };
+    unless (@queue) {
+        _dbg("warm: last.fm — nothing to fill");
+        $done->($stats);
+        return;
+    }
+
+    $lastfmWarmPending++;
+    my $passFinished = 0;
+    my $finishPass = sub {
+        return if $passFinished++;
+        $lastfmWarmPending-- if $lastfmWarmPending > 0;
+        $done->($stats);
+    };
 
     my $filled = 0;
     my $step = sub {
         my (undef, $self) = @_;
-        my $job = shift @queue;
-        unless ($job) {
-            _dbg("warm: last.fm — filled $filled artist(s)");
-            $done->();
+        # The allowance counts upstream requests, not candidates. Leave the
+        # tail present until dispatch so an artist settled by another concurrent
+        # pass does not consume a slot and strand a later unique artist.
+        if (@queue && $stats->{requested} >= $max) {
+            $stats->{deferred} = scalar @queue;
+            $finishPass->();
             return;
         }
+        if (@queue && (_lastfmPriorityBusy() || $lastfmRequestBusy || time() < $lastfmNextAt)) {
+            Slim::Utils::Timers::setTimer(undef, time() + 1, $self, $self);
+            return;
+        }
+        my $job = shift @queue;
+        unless ($job) {
+            _dbg("warm: last.fm — requested $stats->{requested} artist(s), "
+               . "$filled supplied a genre");
+            $finishPass->();
+            return;
+        }
+        my $jobKey = $artistKey{$job};
+        if ($jobKey && ($lastfmSettledArtists{$jobKey} // 0) > time()) {
+            # Both daily feed branches and browse top-ups can snapshot the same
+            # missing artist before either request lands. Recheck the shared
+            # successful checkpoint at dispatch, when the global request lane
+            # guarantees the earlier writer has finished.
+            $stats->{fresh}++;
+            Slim::Utils::Timers::setTimer(undef, time(), $self, $self);
+            return;
+        }
+        $lastfmRequestBusy = 1;
+        $stats->{requested}++;
+        my ($settled, $watchdog);
+        my $next = sub {
+            return if $settled++;
+            Slim::Utils::Timers::killSpecific($watchdog) if $watchdog;
+            $lastfmRequestBusy = 0;
+            $lastfmNextAt = time() + 1;
+            Slim::Utils::Timers::setTimer(undef, $lastfmNextAt, $self, $self);
+        };
+        my $failed = sub {
+            return if $settled;
+            $stats->{failed}++;
+            $next->();
+        };
+        $watchdog = Slim::Utils::Timers::setTimer(undef, time() + 90, $failed);
+        eval {
         Plugins::ListenBrainzFreshReleases::API->getLastfmTags(
             $job, '',
             sub {
+                return if $settled;
                 my $tags = shift // [];
-                $filled++ if grep { _genreKnown($_) } @$tags;
+                # Store what the list can actually display, not every raw Last.fm
+                # tag.  A mixed response such as `indie, usa` keeps `indie` and
+                # ignores only `usa`; a rejected-only response is stored as the
+                # empty/short-age checkpoint it really is.
+                my @genres = grep { _genreKnown($_) } @$tags;
+                if (@genres) {
+                    $filled++;
+                    $stats->{filled}++;
+                } elsif (@$tags) {
+                    $stats->{rejected}++;
+                } else {
+                    $stats->{empty}++;
+                }
                 # Filed on the ARTIST row, through the same key builder the readers
                 # use, so every release by this artist in the feed can read it.
                 if (my $mk = Plugins::ListenBrainzFreshReleases::API->artistKeyForName($job)) {
-                    eval {
+                    my $stored = eval {
                         require Plugins::ListenBrainzFreshReleases::DB;
                         Plugins::ListenBrainzFreshReleases::DB::artistPut(
-                            $mk, lastfm_genres => $tags);
-                        1;
-                    } or $log->warn("last.fm artist-tier store failed for $job: $@");
+                            $mk, lastfm_genres => \@genres);
+                    };
+                    if ($stored) {
+                        $lastfmSettledArtists{$mk} = time() + LASTFM_SETTLED_TTL;
+                    }
+                    elsif ($@) {
+                        $log->warn("last.fm artist-tier store failed for $job: $@");
+                    }
                 }
                 # Yield between calls: paced for Last.fm, and the event loop keeps
                 # servicing audio through a long warm.
-                Slim::Utils::Timers::setTimer(undef, time() + 1, $self, $self);
+                $next->();
             },
-            sub { Slim::Utils::Timers::setTimer(undef, time() + 1, $self, $self) },
+            $failed,
+            1,              # artist checkpoint is due: bypass the raw tag cache
         );
+        1;
+        } or do { $log->warn("Last.fm warm request raised: $@"); $failed->() };
     };
     Slim::Utils::Timers::setTimer(undef, time(), $step, $step);
+}
+
+sub _lastfmWarmNote {
+    my ($s) = @_;
+    return 'disabled (no API key)' unless ref $s eq 'HASH' && $s->{enabled};
+    return sprintf('%d candidate(s), %d fresh checkpoint(s), %d requested: '
+                 . '%d genre(s), %d empty, %d rejected, %d failed; %d deferred',
+        map { int($s->{$_} // 0) }
+            qw(candidates fresh requested filled empty rejected failed deferred));
 }
 
 # IS THE FEED ACTUALLY PREPARED? The one question the warm exists to answer, and
@@ -9174,6 +9809,18 @@ sub _warmGenres {
     my $user  = $prefs->get('username') // '';
     my $token = $prefs->get('token')    // '';
 
+    # Hold the remainder-phase worker from the first core genre lookup, not only
+    # from the moment its eventual Last.fm queue is known.  Otherwise a fast
+    # playlist/follower cache hit can release the core reservation while the
+    # asynchronous ListenBrainz metadata pass is still constructing that queue.
+    $lastfmWarmPending++;
+    my $genreBranches = $user ? 2 : 1;
+    my $branchDone = sub {
+        return if --$genreBranches > 0;
+        $lastfmWarmPending-- if $lastfmWarmPending > 0;
+        $detailMainReady = 1;
+    };
+
     # All Releases needs no account, so it's warmed for everyone.
     my $warmAll = sub {
         _stage('start', 'genres_all');
@@ -9199,8 +9846,10 @@ sub _warmGenres {
                     # A ladder that completes on one tier and trickles on the
                     # other cannot prepare a feed — see LFM_WARM_ALL.
                     _warmLastfm($rels, $meta, sub {
-                        _stage('end', 'genres_lastfm_all', 'done', '');
+                        my $stats = shift;
+                        _stage('end', 'genres_lastfm_all', 'done', _lastfmWarmNote($stats));
                         _warmReport($rels, $meta, 'All Releases');
+                        $branchDone->();
                     }, LFM_WARM_ALL);
                 }, GENRE_WARM_ALL);
             },
@@ -9208,6 +9857,7 @@ sub _warmGenres {
                 my $err = shift // '';
                 _stage('end', 'genres_all', 'failed', $err);
                 _dbg("warm: genres — All Releases fetch failed: $err");
+                $branchDone->();
             },
         );
     };
@@ -9234,19 +9884,22 @@ sub _warmGenres {
                 _stage('start', 'genres_lastfm_foryou');
                 _dbg("warm: genres — For You, " . scalar(keys %$meta) . " release group(s)");
                 _persistLbArtistTags($rels, $meta);
-                # Chained, never fanned out: Last.fm, then the whole All Releases
-                # pass behind it.
+                # Queue Last.fm independently; All Releases metadata must not
+                # wait for the optional, paced Last.fm tail.
                 _warmLastfm($rels, $meta, sub {
-                    _stage('end', 'genres_lastfm_foryou', 'done', '');
+                    my $stats = shift;
+                    _stage('end', 'genres_lastfm_foryou', 'done', _lastfmWarmNote($stats));
                     _warmReport($rels, $meta, 'For You');
-                    $warmAll->();
+                    $branchDone->();
                 }, LFM_WARM_ALL);
+                $warmAll->();
             }, GENRE_WARM_ALL);
         },
         onError => sub {
             my $err = shift // '';
             _stage('end', 'genres_foryou', 'failed', $err);
             _dbg("warm: genres — For You fetch failed: $err");
+            $branchDone->();
             $warmAll->();
         },
     );

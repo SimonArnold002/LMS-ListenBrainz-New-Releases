@@ -376,7 +376,8 @@ print "-" x 74, "\n";
         %PREF = (username => 'simon', weeks_past => 1, weeks_future => 2);
         my $minted  = T::_feedMemoKey('foryou', 'release_date', T::sectionWeeks('foryou'));
         my $dropped = T::_feedMemoKey('foryou', 'release_date', T::sectionWeeks('foryou'));
-        ok($minted eq $dropped && $minted eq 'lbf:feed:user:simon|release_date|1|2',
+        ok($minted eq $dropped
+              && $minted eq 'lbf:feed:user:simon|release_date|1|2|' . T::_today(),
            "the For You key round-trips through one builder ($minted)");
         ok(T::_feedMemoKey('all', 'release_date', 1, 0)
              eq 'lbf:feed:all:release_date|1|0|' . T::_today(),

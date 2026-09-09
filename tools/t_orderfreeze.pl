@@ -280,7 +280,7 @@ section("7. the freeze is SLIDING (TTL ${TTL}s, read from the source)");
 # ===========================================================================
 section('8. the call sites — the half a unit test of the sub cannot see');
 {
-    my ($week) = $SRC =~ /(for my \$ws \(\@order\) \{.*?\n    \}\n)/s;
+    my $week = grab('_buildAllWeekItems');
     ok('the All Releases week drill was located', defined $week && length $week);
     ok('the week renders through _frozenOrder', $week =~ /_frozenOrder\(\s*\$ws\s*,/);
     ok('...and no longer hands _pageSection a bare _sortWithin',

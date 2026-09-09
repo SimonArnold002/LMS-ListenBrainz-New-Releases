@@ -46,10 +46,9 @@ use constant WARM_SVC_MAX_WAIT => 300;       # give up waiting, warm anyway
 # slow" from "the genre ladder is starving the feeds". Absolute start/end marks
 # can, which is why both are recorded rather than an elapsed time.
 #
-# Held in a package lexical rather than `kv`: the dev-build wipe is one
-# unconditional `DELETE FROM kv`, and a measurement only has to survive until it
-# is read. It is deliberately NOT persisted — a stage table from before a restart
-# describes a different process.
+# Held in a package lexical rather than `kv` because it describes this process,
+# not durable cached data. A stage table from before a restart would describe a
+# different run.
 #
 # Every entry is eval-guarded at the call site's expense, never this module's: a
 # recorder that can die turns an instrument into an outage.
@@ -129,22 +128,17 @@ sub warmStages {
     };
 }
 
-# ARE WE A DEV BUILD? 1 on `dev`, 0 on `main`, and it is the ONLY thing in the
-# plugin that knows the difference — the `(dev)` version-tag convention is retired
-# and `repo.xml` (whose <url> is the real dev↔main diff) is not inside the zip.
-#
-# It gates ONE thing: whether _buildChanged throws the user's genres away. In dev
-# every build clears everything, because a stale cache has repeatedly made a working
-# fix look broken. A RELEASED build must not — genres are the most expensive thing
-# this plugin collects (66 rate-limited ListenBrainz batches and a deliberately paced
-# one-request-per-second Last.fm pass; the per-artist hosted pass that used to sit
-# between them was removed in 0.9.173), so a release
-# clears them only when GENRE_FACT_VERSION says the parser that wrote them changed.
-#
-# SET THIS TO 0 AT MERGE-TO-MAIN, with the `repo.xml` <url> line — the two are the
-# same one-line reconciliation, and leaving this at 1 in a release re-inflicts the
-# 0.9.166/0.9.167 wipe on every user who upgrades.
-use constant DEV_BUILD       => 1;
+# ARE WE A DEV BUILD? 1 on `dev`, 0 on `main`. This is telemetry only: ordinary
+# version changes preserve every cache on both branches. Cache families invalidate
+# themselves with their own key/schema/parser versions; a plugin version is not a
+# reason to download the same upstream data again.
+use constant DEV_BUILD => 1;
+
+# Set to 1 only for a deliberately built clean-load test. The next version change
+# then clears both derived rows and genre answers, reproducing the populated-store
+# side of a fresh install without making every routine dev install one. Return it
+# to 0 before building anything intended to preserve an existing installation.
+use constant RESET_CACHE_ON_BUILD => 0;
 
 my $log = Slim::Utils::Log->addLogCategory({
     'category'     => 'plugin.listenbrainzfreshreleases',
@@ -246,11 +240,9 @@ $prefs->init({
     # in as they are looked at, exactly as they did before.
     warm_covers          => 1,
 
-    # The plugin version the store was last seen by, which is how a build change
-    # is detected (see _buildChanged). It lives in a PREF and not in the store for
-    # the obvious reason: the thing it triggers is `DELETE FROM kv`, so a marker
-    # kept in kv would delete itself and every build would look like a new one.
-    # Same lesson as the follow feed's `follow_last_seen` (0.9.75).
+    # The plugin version the store was last seen by. It is diagnostic in ordinary
+    # builds and is also the once-only marker for an explicit clean-load test (see
+    # RESET_CACHE_ON_BUILD and _buildChanged).
     last_build           => '',
     # The genre-parser version the store was last cleared for. Separate from
     # last_build ON PURPOSE: genres are expensive upstream fact, not a decision,
@@ -463,6 +455,8 @@ sub _cliWarmStats {
     $request->addResult('ticks',   $rep->{ticks}   // 0);
     $request->addResult('tick_at', int($rep->{tick_at} // 0));
     $request->addResult('dev_build', DEV_BUILD ? 1 : 0);
+    my $details = Plugins::ListenBrainzFreshReleases::Browse::detailWarmStats();
+    $request->addResult('detail_' . $_, $details->{$_}) for sort keys %$details;
 
     my $t0 = $rep->{tick_at} || 0;
     my $i  = 0;
@@ -681,26 +675,17 @@ sub postinitPlugin {
 }
 
 # ---------------------------------------------------------------------------
-# THE DEV-BUILD WIPE.
+# BUILD-CHANGE CACHE POLICY.
 #
-# The fleet rule is that every dev build invalidates all plugin caches, because
-# stale caches have repeatedly made a working fix look broken. What makes it safe
-# to do UNCONDITIONALLY here — one `DELETE FROM kv`, no allowlist to get wrong —
-# is that anything which must survive now has a TABLE. Do not add exceptions to
-# this; move the data instead.
+# An ordinary build preserves the whole store. Each derived cache family owns an
+# explicit key version, schema-backed data owns its migration/fact version, and
+# GENRE_FACT_VERSION remains the one legitimate automatic trigger for clearing
+# genre answers. A plugin version alone says nothing about stored-data validity.
 #
-# WHAT DELIBERATELY SURVIVES, and each one is a decision from §2.1 rather than an
-# oversight:
-#   * the durable BASE — stored releases, feed coverage, Bandcamp pins, the
-#     follow store. ListenBrainz only re-serves releases inside the window it is
-#     asked for, so wiping the base would LOSE older rows outright, not
-#     re-download them.
-#   * the FACTS except genres — years, types, MBIDs and above all SORT-NAMES, which
-#     are re-derivable only at 100 artists per pass, serially, with a courtesy gap.
-#     A genre change must never re-inflict a multi-day artist-sort reconvergence.
-#
-# The marker is a PREF, not a store row: the wipe is `DELETE FROM kv`, so a marker
-# in kv would delete itself and every start would look like a new build.
+# RESET_CACHE_ON_BUILD is the deliberate fresh-load test switch. With it enabled,
+# a version change clears the disposable kv tier and every genre answer once; the
+# durable base and non-genre facts still survive because deleting those would lose
+# history that upstream windowed APIs cannot necessarily serve again.
 # ---------------------------------------------------------------------------
 sub _buildChanged {
     my $version = eval {
@@ -714,37 +699,15 @@ sub _buildChanged {
     eval {
         require Plugins::ListenBrainzFreshReleases::DB;
 
-        my $kv = Plugins::ListenBrainzFreshReleases::DB::wipeDerived();
+        my $reset = RESET_CACHE_ON_BUILD ? 1 : 0;
+        my $kv = $reset
+            ? Plugins::ListenBrainzFreshReleases::DB::wipeDerived()
+            : undef;
 
-        # WHILE IN DEV, EVERY BUILD CLEARS EVERY CACHE. That is the standing rule
-        # and it exists for a reason no amount of reasoning replaces: a stale cache
-        # has repeatedly made a working fix look broken, and there is otherwise NO
-        # way to test first-run behaviour, or what a user sees when they widen the
-        # window and a swathe of releases arrives that the store has never held.
-        #
-        # 0.9.168 gated this on GENRE_FACT_VERSION after a wipe left the store empty
-        # for days — but the wipe was never the defect. `wipeGenres` cleared the
-        # answers and left their TIMESTAMPS running, so nothing could be re-asked for
-        # ninety days; the store was not slow to refill, it was LOCKED. That is fixed
-        # at its source (per-answer stamps, cleared with the answer), so a wipe is
-        # recoverable again and the rule goes back.
-        #
-        # GENRE_FACT_VERSION is still the PRODUCTION trigger — a released build must
-        # not throw a user's genres away for nothing — and it is still recorded here
-        # so the two cannot disagree about which parser wrote what.
-        #
-        # TWO TRIGGERS, AND UNTIL 0.9.175 ONLY ONE OF THEM EXISTED. `last_genre_fact`
-        # was written on every build and READ BY NOTHING, so the "production trigger"
-        # the comment above describes never ran: a released upgrade that changed no
-        # genre code still cleared all four artist tiers, the release-group genres and
-        # the whole `lastfm_tags` table. That is precisely what the 0.9.169 changelog
-        # promises users does not happen ("a released build still only clears genres
-        # when the code that parses them changes"), and it is the harm 0.9.168 was
-        # over-reacting to. DEV_BUILD is the dev rule; the pref is the release gate.
         my $gv    = Plugins::ListenBrainzFreshReleases::DB->GENRE_FACT_VERSION;
         my $gseen = $prefs->get('last_genre_fact') // '';
         my $g;
-        if (DEV_BUILD || $gseen ne $gv) {
+        if ($reset || $gseen ne $gv) {
             $g = Plugins::ListenBrainzFreshReleases::DB::wipeGenres();
             # Recorded only when they were actually cleared, so the pref keeps meaning
             # "the parser version the store was last cleared FOR" rather than "the
@@ -752,33 +715,31 @@ sub _buildChanged {
             $prefs->set('last_genre_fact', $gv);
         }
 
-        my $why = DEV_BUILD ? 'dev build' : "parser v$gseen -> v$gv";
-        $log->warn("Build changed ($seen -> $version): cleared $kv derived rows"
+        my $why = $reset ? 'explicit clean-load test' : "parser v$gseen -> v$gv";
+        $log->warn("Build changed ($seen -> $version): "
+                 . (defined $kv
+                     ? "cleared $kv derived rows"
+                     : "derived cache KEPT")
                  . (defined $g
                      ? "; cleared $g genre answers ($why) — they refill from the"
                        . " ladder, oldest stamp first"
-                     : "; genres KEPT (parser v$gv unchanged)")
-                 . "; releases, feed coverage, pins, follow items, dates and"
-                 . " sort-names kept");
+                     : "; genre cache KEPT (parser v$gv unchanged)")
+                 . "; durable base and non-genre facts kept");
 
         # INSIDE THE EVAL, and that is the whole point: this pref is what makes the
         # sub return early next start, so setting it after the eval records the
-        # build as handled whether or not it WAS. A wipe that died half way — say
-        # wipeDerived hit a locked DB during startup — then left a partly-wiped
-        # store marked done and never ran again for that version, which is the one
-        # path by which a dev build can silently NOT clear its caches.
+        # build as handled whether or not it WAS. An explicit reset that died half
+        # way — say wipeDerived hit a locked DB during startup — must retry next
+        # start rather than record a partly-wiped store as complete.
         #
         # `last_genre_fact` beside it has always been set inside, for the same
         # reason: the pref means "the version the store was last cleared FOR", not
         # "the version that happened to be running". This one was the odd one out.
         #
-        # A permanent failure now retries once per server start and logs each time.
-        # That is the right trade: the retry is idempotent (`DELETE FROM kv`) and
-        # one error line per start is a symptom you can act on, where a half-wiped
-        # store marked complete is exactly the state the rule exists to prevent.
+        # A permanent failure retries once per server start and logs each time.
         $prefs->set('last_build', $version);
         1;
-    } or $log->error("Dev-build wipe failed: $@");
+    } or $log->error("Build-change cache handling failed: $@");
 }
 
 # Run the warm, then re-arm for the next day. Deferred while a library scan is in

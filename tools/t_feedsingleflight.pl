@@ -221,6 +221,7 @@ require Plugins::ListenBrainzFreshReleases::DB;
     *Plugins::ListenBrainzFreshReleases::DB::store       = sub { bless {}, 'T::Store' };
     *Plugins::ListenBrainzFreshReleases::DB::feedReleases = sub { () };
     *Plugins::ListenBrainzFreshReleases::DB::feedCoverage = sub { { any => 0 } };
+    *Plugins::ListenBrainzFreshReleases::DB::feedGeneration = sub { 0 };
     *Plugins::ListenBrainzFreshReleases::DB::ingestFeed   = sub { { ok => 1, stored => 0 } };
     *Plugins::ListenBrainzFreshReleases::DB::feedNoteAttempt = sub { 1 };
 }
@@ -645,7 +646,8 @@ section('MUSPY HAS TWO SHORT-CIRCUITS, AND force MUST GATE BOTH');
 # WARM_INTERVAL and FEED_STALE_AFTER both 24h, ANY browse inside the window leaves
 # a fresh store, so the nightly forced warm returned yesterday's rows and issued no
 # request: precisely the bug `force` was added to fix, reached through the other
-# door. The memo assertion alone could never see it — the memo is a 5s window.
+# door. The memo assertion alone could never see it: `force` bypasses even a
+# valid generation-backed memo, but must independently bypass the stored rows.
 {
     local @REQUESTS = ();
     $PREFS{muspy_userid} = 'mu-1';

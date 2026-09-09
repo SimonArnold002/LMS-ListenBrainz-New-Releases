@@ -1003,6 +1003,8 @@ section '6e. THE FEED — coverage as a query, and the four ways it must not lie
     my $ingest   = $NS->can('ingestFeed');
     my $coverage = $NS->can('feedCoverage');
     my $rels     = $NS->can('feedReleases');
+    my $weeks    = $NS->can('feedWeeks');
+    my $weekRels = $NS->can('feedWeekReleases');
     my $noteFail = $NS->can('feedNoteAttempt');
     my $invalid  = $NS->can('feedInvalidate');
     my $sweep    = $NS->can('feedSweep');
@@ -1047,6 +1049,22 @@ section '6e. THE FEED — coverage as a query, and the four ways it must not lie
     is(ref $a->{release_tags} eq 'ARRAY' ? $a->{release_tags}[0] : '(none)',
        'shoegaze', 'A FIELD NO COLUMN MIRRORS SURVIVES THE ROUND TRIP');
     is($a->{artist_credit_name}, 'Artist A', 'the payload comes back as the upstream hash');
+
+    # The root menu reads only week_start/count — selecting one folder is the
+    # first point at which payloads for that exact week are thawed.
+    my $summaries = $weeks->('all', $d0, $d2);
+    ok(!scalar(grep { join(',', sort keys %$_) ne 'count,week_start' } @$summaries),
+       'week summaries contain only compact week/count rows');
+    is((eval { my $n = 0; $n += $_->{count} for @$summaries; $n } // -1), 3,
+       'week summary counts cover the stored window without reading payloads');
+    my $wantWeek = $NS->can('_weekStart')->($d2);
+    my @wantIds  = sort map { $_->{release_mbid} }
+                        grep { $NS->can('_weekStart')->($_->{release_date}) eq $wantWeek } @$back;
+    my $oneWeek  = $weekRels->('all', $wantWeek);
+    is(join(',', sort map { $_->{release_mbid} } @$oneWeek), join(',', @wantIds),
+       'an exact-week read returns that week and no adjacent one');
+    is(scalar @{ $weekRels->('all', 'not-a-week') }, 0,
+       'an invalid week cannot broaden into a whole-feed read');
 
     # ---- coverage is a query ------------------------------------------
     my $c = $coverage->('all', $d0, $d2);
@@ -1149,6 +1167,34 @@ section '6e. THE FEED — coverage as a query, and the four ways it must not lie
     ok(!$allIds{M1}, 'a MuSpy row is not a member of the All Releases feed');
     ok(scalar(raw()->selectrow_array('SELECT COUNT(*) FROM release WHERE rel_id = ?', undef, 'M1')),
        'though both feeds share the one release table');
+
+    # ---- generation follows the whole shared payload -----------------
+    # The decoded-feed memo now lives for minutes, so changing a field that has
+    # no mirrored SQL column must invalidate EVERY feed holding that shared row.
+    # `release_tags` is deliberately such a field: it affects rendered genres but
+    # exists only inside the frozen payload.
+    $ingest->('memo:left',  [ $mk->('SHARED', $d2) ], from => $d2, to => $d2);
+    $ingest->('memo:right', [ $mk->('SHARED', $d2) ], from => $d2, to => $d2);
+    my $left0  = $coverage->('memo:left',  $d2, $d2)->{generation};
+    my $right0 = $coverage->('memo:right', $d2, $d2)->{generation};
+
+    $ingest->('memo:right', [ $mk->('SHARED', $d2,
+                                     release_tags => ['ambient']) ],
+             from => $d2, to => $d2);
+    my $left1  = $coverage->('memo:left',  $d2, $d2)->{generation};
+    my $right1 = $coverage->('memo:right', $d2, $d2)->{generation};
+    ok($right1 > $right0,
+       'a PAYLOAD-ONLY change moves the ingesting feed generation');
+    ok($left1 > $left0,
+       '...and moves another feed that references the same release');
+    is($NS->can('feedGeneration')->('memo:left'), $left1,
+       'feedGeneration exposes that version without scanning coverage or thawing rows');
+
+    $ingest->('memo:right', [ $mk->('SHARED', $d2,
+                                     release_tags => ['ambient']) ],
+             from => $d2, to => $d2);
+    is($coverage->('memo:right', $d2, $d2)->{generation}, $right1,
+       'canonical payload bytes keep an identical re-ingest from moving the version');
 
     # ---- generation moves only on real change --------------------------
     my $g1 = $coverage->('all', $d0, $d2)->{generation};

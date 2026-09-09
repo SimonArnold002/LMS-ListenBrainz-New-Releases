@@ -221,10 +221,11 @@ our \$prefs = StubPrefs->new(
 );
 our \$log = StubLog->new;
 our %FEED_MEMO;
-use constant FEED_MEMO_TTL => 5;
+use constant FEED_MEMO_TTL => 30 * 60;
 @{[ grab($api_src, '_memoGet')  ]}
 @{[ grab($api_src, '_memoSet')  ]}
 @{[ grab($api_src, '_memoDrop') ]}
+@{[ grab($api_src, '_memoDropPrefix') ]}
 @{[ grab($api_src, '_today')    ]}
 @{[ ($api_src =~ /^(use constant WEEKS_MAX_SIDE\s*=>.*?;)/m)[0] ]}
 @{[ ($api_src =~ /^(use constant WEEKS_PAST_DEFAULT\s*=>.*?;)/m)[0] ]}
@@ -270,8 +271,8 @@ CODE
 
     ok($inv{'muspy:muspyuser'}, 'MuSpy invalidated in the store, under its own feed name');
 
-    # The rebuild that Refresh triggers re-enters getMuSpyReleases within the memo's
-    # 5s TTL: `if (my $memo = _memoGet($memoKey)) { onDone($memo); return }`.
+    # The rebuild that Refresh triggers re-enters getMuSpyReleases while its
+    # in-process memo is valid: `_memoGet` must not short-circuit the forced fetch.
     my $served = F2::_memoGet($muspyKey);
     ok(!$served, 'MuSpy dropped from the memo too, so the refresh actually re-fetches');
     print "    refresh would serve: " . ($served ? $served->[0]{release_name} : '(re-fetch)') . "\n";
@@ -292,15 +293,21 @@ package F3;
 $STUBS
 package F3;
 our \$prefs = StubPrefs->new(all_sort => 'release_date');
+our \$log = StubLog->new;
+our \$GENRE_FILTER = 0;
+our \$WITH_GENRES_CALLS = 0;
 our %_SINGLE_FAMILY = (single => 1, ep => 1);
 my %_WEEK_START;                             # _weekStart's memo (0.9.139)
 sub cstring { \$_[1] }                       # token back, so rows are identifiable
 sub _weekLabel { 'W/C ' . \$_[1] }
 sub _weekBadgeImage { 'badge.png' }
+sub _weekAction { +{ fixedParams => { lbf_week => \$_[0] } } }
 sub _effectiveView { ('singles_eps', 1, 1) } # user is on Singles & EPs, both families ticked
 sub _warmArtistSorts { }
 sub _noteBrowse { }                          # 0.9.196: the week drill marks the browse
                                              # so the cover warm can yield to it
+sub _focusReleaseCovers { }                  # 0.9.199: requested rows promote existing cover jobs
+@{[ grab($browse_src, '_renderSlots') ]}    # the slot map the focus call is handed
 sub _pageSection { (\$_[2], []) }            # no paging in this fixture
 # 0.9.197: the week drill orders through _frozenOrder, which replays the order a
 # rendered page is holding so an item_id can't resolve to a different album. This
@@ -309,7 +316,12 @@ sub _pageSection { (\$_[2], []) }            # no paging in this fixture
 # itself, and the fact that the week really does call it, are pinned by
 # tools/t_orderfreeze.pl (its section 8 is the call-site half).
 sub _frozenOrder { my (undef, \$mode, undef, \$set) = \@_; return _sortWithin(\$set, \$mode) }
-sub _buildReleaseItem { { name => \$_[0]{release_name}, type => 'link' } }
+sub _buildReleaseItem {
+    my (\$rel, undef, \$meta) = \@_;
+    my \$name = \$rel->{release_name};
+    \$name .= ' [genre]' if \$GENRE_FILTER && \$meta->{\$name};
+    return { name => \$name, type => 'link' };
+}
 sub _sectionHeader { { name => \$_[1], type => 'header' } }
 sub _viewToggle { ({ name => 'PLUGIN_LBF_SHOWING', type => 'link' }) }
 sub _sortToggle { ({ name => 'PLUGIN_LBF_SORTED_BY', type => 'link' }) }
@@ -320,12 +332,21 @@ sub _refreshItem { ({ name => 'PLUGIN_LBF_REFRESH_FEED', type => 'link' }) }
 # pass vacuously by never reaching the guard at all.
 use constant GENRE_WARM_MAX => 600;
 sub _genresRow { () }                        # no genre row in this fixture
-sub _selectedGenres { [] }                   # no genre filter set -> the cheap path
+sub _selectedGenres { \$GENRE_FILTER ? ['rock'] : [] }
 sub _genreSelectFilter { \$_[0] }
-sub _withGenres { my (\$rels, \$cb) = \@_; \$cb->({}) }
+sub _withGenres {
+    my (\$rels, \$cb, \$max) = \@_;
+    \$WITH_GENRES_CALLS++;
+    # The wide filter read knows every row. A second default-width render read is
+    # deliberately empty here: before the fix it proved that the wide map had been
+    # discarded, which is the live Show All failure this fixture guards.
+    my \$meta = \$max ? { map { \$_->{release_name} => 1 } \@\$rels } : {};
+    \$cb->(\$meta);
+}
 @{[ grab($browse_src, '_viewFilter')      ]}
 @{[ grab($browse_src, '_sortWithin')      ]}
 @{[ grab($browse_src, '_weekStart')       ]}
+@{[ grab($browse_src, '_buildAllWeekItems') ]}
 @{[ grab($browse_src, '_buildAllLanding') ]}
 1;
 CODE
@@ -367,6 +388,22 @@ CODE
        && !(grep { $_ eq 'PLUGIN_LBF_NO_RESULTS' } @mnames)
        && !(grep { /^Album / } @mnames),
        'a populated week is unchanged (singles/EPs listed, no "no results", albums still filtered)');
+
+    # A selected genre requires one wide metadata read before paging. The renderer
+    # must use that exact map instead of issuing a second default-capped read, or
+    # Show All loses labels for known releases beyond GENRE_FETCH_MAX.
+    no warnings 'once';
+    local $F3::GENRE_FILTER = 1;
+    local $F3::WITH_GENRES_CALLS = 0;
+    my $filteredItems = F3::_buildAllLanding($mixed, undef, 1);
+    my @f;
+    $filteredItems->[0]{url}->(undef, sub { @f = @{ $_[0]{items} } });
+    my @fnames = map { $_->{name} // '' }
+                 grep { ($_->{name} // '') =~ /^(?:A Single|An EP)/ } @f;
+    ok($F3::WITH_GENRES_CALLS == 1,
+       'a filtered All Releases week performs ONE wide genre read, not a second capped render read');
+    ok(scalar(@fnames == 2 && !grep { $_ !~ / \[genre\]\z/ } @fnames),
+       'the wide filter metadata is reused when the filtered release tiles are rendered');
 }
 
 print "\n", "=" x 74, "\n";

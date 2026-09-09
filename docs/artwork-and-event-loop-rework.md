@@ -507,28 +507,31 @@ from inside code a suite lifts, run every suite, not the obvious one.**
 
 ## Stage 2 — The top level stops blocking, and sections reveal in order
 
-### 2.1 Instant menu, weeks fill in — `topLevel` (Browse.pm:442, 536-556)
+**Implemented in 0.9.202 (2026-09-08), after 0.9.201 added generation-backed
+memos.** The root and Material All Releases shelf now read indexed week/count
+summaries with zero payload thaws. A selected week decodes only that week. The
+root watchdog is gone; an empty store shows the existing drill tile immediately
+while the first fetch fills the store behind it.
 
-Today `topLevel` inlines the All Releases week rows, so it blocks on
+### 2.1 Instant menu, weeks fill in — implemented in 0.9.202
+
+Before 0.9.202, `topLevel` inlined the All Releases week rows by blocking on
 `getFreshReleasesAll` → `DB::feedReleases` = one SELECT of the whole window (~3,000
-rows) **plus a `_thaw` per row**, then `_allSection`, then `_buildAllLanding`. A 5s
-memo is all that hides it, and the `TOPLEVEL_ALL_WAIT` watchdog means a cold open
-sits for five seconds. Everything the user wants first — the For You tile, Playlists,
-People, Settings — is held behind it.
+rows) **plus a `_thaw` per row**, then `_allSection`, then `_buildAllLanding`. A
+generation-backed 30-minute memo hid repeated walks, but the first walk still paid
+the full read and the watchdog could hold the menu for five seconds.
 
-**2.1a — render immediately (small, do first).** Add a long-lived landing memo written
-by `_buildAllLanding` and pre-filled by the warm's `all_feed` `onDone`. `topLevel`
-renders from it synchronously; on a miss it renders the existing drill-tile fallback
-**immediately** and fires the feed detached purely to fill the memo.
-`TOPLEVEL_ALL_WAIT` and its watchdog then become dead and should be deleted, not left
-as a trap.
+**2.1a — superseded implementation sketch.** The proposed long-lived rendered
+landing memo was not added. 0.9.202 instead caches compact data descriptors under
+the feed generation and builds client/language-specific rows on each walk. This
+avoids retaining closures that capture the complete release feed.
 
 > **[review] THE PROPOSED KEY WOULD REINTRODUCE THE 0.9.141 REFRESH BUG.** The key was
 > written as `_sectionSig('all')` + view + `all_sort` at a ~6h TTL. Four problems, and
 > the first is the serious one:
 >
 > 1. **A Refresh cannot invalidate it.** `%SECTION_MEMO` is safe *because* validity is
->    the **identity of the source arrayref** plus a 5s TTL — its own comment
+>    the **identity of the source arrayref** plus a short TTL — its own comment
 >    (Browse.pm:3836) says a refresh necessarily produces a NEW ref, so a refresh cannot
 >    be masked. A 6h memo keyed on prefs alone has no such property: press Refresh at
 >    10am and the landing stays stale until the nightly warm or the TTL. **The landing
@@ -546,11 +549,11 @@ as a trap.
 >    each week's release list, so ~3,000 hashrefs stay live for 6h where today they are
 >    transient. On a Pi that is worth knowing before choosing the TTL.
 
-**2.1b — stop loading 3,000 rows at all.** `release` already has a `week_start`
-column *and* an index on it (DB.pm:454, 464), and `feedReleases` already accepts a
-`$from,$to` window. So: new `DB::feedWeeks($feed)` = `SELECT week_start, COUNT(*) …
-GROUP BY week_start` (**zero thaws**), and the week drill closure stops capturing the
-whole feed and calls `feedReleases($feed, $ws, $ws+6d)` instead.
+**2.1b — stop loading 3,000 rows at all (implemented).** `release` already has a `week_start`
+column *and* an index on it (DB.pm:454, 464). `DB::feedWeeks($feed)` now runs
+`SELECT week_start, COUNT(*) … GROUP BY week_start` (**zero thaws**), and the
+week drill closure stops capturing the whole feed and calls the exact
+`feedWeekReleases($feed, $ws)` reader instead.
 
 > **The one real design risk, stated plainly:** `_dedupeReleases` is cross-row and can
 > span weeks (an LB/MuSpy duplicate whose two copies carry different dates). A naive
@@ -572,8 +575,17 @@ whole feed and calls `feedReleases($feed, $ws, $ws+6d)` instead.
 > If the index is cold, falling back to the existing whole-feed path is honest; falling
 > back to the GROUP BY is not.
 
-The week row label carries no count (`_weekLabel`, Browse.pm:5112), so nothing in the
-UI changes.
+**0.9.202 resolution of the review risks:** All Releases has only ListenBrainz
+membership, although the release payload table is shared and a row also seen by
+MuSpy can retain that source marker. Both the full and exact-week All paths now
+disable the MuSpy-specific cross-date collapse; that behaviour remains enabled for
+the merged For You list only. The two All paths therefore have the same dedupe scope,
+and same-source editions with distinct dates remain intentionally retained. The raw
+summary may advertise a week which the active payload filters empty; the week opens
+with its Options plus the existing No Results row, allowing the user to change the
+filter. No raw count is displayed. Refresh drops the generation-backed
+summary/exact-week children, and rendered rows are still built per client. The week
+row label carries no count, so the normal UI is unchanged.
 
 ### 2.2 A building row for For You — and **only** For You [review]
 
@@ -729,7 +741,7 @@ time (`lbf:pl:count:`, a few dozen bytes, registered in `KEY_VERSIONS`) and sum 
 enabled services from that.
 
 **4.2 `_trendingTile` (Browse.pm:1875)** thaws up to 50 item hashes just to count
-them, on every top-level render outside a 5s memo — which matters more once 2.1 makes
+them, on every top-level render outside the decoded-feed memo — which matters more once 2.1 makes
 the top level otherwise fast. Same sidecar treatment.
 
 **4.3 `resolveFollowFeed` (Browse.pm:1294)** does a network fetch, then `_mergeFollow`

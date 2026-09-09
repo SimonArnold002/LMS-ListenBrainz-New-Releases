@@ -49,14 +49,14 @@ tracking and a recognisable log line.** The distinction that matters operational
 |---|---|---|
 | store | `release` / `feed_member` / `feed_day` / `feed_meta` tables | `kv` rows |
 | freshness | a COVERAGE QUERY over `feed_day` — partial windows serve + revalidate | a flat TTL — hit or miss |
-| survives a dev build | **yes** | **no** — the wipe is `DELETE FROM kv` |
+| survives an ordinary dev build | **yes** | **yes** — since 0.9.203 all caches are preserved |
 | logs a served-from-store line | yes, at info | no |
 
-**The last row is the one that bites this machine specifically.** `_buildChanged`'s
-dev-build wipe is one unconditional `DELETE FROM kv`, so **every installed dev build
-empties Playlists and Followers completely** while the release feeds survive intact
-in the feed store. Followers is therefore cold far more often here than it ever
-would be for a release user — and a cold Followers is the slow case described below.
+**0.9.203 changes the last row.** The old `_buildChanged` policy emptied
+Playlists and Followers on every installed dev build while release feeds survived
+in tables. Ordinary builds now preserve both tiers; a cold Followers run occurs on
+a genuine fresh install, expiry, or a deliberately enabled clean-load reset—not
+merely because the plugin version changed.
 
 ### 1.2 The warm is barely ordered
 

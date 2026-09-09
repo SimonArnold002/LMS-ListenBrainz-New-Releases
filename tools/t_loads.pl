@@ -132,7 +132,7 @@ my $PRELUDE = 'BEGIN { *main::WEBUI = sub () { 0 }; *main::SCANNER = sub () { 0 
             . '*main::ISWINDOWS = sub () { 0 }; *main::DEBUGLOG = sub () { 0 }; '
             . '*main::INFOLOG = sub () { 0 }; }';
 
-my @MODULES = qw(DB API Browse DSTM Diag HomeExtras Settings Plugin);
+my @MODULES = qw(DB API Browse DSTM Diag HomeExtras Settings Plugin DetailWarm SingleFlight);
 
 for my $m (@MODULES) {
     my $pkg = "Plugins::ListenBrainzFreshReleases::$m";

@@ -2,6 +2,13 @@
 
 **Status: IN BUILD.** Investigated and designed 2026-08-12/13; build started 2026-08-13.
 
+**CACHE-WIPE POLICY SUPERSEDED 2026-09-08.** Historical sections below describe
+the old every-dev-build wipe because that is what those stages shipped with.
+Current behaviour preserves every cache on an ordinary version change. Derived
+families invalidate through key versions, fact/schema families through their own
+versions, and a full derived+genre reset occurs only when a deliberately built
+clean-load test sets `RESET_CACHE_ON_BUILD => 1`.
+
 | stage | state |
 |---|---|
 | 1 — `DB.pm`, schema, `kv`, sweep, `retirePrefixes`, `["lbf","cachestats"]` | **DONE** (0.9.164) — nothing read it yet, behaviour byte-identical |
@@ -13,7 +20,7 @@
 | A — the two over-boundary TTLs (§2.4.6) | **DONE, properly.** 0.9.164 capped both at `30 * 86400`; they are now `RECMETA_AGE` / `AGEN_FOUND_AGE` compared against `fetched_at` in Perl, so the defect is **inexpressible** rather than corrected, and 90 days means 90 days again |
 | 5 — feed **ingest** | **DONE** — `release`/`feed_member`/`feed_day`/`feed_meta` fill on every fetch, with `BASE_VERSION`, window-scoped rotation and the refuse-an-empty-ingest branch |
 | 6 — **flip the read** | **DONE** — done in the SAME build as 5, deliberately; the `…fb:` twins are gone from the release feeds. See correction 4 |
-| 7 — dev-build wipe, warm ahead of the username gate | **DONE** — `_buildChanged` (marker in a PREF, not in `kv`), `Browse::warmFeeds`, `DB::feedSweep` on the warm tick |
+| 7 — build marker/cache policy, warm ahead of the username gate | **SUPERSEDED in 0.9.203** — ordinary builds now preserve caches; `_buildChanged` retains the pref marker for explicit clean-load tests and parser-version invalidation |
 | 8 | deferred, as planned — gated on `bench_walk.pl` numbers |
 | D, E, F | not started |
 
@@ -445,7 +452,15 @@ days, comfortably beyond the `days` pref's 90 maximum.
 
 `%FEED_MEMO` and `%SECTION_MEMO` both stay, with better validity: keyed on `feed_meta.generation`
 — which only moves when content actually moved — instead of a 5-second expiry, so they can hold
-for minutes without masking anything.
+for minutes without masking anything. **Implemented in 0.9.201:** both now hold for 30 minutes;
+the feed memo checks the generation directly, and the section memo inherits that version-stable
+source identity plus a complete settings/effective-window signature. Whole canonical payload
+changes advance every feed sharing the release, not only the feed currently being ingested.
+
+**0.9.202 removes the full read from the All Releases root/home path:** `feedWeeks` groups the
+indexed `week_start` column into compact descriptors with no payload thaws; selecting a folder
+uses `feedWeekReleases` to decode that exact week. Both summaries and selected-week arrays reuse
+the same feed generation, and a cold root renders its fallback before a detached first fetch.
 
 ## 2.3 Invalidation
 

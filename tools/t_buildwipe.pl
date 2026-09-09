@@ -1,10 +1,8 @@
 #!/usr/bin/env perl
 #
-# t_buildwipe.pl — regression guard for the 0.9.174 review's finding 1: the genre
-# half of the build wipe had NO release gate. `last_genre_fact` was written on every
-# build and read by nothing, so a released upgrade that changed no genre code still
-# cleared all four artist tiers, the release-group genres and the whole `lastfm_tags`
-# table — the opposite of what the code comment and the 0.9.169 changelog both say.
+# t_buildwipe.pl — regression guard for build-change cache handling. Ordinary
+# version changes preserve the whole store; only an explicit clean-load build
+# clears derived data, while a genre parser-version change clears genres alone.
 #
 #   perl tools/t_buildwipe.pl
 #
@@ -80,6 +78,8 @@ my $sub_src    = grab($plugin_src, '_buildChanged');
 # The REAL parser version, from the real DB.pm.
 my ($GV) = $db_src =~ /^use constant GENRE_FACT_VERSION\s*=>\s*(\d+)/m;
 die "no GENRE_FACT_VERSION in $DBPM\n" unless defined $GV;
+my ($RESET_ON_DISK) = $plugin_src =~ /^use constant RESET_CACHE_ON_BUILD\s*=>\s*([01])/m;
+die "no RESET_CACHE_ON_BUILD in $PLUGIN\n" unless defined $RESET_ON_DISK;
 
 # ---------------------------------------------------------------------------
 # Stubs. The store counts what it was asked to wipe; nothing else is modelled.
@@ -116,13 +116,12 @@ our $VERSION_ON_DISK;
     sub error { push @{ $_[0]{error} }, $_[1] }
 }
 
-# Each scenario gets its own package, because DEV_BUILD is a compile-time constant
-# in the sub body — flipping it means re-compiling the body, which is exactly how
-# the shipped code sees it.
+# Each scenario gets its own package because the two switches are compile-time
+# constants in the shipped sub body.
 my $pkg_n = 0;
 our ($CUR_PREFS, $CUR_LOG);
 sub run {
-    my (%a) = @_;   # dev, installed (version on disk), last_build, last_genre_fact
+    my (%a) = @_;   # dev, reset, installed, last_build, last_genre_fact
     my $pkg = 'Scenario' . ++$pkg_n;
     my $prefs = StubPrefs->new(
         last_build      => $a{last_build},
@@ -140,6 +139,7 @@ sub run {
     my $code = "package $pkg;\n"
              . "use strict; use warnings;\n"
              . "use constant DEV_BUILD => $a{dev};\n"
+             . "use constant RESET_CACHE_ON_BUILD => " . ($a{reset} ? 1 : 0) . ";\n"
              . "my \$prefs = \$main::CUR_PREFS;\n"
              . "my \$log   = \$main::CUR_LOG;\n"
              . $sub_src
@@ -157,7 +157,7 @@ sub run {
     };
 }
 
-print "t_buildwipe.pl — the build wipe's genre gate\n";
+print "t_buildwipe.pl — build-change cache preservation and explicit reset\n";
 print "  Plugin.pm: $PLUGIN\n  parser version: v$GV\n\n";
 
 # ---------------------------------------------------------------------------
@@ -170,17 +170,19 @@ ok(scalar($plugin_src =~ /^use constant DEV_BUILD\s*=>\s*[01]\s*;/m),
    'DEV_BUILD is declared as a 0/1 constant');
 my ($dev_on_disk) = $plugin_src =~ /^use constant DEV_BUILD\s*=>\s*([01])/m;
 print "  (DEV_BUILD is $dev_on_disk in the working tree — must be 0 at merge-to-main)\n";
+is($RESET_ON_DISK, 0, 'the packaged working tree preserves caches by default');
 
 # ---------------------------------------------------------------------------
-print "\n2. A RELEASED build, parser unchanged: genres MUST survive\n";
+print "\n2. An ordinary build, parser unchanged: the WHOLE cache survives\n";
 {
     my $r = run(dev => 0, installed => '0.9.175',
                 last_build => '0.9.174', last_genre_fact => $GV);
-    is($r->{kv},     1, 'derived kv rows are still wiped (that rule is unconditional)');
+    is($r->{kv},     0, 'derived kv rows are kept');
     is($r->{genres}, 0, 'wipeGenres is NOT called');
     is($r->{fact},  $GV, 'last_genre_fact is left as it was');
     is($r->{build}, '0.9.175', 'last_build is advanced');
-    ok(scalar($r->{warnings} =~ /genres KEPT/), 'the log says the genres were kept');
+    ok(scalar($r->{warnings} =~ /derived cache KEPT/), 'the log says derived data was kept');
+    ok(scalar($r->{warnings} =~ /genre cache KEPT/), 'the log says genres were kept');
     is($r->{errors}, '', 'no error logged');
 }
 
@@ -192,10 +194,10 @@ print "\n2b. A wipe that DIES must not record the build as handled\n";
 # That is the one path by which a dev build can silently not clear its caches,
 # which is the standing rule the whole sub exists to enforce.
 {
-    my $r = run(dev => 1, installed => '0.9.185',
+    my $r = run(dev => 1, reset => 1, installed => '0.9.185',
                 last_build => '0.9.184', last_genre_fact => $GV, wipe_dies => 1);
     is($r->{kv},    1, 'the wipe was attempted');
-    ok(scalar($r->{errors} =~ /Dev-build wipe failed/), '...and the failure is logged');
+    ok(scalar($r->{errors} =~ /Build-change cache handling failed/), '...and the failure is logged');
     is($r->{build}, '0.9.184',
        'last_build is NOT advanced, so the next start retries');
     # The store is genuinely half-done here — the die landed before the genre half —
@@ -204,7 +206,7 @@ print "\n2b. A wipe that DIES must not record the build as handled\n";
     is($r->{fact},  $GV, '...and its stamp was not advanced either');
 
     # The retry, modelled as the next server start: same prefs state, DB healthy.
-    my $r2 = run(dev => 1, installed => '0.9.185',
+    my $r2 = run(dev => 1, reset => 1, installed => '0.9.185',
                  last_build => $r->{build}, last_genre_fact => $r->{fact});
     is($r2->{kv},     1, 'the next start wipes again rather than skipping');
     is($r2->{genres}, 1, '...including the genre half it never reached');
@@ -217,6 +219,7 @@ print "\n3. A RELEASED build, parser CHANGED: genres are cleared and stamped\n";
     my $stale = $GV - 1;
     my $r = run(dev => 0, installed => '0.9.175',
                 last_build => '0.9.174', last_genre_fact => $stale);
+    is($r->{kv}, 0, 'derived rows survive a genre-only parser change');
     is($r->{genres}, 1, 'wipeGenres is called');
     is($r->{fact},  $GV, "last_genre_fact is advanced to v$GV");
     ok(scalar($r->{warnings} =~ /parser v\Q$stale\E -> v\Q$GV\E/),
@@ -237,14 +240,25 @@ print "\n4. A RELEASED build on a store that has NEVER been stamped\n";
     is($r2->{genres}, 0, 'the NEXT release build leaves them alone');
 }
 
-print "\n5. A DEV build: every build still clears everything\n";
+print "\n5. A normal DEV build preserves the whole cache too\n";
 {
     my $r = run(dev => 1, installed => '0.9.175',
                 last_build => '0.9.174', last_genre_fact => $GV);
-    is($r->{kv},     1, 'kv wiped');
-    is($r->{genres}, 1, 'wipeGenres is called even though the parser is unchanged');
-    is($r->{fact},  $GV, 'the stamp is (re)written');
-    ok(scalar($r->{warnings} =~ /dev build/), 'the log says why');
+    is($r->{kv},     0, 'kv is kept');
+    is($r->{genres}, 0, 'genres are kept');
+    is($r->{fact},  $GV, 'the parser stamp is retained');
+    is($r->{build}, '0.9.175', 'the build marker advances');
+}
+
+print "\n5b. An explicit clean-load build clears both cache tiers\n";
+{
+    my $r = run(dev => 1, reset => 1, installed => '0.9.175',
+                last_build => '0.9.174', last_genre_fact => $GV);
+    is($r->{kv},     1, 'derived kv rows are wiped');
+    is($r->{genres}, 1, 'genre answers are wiped');
+    is($r->{fact},  $GV, 'the parser stamp is recorded');
+    is($r->{build}, '0.9.175', 'the reset build is recorded once');
+    ok(scalar($r->{warnings} =~ /explicit clean-load test/), 'the log names the explicit reset');
 }
 
 print "\n6. No build change at all: nothing is touched\n";

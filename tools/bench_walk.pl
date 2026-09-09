@@ -82,7 +82,7 @@ my @SUBS = qw(
     _loadGenreFamilies _bucketFor _genresFor _lastfmGenres
     _hostedArtistKey _lbArtistGenres _lastfmArtistGenres _artistTierGenres
     _mergeMuSpy _dateShift
-    _sectionSig _sectionList _allSection _forYouSection
+    _sectionSig _sectionBounds _sectionList _allSection _forYouSection
 );
 
 $src =~ /(my \$HAVE_NFD = .*?^\);)/ms or die "bench: no %FOLD block\n";
@@ -96,7 +96,7 @@ my @RELEASE_TYPES = qw(album single ep broadcast other compilation soundtrack li
 my %_SINGLE_FAMILY = (single => 1, ep => 1);
 use constant VA_MBID => '89ad4ac3-39f7-470e-963a-56509c546377';
 use constant GENRE_NONE => '_none';
-use constant SECTION_MEMO_TTL => 5;
+use constant SECTION_MEMO_TTL => 30 * 60;
 use constant MUSPY_FUTURE_MONTHS_DEFAULT => 12;
 use constant MUSPY_FUTURE_MONTHS_MAX     => 24;
 my %SECTION_MEMO;
@@ -136,6 +136,7 @@ sub coverArtUrl {
     return $rel ? CAA_BASE_URL . $rel . '/front-250' : undef;
 }
 sub peekArtistSort { undef }
+sub sectionWindow { ('2026-08-03', '2026-08-30') }
 # PLURAL, and it is the one _sortWithin('artist') actually calls. Its absence made
 # the bench DIE at the _sortWithin bench and skip everything after it — including
 # the `_bucketFor` line, which is the guard that caught the per-release SELECT in

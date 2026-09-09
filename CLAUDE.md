@@ -3,6 +3,17 @@
 ## Project Overview
 A plugin for Lyrion Music Server (LMS) that browses ListenBrainz Fresh Releases. It provides a personalised "For You" feed and a global "All Releases" feed. Filtering is controlled via settings, and the browse menu stays intentionally simple. The current build targets LMS v9.x and has been tested with Material Skin.
 
+## Cache priority refactor — working tree, 2026-09-08
+
+Current user direction: artwork and core cached data first; **only Last.fm** genre
+retrieval moves behind core work. ListenBrainz metadata stays early. This supersedes
+the historical rationale for running the Last.fm tail alongside playlist/follower
+processing. The first patch separates the two feeds' ListenBrainz passes from the
+Last.fm tails and gates all Last.fm warm/top-up calls on core work, cover work and
+browse activity. See [cache-priority-refactor.md](docs/cache-priority-refactor.md)
+for implementation, recovery limits, tests and outstanding live scheduling work.
+This is not yet a full fixed-clock overnight-preparation implementation.
+
 ## Review Ledger — READ THIS BEFORE REPORTING ANY FINDING
 
 **Why this exists.** Reviews kept re-reporting things that had already been
@@ -68,15 +79,15 @@ does not cover. Say which ledger entry you are challenging and what changed.
   already re-asks and re-files a missing artist on the next warm — the store's own
   comment says refilling is the correct answer because the tags ride a bulk request
   the plugin already makes — so a global genre wipe would clear EVERY user's store
-  to fix a subset. `DEV_BUILD` clears genres on every dev build anyway, so the
-  question only really arises **at the merge to main**; decide it there.
+  to fix a subset. Ordinary dev builds now preserve all caches too, so this remains
+  an explicit parser-version decision; do not hide it behind a plugin-version bump.
 
 ### C. CLOSED FINDINGS
 
 Fixed findings are recorded per review in `docs/code-review-<version>.md`, each
 with its mechanism, its guard and its test. Check there before reporting: the
-0.9.174, 0.9.184, 0.9.191 and 0.9.192 findings are all fixed and verified. Do not
-re-derive them.
+0.9.174, 0.9.184, 0.9.191, 0.9.192 and 0.9.206 findings are all fixed and
+verified. Do not re-derive them.
 
 **CLOSED IN 0.9.197 — two field bugs, both fixed, both pinned. Do not re-report:**
 - **An All Releases week's row order moving between render and click** (the
@@ -89,6 +100,26 @@ re-derive them.
   `COVER_SCAN_BUDGET`; `t_coverwarm.pl` §4d, three anti-tests. **This is the 0.9.196
   claim corrected, not a new mechanism** — see the ⚠️ blocks in
   `docs/artwork-and-event-loop-rework.md`.
+
+**CLOSED IN 0.9.207 — both 0.9.206 findings, plus a third carrier the review missed.
+Do not re-report:**
+- **The artwork focus addressing the wrong releases on For You.** Fixed by replacing
+  the scalar options offset with a SLOT MAP (`_weekGroups` → `_renderSlots`), one entry
+  per rendered row. `t_coverwarm.pl` §4e, three anti-tests (3/5/1 red). **The residual
+  is STATED, not missed:** the focus still promotes covers for the whole list, rotated —
+  it changes the ORDER work is done in, never which covers are eventually warmed. That
+  is by design and is not an incomplete fix.
+- **An upcoming MuSpy release losing its detail prewarm.** Fixed by `_sectionBounds`,
+  the one carrier for a section's date bounds, returning the UNION of the For You and
+  MuSpy windows. `t_detailwarm.pl` §8, two anti-tests. **The review proposed a separate
+  source id instead; that was considered and declined** — both feeds enqueue at
+  priority 0, DetailWarm keys sources BY priority, and `$job->{rel}` is last-write-wins,
+  so a per-release test loses the prewarm in the mirror-image gate combination. The
+  union is order-independent and only over-accepts. Do not re-propose the source id
+  without addressing that case.
+- **`_windowSpan` understating the For You tile's span** — the same concept drifting in
+  a third place, found by sweeping the carriers rather than reported. Now routed through
+  `_sectionBounds` with `_sectionSig`.
 
 **A closed finding is not a closed MECHANISM.** Both 0.9.192 findings were
 second-order consequences of the 0.9.191 fixes — not regressions of old code, and
@@ -180,7 +211,7 @@ ListenBrainzFreshReleases/
 ├── HomeExtras.pm                      # Material home-page shelves — three HomeExtraBase subclasses (New Releases for You / Playlists / All Releases)
 ├── DSTM.pm                            # Don't Stop The Music propagators — 2 mixers: Radio (seeds from last-played artist → similar-artists → top-recordings, evolves) + Recommended (CF pool); streaming-first resolution via Browse::_resolveTracks
 ├── Settings.pm                        # CSRF-protected settings page (General / Streaming Services / For You / All Releases)
-├── DB.pm                              # The durable SQLite store behind the release feeds. THREE TIERS, and the rule that keeps them honest: IF IT IS IN `kv` IT IS DISPOSABLE, IF IT MUST SURVIVE IT NEEDS A TABLE. BASE (release/feed_member/feed_day/feed_meta/bandcamp_pin/follow_item) dies only to a BASE_VERSION bump; FACTS (release_group/recording/artist) to their own *_FACT_VERSION, with a dev build clearing ONLY the genre columns so years/types/MBIDs/sort-names survive; DERIVED (kv) is wiped wholesale by `wipeDerived` on every build change
+├── DB.pm                              # The durable SQLite store behind the release feeds. THREE TIERS: BASE (release/feed_member/feed_day/feed_meta/bandcamp_pin/follow_item) invalidates only through BASE_VERSION; FACTS (release_group/recording/artist) through their own *_FACT_VERSION; DERIVED (kv) through per-family key versions. Ordinary version changes preserve all three; `wipeDerived` + `wipeGenres` run only for an explicit clean-load test
 ├── SingleFlight.pm                    # SHARED FLEET MODULE (canonical copy — see tools/singleflight_sync_check.py). The one async coalescing registry: claim / park / fan out / watchdog. Replaces the THIRTEEN hand-rolled guards across four repos (LBF %BUILDING/%INFLIGHT/%coverQueued/%sortInFlight/%agenInFlight, LL %counting/%trackPending, PFR %PENDING/%RESOLVING, DSC %nameRefetched/%candWaiting/%bandsInFlight/%officialInFlight) that between them produced the same four review findings, one site at a time, for weeks
 ├── Diag.pm                            # Server-side connectivity report — probes every upstream host (LB, LB Labs, MusicBrainz via _mbBase, the MB search index, CAA, Last.fm, MuSpy) in parallel and returns ok/warn/fail/skip per target; driven by the ["lbf","diag"] CLI dispatch in Plugin.pm and by the Settings page's Connection Check section
 ├── install.xml                        # <extension> format, icon_svg.png (version in <version>)
@@ -216,6 +247,235 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
+
+**0.9.207** — built 2026-09-09 for local testing; not installed or live-tested.
+Fixes the two 0.9.206-review findings, and **the sweep for other carriers of each
+concept found a third site the review had not reported.** No schema change, no
+cache-family bump, and **the caches are deliberately NOT cleared** — this build
+changes no stored shape and no cached decision, and the caching behaviour is locked
+while other work proceeds.
+
+**FINDING 1 — the artwork focus addressed the wrong releases on For You.**
+`_focusReleaseCovers` was handed the pre-render list with a single scalar offset for
+the Options block, but the level it describes is drawn by `_buildWeekly`, which
+**inserts a divider before every week and re-sorts inside each one**. So Material's
+row index and the release position drifted apart by one per divider above the
+request — off by one from the very first week, growing per week crossed — and under
+the artist/album sorts the release at a given row is not the one at that position in
+the input list at all. The sibling call site for an All Releases week was always
+correct, because that level draws its releases flat with no dividers among them;
+that is exactly why one scalar offset looked sufficient.
+
+**FIXED BY GIVING THE MAPPING A SHAPE INSTEAD OF AN OFFSET.** `_weekGroups` is the
+one carrier of the weekly render order (the grouping AND the `_sortWithin` call),
+`_buildWeekly` consumes it rather than re-deriving it, and `_renderSlots` turns it
+into **one entry per RENDERED ROW** — the release drawn there, or undef for a row
+that draws none. `_focusReleaseCovers` takes that slot list and counts, so both the
+start position and the requested span are exact even across a divider. `fetchForYou`
+groups ONCE and hands the same groups to the renderer and the focus map, which is
+what makes drift impossible rather than merely unlikely. There is no scalar offset
+left to get wrong.
+
+**FINDING 2 — an upcoming MuSpy release lost its detail prewarm.** For You renders
+two sources with independent future gates (API's `%WEEK_GATES`: `foryou_future` and
+`muspy_future`), but `_warmReleaseDetails` judged every priority-0 job by the For You
+window alone. With later weeks off for the feed and on for MuSpy, `_mergeMuSpy` keeps
+an upcoming release and puts it on screen while its prewarm job is discarded with
+retry 0 — which **deletes it from the queue** rather than deferring it, so it stays
+cold until the next nightly warm.
+
+**AND THE SWEEP FOUND A THIRD CARRIER THE REVIEW DID NOT REPORT.** Four places answer
+"what dates can this section's rows occupy", and two of them disagreed with the merge
+that actually decides visibility: `_warmReleaseDetails` (the reported one) and
+`_windowSpan`, whose tile subtitle therefore understated the span whenever MuSpy
+reached further. All three non-authority sites now go through one **`_sectionBounds`**,
+which returns the UNION of the For You and MuSpy windows.
+
+**THE UNION RATHER THAN THE REVIEW'S SUGGESTED SEPARATE SOURCE ID, deliberately.**
+Both feeds enqueue at priority 0 and DetailWarm keys its sources set BY priority, so
+the origin is unrecoverable by construction — and `$job->{rel}` is replaced by
+whichever enqueue landed last, so testing the release's own `_source` tag would judge
+a release carried by BOTH feeds against whichever window arrived last. That loses the
+prewarm in the mirror-image case (`foryou_future` on, `muspy_future` off). The union
+is order-independent and can only ever over-accept, which costs one prewarm nobody
+reads instead of a cold tap on a release that is on screen.
+
+**TESTS.** `t_coverwarm.pl` 131 → **134**, with a new §4e that pairs every "which
+release does this row promote" assertion with the item `_buildWeekly` actually drew
+at that row, read from the same groups. It carries the control this file's own
+0.9.197 entry insists on — *the render really did reorder, else the rest proves
+nothing* — and it is the assertion the no-sort mutant fails. **Anti-tested three ways,
+each mutant failing only its own property:** the flat pre-fix offset **3 red**,
+`_renderSlots` emitting no divider slot **5 red**, `_weekGroups` skipping the
+within-week sort **1 red** (the control).
+`t_detailwarm.pl` 32 → **38**, gaining `LBF_BROWSE` so it can be anti-tested at all.
+**Its `sectionWindow` stub had to become PREFIX-AWARE, and that is a finding about the
+test:** a single window for every prefix cannot tell the union apart from the plain
+For You window, so the old flat stub would have passed against the very defect being
+fixed. `_sectionBounds` is LIFTED from source rather than restated, since a
+hand-written copy could agree with a broken shipped one. **Anti-tested twice:**
+`_warmReleaseDetails` back on `sectionWindow` **1 red**, `_sectionBounds` returning
+the For You window with no union **2 red**.
+
+**THREE SUITES AND A BENCH BROKE ON THIS LANDING, AND IT IS THE `perl -c`-INVISIBLE
+CLASS THIS FILE ALREADY WARNS ABOUT — TWICE.** `t_cachememo.pl` lifts `_sectionSig`,
+`t_review_fixes.pl` evals the week coderef, and `bench_walk.pl` lifts the section
+pipeline; adding a call to a NEW sub from inside code a harness lifts killed all three
+with `Undefined subroutine`, while compilation stayed clean everywhere. **`bench_walk`
+is the one to note: it exits 255 and prints a SHORTER LIST rather than a failure**, so
+a half-dead bench reads as a quiet one — exactly the 0.9.173 lesson. Each now lifts the
+real sub rather than stubbing it. **After adding a call from inside code a suite lifts,
+run EVERY suite and the bench and check the EXIT CODE, not the last line.**
+
+Regression guards: the complete native `tools/t_*.pl` loop (31 scripts) exits 0,
+`t_loads.pl` 20 passes against the BUILT ZIP, `bench_walk.pl`, `git diff --check`,
+`matcher_sync_check.py` and `singleflight_sync_check.py` all clean.
+
+### Previous build: 0.9.206
+
+**0.9.206** — built 2026-09-09 for local testing; not installed or live-tested.
+Fixes the Last.fm vocabulary/checkpoint defect found during the live 0.9.205
+verification. Last.fm tags are classified individually before the artist answer
+is stored, so `indie, usa` keeps and displays `indie` rather than blanking the row.
+`indie` is now a valid family-less genre, while `usa` and other non-genres remain
+rejected. Rejected-only raw arrays use the one-day negative age instead of being
+mistaken for 30-day positive answers, and a due retry bypasses the raw response
+cache so it really reaches Last.fm. Existing rows are reclassified at read time;
+no genre wipe or parser-version bump is needed. See
+[cache-priority-refactor.md](docs/cache-priority-refactor.md).
+
+**This version bump preserves the whole cache.** Existing Last.fm rows containing
+an accepted tag can contribute immediately under the corrected gate. Rejected-only
+rows older than one day become due and are rewritten as proper empty checkpoints;
+the ListenBrainz and release-group genre tiers are untouched.
+
+### Also carried into 0.9.207 — the earlier 0.9.206 review fixes (previously unbuilt)
+
+The 0.9.206 review found two second-order gaps; both were fixed in the source tree
+and are BUILT for the first time in 0.9.207. All Releases week cards now carry `lbf_week=<week_start>` through the
+registered browse command, so root refresh/revalidation cannot redirect a saved
+tap to the adjacent week. The shared builder covers the plugin root, the full-feed
+fallback and the `LBFAllReleases` Material home shelf; the old row coderef remains
+for legacy clients. The explicit route validates the natural key and retains it in
+the returned query so nested paging/actions re-walk the same week.
+
+Concurrent Last.fm passes now recheck a shared successful artist checkpoint at
+dispatch. The request limit is enforced against actual upstream requests rather
+than by truncating the candidate queue, so a duplicate skipped after another pass
+lands frees that allowance for the next unique artist. A failed request or failed
+store write creates no checkpoint and therefore remains retryable. This covers the
+For You and All Releases daily branches plus browse-triggered top-ups because all
+three use `_warmLastfm`. No schema, cache-family, ordering, pacing or concurrency
+change. See [code-review-0.9.206.md](docs/code-review-0.9.206.md) and
+[cache-priority-refactor.md](docs/cache-priority-refactor.md).
+
+Regression guards: `t_release_target.pl` 49 assertions, `t_weeksummary.pl` 16 and
+`t_lastfm_priority.pl` 61. The complete native `tools/t_*.pl` loop (31 scripts),
+`t_loads.pl`, `bench_walk.pl` and `git diff --check` are green. These shipped
+unbuilt at 0.9.206; the 0.9.207 zip and SHA are the first to carry them.
+
+### Previous build: 0.9.205
+
+**0.9.205** — built and installed 2026-09-08; live Last.fm verification completed.
+Fixes the Last.fm candidate-cap lockout diagnosed against the live 0.9.204 cache.
+The worker used to stop after collecting 400 candidate artists and only then
+discard fresh checkpoints. The same already-answered artists therefore occupied
+the allowance on every pass: the live All Releases Last.fm stage claimed to finish
+in 5.24s while 4,508 artist rows remained never asked. It now bulk-checks every
+candidate first and applies the 400 bound only to real upstream requests. Each
+Last.fm `warmstats` stage now reports candidates, fresh checkpoints, requests,
+displayable genres, empty answers, vocabulary-rejected answers, failures and
+genuinely deferred work. The live run examined 302 candidate artists, found 299
+fresh checkpoints and made three requests (two accepted genres, one empty, zero
+failures or deferred), proving the worker had advanced. W/C 31 August nevertheless
+remained at 243/362 labelled rows. Hannah Cole exposed why: Last.fm had `indie, usa`,
+but `indie` was still classified as a modifier and the rejected non-empty array was
+treated as a 30-day positive checkpoint. That second defect is fixed in 0.9.206.
+No schema/cache-family change; the preserved cache can continue filling. See
+[cache-priority-refactor.md](docs/cache-priority-refactor.md).
+
+### Previous build: 0.9.204
+
+**0.9.204** — built and installed 2026-09-08; live scheduling/cache diagnosis
+completed. Corrects the 0.9.200 detail-prewarm phase inversion found against the
+preserved 0.9.203 live cache. General tracklist/streaming preparation now waits
+until both main Last.fm tails finish; list opening and expansion reprioritise
+artwork only, while opening one release owns an idempotent Last.fm hold for that
+foreground lookup. Rebuilt all-warm artwork queues and fresh empty/vocabulary-
+rejected Last.fm answers no longer consume or block paced requests, but the live
+run exposed the candidate-cap ordering defect fixed in 0.9.205. `warmstats`
+separates detail cache checks/hits from actual fetches and exposes whether the
+main phase has released the detail remainder phase. No schema, cache-family,
+feed-order or artwork-concurrency change.
+
+### Previous build: 0.9.203
+
+**0.9.203** — built 2026-09-08 for local testing; live cache diagnosis completed.
+A genre-filtered All Releases week loaded the whole week's genre map before
+paging, then discarded it and performed a second render lookup under the
+150-release `GENRE_FETCH_MAX`. On W/C 31 August that made known genres after
+row 150 render blank in Show All even though the warm was complete. The renderer
+now reuses the filter's existing map: no API request, cache write, schema change
+or cache-family bump. `tools/t_review_fixes.pl` drives the filtered week and
+asserts one wide metadata read plus reuse by the rendered tiles.
+
+### Previous build: 0.9.202
+
+**0.9.202** — built 2026-09-08 for local testing; not installed or live-tested.
+The plugin root and Material All Releases shelf now read compact indexed week
+summaries rather than selecting and thawing the complete All Releases feed.
+Selecting a week loads only that week's payloads, with generation-backed reuse;
+fresh, stale and empty stores retain stale-while-revalidate/fallback behaviour.
+The measured 3,255-row fixture fell from a ~20ms full read to a ~3ms five-row
+root summary, while its 580-release week read took ~4ms. No schema bump: the
+existing indexed `week_start` column supplies the summary. See
+[cache-priority-refactor.md](docs/cache-priority-refactor.md).
+
+### Previous build: 0.9.201
+
+**0.9.201** — built 2026-09-08 for local testing; not installed or live-tested.
+Decoded release feeds and their filtered/deduped section lists now reuse a
+generation-validated in-process copy for 30 minutes. Payload-only changes,
+releases shared across feeds, settings, Refresh and date-window rollovers all
+invalidate correctly; genre and artist-sort enrichment remains live at render
+time. The latest measured 3,255-row store read (~20ms here, ~200ms projected on
+the Pi) is replaced on memo hits by a ~0.017ms indexed generation query. See
+[cache-priority-refactor.md](docs/cache-priority-refactor.md) for the mechanism,
+tests and remaining live scheduling work. No schema or cache-family bump.
+
+### Previous build: 0.9.200
+
+**0.9.200** — built 2026-09-07 for local testing; not installed or live-tested.
+Release detail pre-warming now fills existing tracklist/streaming caches ahead of
+opening albums. Adaptive priority and existing cached results drive the queue;
+ready detail work precedes Last.fm. Shared flights coalesce foreground/background
+fetches, and public MusicBrainz tracklists use courtesy spacing/shared backoff.
+Queue counters are exposed by `lbf warmstats`. See
+[cache-priority-refactor.md](docs/cache-priority-refactor.md) for scope, recovery,
+776 passing checks and remaining scheduling/view-cache work. No schema or cache
+family bump; the normal dev-build wipe still applies.
+
+### Previous build: 0.9.199
+
+**0.9.199** — built 2026-09-07 for local testing; not installed or live-tested.
+Adaptive artwork prioritises requested/revealed rows, then resumes For You and
+All Releases by week. Material release taps use explicit targets so a changed
+list position cannot open a different album; nested detail/playback actions retain
+the target. See [cache-priority-refactor.md](docs/cache-priority-refactor.md) for
+protocol checks, tests, target expiry and remaining overnight queue work.
+No schema or cache-family version change. Existing dev-build invalidation applies.
+
+### Previous build: 0.9.198
+
+**0.9.198** — built 2026-09-07 for local testing; not installed or live-tested.
+Last.fm warm/top-up requests yield to core feed/playlist/follower work, artwork,
+and active browsing. Both ListenBrainz metadata passes remain early. Shared
+Last.fm pacing and watchdog recovery cover deferred and missing callbacks.
+See [cache-priority-refactor.md](docs/cache-priority-refactor.md) for scope and
+remaining work. No schema or cache-family version change; the existing dev-build
+cache wipe still applies on the version change.
+
+### Previous build
 
 **0.9.197** — built 2026-09-05, **NOT installed and NOT tested.** Two field bugs, both
 diagnosed from the running server and both fixed with the assertion that was missing.
@@ -1698,10 +1958,10 @@ merge, folding superseded dev versions together. Same for `README.md`/`README.ht
 `repo.xml`'s `<url>` (dev → main). The second, since 0.9.175, is
 `use constant DEV_BUILD` in `Plugin.pm` — **1 on `dev`, 0 on `main`**. It is the only
 thing in the plugin that knows which branch it came from (the `(dev)` version-tag
-convention is retired and `repo.xml` is not inside the zip), and it decides whether an
-upgrade throws the user's genres away. Shipping a release with `DEV_BUILD => 1` wipes
-the genre store of every user who upgrades. `tools/t_buildwipe.pl` prints its current
-value on every run.
+convention is retired and `repo.xml` is not inside the zip). It is telemetry only;
+it no longer changes cache policy. Separately verify `RESET_CACHE_ON_BUILD => 0`:
+that switch is enabled only for a deliberately built clean-load test and must never
+reach a routine dev or release build. `tools/t_buildwipe.pl` asserts the safe value.
 
 ### Fixes on top of 0.9.174 (not yet built, no version bump)
 - **The genre wipe's release gate did not exist** (0.9.174 review, finding 1). See the
@@ -1950,10 +2210,9 @@ the warm until `["lbf","warmstats"]` has been read off a real tick.
 Three findings from that doc that correct things people assume about this plugin:
 
 - **Playlists and Followers are NOT missing a cache.** They live in `kv` on flat
-  TTLs rather than in the feed store, so they log no "served from the store" line
-  and — the part that bites on a dev box — **every dev build wipes them**, because
-  `_buildChanged` is one unconditional `DELETE FROM kv`. The release feeds survive
-  in the feed store, which is why only they look cached.
+  TTLs rather than in the feed store, so they log no "served from the store" line.
+  **Since 0.9.203 they survive ordinary dev builds too**; only expiry or an explicit
+  `RESET_CACHE_ON_BUILD` clean-load build makes them cold.
 - **There has NEVER been a "still building" state.** `PLUGIN_LBF_NO_TRENDING` fires
   only from the affirmative empty branch (nobody followed / no active followers / no
   candidates). Nothing was removed from history; a cold Followers open simply blocks
@@ -2039,17 +2298,16 @@ this file:
     seeing releases while the re-fetch runs and a failed refresh leaves them with what
     they had. Both memo layers are still dropped (the 0.9.141 review bug survives the
     move unchanged).
-  - **`_buildChanged` is the dev-build wipe** — one unconditional `DELETE FROM kv` plus
-    the genre columns, safe only because everything durable has a table. Its marker is a
-    **PREF** (`last_build`), never a `kv` row: the wipe would delete its own marker and
-    every start would look like a new build.
-  - **The genre half has TWO triggers, and only one of them existed before 0.9.175**:
-    `DEV_BUILD` (every dev build clears genres) and `last_genre_fact` vs
-    `GENRE_FACT_VERSION` (a RELEASED build clears them only when the parser changed).
-    The pref was written and **read by nothing**, so a released upgrade with unchanged
-    genre code threw away all four artist tiers, the release-group genres and the whole
-    `lastfm_tags` table — the 0.9.166/0.9.167 harm, re-inflicted on users, and the exact
-    opposite of what the 0.9.169 changelog promises. Guarded by `tools/t_buildwipe.pl`.
+  - **`_buildChanged` preserves the whole cache on an ordinary build.** Derived
+    families own key versions; schema/fact families own their migrations and parser
+    versions. `RESET_CACHE_ON_BUILD => 1` is the only full reset and exists solely
+    for a deliberately built clean-load test. Its once-only marker is the
+    **PREF** `last_build`, not a `kv` row.
+  - **Genres clear automatically only when `last_genre_fact` differs from
+    `GENRE_FACT_VERSION`**, or as part of that explicit clean-load reset. The pref
+    was once write-only, causing released upgrades to discard all artist and
+    release-group genres plus `lastfm_tags`; `tools/t_buildwipe.pl` guards the
+    parser gate, whole-cache preservation and the explicit reset independently.
   - **`Browse::warmFeeds` runs AHEAD of `warmCache`'s username gate** — All Releases
     needs no account and had therefore never been warmed for anyone.
 
@@ -2375,14 +2633,25 @@ diagnostic — probe coverage, answered-vs-unreachable, the semantic checks, red
 deadline; `LBF_DIAG=` points it at a mutated copy), `tools/t_db.pl` (the plugin-owned SQLite
 store, against a REAL file in a tempdir — persistence proved CROSS-PROCESS, the kv
 0/''/undef distinctions, wide chars both sides, non-UTF-8 blob bytes, the 90-day
-round-trip, prefix retirement, the dev-build wipe leaving the durable tables alone, and
+round-trip, prefix retirement, explicit derived/genre resets leaving durable tables alone, and
 degrade-never-die; `LBF_DB=` points it at a mutated copy), `tools/t_ttlceiling.pl` (no
 TTL handed to `Slim::Utils::Cache` may exceed 2,592,000 — reproduces LMS's own rule
 first, so a guard set to the WRONG number fails before it can pass vacuously),
 `tools/t_coverwarm.pl` (the CAA size table, the ladder's url rewrite + the cover pre-warm —
 the warmed path must equal what Material requests, down to the EXTENSION, which decides
 whether the proxy caches JPEG or re-encodes every cover as PNG;
-`LBF_PLUGIN=`/`LBF_BROWSE=`/`LBF_API=`/`LBF_DB_SRC=` point it at mutated copies),
+`LBF_PLUGIN=`/`LBF_BROWSE=`/`LBF_API=`/`LBF_DB_SRC=` point it at mutated copies;
+**§4e (0.9.207) is the FOR YOU focus map** — that level draws a divider before every
+week and re-sorts inside each, so Material's row index is NOT a release position, and
+every assertion there is paired with the item `_buildWeekly` actually drew at that row.
+Anti-tested three ways, each mutant failing only its own property),
+`tools/t_detailwarm.pl` (the detail-prewarm queue and its job runner — and §8, the one
+place that pins `_sectionBounds`: For You carries TWO sources on independent future
+gates but both enqueue at priority 0, so eligibility takes the UNION of the For You and
+MuSpy windows. **Its `sectionWindow` stub is PREFIX-AWARE on purpose** — a single window
+for every prefix cannot tell the union apart from the plain For You window, so a flat
+stub passes against the defect. `LBF_BROWSE=` points it at a mutated copy, anti-tested
+two ways),
 `tools/t_statsratelimit.pl` (the follower stats burst — the shared backoff on `_getUserStats` and the serialised follower chain; `LBF_API=`/`LBF_BROWSE=` point it at mutated copies, anti-tested two ways), `tools/bench_store.pl` (the feed store's blocking cost — ingest and read, against real DBD::SQLite at a real feed size; RUN IT after any change to `ingestFeed`/`feedReleases`, and it is what set `INGEST_CHUNK`), `tools/t_ingestchunk.pl` (the chunked ingest's SAFETY property — rotation and coverage only on a complete pass, identical store either way, merge across a chunk boundary, synchronous refusal; `LBF_DB=` points it at a mutated copy, anti-tested two ways), `tools/t_warmstats.pl` (the warm-stage instrument — that it records the OVERLAP between stages and not merely their durations, and that the warm subs actually CALL it; `LBF_PLUGIN=`/`LBF_BROWSE=` point it at mutated copies, anti-tested five ways), `tools/t_feedsingleflight.pl` (the COLD feed path fetches ONCE however many browse walks arrive, AND — since 0.9.190 — that the WARM's `force => 1` bypasses both the memo and the store short-circuit so it warms what actually arrived rather than the stored copy, degrading to stored only when the fetch fails; `LBF_API=`/`LBF_BROWSE=` point it at mutated copies — behavioural, driven through a suspending HTTP stub because the property is "how many requests went out and who was called back", which no pattern match shows; also that BOTH outcomes fan out, that waiters get the same STRING shape as the primary on error, and that the key is the REQUEST (memo key + headers) so a token holder is never multiplexed onto an anonymous fetch. `LBF_API=` points it at a mutated copy, anti-tested five ways), `tools/t_buildingstate.pl` (the in-flight guard and the building row — that the flag is TAKEN before a fan-out, RELEASED on every exit via a single wrapper rather than at each of 8 returns, never released by a caller that did not take it, and that "building" is signalled as `undef` and never as an empty list; also that the feed chain's error paths all advance it and that `_warmTick` waits on its callback. `LBF_BROWSE=` points it at a mutated copy, anti-tested five ways), `tools/t_rgresolver.pl` (the hosted `/discography` release-group tier — that a hit returns a release-GROUP id and never asks MB, that it is ONE call per artist not per album, that `?mbid=` reaches BOTH cache keys, which of several same-titled groups wins, and that EVERY non-hit falls back to MusicBrainz; `LBF_API=` points it at a mutated copy, anti-tested five ways. **Its cache lever is `DB::store`, not `Slim::Utils::Cache`** — API.pm holds the plugin's own store, and a first cut that stubbed the wrong one failed ten assertions because nothing could be observed or reset between sections; the suite now dies loudly if the override is not in effect rather than running vacuous), `tools/t_weekwindow.pl` (the whole-week release window — that the edges are real Mondays and Sundays on EVERY day of the week and for every legal (past, future) pair; **the Friday test**, run across a real week, that a Friday release is still in scope on Saturday and Sunday with earlier weeks OFF and leaves on the next MONDAY rather than at midnight; that the four-week budget survives a hand-edited 52/52; that the derived LB `days=` never exceeds 27, is never 0, and reports `future=true` with zero later weeks; that the gate fallbacks in `%WEEK_GATES` are DERIVED from Plugin.pm's `$prefs->init` rather than restated; that the feed memo key has ONE builder both fetchers and both halves of `clearFeedCache` go through; and that the checkbox-coercion sentinel names a field `settings.html` actually posts. `LBF_API=`/`LBF_DB=`/`LBF_BROWSE=` point it at mutated copies, anti-tested three ways — a today-relative window, the sentinel left on `pref_days`, and `foryou_future` drifting back to `// 0`), `tools/t_matchersync.pl` (the FLEET MATCHER SYNC gate — the three Discography-origin rules
 ported into LBF in 0.9.194: apostrophe elision + its `'n'` guard, the ~90-entry `%FOLD`, and
 the compound-word collapse in `_albumMatches`. Every sub AND `%FOLD` are grabbed from the real

@@ -137,7 +137,7 @@ OVERRIDES = {
 MODIFIERS = {
     "instrumental", "lo-fi", "hi-fi", "acoustic", "live", "remix", "cover",
     "demo", "a cappella", "vocal", "minimal", "maximal", "contemporary",
-    "traditional", "modern", "classic", "alternative", "indie", "underground",
+    "traditional", "modern", "classic", "alternative", "underground",
     "progressive", "experimental music", "christmas", "holiday", "novelty",
     "soundtrack music", "background music", "easy listening",
 }

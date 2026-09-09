@@ -507,3 +507,6 @@ PLUGIN_LBF_GENRE_LOOKUP_ALWAYS
 
 PLUGIN_LBF_GENRE_LOOKUP_OFF
 	EN	Never look genres up
+
+PLUGIN_LBF_VIEW_EXPIRED
+	EN	This view has expired. Go back and refresh the release list.

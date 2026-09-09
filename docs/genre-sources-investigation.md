@@ -147,11 +147,18 @@ MAI embeds a Last.fm key (`Common.pm` `__DATA__`, base64:
 2. **One request per album, no bulk form.** Phase 1 of the genre work exists specifically to avoid
    per-item fan-out; this reintroduces it. Faster per call than LB, but 400 requests at an unspecified
    rate limit against someone else's hosted service is not something to point a feed fill at.
-3. **Vocabulary mismatch.** `genre-families.txt` is generated from MB's 2177-name vocabulary
+3. **Vocabulary mismatch.** `genre-families.txt` is generated from MusicBrainz's vocabulary
    (`tools/make_genre_families.py`) and doubles as the "is this a real genre?" gate for the Last.fm
-   tier. Names like `Neo-Progressive Rock`, `Space Rock Revival`, `Hypnagogic Pop` don't exist in it,
-   so every one would fall through `_genreKnown` and be discarded — or the whole rollup table would
-   need regenerating against a second vocabulary. That's a large hidden cost.
+   tier. This remains a constraint for genuinely unknown Last.fm/Discogs-style tags, but the former
+   examples here are no longer mismatches: separator-normalised `Neo-Progressive Rock` maps to Rock,
+   `Hypnagogic Pop` maps to Pop, and `Space Rock Revival` is known and displayable without a family.
+   In 0.9.206 the accepted per-tag subset became the durable answer: an accepted genre remains even
+   when another tag in the same Last.fm response is rejected. `indie` is also a valid standalone
+   genre rather than a discarded modifier, so Last.fm's `indie, usa` answer displays `indie` and
+   ignores only `usa`.
+   Rejected-only answers are negative checkpoints with the short retry age, not non-empty 30-day
+   successes. Extending the rollup to a genuinely separate vocabulary would still require explicit
+   family/acceptance rules so countries, moods and user-junk do not become genres.
 
 **And it doesn't address why the feature is parked.** The blocker is per-item cost at list scale;
 every alternative here is per-item. MAI changes the *credential* story, not the *performance* story.

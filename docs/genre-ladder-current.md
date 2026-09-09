@@ -63,8 +63,11 @@ Notes that matter:
   an artist genre is only ever a proxy for it.
 - **2b exists because artist tags learned from one release generalise to that artist's
   other releases.** Before it, the store re-bought the same answer once per release.
-- **Rung 5 is gated to MusicBrainz's genre vocabulary** (`genre-families.txt`). Last.fm
-  tags are crowd-written and carry no `genre_mbid`, so the file is the only gate available.
+- **Rung 5 is gated per tag to MusicBrainz's genre vocabulary** (`genre-families.txt`).
+  Last.fm tags are crowd-written and carry no `genre_mbid`, so the file is the only gate
+  available. A mixed answer keeps every accepted genre and discards only its junk companions;
+  `indie, usa` therefore stores and displays `indie`. Rejected-only answers use the one-day
+  negative age, while a displayable answer keeps the 30-day positive age.
 - **There is no tier 3.** The numbering has a hole in it because tier 3 was the hosted
   artist rung, removed in 0.9.173 (§5). Left as a hole deliberately — renumbering would
   make every older note about "tier 3" quietly wrong.
