@@ -41,6 +41,9 @@ my $BROWSE = $ENV{LBF_BROWSE}
 # "passed". Added when finding 2 moved onto the store (0.9.166).
 my $API    = $ENV{LBF_API}
     || File::Spec->catfile($ROOT, 'ListenBrainzFreshReleases', 'API.pm');
+# LBF_PLUGIN — the same seam for Plugin.pm, added 0.9.209 with section 4.
+my $PLUGIN = $ENV{LBF_PLUGIN}
+    || File::Spec->catfile($ROOT, 'ListenBrainzFreshReleases', 'Plugin.pm');
 
 my ($pass, $fail) = (0, 0);
 sub ok {
@@ -81,6 +84,7 @@ sub grab {
 
 my $browse_src = slurp($BROWSE);
 my $api_src    = slurp($API);
+my $plugin_src = slurp($PLUGIN);
 
 # ---------------------------------------------------------------------------
 # A minimal DB::kver/kverNum, built from the REAL KEY_VERSIONS in DB.pm.
@@ -404,6 +408,62 @@ CODE
        'a filtered All Releases week performs ONE wide genre read, not a second capped render read');
     ok(scalar(@fnames == 2 && !grep { $_ !~ / \[genre\]\z/ } @fnames),
        'the wide filter metadata is reused when the filtered release tiles are rendered');
+}
+
+print "\n4. THE RUNNING BUILD REPORTS ITS OWN VERSION (0.9.209)\n";
+print "-" x 74, "\n";
+{
+    # WHY THIS IS A TEST AND NOT A COMMENT. A repo-installed copy shadows a manual
+    # install, and until 0.9.209 nothing in the plugin could tell you that had
+    # happened: `.pm` loads once at startup, so a stale package answers every
+    # question a fresh install was meant to answer. A whole verification round can
+    # run against the wrong build with no wrong-looking line anywhere.
+    ok(scalar($plugin_src =~ /^sub version \{/m),
+       'Plugin::version exists');
+
+    # DERIVED, NOT RESTATED. A hand-maintained version constant is precisely the
+    # thing that drifts — the sibling HQPlayer Bridge shipped one stuck at 0.2.3
+    # while its repo was at 0.2.7.
+    #
+    # SCOPED TO THE SUB BODY, and the first draft of this test was NOT — it searched
+    # the whole file, where `_buildChanged` makes the SAME `dataForPlugin` call for
+    # its own reasons. So it passed against a mutant that replaced this accessor's
+    # body with a hardcoded string, which is precisely the defect it exists to
+    # catch. Caught by anti-testing; recorded because a whole-file regex for a
+    # common idiom is a trap, not a one-off slip.
+    # EVAL'D, BECAUSE grab() DIES ON A MISSING SUB. Anti-testing the rename mutant
+    # exposed this: the suite exited 255 partway through and printed a SHORTER
+    # LIST rather than a failure, so sections 1-3 looked fine and section 4 simply
+    # was not there. That is the exact shape CLAUDE.md warns about for bench_walk
+    # — a half-dead run reads as a quiet one. An assertion must not be able to
+    # take the harness down with it.
+    my $vbody = eval { grab($plugin_src, 'version') } // '';
+    ok(scalar($vbody =~ /dataForPlugin\(__PACKAGE__\)->\{version\}/),
+       '...and it reads the LOADED plugin\'s install.xml, not a constant');
+    ok(!scalar($vbody =~ /=\s*['"][0-9]/),
+       '...with no hardcoded version literal in its body');
+
+    # THE TRAP THIS GUARDS, AND IT IS THE ONE `perl -c` CANNOT SEE: a call to a
+    # sub that does not exist COMPILES. If `version` is ever renamed, every call
+    # site below stays green under a syntax check and dies at runtime, inside a
+    # CLI handler, which is the least observed place in the plugin. So count the
+    # call sites and require each to have a definition backing it.
+    my $calls = () = ($plugin_src =~ /addResult\('plugin_version', version\(\)\)/g);
+    ok($calls == 3,
+       "all three CLI reports name the running build  ->  $calls");
+
+    # ONE CONTROL, because the three assertions above would all pass just as
+    # happily against a file the harness failed to load.
+    ok(scalar($plugin_src =~ /\['lbf', 'cachestats'\]/)
+       && scalar($plugin_src =~ /\['lbf', 'warmstats'\]/)
+       && scalar($plugin_src =~ /\['lbf', 'diag'\]/),
+       'CONTROL — the three CLI dispatches really are in the source read');
+
+    # `plugin_version` and cachestats' `version` are DIFFERENT QUESTIONS. The
+    # second is the store SCHEMA and does not move on most builds, which is why it
+    # could never have answered "which package is running".
+    ok(scalar($plugin_src =~ /\$stats->\{version\}/),
+       '...and the store SCHEMA version is still reported separately');
 }
 
 print "\n", "=" x 74, "\n";

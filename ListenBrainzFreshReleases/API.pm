@@ -3439,21 +3439,23 @@ my %agenInFlight;
 # the public API. The genre path is only allowed to fan out against a mirror.
 sub hasMirror { return _mbThrottled() ? 0 : 1 }
 
+# `peekArtistGenres` (the single-MBID wrapper) LIVED HERE — removed 0.9.208 as
+# unreachable, and its comment was WRONG in a way worth recording: it claimed "the
+# render path uses this", but the render path has only ever called the BULK form
+# below. A per-MBID wrapper over a bulk statement is one SELECT per row, which is
+# exactly the shape `peekArtistGenresBulk` exists to prevent, so re-adding it would
+# reintroduce the cost rather than restore a convenience.
+#
 # Store-only read: the artist's genres (possibly an empty arrayref, meaning "MB
-# has none"), or undef when we've simply never looked. The render path uses this
-# and NEVER fetches — same contract as peekArtistSort/peekLastfmTags.
+# has none"), or undef when we've simply never looked. NEVER fetches — same
+# contract as peekArtistSort/peekLastfmTags.
 #
 # The mirror tier keys on the MBID and the hosted tier on `n:<normalised name>`
 # (it has no MBID lookup at all), so the two occupy DIFFERENT ROWS of the same
 # table and cannot overwrite one another. `genres_src` is checked anyway, so a
 # future tier that did share a key would read as absent here rather than be
 # silently mistaken for this one.
-sub peekArtistGenres {
-    my ($class, $mbid) = @_;
-    return undef unless $mbid;
-    return $class->peekArtistGenresBulk([$mbid])->{ lc $mbid };
-}
-
+#
 # BULK — one statement for a whole page. See peekReleaseGroupMetadataBulk.
 sub peekArtistGenresBulk {
     my ($class, $mbids) = @_;

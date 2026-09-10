@@ -1,7 +1,24 @@
 # LBF — the artwork pipeline and the event-loop stalls
 
-**Status: REVIEWED; STAGE 1 BUILT, VERSIONED as 0.9.196, INSTALLED AND VERIFIED
-LIVE 2026-09-03 — §1.1–§1.4 (1.5 dropped). Session paused here; Stage 2 is next.**
+**Status: STAGE 1 DONE; STAGE 2 PART-SHIPPED AND PART-SUPERSEDED. Updated 2026-09-10.**
+Stage 1 built, versioned as 0.9.196, installed and verified live 2026-09-03 — §1.1–§1.4
+(1.5 dropped), with §1.2/§1.4's stall corrected in 0.9.197.
+
+> **"Session paused here; Stage 2 is next" IS NO LONGER TRUE — do not pick this up as
+> the live plan.** What happened to Stage 2:
+> - **§2.1 — SHIPPED in 0.9.202**, on top of 0.9.201's generation-backed memos, which
+>   is §2.1a's landing memo with the real invalidation key the review asked for.
+> - **§2.2 (a building row for For You) — STILL UNBUILT.** `_buildingRow` exists but
+>   serves the playlist and follower paths. This is the only part of Stage 2 still open.
+> - **§2.3 — SUPERSEDED.** Rather than making Last.fm the last rung of the genre warm,
+>   the adopted plan gates it behind core work, cover work and browse activity
+>   altogether. Stronger, and it changes the ordering §2.3 assumes.
+>
+> **Stages 3–5 were never started, and Stage 3's premise has moved** — the pump stall
+> it depended on was fixed in 0.9.197, not 0.9.196. **`cache-priority-refactor.md` is
+> the adopted plan for warm order and priority; read it first.** Keep this document for
+> its MEASUREMENTS — §"What was proved" and the source-URL/size numbers are the reason
+> the artwork pipeline is shaped as it is, and they are not recorded anywhere else.
 
 > **READ THE TWO ⚠️ BLOCKS BEFORE STARTING STAGE 2 OR 3 (added 2026-09-04).** §1.2's
 > "As built" note and Stage 3's `[RESOLVED]` hazard both asserted something that turned

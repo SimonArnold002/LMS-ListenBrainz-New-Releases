@@ -43,8 +43,14 @@ does not cover. Say which ledger entry you are challenging and what changed.
   is CORRECT on `dev`. Dev builds update `CLAUDE.md`, `docs/*.md` and the memory
   notes only. *(This was reported as "docs drift" in the 0.9.174 review; it was
   never a defect.)*
-- **The large uncommitted working tree is deliberate.** It is the review diff.
-  Do not report it, and do not prompt to commit as a fix for anything.
+- **The working tree's commit state is never a finding, in EITHER direction.**
+  When the tree is large and uncommitted, that is deliberate — it is the review
+  diff. When it is clean with commits unpushed, that is also deliberate: an
+  uncommitted tree means "under review", an unpushed commit means "review not
+  passed yet", and a push to `dev` IS the pass signal. Do not report either state,
+  and do not prompt to commit **or** push as a fix for anything.
+  *(As of 2026-09-10 the tree is clean at 0.9.209 with commits unpushed on `dev`.
+  Do not treat that as the standing state either — check, don't assume.)*
 - **`install.xml` / `repo.xml` being ahead of the docs on `dev`** follows from the
   two rules above.
 
@@ -86,8 +92,21 @@ does not cover. Say which ledger entry you are challenging and what changed.
 
 Fixed findings are recorded per review in `docs/code-review-<version>.md`, each
 with its mechanism, its guard and its test. Check there before reporting: the
-0.9.174, 0.9.184, 0.9.191, 0.9.192 and 0.9.206 findings are all fixed and
-verified. Do not re-derive them.
+**0.9.160, 0.9.174, 0.9.184, 0.9.191, 0.9.192 and 0.9.206** findings are all fixed
+and verified. Do not re-derive them.
+
+**CLOSED IN THE 2026-09-10 HYGIENE PASS — the two review docs that still said
+"nothing here is fixed yet".** Both had been closed in code for weeks; only the
+documents were stale, which is the failure mode this whole ledger exists to stop.
+- **All ten 0.9.160 findings** (the bio render rework and `Diag.pm`), verified
+  against the source rather than inferred from a build note — they were absorbed
+  across 0.9.161–0.9.186 and no single version closed them. The doc now carries a
+  finding-to-mechanism table. **Three of the ten (2, 3 and 10) were closed by
+  rewriting wrong prose and nothing guards them** — that is stated there, not
+  hidden.
+- **The last two 0.9.174 findings.** The matcher drift closed in 0.9.194 (the
+  checker exits 0, re-run 2026-09-10); the CHANGELOG gap was never a defect and is
+  now section A's first entry.
 
 **CLOSED IN 0.9.197 — two field bugs, both fixed, both pinned. Do not re-report:**
 - **An All Releases week's row order moving between render and click** (the
@@ -212,6 +231,7 @@ ListenBrainzFreshReleases/
 ├── DSTM.pm                            # Don't Stop The Music propagators — 2 mixers: Radio (seeds from last-played artist → similar-artists → top-recordings, evolves) + Recommended (CF pool); streaming-first resolution via Browse::_resolveTracks
 ├── Settings.pm                        # CSRF-protected settings page (General / Streaming Services / For You / All Releases)
 ├── DB.pm                              # The durable SQLite store behind the release feeds. THREE TIERS: BASE (release/feed_member/feed_day/feed_meta/bandcamp_pin/follow_item) invalidates only through BASE_VERSION; FACTS (release_group/recording/artist) through their own *_FACT_VERSION; DERIVED (kv) through per-family key versions. Ordinary version changes preserve all three; `wipeDerived` + `wipeGenres` run only for an explicit clean-load test
+├── DetailWarm.pm                      # The overnight/background DETAIL pre-warm queue (0.9.200) — pre-resolves a new release's tracklist and streaming matches so opening it is a store read, not a live fetch. Priority-keyed sources, restart checkpoints, a worker watchdog; section date bounds come from Browse::_sectionBounds (the UNION of the For You and MuSpy windows — see the 0.9.207 entry for why a per-release source tag loses the prewarm)
 ├── SingleFlight.pm                    # SHARED FLEET MODULE (canonical copy — see tools/singleflight_sync_check.py). The one async coalescing registry: claim / park / fan out / watchdog. Replaces the THIRTEEN hand-rolled guards across four repos (LBF %BUILDING/%INFLIGHT/%coverQueued/%sortInFlight/%agenInFlight, LL %counting/%trackPending, PFR %PENDING/%RESOLVING, DSC %nameRefetched/%candWaiting/%bandsInFlight/%officialInFlight) that between them produced the same four review findings, one site at a time, for weeks
 ├── Diag.pm                            # Server-side connectivity report — probes every upstream host (LB, LB Labs, MusicBrainz via _mbBase, the MB search index, CAA, Last.fm, MuSpy) in parallel and returns ok/warn/fail/skip per target; driven by the ["lbf","diag"] CLI dispatch in Plugin.pm and by the Settings page's Connection Check section
 ├── install.xml                        # <extension> format, icon_svg.png (version in <version>)
@@ -247,6 +267,110 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
+
+**0.9.209** — built 2026-09-10 **to be installed and live-tested**. It carries the
+0.9.208 hygiene pass plus **the one thing that pass showed was missing: the plugin can
+now say which build is actually running.** No schema change, no cache-family bump, and
+**the caches are deliberately NOT cleared** — nothing about a stored shape or a cached
+decision changed.
+
+**THE RUNNING BUILD NOW REPORTS ITS OWN VERSION.** New `Plugin::version()`, added to
+`["lbf","cachestats"]`, `["lbf","warmstats"]` and `["lbf","diag"]` as `plugin_version`.
+**This exists because a repo-installed copy shadows a manual install and nothing could
+detect it:** a `.pm` loads once at startup, so a stale package under
+`cache/InstalledPlugins` answers every question a fresh manual install was meant to
+answer, and a whole verification round can run against the wrong build without one
+wrong-looking line anywhere. `cachestats` did already report a `version`, but that is
+the **store SCHEMA** version — it does not move on most builds and so could never have
+answered "which package is running". Both are now reported, side by side, with a comment
+saying they are different questions. The value is read through
+`dataForPlugin(__PACKAGE__)` rather than restated, since a hand-maintained constant is
+exactly the thing that drifts: the sibling HQPlayer Bridge shipped one stuck at 0.2.3
+while its repo was at 0.2.7.
+
+**FIRST THING TO DO AFTER INSTALLING — confirm the right build loaded:**
+
+```
+lbf cachestats
+```
+
+`plugin_version` must read **0.9.209**. If it says anything else, a shadowing copy is
+running and nothing else observed in that session means anything.
+
+**TESTS — `t_review_fixes.pl` 17 → 22**, new §4. **Two of its five assertions were
+wrong on the first draft, and the anti-test is the only reason that is known:**
+- The "reads install.xml, not a constant" check searched the WHOLE FILE, where
+  `_buildChanged` makes the same `dataForPlugin` call for its own reasons — so it passed
+  against a mutant whose accessor returned a hardcoded string, which is the exact defect
+  it exists to catch. Now scoped to the sub body via `grab`. **A whole-file regex for a
+  common idiom is a trap, not a one-off slip.**
+- `grab` DIES on a missing sub, so the rename mutant exited 255 partway through and
+  printed a **SHORTER LIST rather than a failure** — sections 1–3 looked fine and §4
+  simply was not there. That is the `bench_walk` shape this file already warns about: a
+  half-dead run reads as a quiet one. The call is now eval'd, so a rename fails as an
+  assertion instead of taking the harness down.
+
+**Anti-tested three ways, each mutant failing only its own property:** `version`
+renamed **2 red**, its body replaced with a hardcoded literal **1 red**, one of the three
+call sites dropped **1 red**. `LBF_PLUGIN` was added to the suite as the seam that makes
+this possible at all.
+
+Regression guards: the complete native `tools/t_*.pl` loop (31 scripts) exits 0,
+`t_loads.pl` 20 passes against the BUILT ZIP, `bench_walk.pl`, `bench_store.pl`,
+`git diff --check`, `matcher_sync_check.py` and `singleflight_sync_check.py` all clean.
+The zip was extracted and diffed against the working tree.
+
+### Previous build: 0.9.208
+
+**0.9.208** — built 2026-09-10 for local testing; superseded by 0.9.209 before install.
+**A DOCUMENTATION AND ORPHAN-CODE PASS, not a behaviour change.** No schema change, no
+cache-family bump, and **the caches are deliberately NOT cleared** — nothing about a
+stored shape or a cached decision changed.
+
+**THREE UNREACHABLE SUBS REMOVED**, found by sweeping every `sub` name in the plugin
+against every reference to it. Each leaves a tombstone comment saying why it is not
+coming back, per the convention `getArtistBio` set in 0.9.186:
+- **`DB::bcPinDel`** — a Bandcamp pin is replaced by writing a new one through
+  `bcPinPut`, or dropped with the table on a clean-load reset. Nothing has ever deleted
+  a single pin, and the row is deliberately durable.
+- **`DB::followCount`** — written as a diagnostic beside `followTrim`, but
+  `["lbf","cachestats"]` already reports the `follow_item` row count through `stats`'
+  `@TABLES` sweep. Nothing ever wanted a per-USERNAME count.
+- **`API::peekArtistGenres`** — the single-MBID wrapper over
+  `peekArtistGenresBulk`. **Its comment claimed "the render path uses this", and that
+  was false** — the render path has only ever called the bulk form. A per-MBID wrapper
+  over a bulk statement is one SELECT per row, which is the cost the bulk sub exists to
+  prevent, so it was worse than dead: it was an invitation.
+
+Also removed: the orphan string token `PLUGIN_LBF_VIEW_ALL` ("Show all"), left over from
+the two-row family selector that 0.9.128 replaced with `_viewToggle`. `PLUGIN_LBF_SHOW_ALL`
+carries the same text and is the one in use.
+
+**TESTS.** `tools/t_genrefill.pl` 191 → **198**, with a new §6d pinning all three
+removals. **Every "this sub is gone" assertion is PAIRED WITH ITS SURVIVING SIBLING** —
+a negative regex passes just as happily against a file the harness failed to load, so
+the positive half is the control that proves the source is really there.
+**Anti-tested twice:** restoring `peekArtistGenres` in a mutated `API.pm` **1 red**,
+restoring both DB subs in a mutated `DB.pm` **2 red**, each failing only its own
+property.
+
+**THE REST OF THE PASS IS DOCUMENTATION, and the pattern in it is worth keeping.**
+Every stale claim found was a document that had stopped tracking the code weeks
+earlier while still reading as authoritative — a "PICK UP HERE" pointing at work that
+had shipped, a plan header saying "IN BUILD" after the last stage landed, a review doc
+saying "nothing here is fixed yet" about ten findings all closed. **Two of them
+contradicted the Review Ledger directly** (the matcher hold, the uncommitted tree),
+which is the exact failure the ledger exists to prevent. Closed: both stale review docs
+(0.9.160's ten findings and 0.9.174's last two), the three superseded caching/warm
+plans, the genre phase status, and the "State of play" section, which was rewritten and
+re-dated. **There is now ONE statement of branch state, in that section's header**, so
+the two copies cannot drift apart again.
+
+Regression guards: the complete native `tools/t_*.pl` loop (31 scripts) exits 0,
+`bench_walk.pl` and `bench_store.pl` exit 0, `matcher_sync_check.py` and
+`singleflight_sync_check.py` both exit 0.
+
+### Previous build: 0.9.207
 
 **0.9.207** — built 2026-09-09 for local testing; not installed or live-tested.
 Fixes the two 0.9.206-review findings, and **the sweep for other carriers of each
@@ -768,25 +892,30 @@ left unwired 1 red, warm handed the raw feed 3 red, restart timer left unguarded
 `matcher_sync_check.py` and `singleflight_sync_check.py` both exit 0.
 
 **NOT YET BUILT of stage 1 (the plan is otherwise done): nothing** — 1.1–1.4 are
-all in; only 1.5 was dropped. Stages 2–5 of the plan are designed and reviewed,
-not started. **PICK UP HERE: Stage 2** (`docs/artwork-and-event-loop-rework.md`
-§"Stage 2 — The top level stops blocking") is next, already reviewed with two
-corrections folded in — §2.1a's landing memo needs a real invalidation key (ref
-identity / feed `ok_at`, not prefs alone, or a Refresh can't bust it), and §2.2's
-building row is narrowed to **For You only**, citing the 0.9.184 ledger entry it
-challenges (For You chains LB → MuSpy so it's two `FEED_TIMEOUT` windows, not one;
-`fetchAll` is a single fetch and keeps the existing behaviour). Read the doc's Stage
-2 section fresh before writing anything — do not re-derive the review from this
-summary alone.
+all in; only 1.5 was dropped.
 
-**ALSO PARKED, RAISED DURING STAGE 1'S VERIFICATION, NOT YET SCOPED FOR BUILD:**
-`docs/overnight-detail-prewarm.md` — the overnight warm should pre-resolve a new
-release's tracklist and streaming matches too, not just covers/genres, so a user
-never triggers a live fetch by opening something that matches their current
-settings. On-demand stays as the correctness path; this is additive. Needs its own
-investigation (MusicBrainz rate-limit participation, `_findPlayable` fan-out cost
-at scale) before a design exists — see the doc, and CLAUDE.md's PLANNED WORK list
-below for the same pointer.
+> **⚠️ THE "PICK UP HERE: Stage 2" INSTRUCTION THAT USED TO SIT HERE IS DEAD —
+> corrected 2026-09-10.** It was written at 0.9.196 and went on reading as the live
+> next step while the work it pointed at was done by a different plan. **§2.1 (instant
+> menu, weeks fill in) SHIPPED in 0.9.202**, on top of 0.9.201's generation-backed
+> memos — which is also §2.1a's landing memo, given the real invalidation key the
+> review asked for. **§2.3 (Last.fm last in the genre warm) is SUPERSEDED** by the
+> 2026-09-07 direction: Last.fm is now gated behind core work, cover work and browse
+> activity entirely, which is stronger than merely making it the last rung. **Only §2.2
+> (a building row for For You) is still unbuilt** — `_buildingRow` exists but serves the
+> playlist and follower paths, not For You.
+>
+> **Read `docs/cache-priority-refactor.md` FIRST for anything about warm order or
+> priority.** It is the adopted plan; `artwork-and-event-loop-rework.md` and
+> `warm-ordering-and-follower-latency.md` are the two it overtook, and both are now kept
+> for their measurements rather than their stage lists.
+
+**RAISED DURING STAGE 1'S VERIFICATION — `docs/overnight-detail-prewarm.md`, and it
+SHIPPED in 0.9.200.** The overnight warm now pre-resolves a new release's tracklist and
+streaming matches, not just covers/genres (`DetailWarm.pm` + the prewarm queue). This
+paragraph used to say "not yet scoped for build"; what is still owed is live
+verification of queue throughput and restart behaviour, plus a fixed overnight clock —
+not investigation or design.
 
 **0.9.195** — built 2026-09-02, **NOT installed and NOT tested**. **A FAILED SERVICE SEARCH IS NO
 LONGER CACHED AS "THIS TRACK IS ON NO SERVICE".** Diagnosed live the same day, from the field:
@@ -2248,12 +2377,19 @@ the MAI precedent read from source (uncapped, ONE request in flight, 5s-doubling
 and what it says about our caps; the live measurements; and the agreed 4-step plan. Don't
 re-derive any of it, and don't reinstate `HOSTED_WARM_ALL` on its own.
 
-### IN BUILD — THE CACHING REWORK. READ `docs/caching-rework.md` FIRST (started 2026-08-13)
+### THE CACHING REWORK — LANDED. READ `docs/caching-rework.md` FIRST (started 2026-08-13)
 
-**Not built, not versioned, not installed.** The plan, the staging and the decisions
-already taken (do not re-open them) are in `docs/caching-rework.md`, whose header
-carries a live stage table. Two things from it that change how you read the rest of
-this file:
+**BUILT, VERSIONED AND INSTALLED — this heading said "IN BUILD / not built, not
+versioned, not installed" until 2026-09-10, long after it stopped being true.**
+Stages 1–7 plus the brought-forward A/B/C are all DONE and shipped (0.9.164–0.9.203);
+stage 8 (scoped per-week SQL) is deferred by design, gated on `bench_walk.pl` numbers;
+stage D is DROPPED, E is SETTLED on MusicBrainz and F shipped in 0.9.179. **The
+cache-WIPE policy this rework shipped with has since been reversed** — ordinary version
+changes now preserve every cache; see the section at the top of this file and
+`docs/cache-priority-refactor.md`, which is the plan that supersedes this one for
+anything about warm ORDER or priority. The plan, the staging and the decisions already
+taken (do not re-open them) are in `docs/caching-rework.md`, whose header carries the
+stage table. Two things from it that change how you read the rest of this file:
 
 - **GENRES HAVE NEVER WORKED, AND IT WAS NEVER THE GENRE CODE.** `RECMETA_TTL` and
   `AGEN_FOUND_TTL` were both `90 * 86400`, and LMS reads any TTL over **2,592,000** as
@@ -2440,26 +2576,45 @@ Full table, with fallbacks and triggers, in `docs/genre-ladder-current.md` §4.
   whose inline-MBID short-circuit then costs **zero** MusicBrainz lookups. Radio ladder is now
   LB similar → hosted → Last.fm → recommendations.
 
-### State of play (2026-07-30) — read this before starting anything
+### State of play (rewritten 2026-09-10, current at 0.9.209) — read this before starting anything
 
-**PLANNED WORK — scoped 2026-07-31, none of it started. Read the doc before opening the code:**
-- **`docs/overnight-detail-prewarm.md`** — **requirement captured 2026-09-03, NOT
-  investigated, not designed.** The overnight warm already pre-fetches covers and genres for
-  new releases; a release's MusicBrainz tracklist and its streaming matches never have — both
-  are strictly on-demand, first-open-triggers-a-live-fetch, always. Goal (Simon): "the user
-  wakes up to find new material ready and waiting," not just for artwork. **On-demand stays as
-  the correctness path** — this is additive, the same relationship the cover warm has to the
-  image proxy's on-demand fetch. Needs its own investigation (MB rate-limit participation,
-  `_findPlayable` fan-out cost at scale) before a design exists. Do not start implementing from
-  the doc alone.
-- **`docs/cache-ttl-30-day-boundary.md`** — **BUG, one line to fix.** `RECMETA_TTL` is 90 days, and
-  LMS's `DbCache` reads any TTL **over 2,592,000s (30 days)** as an *absolute Unix timestamp*, not a
-  duration — so it is stored expiring in **1970** and every read returns undef. `set` returns 1 and
-  raises nothing, so it fails silently. Worse, it is the **dated** branch: recordings that resolved a
-  year are the ones discarded, while yearless ones (1d) cache fine. Verified in LMS 9.1 source; found
-  after it cost the Pitchfork plugin five releases of misdiagnosis. Fix is `30 * 86400`, **no
-  `RECMETA_PFX` bump** (nothing under the current prefix is retrievable anyway), plus a test sweep
-  failing any TTL over the boundary. The doc's §5 is worth reading before diagnosing anything similar.
+*This section was dated 2026-07-30 and had not been rewritten since, so it still
+described a 0.9.151 working tree, a matcher hold that closed in 0.9.194 and four plans
+that have since shipped. Rewritten in the hygiene pass to describe the repo as it is.
+**Re-date it whenever you change it** — a "state of play" that lies is worse than none.*
+
+**BRANCHES.** `dev` is the working line and is at **0.9.209, built and awaiting install**.
+The tree is CLEAN; there are commits on `dev` not yet pushed, and per the Review Ledger
+that is the deliberate review gate, not a defect. `main` is at **0.9.149** — everything
+from 0.9.150 on has never been promoted, so "what users have" is far behind `dev`, and
+the CHANGELOG/README debt for that gap is a merge-gate item. `alpha` holds the parked
+genre work at 0.9.140 and **must not be merged** — the feature was ported onto `dev` in
+0.9.162 and `ALPHA.md` there is wrong about why it was blocked. `beta` is untouched and
+stale at 0.8.24.
+
+**FLEET HOLDS.**
+- **Matcher sync: the hold is OVER.** It closed with LBF 0.9.194 / PFR 0.9.33 on
+  2026-08-29. `matcher_sync_check.py` **exits 0**; a non-zero exit is a real finding
+  again. Search Hub is pinned in `VARIANTS` as a deliberate frozen variant.
+- **Search Hub is still ON HOLD.** No work on `LMS-Search-Hub`, and nothing here should
+  start depending on it.
+
+**PLANNED WORK — genuinely not started. Read the doc before opening the code:**
+- ~~**`docs/overnight-detail-prewarm.md`**~~ — **SHIPPED, moved out of planned work
+  2026-09-10.** Implemented for testing in **0.9.200** (`DetailWarm.pm` + the prewarm
+  queue); the design lives in `docs/cache-priority-refactor.md` under "Third
+  implementation". What is still owed is VERIFICATION, not design: live queue
+  throughput, restart/checkpoint behaviour, and a fixed overnight clock — see the
+  "Open on this repo" list below.
+- ~~**`docs/cache-ttl-30-day-boundary.md`**~~ — **FIXED 2026-08-13, and there were TWO
+  instances, not one.** Both constants are `30 * 86400`, and the boundary is now
+  **inexpressible** rather than merely corrected: the ages are compared against
+  `fetched_at` in Perl (`RECMETA_AGE` / `AGEN_FOUND_AGE`), so 90 days means 90 days
+  again. `tools/t_ttlceiling.pl` fails any TTL above the boundary in any module,
+  including durations written inline into a `$cache->set` call. The doc is kept for its
+  §5 — the reasoning is worth reading before diagnosing anything similar — and for the
+  lesson that its own §2 audit was written before `AGEN_FOUND_TTL` existed and was
+  silently wrong one release later. [[lms-cache-30day-ttl-boundary]]
 - **`docs/token-free-refactor.md`** — **§3.1 SHIPPED in 0.9.160**; §3.2/§3.3 still open, §4 dropped.
   Re-verified live 2026-08-12 against the real account: every LB endpoint the plugin calls returns a
   **byte-identical payload anonymous vs authenticated**, and `/1/user/<u>/feed/events` is the **only**
@@ -2494,7 +2649,7 @@ Full table, with fallbacks and triggers, in `docs/genre-ladder-current.md` §4.
   gotchas (`$dropSingles` ordering, Bandcamp already excluded), the CLI recipe for reproducing the
   measurement, and the two test traps that bit PFR's suite.
 - **`docs/genre-ladder-current.md`** — **START HERE for anything genre- or hosted-API-related.**
-  What ships at 0.9.175: the ladder rung by rung with what each is keyed on and stored in, which
+  What ships (the doc is verified at 0.9.186): the ladder rung by rung with what each is keyed on and stored in, which
   views show a genre line (Trending Albums is a release row that *could* and currently doesn't),
   the three hosted routes and the section each serves, and the two tiers that were built and
   discarded (hosted ARTIST genres, ~2% on the residue; MusicBrainz, now mirror-only) with the
@@ -2503,7 +2658,10 @@ Full table, with fallbacks and triggers, in `docs/genre-ladder-current.md` §4.
   genre backend. **Conclusion: not for list rows** (16% coverage on real fresh releases vs our
   existing 49%, per-album not bulk, non-MB vocabulary, and **no artist-genre route to fall back to** —
   `/artist/<n>/genres` silently returns the *picture* payload with a 200, it never 404s). Good
-  detail-page enricher. **Does not change why the genre work is parked on `alpha`.**
+  detail-page enricher. ~~**Does not change why the genre work is parked on `alpha`.**~~
+  **That last clause is DEAD — the genre work was unparked onto `dev` in 0.9.162.** The doc's
+  own conclusion held: the detail-page enricher shipped, the list-row idea was built anyway as
+  a hosted ARTIST tier in 0.9.162 and removed again in 0.9.173 on the numbers.
 - **`docs/hosted-lms-community-api.md`** — scoped 2026-08-01. Adopt the hosted `mai-api`
   (`api.lms-community.org`) as a resolver/metadata backend. **Two hard rules first:** every call sends
   the `X-LMS-Plugin-ID` header, and all calls go through ONE request helper (auth may be added later).
@@ -2517,24 +2675,53 @@ Full table, with fallbacks and triggers, in `docs/genre-ladder-current.md` §4.
   was taken (LB already carries type + date on the request that fetches tags), and the hosted ARTIST
   genre tier was removed again. Its route lines omit the live `/music` prefix.
 
-**Branches.** `dev` (this one) is the working line. Last commit is `e5c919d` (**0.9.151**, the bio
-blob fix); **0.9.152–0.9.157 are BUILT AND UNCOMMITTED** in the working tree — the prose-row
-layout fix and the bio-structure fixes on top of it, see the Version History entries. 0.9.152 was
-installed and tested; 0.9.153 awaits Simon's install/verify, then a commit if he OKs it.
-(0.9.147–0.9.148 landed as `a7e1ac4`; 0.9.149 is the Trending Albums empty-cache fix, tagged
-`v0.9.149`.) `alpha` holds the parked
-genre work at 0.9.140 — pushed, see `ALPHA.md` there, do not merge it. `main` is still at
-**0.9.98**: everything from 0.9.99 on (People You Follow, Trending, the matcher fleet sync,
-0.9.126–0.9.128 and 0.9.141) has never been promoted, so "what users have" is far behind
-`dev`. `beta` is untouched and stale.
+*(The branch and fleet-hold paragraphs that used to sit here were rewritten into this
+section's header on 2026-09-10 — they described a 0.9.151 tree and a matcher hold that
+had closed. There is now ONE statement of branch state, at the top, so the two cannot
+drift apart again.)*
 
-**Fleet holds — both deliberate, don't try to tidy them up:**
-- **Matcher sync is ON HOLD** until Discography's rework lands. `matcher_sync_check.py`
-  exits 1 by design; see the banner on the Shared Matching Engine rule below.
-- **Search Hub is ON HOLD.** No work on `LMS-Search-Hub` and nothing here should start
-  depending on it.
+**Known open items on this repo.** *Re-derived from source, tests and git in the
+2026-09-10 hygiene pass — everything listed here was checked, not inherited.*
 
-**Known open items on this repo, none of them started:**
+**Owed VERIFICATION, not design — the whole 0.9.198–0.9.209 run is unproven live.**
+0.9.204 and 0.9.205 were installed; **0.9.206, 0.9.207 and 0.9.208 were built and never
+installed**. **0.9.209 is the build going in**, so it is the first observation of
+everything below at once — which also means a failure in it does not immediately say
+WHICH version introduced it. Check `plugin_version` first; then read the list as
+candidates, not as one suspect:
+- Detail-prewarm queue throughput and restart/checkpoint behaviour on the real server.
+- **A fixed overnight clock.** The timer is still 24 hours relative to STARTUP, which is
+  the last unbuilt piece of the agreed overnight-preparation direction.
+- Adaptive artwork priority, the explicit release actions, generation-backed reuse and
+  the indexed week-summary navigation.
+- Whole-pass limits, including Last.fm's 400-artist cap, as part of durable queue
+  draining. The plan does not yet promise every new release is prepared.
+
+**Designed or scoped, genuinely not started.**
+- **A building row for For You** — the only unbuilt part of the artwork plan's Stage 2.
+  `_buildingRow` exists and serves the playlist and follower paths.
+- **`docs/album-title-search-leg.md`** — a port from PFR 0.7.12, not a design exercise.
+  Verified still unbuilt: the auto-resolver searches the ARTIST only.
+- **`docs/year-in-music.md`**, **`docs/recommended-listening-row.md`** — both untouched.
+- **`docs/token-free-refactor.md` §3.2/§3.3** — rebuilding Recommended on public
+  loved-tracks/pins, and the volume decision it depends on.
+- **`docs/lastfm-key-bundling.md`** — proposed 2026-09-03, nothing implemented, and §4
+  needs a decision before any code.
+
+**Merge-gate debt.** `main` is at 0.9.149 and `dev` at 0.9.209. The CHANGELOG and README
+are owed for that whole gap, plus **a credit line for honzup** (PR #17's own CHANGELOG
+hunk was deliberately not taken), and **`GENRE_FACT_VERSION` is deliberately NOT bumped
+for the 0.9.194 `_norm` change** — an explicit parser-version decision, recorded in
+Review Ledger section B, that must not be hidden behind a plugin-version bump.
+
+**PR #17 (Spotify via Spotty) is CLOSED as work.** The adapter is applied, committed as
+`c68cbb1` and built into 0.9.187, and the reply to honzup is posted — Simon confirmed
+2026-09-10, settling a disagreement between the two PR docs that could not be resolved
+from inside the repo. `docs/spotify-spotty-pr17-reply.md` is now a record, not a task.
+Only the CHANGELOG credit line remains, and it belongs to the merge gate above. The PR
+stays OPEN on GitHub as a mechanical consequence, since its `Closes #17` only fires on
+`main`.
+
 - **Detail-page tracklist paging — OPEN, deliberately deferred (Simon, 2026-08-05: "leave it open,
   may address later").** The release detail page emits one text row per TRACK, so a release with
   roughly **85+ tracks** crosses Material's 100-item threshold on its own and enters the fixed-48px
@@ -2983,7 +3170,7 @@ is real drift again).
   a server restart from the install, with the player's Tidal stream failing to reopen 4s later and the
   first browse 23s after that — i.e. not proven to be this code, but the hazard was real and latent.
 
-## GENRES — measured coverage & the plan (0.9.129 = phase 1 of 4)
+## GENRES — measured coverage & the plan (phases 1–3 DONE, phase 4 superseded — see the phase status below)
 
 **Measured 2026-07-26** over 400 releases of the LIVE All Releases feed, with the plugin's own
 type/artwork filters applied. Don't re-derive these:
@@ -3028,12 +3215,24 @@ equivalent) so the genre fill covers only the visible 30.
   it labelled a drum-and-bass artist "ambient, breakcore". Perl's stable sort keeps LB's own order on
   ties, which tracks the primary genre. Caught by a test against a real captured response.
 
-**Still outstanding on phase 1's cost story:** the detail page still makes its own per-album
-`getReleaseGroupGenres` MB call ([Browse.pm](ListenBrainzFreshReleases/Browse.pm) `_releaseDetail`) — it
-should read the bulk data instead, making that path one call cheaper; and `warmCache` should pre-fill
-the feed's genre cache so a browse is always a pure cache hit.
-**Phases 2–4 not started:** rollup table (`tools/` generator + shipped data file), Last.fm gated by the
-MB vocabulary, and "Group by genre" as a fourth mode on the per-view sort toggle.
+~~**Still outstanding on phase 1's cost story:**~~ **BOTH CLOSED, corrected 2026-09-10.**
+`getReleaseGroupGenres` was **deleted outright in 0.9.185**, not made cheaper — the detail
+page makes no per-album MB genre call at all now, and only a tombstone comment remains in
+`API.pm`. `warmCache` does pre-fill the feed's genre cache, so a browse is a store read.
+
+**PHASE STATUS, corrected 2026-09-10** — this line said "phases 2–4 not started" for six
+weeks while two of the three shipped:
+- **Phase 2 — the rollup table: DONE.** It ships as the generated data file
+  `ListenBrainzFreshReleases/genre-families.txt`, built by `tools/make_genre_families.py`
+  and loaded by `Browse.pm` (`$_GENRE_KNOWN`).
+- **Phase 3 — Last.fm gated by the MB vocabulary: DONE.** Tier 5 is vocabulary-gated, and
+  0.9.206 refined it further so tags are classified INDIVIDUALLY (`indie, usa` keeps
+  `indie` instead of blanking the row).
+- **Phase 4 — "Group by genre" as a fourth sort mode: NOT BUILT, and effectively
+  SUPERSEDED.** `@SORT_MODES` is still `release_date artist album`. The in-view **genre
+  picker** (a family FILTER, with its own durable `<prefix>_genres` pref) shipped instead
+  and covers the same need from the other direction. Do not build the sort mode without
+  first arguing why the picker is not enough.
 
 - **Family selector collapsed back to ONE cycling row — `_viewToggle` (0.9.128).** Replaces
   `_viewRows` (the 0.9.125–0.9.127 two-row radio pair). Same signature

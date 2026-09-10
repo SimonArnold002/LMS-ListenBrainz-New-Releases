@@ -1,9 +1,24 @@
 # LBF — warm ordering, follower latency, and a "still building" state
 
-**Status: STAGE 1 BUILT (0.9.175) — instrumentation only. THE EVENT-LOOP STALL IS
-FIXED (0.9.176) — see §4. THE FOLLOWER STATS BURST IS FIXED (0.9.177) — see §5,
-which is why People You Follow was empty. The rest of stage 2 (warm reordering,
-the building state) is designed and NOT started.**
+**Status: DONE AND SUPERSEDED — closed 2026-09-10. This header contradicted the
+document's own §8 for over two weeks:** it said "the rest of stage 2 is designed and
+NOT started" while §8 recorded stage 2 as BUILT in 0.9.180. §8 was right.
+
+- **Stage 1 (0.9.175)** — instrumentation. BUILT.
+- **The event-loop stall (0.9.176)** — FIXED, §4.
+- **The follower stats burst (0.9.177)** — FIXED, §5, which is why People You Follow
+  was empty.
+- **Stage 2 (0.9.180, with the building row's own half-build fixed in 0.9.181)** —
+  BUILT: the ordered feed chain, the building state and the in-flight guard. §8.
+- **§8.4 (genre demotion) and §8.6 (user-activity deferral) are NO LONGER "deliberately
+  not built" — they were REVERSED.** §8.4 concluded *"do not chain them back onto the
+  end"*; the agreed direction of 2026-09-07 does exactly that for **Last.fm only**, and
+  §8.6's activity deferral is now how the Last.fm tail is gated. **Read
+  `cache-priority-refactor.md` — it is the adopted plan and it overrides §8.4 and §8.6
+  of this one.** §8.5 (covers demotion) stands: artwork was PROMOTED, not demoted.
+
+**Keep this document for §1 and §4** — what the code actually did before any of it, and
+the ingest stall's mechanism. Do not take its stage lists as live work.
 
 The field report (2026-08-22): *"Followers seems to hang for a very long time and
 load times seem excessive. These sections also used to display a message they were
@@ -698,7 +713,16 @@ Three properties, each with its own assertions in `tools/t_buildingstate.pl`:
    guard exists to prevent. Every release is `if $owns`, asserted as having no
    unguarded `_buildingEnd` in either sub.
 
-### 8.4 NOT BUILT — the genre demotion (deliberate)
+### 8.4 ~~NOT BUILT — the genre demotion (deliberate)~~ — **REVERSED 2026-09-07**
+
+> **This section's conclusion no longer holds, and the reversal was deliberate.** The
+> Last.fm rung IS now chained behind core work, cover work and browse activity — see
+> `cache-priority-refactor.md`. What survives is the DISTINCTION this section drew and
+> the new plan kept: **only Last.fm moves.** The ListenBrainz rungs stay early, so a
+> view still does not open bare, and [[lbf-genre-ladder-spec]] is not violated. The
+> argument below is the reasoning that had to be overturned to get there; it is left
+> intact so the next reader can see what was traded away.
+
 
 The original stage-2 sketch had each feed's genre pass folded into that feed's stage,
 and this session's plan went further and proposed demoting the 186s Last.fm rung to
@@ -718,9 +742,15 @@ Proposed and dropped for the same class of reason: the covers stage IS what make
 artwork appear, and artwork failing to populate on a cold start was one of the
 original complaints. Deferring it pushes the wrong way.
 
-### 8.6 NOT BUILT — user-activity deferral (2c)
+### 8.6 ~~NOT BUILT — user-activity deferral (2c)~~ — **BUILT 2026-09-07/08**
 
-Still unbuilt, and now lower value than when scoped: the in-flight guard removes the
+> **Built after all, and by the plan that superseded this one.** Last.fm warm and
+> top-up calls are now gated on browse activity as well as on core and cover work
+> (`cache-priority-refactor.md`, "First implementation"). The paragraph below is why it
+> was passed over at the time; the measurement it asked for arrived from the artwork
+> work instead.
+
+Was unbuilt, and lower value than when scoped: the in-flight guard removes the
 specific contention it was aimed at (a warm build racing a user tap), which was the
 concrete case behind "a clicked-into view should get priority". Revisit only with a
 measurement showing background work still delaying an open.

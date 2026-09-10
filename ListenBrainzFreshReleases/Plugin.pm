@@ -18,6 +18,31 @@ use Time::HiRes ();
 # compete with boot), then once a day. Daily is cheap because the playlist
 # caches are keyed by last_modified — real work happens only when a new week's
 # playlist appears.
+# THE RUNNING BUILD'S OWN VERSION — read from the LOADED plugin, never restated.
+#
+# A REPO-INSTALLED COPY SHADOWS A MANUAL INSTALL, and nothing else in this plugin
+# could tell you that had happened. The settings page proves only what is on DISK,
+# and a `.pm` loads once at startup, so a stale copy under `cache/InstalledPlugins`
+# answers every question a fresh manual install was meant to answer — a whole
+# verification round can be run against the wrong build without one wrong-looking
+# line anywhere. `["lbf","cachestats"]` already reported a `version`, but that is the
+# STORE SCHEMA version, which does not move on most builds and therefore proves
+# nothing about which package is running.
+#
+# `dataForPlugin` reads the install.xml of the copy that was actually loaded, so it
+# cannot drift the way a hand-maintained constant does. The sibling HQPlayer Bridge
+# carries the same accessor for the same reason, after a constant there sat at 0.2.3
+# while the repo was at 0.2.7. Cached: the answer cannot change without a restart.
+my $VERSION;
+
+sub version {
+    return $VERSION if defined $VERSION;
+    $VERSION = eval {
+        Slim::Utils::PluginManager->dataForPlugin(__PACKAGE__)->{version};
+    } || 'unknown';
+    return $VERSION;
+}
+
 use constant WARM_DELAY      => 60;          # seconds after startup
 use constant WARM_INTERVAL   => 24 * 3600;   # daily
 # While a library scan is running the local-library tier is incomplete, so a warm
@@ -452,6 +477,8 @@ sub _cliWarmStats {
 
     my $rep = eval { warmStages() } || { tick_at => 0, ticks => 0, stages => [] };
 
+    # FIRST, so a report pasted into a thread names the build it came from.
+    $request->addResult('plugin_version', version());
     $request->addResult('ticks',   $rep->{ticks}   // 0);
     $request->addResult('tick_at', int($rep->{tick_at} // 0));
     $request->addResult('dev_build', DEV_BUILD ? 1 : 0);
@@ -488,6 +515,9 @@ sub _cliCacheStats {
         Plugins::ListenBrainzFreshReleases::DB::stats();
     } || { ok => 0, tables => {}, error => ($@ || 'unknown error') };
 
+    # `plugin_version` is the RUNNING PACKAGE; `version` is the STORE SCHEMA. They
+    # are different questions and the second cannot answer the first.
+    $request->addResult('plugin_version', version());
     $request->addResult('ok',      $stats->{ok}      ? 1 : 0);
     $request->addResult('path',    $stats->{path}    // '');
     $request->addResult('version', $stats->{version} // 0);
@@ -569,6 +599,9 @@ sub _cliDiag {
                     for qw(key name url status http ms note);
                 $i++;
             }
+            # The diag report exists to be PASTED into a support thread; a report
+            # that does not name its own build is the one that wastes the thread.
+            $request->addResult('plugin_version', version());
             $request->addResult('count', scalar @$rows);
             $request->addResult('failed', scalar grep { $_->{status} eq 'fail' } @$rows);
             $request->addResult('warned', scalar grep { $_->{status} eq 'warn' } @$rows);

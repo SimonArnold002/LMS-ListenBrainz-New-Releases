@@ -1,13 +1,19 @@
 # Overnight pre-warm of detail-page data — tracklist + streaming links
 
-**Update 2026-09-07: implemented for testing in 0.9.200.** Investigation and design
-are recorded in [cache-priority-refactor.md](cache-priority-refactor.md), under
-“Third implementation”. The earlier requirement capture below is historical;
-its “not investigated/not designed” status no longer describes the working tree.
-Existing daily/startup scheduling is retained. Fixed overnight timing and live
-throughput verification remain open.
+**Status: IMPLEMENTED in 0.9.200 (2026-09-07); LIVE VERIFICATION STILL OWED.**
+Investigation and design are recorded in
+[cache-priority-refactor.md](cache-priority-refactor.md) under “Third implementation”;
+the code is `DetailWarm.pm` plus the prewarm queue. Existing daily/startup scheduling
+is retained. **Still open:** a fixed overnight clock (the timer is still 24 hours
+relative to startup), live throughput measurement, and restart/checkpoint behaviour on
+the real server.
 
-**Status: REQUIREMENT CAPTURED, NOT INVESTIGATED, NOT DESIGNED.** Raised 2026-09-03
+*Corrected 2026-09-10: this file carried BOTH the update above and the original
+“NOT INVESTIGATED, NOT DESIGNED” status line directly beneath it, so whichever a reader
+saw first decided what they believed. The original status is folded into the historical
+note below rather than left standing as a second verdict.*
+
+**Original requirement capture — HISTORICAL, superseded by the status above.** Raised 2026-09-03
 during the artwork/event-loop rework's live verification. Needs its own investigation
 and design pass before any code is written — do not start implementing from this
 document alone.

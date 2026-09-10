@@ -986,13 +986,11 @@ sub bcPinPut {
     return $ok ? 1 : 0;
 }
 
-sub bcPinDel {
-    my ($relId) = @_;
-    my $h = dbh() or return 0;
-    return 0 unless defined $relId && length $relId;
-    eval { $h->do('DELETE FROM bandcamp_pin WHERE rel_id = ?', undef, $relId); 1 } or return 0;
-    return 1;
-}
+# `bcPinDel` LIVED HERE — removed 0.9.208 as unreachable. A pin is unpinned by
+# WRITING a new one through `bcPinPut` (the re-search path) or by dropping the whole
+# table on a clean-load reset; nothing in the plugin has ever deleted a single pin,
+# and the row is deliberately durable, so a delete helper is an invitation to make it
+# not so. Re-add it only with the caller that needs it.
 
 # ---------------------------------------------------------------------------
 # BASE — `follow_item`. NOT A CACHE.
@@ -1074,14 +1072,10 @@ sub followTrim {
     return int($n);
 }
 
-sub followCount {
-    my ($username) = @_;
-    my $h = dbh() or return 0;
-    return int(eval {
-        $h->selectrow_array('SELECT COUNT(*) FROM follow_item WHERE username = ?',
-                            undef, ($username // ''))
-    } || 0);
-}
+# `followCount` LIVED HERE — removed 0.9.208 as unreachable. It was written as a
+# diagnostic beside `followTrim`, but `["lbf","cachestats"]` reports the follow_item
+# row count from `stats`' per-table sweep instead (`@TABLES`), so the two never both
+# existed for a reason. Nothing else ever asked for a per-USERNAME count.
 
 # ===========================================================================
 # BASE — THE FEED ITSELF. `release`, `feed_member`, `feed_day`, `feed_meta`.

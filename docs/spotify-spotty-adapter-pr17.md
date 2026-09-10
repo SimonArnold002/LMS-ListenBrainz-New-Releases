@@ -5,10 +5,14 @@ committed as **`c68cbb1`** on `dev` (2026-08-29), with honzup credited as `Co-Au
 into **0.9.187**. **Not pushed, not installed, NOT tested** — Spotty is still absent from the test
 server, so everything below remains source-verified only.
 
-**Still owed:** the PR stays OPEN (its `Closes #17` only fires on the default branch, `main`) —
-Simon is closing it by hand once `dev` is pushed, and has already replied to honzup. **A CHANGELOG
-credit line for honzup is owed at the main merge**, since the PR's own CHANGELOG hunk was
-deliberately not taken.
+**The reply to honzup is POSTED** — confirmed by Simon 2026-09-10, which settles the
+disagreement the hygiene pass found between this file and
+`spotify-spotty-pr17-reply.md`. That file is now a record, not a task.
+
+**Still owed, and only at the main merge: a CHANGELOG credit line for honzup**, since
+the PR's own CHANGELOG hunk was deliberately not taken. The PR itself stays OPEN as a
+mechanical consequence — its `Closes #17` only fires on the default branch, `main` — so
+Simon closes it by hand. That is not work this repo can do.
 
 **How it was applied, and the rule that came out of it:** hand-applying was right on 2026-08-21
 (the tree was uncommitted) but NOT on 2026-08-29, once the tree was committed as `cab9450`. A
@@ -27,7 +31,7 @@ notes don't fight.
 **Reviewed:** 2026-08-21, against Spotty **v4.62.2** master source (`Plugin.pm`, `OPML.pm`,
 `API.pm`, `API/Pipeline.pm`, `API/Cache.pm`, `AccountHelper.pm`) — not against the PR description.
 
-**Reply drafted and ready to post: `docs/spotify-spotty-pr17-reply.md`.**
+**Reply POSTED — what was said is recorded in `docs/spotify-spotty-pr17-reply.md`.**
 
 **Verdict: accept, with two code changes (§2) and one housekeeping revert (§3).** The adapter
 follows the house pattern closely and the non-obvious details are right for the right reasons.

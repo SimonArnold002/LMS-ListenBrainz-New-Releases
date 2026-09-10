@@ -357,14 +357,18 @@ version changes are required.
 
 `tools/t_lastfm_priority.pl` executes the real priority, Last.fm worker, metadata
 warm and core warm functions with controlled timers and upstream callbacks. Its
-55 checks cover checkpoint-aware request bounds, mixed accepted/rejected answers,
+**61** checks cover checkpoint-aware request bounds, mixed accepted/rejected answers,
 positive/negative checkpoint ages, forced upstream retries, observable answer counts,
 main-before-detail phase ownership, preserved artwork-marker
 scans, fresh negative Last.fm checkpoints, shared pacing, watchdog/late-callback
-recovery, independent reservations and foreground release holds. The 32-check
+recovery, independent reservations and foreground release holds. The **38**-check
 `tools/t_detailwarm.pl` suite covers artwork-only list focus, cache/fetch
 diagnostics, restart checkpoint reuse, post-main resumption, retries and worker
-watchdog recovery.
+watchdog recovery — including §8's `_sectionBounds` union, whose stub had to be made
+PREFIX-AWARE before it could tell the union apart from the plain For You window.
+
+*Counts re-run and corrected 2026-09-10 (was 55 and 32). A stated assertion count that
+drifts is worse than none: it reads as a checksum and is not one.*
 
 Existing load, genre, artwork, feed coalescing, building-state, warm statistics,
 cold-start and follower rate-limit suites also pass. The genre test's detail-barrier

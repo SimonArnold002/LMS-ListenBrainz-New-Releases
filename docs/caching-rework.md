@@ -1,6 +1,17 @@
 # LBF — caching rework and the MusicBrainz retreat
 
-**Status: IN BUILD.** Investigated and designed 2026-08-12/13; build started 2026-08-13.
+**Status: LANDED — this plan is DONE and is now HISTORY. Closed 2026-09-10.**
+Investigated and designed 2026-08-12/13; built 2026-08-13 onward across 0.9.164–0.9.203.
+The header said "IN BUILD" for four weeks after the last stage shipped.
+
+> **THIS IS NOT THE PLAN TO READ FOR WARM ORDER OR PRIORITY.** Three documents in this
+> folder proposed caching/warm changes and only the LAST was adopted end to end. Read
+> **`cache-priority-refactor.md`** — it is the live one, and its "Agreed direction
+> (2026-09-07)" reverses reasoning recorded here and in
+> `warm-ordering-and-follower-latency.md` §8.4. This document keeps its value as the
+> record of the STORE: the schema, the three-tier invalidation model, and the
+> corrections taken during the build (below), which are the part most likely to be
+> rediscovered the hard way.
 
 **CACHE-WIPE POLICY SUPERSEDED 2026-09-08.** Historical sections below describe
 the old every-dev-build wipe because that is what those stages shipped with.
@@ -21,8 +32,13 @@ clean-load test sets `RESET_CACHE_ON_BUILD => 1`.
 | 5 — feed **ingest** | **DONE** — `release`/`feed_member`/`feed_day`/`feed_meta` fill on every fetch, with `BASE_VERSION`, window-scoped rotation and the refuse-an-empty-ingest branch |
 | 6 — **flip the read** | **DONE** — done in the SAME build as 5, deliberately; the `…fb:` twins are gone from the release feeds. See correction 4 |
 | 7 — build marker/cache policy, warm ahead of the username gate | **SUPERSEDED in 0.9.203** — ordinary builds now preserve caches; `_buildChanged` retains the pref marker for explicit clean-load tests and parser-version invalidation |
-| 8 | deferred, as planned — gated on `bench_walk.pl` numbers |
-| D, E, F | not started |
+| 8 | **deferred, as planned** — scoped per-week SQL, gated on `bench_walk.pl` numbers. Still the honest state: the bench is healthy (a repeated section walk is a 0.01ms memo hit; the cold walk ~15ms on 3,365 releases), so nothing has demanded it |
+| D — artist sort (§2.4.3) | **DROPPED 2026-08-22**, not deferred — the local `type`-driven key mis-files stage names (Panda Bear → "Bear, Panda"). Artist sort STAYS on MusicBrainz, now with the 0.9.180 503 backoff |
+| E — LB tracklists (§2.4.4) | **SETTLED ON MUSICBRAINZ 2026-08-22** — see `hosted-lms-community-api.md` §7. The detail tracklist stays on MB for the same reason as D. Not "not started": decided against |
+| F — `/discography` (§2.4.5) | **DONE (0.9.179)** — `getReleaseGroupByName` goes to the hosted `/artist/<name>/discography` first, with an unconditional public-MB fallback |
+
+*The three rows above read "D, E, F | not started" until 2026-09-10, by which point one
+was dropped, one was decided against and one had shipped six weeks earlier.*
 
 **MuSpy was absent from this plan entirely, and it does not fit the model in §2.2.**
 Recorded here because the omission was not obvious: `getMuSpyReleases` fetches

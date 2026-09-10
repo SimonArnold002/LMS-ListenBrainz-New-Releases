@@ -1,10 +1,19 @@
-# PR #17 reply — ready to post
+# PR #17 reply — POSTED (record of what was said)
 
-**Status:** DRAFTED 2026-08-21, **not posted.** Post when `dev` reaches a stable point (see
-`spotify-spotty-adapter-pr17.md` for the findings this is built from, and §1a there for who owns
-which fix).
+**Status: CLOSED — POSTED. Drafted 2026-08-21, confirmed done by Simon 2026-09-10.**
+The sibling `spotify-spotty-adapter-pr17.md` was the accurate one: the reply went to
+honzup, and the Spotty adapter work it accompanies is applied, committed as `c68cbb1`
+and built into 0.9.187.
 
-**Before posting, two judgement calls are yours:**
+**This file is now a RECORD, not a task.** Keep it for what was said and why — the two
+judgement calls below were live decisions at drafting time and are preserved as such,
+not as instructions to act on. Nothing here needs doing.
+
+*The 2026-09-10 hygiene pass flagged this file as contradicting its sibling, because
+this header still said "not posted". It could not be settled from inside the repo; Simon
+settled it.*
+
+**The two judgement calls that were live at drafting time:**
 
 1. **Finding 1 is flagged as unverified, with an offer to withdraw it.** It's sound from reading
    `AccountHelper`/`Plugin.pm`, but Spotty isn't installed here so it was never observed. Delete

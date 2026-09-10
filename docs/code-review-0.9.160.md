@@ -1,7 +1,33 @@
 # Code review — 0.9.158–0.9.160 (bio render rework, Diag.pm, token-free)
 
-**Reviewed 2026-08-12.** Nothing here is fixed yet — this is the finding list, with the
-mechanism and a reproduction for each so none of it has to be re-derived.
+**Reviewed 2026-08-12. ALL TEN FINDINGS ARE CLOSED — verified against the source at
+0.9.208 on 2026-09-10**, during the repo-wide hygiene pass. This header used to say
+"nothing here is fixed yet", which stayed true in the document for four weeks after it
+stopped being true in the code. The finding text below is the ORIGINAL, kept as
+written: it holds the mechanism and the reproduction, so none of it has to be
+re-derived.
+
+**Where each one went.** None of these was fixed in a single named build — they were
+absorbed by the bio-render and Diag work across 0.9.161–0.9.186, which is exactly why
+no closure note was ever written here.
+
+| # | finding | closed by |
+|---|---|---|
+| 1 | `pop @paras while` has no floor | `Browse.pm` now pops only `while $bodyCount && ... && $paras[-1]{setext}` — a floor AND a narrower test |
+| 2 | `_bioHardWrapped` false positive | the gates tightened (`BIO_WRAP_MIN_LINES`, the terminal-punctuation set, the `$#l` non-final-line count) and the comment restated to match |
+| 3 | preview shows the synthesised setext underline as dashes | the collapsed preview is built from the BODY blocks, joined — see the comment naming the "ten literal hyphens" case |
+| 4 | `_bioBullet` treats a bare hyphen as a marker | `_bioBlocks` now requires a dash marker to be **corroborated by a neighbour**; the sub returns `($marker, $text)` precisely so the caller can tell an unambiguous marker from a dash |
+| 5 | `<a>…</a>` deletes the link text | now `s{<a\b[^>]*>(.*?)</a>}{$1}gis` — unwrap, not delete, with the link-only `<li>` and "Read more on Last.fm" rules ahead of it |
+| 6 | two MusicBrainz probes fire concurrently | `Diag.pm` staggers by host — `$hostSeen{$host}++ * SAME_HOST_GAP`, with local hosts exempt and `$started` set at dispatch so a staggered probe reports its own round trip |
+| 7 | `_httpCode` matches any 3-digit number | anchored: `m{^\s*(?:HTTP(?:/\d(?:\.\d)?)?\s+)?([1-5]\d\d)\b}` |
+| 8 | MuSpy probe URL not redacted | `display => API_PKG->muspyUrl . '/releases/***?limit=1'`, matching the token and Last.fm rows |
+| 9 | `_cliDiag` can hang the CLI request for ever | wrapped in `eval` with an `$answered` flag, so a `require` failure or a pre-timer die still reaches `setStatusDone` |
+| 10 | doc drift on the bio's fixed row count | the comment above the branch now states the variable row count and why |
+
+**One caveat on this closure.** Findings 2, 3 and 10 were closed by *rewriting the
+prose that was wrong*, not by a mechanical change a test can pin. They are correct as
+of this reading and nothing guards them. Findings 1, 4, 5, 6, 7, 8 and 9 are all
+structural and would be caught by a change that undid them.
 
 **Scope:** `git diff @{upstream}...HEAD` on `dev` — the two commits carrying 0.9.158/0.9.159
 (the connectivity diagnostic) and the bio-render rework — plus the **uncommitted 0.9.160

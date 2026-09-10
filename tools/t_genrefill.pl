@@ -461,6 +461,34 @@ print "-" x 74, "\n";
     ok($dec == 2, "...and releases it on both exits, callback and eval-threw  ->  $dec");
 }
 
+print "\n6d. THE 0.9.208 ORPHAN REMOVALS — three subs nothing ever called\n";
+print "-" x 74, "\n";
+{
+    # Found by sweeping every `sub` name against every reference in the plugin.
+    # Each is pinned GONE here rather than in prose, because an unreachable sub
+    # reads as working code to the next review and gets "fixed" instead of read.
+    #
+    # EACH ASSERTION IS PAIRED WITH ITS SURVIVING SIBLING. A "sub is gone" test
+    # passes just as happily against a file the harness failed to load, so the
+    # positive half is the control that proves the source is really here.
+    ok(!scalar($api_src =~ /^sub peekArtistGenres\b\s*\{/m),
+       'API::peekArtistGenres (the single-MBID wrapper) is GONE');
+    ok(scalar($api_src =~ /^sub peekArtistGenresBulk\b/m),
+       '...and peekArtistGenresBulk SURVIVES — the render path only ever used the bulk form');
+
+    ok(!scalar($db_src =~ /^sub bcPinDel\b/m),
+       'DB::bcPinDel is GONE — a pin is replaced by bcPinPut, never deleted singly');
+    ok(scalar($db_src =~ /^sub bcPinPut\b/m) && scalar($db_src =~ /^sub bcPinGet\b/m),
+       '...and the bcPinGet/bcPinPut pair SURVIVES');
+
+    ok(!scalar($db_src =~ /^sub followCount\b/m),
+       'DB::followCount is GONE — cachestats counts follow_item through `stats`');
+    ok(scalar($db_src =~ /^sub followTrim\b/m),
+       '...and followTrim SURVIVES, which is the sub it was written beside');
+    ok(scalar($db_src =~ /my \@TABLES = qw\([^)]*\bfollow_item\b/s),
+       '...and follow_item is still in @TABLES, so `stats` really does report it');
+}
+
 print "\n7. THE ARTIST-ROW KEY — shared by every artist-level rung\n";
 print "-" x 74, "\n";
 {

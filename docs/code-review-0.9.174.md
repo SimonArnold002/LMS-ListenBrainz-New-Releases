@@ -1,7 +1,24 @@
 # Code review — 0.9.169–0.9.174 (the SQLite store, genre ladder, hosted API tier)
 
-**Reviewed 2026-08-22.** Nothing here is fixed yet — this is the finding list, with the
-mechanism and a reproduction for each so none of it has to be re-derived.
+**Reviewed 2026-08-22. ALL FIVE FINDINGS ARE CLOSED** — three carry their own inline
+FIXED notes (1, 3, 4), and the remaining two are closed here on 2026-09-10 during the
+repo-wide hygiene pass. The finding text below is the ORIGINAL, kept as written: it
+holds the mechanism and the reproduction, so none of it has to be re-derived.
+
+- **Finding 2 (shared matcher drift) — CLOSED in 0.9.194.** The fleet hold was lifted
+  2026-08-29 and the sync landed across the repos (PFR 0.9.33, LBF 0.9.194).
+  `python3 tools/matcher_sync_check.py` **exits 0**, re-run 2026-09-10. Per the Review
+  Ledger section B, a non-zero exit is a real finding again — this doc is no longer the
+  reason for one.
+- **Finding 5 (the CHANGELOG stops at 0.9.169) — NOT A DEFECT, and it never was.** Per
+  the repo convention the CHANGELOG and README are written at the MERGE TO MAIN, not on
+  dev builds; a CHANGELOG many versions behind `install.xml` is the CORRECT state on
+  `dev`. This is now Review Ledger section A's first two entries, added because of this
+  very finding. It remains a **merge-gate** item: `main` is at 0.9.149 and `dev` at
+  0.9.209, so the gap the finding describes is now ~60 versions rather than five.
+
+**Findings 1, 3 and 4 were fixed in the working tree on 2026-08-22** and shipped in
+0.9.175/0.9.176 — see each one's inline note for the guard and the anti-test.
 
 **Scope:** the **uncommitted working tree** on `dev` at 3b10989. The range diff vs
 `origin/dev` is empty, so every line reviewed is unstaged:
