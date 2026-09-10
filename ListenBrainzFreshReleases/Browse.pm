@@ -248,8 +248,17 @@ use constant PLAYLIST_INCONCLUSIVE_TTL => 1 * 3600;
 # playlist would otherwise fire all at once (rate-limit friendliness).
 use constant PLAYLIST_CONCURRENCY => 6;
 # Overall watchdog for resolving a playlist, so a hung service search can't leave
-# the playlist page spinning forever.
+# the playlist page spinning forever. THE DEFAULT FOR EVERY CALLER THAT HAS A
+# WATCHER — trending, DSTM, the follow feed — and unchanged.
 use constant PLAYLIST_TIMEOUT => 45;
+# The created-for playlists' own ceiling, and it is generous BECAUSE NOTHING IS
+# WAITING ON IT. The warm has no watcher at all, and since the building row
+# (0.9.182) neither does an open: the row renders at once and the resolve completes
+# into cache behind it. A cold 50-track pass at concurrency 6 against five adapters,
+# on a box also running the feed ingest and the genre ladder, does not fit in 45s —
+# and cutting it there files an unfinished pass as this playlist's answer. Still
+# bounded, so a genuinely wedged service cannot hold the flag past BUILDING_MAX.
+use constant PLAYLIST_RESOLVE_TIMEOUT => 150;
 # The warm's feed chain (For You -> All Releases -> MuSpy) runs the three feeds in
 # priority order instead of firing them together. Ordering them creates a failure
 # the concurrent version could not have: one hung feed starves playlists and
@@ -1296,17 +1305,18 @@ sub resolvePlaylist {
             # metadata call; the resolve then bakes the year into each item name.
             _enrichYears($tracks, sub {
             _resolveTracks($client, $tracks, sub {
-                my ($items, $inconclusive) = @_;
+                my ($items, $inconclusive, undef, undef, $timedOut) = @_;
                 $items //= [];
                 my $payload = { items => $items, matched => scalar(@$items), total => scalar(@$tracks) };
-                my $ttl     = _playlistTtl($items, scalar @$tracks, $inconclusive);
+                my $ttl     = _playlistTtl($items, scalar @$tracks, $inconclusive, $timedOut);
                 eval { $cache->set($rkey, $payload, $ttl); 1 }
                     or $log->warn("resolved playlist cache set failed: $@");
                 my $lib = grep { ($_->{_svc} // '') eq 'Library' } @$items;
                 _dbg("resolved playlist $mbid: $payload->{matched}/$payload->{total} matched ($lib library)"
-                    . ($inconclusive ? " ($inconclusive inconclusive — short TTL)" : ""));
+                    . ($inconclusive ? " ($inconclusive inconclusive — short TTL)" : "")
+                    . ($timedOut ? " (WATCHDOG cut the pass — short TTL, will re-resolve)" : ""));
                 $callback->(_playlistResult($client, $payload, $title));
-            });
+            }, undef, 0, timeout => PLAYLIST_RESOLVE_TIMEOUT);
             });
         },
         sub {
@@ -1500,21 +1510,26 @@ sub _resolveFollow {
     # release year first (shown in the list, like New Releases), then resolve.
     _enrichYears($tracks, sub {
     _resolveTracks($client, $tracks, sub {
-        my ($items, $inconclusive, $unmatched, $owned) = @_;
+        my ($items, $inconclusive, $unmatched, $owned, $timedOut) = @_;
         $items //= [];
         $owned //= 0;
         my $newTotal = scalar(@$tracks) - $owned;   # tracks the user doesn't already own
         my $payload  = { items => $items, matched => scalar(@$items), total => $newTotal, sig => $sig };
-        my $ttl      = _playlistTtl($items, $newTotal, $inconclusive);
+        my $ttl      = _playlistTtl($items, $newTotal, $inconclusive, $timedOut);
         eval { $cache->set($rkey, $payload, $ttl); 1 }
             or $log->warn("resolved follow cache set failed: $@");
         my $lib = grep { ($_->{_svc} // '') eq 'Library' } @$items;
         _dbg("resolved follow feed: $payload->{matched}/$payload->{total} new ($owned owned excluded, $lib library)"
-            . ($inconclusive ? " ($inconclusive inconclusive — short TTL)" : ""));
+            . ($inconclusive ? " ($inconclusive inconclusive — short TTL)" : "")
+            . ($timedOut ? " (WATCHDOG cut the pass — short TTL, will re-resolve)" : ""));
         $release->();
         $onDone->();
         $callback->(_followResult($client, $payload, $feat)) if $callback;
-    }, 'exclude', $force);
+        # Long watchdog for the same reason as the playlists: this renders a building
+        # row and completes into cache, and on the warm path there is no $callback at
+        # all — so cutting the pass at 45s saves nobody time and only files an
+        # unfinished answer.
+    }, 'exclude', $force, timeout => PLAYLIST_RESOLVE_TIMEOUT);
     });
 }
 
@@ -1823,13 +1838,26 @@ sub _fanFollowers {
     # Overall deadline: proceed with whatever's collected rather than hanging the
     # browse if some followers' stats are slow/unreachable (late callbacks no-op).
     my $watchdog;
+    # 2ND ARG TO $onAll: DID EVERY FOLLOWER ANSWER, OR DID THE DEADLINE FIRE?
+    # One-follower-one-vote means a missing follower changes the RANKING, not just
+    # the volume — so an aggregate built from a cut-short fan-out is a different
+    # answer from the same users, and must not be cached as though it were theirs.
+    # The empty case was already handled (0.9.149, $sawListens / the empty settle);
+    # this is the same reasoning applied to a PARTIAL fan-out, which looked exactly
+    # like a complete one from here.
+    my $cut = 0;
     my $finish = sub {
         return if $fin;
         $fin = 1;
         Slim::Utils::Timers::killSpecific($watchdog) if $watchdog;
-        $onAll->(\%result);
+        $onAll->(\%result, $cut);
     };
-    $watchdog = Slim::Utils::Timers::setTimer(undef, time() + FANOUT_DEADLINE, sub { $finish->() });
+    $watchdog = Slim::Utils::Timers::setTimer(undef, time() + FANOUT_DEADLINE, sub {
+        $cut = 1;
+        $log->info("follower fan-out hit the " . FANOUT_DEADLINE . "s deadline with "
+                 . scalar(keys %result) . "/$total collected — result is partial");
+        $finish->();
+    });
 
     my $pumping = 0;
     my $pump;
@@ -2174,8 +2202,9 @@ sub _resolveTrending {
                         $u, range => TRENDING_RANGE, count => TRENDING_PER_USER, force => $force, onDone => $cb);
                 },
                 sub {
-                    my ($perFollower) = @_;
-                    _dbg("trending timing: stats fan-out in " . $dt->() . "ms");
+                    my ($perFollower, $fanCut) = @_;
+                    _dbg("trending timing: stats fan-out in " . $dt->() . "ms"
+                         . ($fanCut ? " (DEADLINE cut it short — partial follower set)" : ""));
 
                     # Rank distinct recordings by breadth (distinct followers) and map ONLY
                     # the top TREND_MAP_CAP to albums — a huge library of one-off plays can't
@@ -2221,19 +2250,27 @@ sub _resolveTrending {
                         # listens at all we learned nothing, so record nothing: an empty
                         # result is not a fact.
                         unless (@$cands) {
-                            $empty->($sawListens ? "no candidate tracks"
+                            # $fanCut joins $sawListens for the same reason it exists: with
+                            # only some followers in, "no candidates" is not a property of the
+                            # users, it is a property of this attempt.
+                            $empty->($sawListens && !$fanCut ? "no candidate tracks"
                                                  : "no listens from the fan-out — not caching",
-                                     $sawListens ? 1 : 0);
+                                     $sawListens && !$fanCut ? 1 : 0);
                             return;
                         }
 
                         my $resolve = sub {
                             _resolveTracks($client, $cands, sub {
-                            my ($items, $inconclusive, $unmatched, $owned) = @_;
+                            my ($items, $inconclusive, $unmatched, $owned, $timedOut) = @_;
                             $items //= []; $owned //= 0;
                             @$items = @{ $items }[0 .. TRENDING_MAX - 1] if @$items > TRENDING_MAX;
                             my $payload = { items => $items, total => scalar(@$items) };
-                            my $ttl = $inconclusive ? PLAYLIST_INCONCLUSIVE_TTL : TREND_RESOLVED_TTL;
+                            # A pass the watchdog ended is not this week's trending list;
+                            # it is however far the resolve got. Cache it short so a healthy
+                            # build replaces it, exactly as the inconclusive case does. Note
+                            # the early-stop at TRENDING_MAX is NOT this: that is the pass
+                            # finishing on purpose, and $timedOut stays false for it.
+                            my $ttl = ($inconclusive || $timedOut) ? PLAYLIST_INCONCLUSIVE_TTL : TREND_RESOLVED_TTL;
                             eval { $cache->set($rkey, $payload, $ttl); 1 }
                                 or $log->warn("resolved trending cache set failed: $@");
                             _stage('end', 'trending_tracks', 'done',
@@ -2241,13 +2278,15 @@ sub _resolveTrending {
                                    . ($inconclusive ? ", $inconclusive inconclusive" : ""));
                             _dbg("resolved trending: " . scalar(@$items) . " tracks"
                                 . " ($owned owned excluded"
-                                . ($inconclusive ? ", $inconclusive inconclusive — short TTL" : "") . ")"
+                                . ($inconclusive ? ", $inconclusive inconclusive — short TTL" : "")
+                                . ($timedOut ? ", WATCHDOG cut the pass — short TTL" : "") . ")"
                                 . " — resolve " . $dt->() . "ms, total " . int((Time::HiRes::time() - $t0) * 1000) . "ms");
                             $callback->(_trendingResult($client, $payload, $feat)) if $callback;
                             $finish->();
                             # early-stop at TRENDING_MAX matches (ranked pool — we only need the
                             # first N), higher parallelism (the resolve is the cold build's cost).
-                            }, 'exclude', $force, limit => TRENDING_MAX, concurrency => TREND_RESOLVE_CONC);
+                            }, 'exclude', $force, limit => TRENDING_MAX, concurrency => TREND_RESOLVE_CONC,
+                               timeout => PLAYLIST_RESOLVE_TIMEOUT);
                         };
 
                         # TARGETED metadata fill: the pre-grouping map is capped at
@@ -2546,8 +2585,9 @@ sub _buildAlbumsData {
                         $u, range => $range, count => 50, force => $force, onDone => $cb);
                 },
                 sub {
-                    my ($perFollower) = @_;
-                    _dbg("albums ($range) timing: stats fan-out in " . $dt->() . "ms");
+                    my ($perFollower, $fanCut) = @_;
+                    _dbg("albums ($range) timing: stats fan-out in " . $dt->() . "ms"
+                         . ($fanCut ? " (DEADLINE cut it short — partial follower set)" : ""));
                     my $data = _aggregateAlbums($followers, $perFollower);
                     _dbg("albums ($range) timing: aggregate " . scalar(@$data)
                          . " album(s) in " . $dt->() . "ms");
@@ -2611,7 +2651,11 @@ sub _buildAlbumsData {
                                 . ($timedOut ? " (timed out — short TTL)" : "")
                                 . " — gate " . $dt->() . "ms, total "
                                 . int((Time::HiRes::time() - $t0) * 1000) . "ms");
-                            $settle->(\@keep, $timedOut ? 1 : 0);
+                            # EITHER cut makes this a partial answer: the gate running out of
+                            # time, or the follower fan-out that fed it doing so. One-vote-per
+                            # -follower means a missing follower reorders the list, so a
+                            # cut-short fan-out is not this month's ranking.
+                            $settle->(\@keep, ($timedOut || $fanCut) ? 1 : 0);
                         };
                         my $watchdog = Slim::Utils::Timers::setTimer(undef, time() + PLAYLIST_TIMEOUT, sub { $timedOut = 1; $finish->() });
                         my $pump;
@@ -3230,7 +3274,14 @@ sub _playlistResult {
 # is kept only a day (the file URL can go stale on a rescan/delete); otherwise it
 # follows the long full/partial streaming TTLs.
 sub _playlistTtl {
-    my ($items, $total, $inconclusive) = @_;
+    my ($items, $total, $inconclusive, $timedOut) = @_;
+    # A pass the WATCHDOG ended is not an answer about this playlist — it is an
+    # answer about how busy the box was. The tracks it never launched look exactly
+    # like tracks that were searched and missed, so without this they would be filed
+    # at PLAYLIST_PARTIAL_TTL and the list would sit short for a fortnight. Ranked
+    # with the inconclusive case, above the partial/found split, for the same reason:
+    # both mean "ask again soon", not "this is what the playlist contains".
+    return PLAYLIST_INCONCLUSIVE_TTL if $timedOut;
     # Any track left unresolved because a service couldn't be queried → keep the
     # whole resolve short so it retries soon rather than pinning a streaming outage
     # for a month. Takes precedence (it's the reason a list looks under-matched).
@@ -3247,8 +3298,18 @@ sub _resolveTracks {
     # $opt{limit}: stop launching new resolves once this many have MATCHED (playable),
     #   letting in-flight ones drain — for a ranked candidate pool where we only need
     #   the first N (trending). $opt{concurrency}: parallelism (default PLAYLIST_CONCURRENCY).
+    #   $opt{timeout}: overall watchdog, seconds (default PLAYLIST_TIMEOUT) — see below.
     my $limit       = $opt{limit};
     my $concurrency = $opt{concurrency} || PLAYLIST_CONCURRENCY;
+    # THE WATCHDOG IS SIZED BY WHO IS WAITING, AND FOR THE PLAYLISTS NOBODY IS.
+    # PLAYLIST_TIMEOUT(45s) was chosen when opening a playlist BLOCKED the user at
+    # the screen. Since the building row (0.9.182) the open renders immediately and
+    # the resolve completes into cache behind it, and the warm never had a watcher at
+    # all — while a fifth adapter (Spotify) joined every track search, so a cold
+    # 50-track pass at concurrency 6 can now exceed 45s on a busy box. Cutting it
+    # there does not save anyone time; it just files an unfinished pass as an answer.
+    # The default is unchanged, so trending / DSTM / follow keep the old ceiling.
+    my $timeout     = $opt{timeout} || PLAYLIST_TIMEOUT;
 
     my $total        = scalar @$tracks;
     my @slots        = (undef) x $total;   # per-index: hashref (match) / 0 (miss) / 'owned' (excluded) / undef (pending)
@@ -3261,6 +3322,9 @@ sub _resolveTracks {
     my $owned        = 0;   # tracks dropped as already-owned ('exclude' mode only)
 
     my $watchdog;
+    # Set by the watchdog BEFORE it finishes the pass — see the note at the $done
+    # call below for why the caller has to be able to tell the two apart.
+    my $timedOut = 0;
     my $finish = sub {
         return if $finished;
         $finished = 1;
@@ -3273,10 +3337,19 @@ sub _resolveTracks {
         # the "new tracks" total can exclude what the user already has).
         my @unmatched = map { $tracks->[$_] }
                         grep { !ref $slots[$_] && ($slots[$_] // '') ne 'owned' } 0 .. $#slots;
-        $done->([ grep { ref $_ } @slots ], $inconclusive, \@unmatched, $owned);   # matched items, in order
+        # 5TH ARG: DID THE WORK FINISH, OR DID THE CLOCK? Without it a truncated pass
+        # is indistinguishable from a complete one that genuinely matched fewer tracks,
+        # so a caller caching the result files an unfinished answer at the full TTL —
+        # the tracks the watchdog never even LAUNCHED contribute nothing to
+        # $inconclusive, so that signal cannot cover this one. The same distinction was
+        # already added to the trending-albums gate (0.9.117) and to _buildAlbumsData;
+        # this is the third site of the same class, and the one the created-for
+        # playlists sit on. Positional, so the five existing callers that unpack fewer
+        # values are unaffected.
+        $done->([ grep { ref $_ } @slots ], $inconclusive, \@unmatched, $owned, $timedOut);   # matched items, in order
     };
 
-    $watchdog = Slim::Utils::Timers::setTimer(undef, time() + PLAYLIST_TIMEOUT, sub { $finish->() });
+    $watchdog = Slim::Utils::Timers::setTimer(undef, time() + $timeout, sub { $timedOut = 1; $finish->() });
 
     my $pump;
     $pump = sub {
@@ -4309,29 +4382,62 @@ sub warmCache {
 
                         my $rkey = _plResolvedKey($pl->{mbid}, $pl->{last_modified}, $svcOrder);
 
-                        # Already resolved (same week) or no client → move on. A forced
+                        # FULLY resolved (same week) or no client → move on. A forced
                         # refresh bypasses the cache-hit skip so it always re-resolves.
-                        if ((!$force && $cache->get($rkey)) || !$client || !@$tracks) {
+                        #
+                        # "CACHED" IS NOT "FINISHED", AND THAT IS WHY THE STRAGGLERS STAY.
+                        # This used to skip on a merely-PRESENT key, which meant an
+                        # under-matched list was revisited only when its entry expired —
+                        # up to a fortnight for a partial. The per-track misses under it
+                        # are on a 1h/6h/24h retry ladder (MISS_RETRY_SCHEDULE), and the
+                        # ladder is only ever consumed by a re-resolve: with the list
+                        # pinned, those steps meant "the next few times the user happens
+                        # to look", not hours. Revisiting an INCOMPLETE list daily is what
+                        # makes the ladder mean what it says.
+                        # It is cheap by construction: $force is NOT passed below, so a
+                        # revisit reads the per-track cache and only re-searches tracks
+                        # whose retry window has actually opened. A complete list is still
+                        # skipped outright — no extra service traffic for the normal case.
+                        my $have = (!$force && $cache->get($rkey)) || undef;
+                        if (($have && ($have->{matched} // 0) >= ($have->{total} // 0))
+                            || !$client || !@$tracks) {
                             $next->();
                             return;
                         }
+                        _dbg("warm: $pl->{mbid} cached at " . ($have->{matched} // '?')
+                            . "/" . ($have->{total} // '?') . " — revisiting the shortfall") if $have;
+
+                        # THE WARM TAKES THE IN-FLIGHT FLAG TOO. Without it a user opening
+                        # this playlist mid-warm finds no cache entry, sees no build in
+                        # progress, and starts a SECOND full fan-out at the same services
+                        # for the same tracks — doubling exactly the load whose failures
+                        # produce the misses. The follow warm has always had this via
+                        # _resolveFollow; the playlist warm inlined its resolve and missed
+                        # it. Released at the single terminal below, and _buildingStart's
+                        # own BUILDING_MAX(180s) expiry backstops a chain that never calls
+                        # back — PLAYLIST_RESOLVE_TIMEOUT is deliberately under that, so
+                        # the normal path always releases first.
+                        my $bkey = "playlist:$pl->{mbid}";
+                        my $owns = _isBuilding($bkey) ? 0 : _buildingStart($bkey);
 
                         # Year-enrich first (mirrors resolvePlaylist) so the warm bakes
                         # the same " (YYYY)" names the open path would.
                         _enrichYears($tracks, sub {
                         _resolveTracks($client, $tracks, sub {
-                            my ($items, $inconclusive) = @_;
+                            my ($items, $inconclusive, undef, undef, $timedOut) = @_;
                             $items //= [];
+                            _buildingEnd($bkey) if $owns;
                             my $payload = { items => $items, matched => scalar(@$items), total => scalar(@$tracks) };
-                            my $ttl = _playlistTtl($items, scalar @$tracks, $inconclusive);
+                            my $ttl = _playlistTtl($items, scalar @$tracks, $inconclusive, $timedOut);
                             eval { $cache->set($rkey, $payload, $ttl); 1 }
                                 or $log->warn("warm resolved cache set failed: $@");
                             my $lib = grep { ($_->{_svc} // '') eq 'Library' } @$items;
                             _dbg("warm: resolved $pl->{mbid} $payload->{matched}/$payload->{total}"
                                 . " ($lib library)"
-                                . ($inconclusive ? " ($inconclusive inconclusive)" : ""));
+                                . ($inconclusive ? " ($inconclusive inconclusive)" : "")
+                                . ($timedOut ? " (WATCHDOG cut the pass — short TTL)" : ""));
                             $next->();
-                        }, undef, $force);
+                        }, undef, $force, timeout => PLAYLIST_RESOLVE_TIMEOUT);
                         });
                     },
                     sub { $next->() },

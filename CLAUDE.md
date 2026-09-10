@@ -107,6 +107,26 @@ does not cover. Say which ledger entry you are challenging and what changed.
   LMS-community API. Fix narrowly; do NOT re-architect `_bioBlocks` & co., and do
   not propose heuristics that re-derive structure a source already states.
 
+- **The 45s `PLAYLIST_TIMEOUT` default is NOT an oversight left behind by
+  `PLAYLIST_RESOLVE_TIMEOUT`(150s).** The long one goes to resolves nobody waits on
+  — the playlist open (building row), the playlist warm, the follow feed and the
+  trending tracks build. The 45s default is CORRECT and deliberate for DSTM (LMS is
+  waiting on it to queue tracks) and for the two unmatched-tracks views (no building
+  row, the user is at the screen). Sized by who is waiting, not by uniformity.
+  *(0.9.211.)*
+- **The two unmatched-tracks diagnostic views over-reporting on a cold, cut-short
+  pass is KNOWN and accepted.** They render `cachetime => 0` and write no cache, so
+  there is no wrong answer to persist; a track the watchdog never launched is listed
+  beside one searched and missed, and re-opening fixes it. Surfacing it in the
+  heading needs a new localised string and was left out of 0.9.211 on purpose. Raise
+  it only with a proposal for the string, not as a defect.
+- **`_playlistTtl`'s `$timedOut` ranking ABOVE the partial/found split is the point,
+  not a bug.** A pass the watchdog ended is an answer about how busy the box was, not
+  about the playlist. `tools/t_playlistresolve.pl` §2 pins both directions: truncated
+  → 1h, and a resolve that COMPLETED short → still the full partial TTL. Do not
+  "simplify" it into the `$inconclusive` term; they mean different things and the
+  anti-test catches a blanket downgrade. *(0.9.211.)*
+
 ### B. KNOWN-OPEN AND ACCEPTED — do not re-report as new
 
 - ~~**`matcher_sync_check.py` exits 1.**~~ **CLOSED in 0.9.194** — the hold was
@@ -336,6 +356,91 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
+
+**0.9.211** — built 2026-09-10, **NOT installed and NOT tested**. **AN UNFINISHED PASS IS NOT AN
+ANSWER, AT ALL FIVE PLACES THAT CACHE ONE.** **One cache family bumps** (`lbf:pl:resolved:` 8→9)
+to drop the partial playlist resolves already pinned on the server; `lbf:track:` is deliberately
+UNTOUCHED, so a re-resolve reads the expensive layer and is mostly cache hits. New regression
+guard `tools/t_playlistresolve.pl` (58 assertions).
+
+**THE FIELD REPORT:** after a full install the four created-for playlists come up short and stay
+short, and a manual "Refresh playlist matches" picks up the stragglers. On the released build
+(`main`, 0.9.149) the same cold pass always converged.
+
+**WHAT THE main→dev DIFF ACTUALLY SHOWS, and it corrects the obvious reading.** Three things a
+review reaches for first are present on `main` TOO, so they are latent bugs, not the regression:
+the watchdog with no timed-out signal, `PLAYLIST_PARTIAL_TTL == PLAYLIST_FOUND_TTL`, and a warm
+that skips on a merely-PRESENT key. What `main` had that `dev` does not is an **UNBOUNDED retry**:
+an inconclusive track miss was cached for an hour (`TRACK_INCONCLUSIVE_TTL`, deleted in 0.9.195)
+and the LIST holding it expired on the same hour, so the next look re-searched every straggler,
+for ever, until they all matched. **0.9.195 replaced that with a bounded ladder — deliberately,
+on Simon's own call — and 0.9.207 stopped every build from wiping the store.** Together those
+removed the brute force that had been covering a cold pass that **has never matched in one go**.
+The cold pass has always lost tracks under load; that is the 2026-09-02 diagnosis verbatim.
+
+**FIX 1 — `_resolveTracks` SAYS WHETHER THE WORK FINISHED OR THE CLOCK DID** (5th callback arg,
+`$timedOut`, set by the watchdog before `$finish`). Tracks the watchdog never LAUNCHED contribute
+nothing to `$inconclusive`, so that signal could not cover this. Positional, so the callers that
+unpack fewer values are unaffected. **This is the third site of a class already fixed twice** —
+the trending-albums gate (0.9.117) and `_buildAlbumsData`'s empty settle — and the shared resolver
+was the one that never got it.
+
+**FIX 2 — A WATCHDOG SIZED BY WHO IS WAITING, AND FOR THE PLAYLISTS NOBODY IS.**
+`PLAYLIST_TIMEOUT`(45s) was chosen when opening a playlist BLOCKED the user, which is true on
+`main` — it has no building row at all (`_isBuilding` does not exist there). Since 0.9.182 the
+open renders at once and completes into cache, the warm never had a watcher, and a **fifth adapter
+(Spotify) joined every track search after `main` was cut**. New `PLAYLIST_RESOLVE_TIMEOUT`(150s)
+for the playlist, follow and trending resolves; **the 45s default is unchanged** for DSTM and the
+two unmatched-tracks views, which do have someone waiting. 150 < `BUILDING_MAX`(180) is
+load-bearing: the normal path must release the in-flight flag before the expiry backstop does.
+
+**FIX 3 — THE WARM REVISITS AN INCOMPLETE LIST INSTEAD OF SKIPPING IT.** It skipped on a present
+key, so an under-matched list was revisited only when its entry EXPIRED — up to a fortnight. The
+per-track misses under it are on `MISS_RETRY_SCHEDULE` (1h/6h/24h), and **the ladder is only ever
+consumed by a re-resolve**: with the list pinned, those steps meant "the next few times the user
+happens to look", not hours. Cheap by construction — `$force` is NOT passed, so a revisit reads
+the per-track cache. A COMPLETE list is still skipped outright (asserted).
+
+**FIX 4 — THE WARM TAKES THE IN-FLIGHT FLAG.** Without it a user opening a playlist mid-warm found
+no cache entry, saw no build in progress, and started a SECOND full fan-out at the same services —
+doubling exactly the load whose failures produce the misses. `_resolveFollow` has always had this;
+the playlist warm inlined its resolve and missed it.
+
+**FIX 5 — THE SAME RULE AT EVERY OTHER SITE THAT PERSISTS AN ANSWER.** Auditing all seven bounded
+waits found three more: the **follow feed** resolve and the **trending tracks** resolve both cached
+a truncated pass at the full TTL, and **`_fanFollowers`** reported a deadline-cut follower set as
+though every follower had answered. That last one is the worst of the three and the least obvious:
+ranking there is **one vote per follower**, so a missing follower REORDERS the list rather than
+shortening it — an aggregate built from 8 of 13 followers was cached for a week (This Month) or a
+month (This Year) as if it were those users' answer. `$fanCut` now joins `$sawListens` on the
+empty-trending gate and `$timedOut` on the albums settle. The detail-page watchdog and the
+per-service search timeout were checked and need nothing: one forces a render and caches nothing,
+the other already settles inconclusive.
+
+**NOT CHANGED, DELIBERATELY, and each was considered:** `RESET_CACHE_ON_BUILD` stays 0 — converging
+the playlists by reinstating the build wipe would undo 0.9.207 and clear far more than this needs.
+`MISS_RETRY_SCHEDULE` stays `[1h, 6h, 24h]` — the ladder is not re-unbounded. Every TTL constant is
+unchanged. The two unmatched-tracks diagnostic views cache nothing, so there is no wrong answer to
+persist; they will over-report on a cold cut-short pass (a track never searched is listed beside
+one searched and missed) and re-opening fixes it. **`tools/t_playlistresolve.pl` §5 pins all of
+this** — 6 key versions, the ladder, 10 TTL/concurrency constants and the build-wipe switch — so a
+later fix that converges the playlists by quietly shortening something else FAILS the suite.
+
+**TESTING.** The suite was written and run BEFORE any code changed: 30 passed / 8 failed, every
+CONTROL passing, which is what proved the harness drives shipped bodies rather than a paraphrase.
+Two controls were then ANTI-TESTED against mutated copies — a `_playlistTtl` returning the short
+TTL unconditionally passes the target assertion and fails three controls; a warm that always
+re-resolves passes its target and fails the no-extra-traffic control. After the fix: **58/58**, all
+32 suites exit 0, `perl -c` clean on Browse/DB/DSTM/API (Plugin's only error is the LMS
+`main::WEBUI` constant, as always). `t_trending_empty.pl` needed one assertion **strengthened**,
+not relaxed: it pattern-matched the empty-trending gate, which now requires `$sawListens && !$fanCut`,
+and the updated assertion requires BOTH terms. `t_lastfm_priority.pl` gained the new constant in
+its stub package (it lifts `warmCache`).
+
+**READ 4.2 OF THE SUITE AS A PAIR WITH 4.3.** "An open during the warm renders the building row"
+passed BEFORE the fix too, and for the wrong reason: with no flag held the open found no cache
+entry, started its own resolve, took its own flag and rendered the building row from the cold-start
+branch. Same row on screen, two fan-outs at the services. 4.3 is what discriminates.
 
 **0.9.210** — built 2026-09-10, from the live test of 0.9.209. **Darkwave is filed
 under Rock.** No schema change, no cache-family bump, **and no cache clear is needed** —

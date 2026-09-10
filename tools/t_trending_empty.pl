@@ -376,8 +376,13 @@ print "\n6. A TRANSIENT empty is never cached; a DEFINITIVE one still is\n";
     # The thin-fan-out fix.
     ok(scalar($fn =~ /\$sawListens\s*=\s*scalar\s+keys\s+\%recFol/),
        '$sawListens is computed from the fan-out result (%recFol), not assumed');
-    ok(scalar($fn =~ /no candidate tracks[\s\S]{0,300}?\$sawListens\s*\?\s*1\s*:\s*0/),
-       'the "no candidate tracks" branch caches only when listens were actually seen');
+    # STRENGTHENED, not relaxed. The gate used to be $sawListens alone; it is now
+    # "$sawListens && !$fanCut", because a fan-out that hit its DEADLINE returns a
+    # partial follower set and "no candidates" from a partial set is not a fact
+    # about those users either. Both terms are required here, so dropping the
+    # newer one fails this assertion exactly as dropping the older one does.
+    ok(scalar($fn =~ /no candidate tracks[\s\S]{0,400}?\$sawListens\s*&&\s*!\$fanCut\s*\?\s*1\s*:\s*0/),
+       'the "no candidate tracks" branch caches only when listens were seen AND the fan-out completed');
     ok(!scalar($fn =~ /\$empty->\("no candidate tracks",\s*1\)/),
        'and it no longer passes a hard-coded 1');
 

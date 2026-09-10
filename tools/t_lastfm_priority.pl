@@ -30,6 +30,10 @@ sub grab {
     use constant LFM_WARM_MAX => 40;
     use constant LFM_WARM_ALL => 400;
     use constant GENRE_WARM_ALL => 4000;
+    # warmCache is lifted here for its Last.fm hold/release ordering; it also carries
+    # the playlist resolve, so the resolver's own ceiling has to be in scope.
+    # t_playlistresolve.pl owns the assertions about it.
+    use constant PLAYLIST_RESOLVE_TIMEOUT => 150;
     sub _dbg {}
     sub _stage { push @stages, [@_] }
     sub _genresFor { () }

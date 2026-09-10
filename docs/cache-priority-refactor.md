@@ -380,3 +380,43 @@ Releases section walk is a 0.01ms memo hit, and the cold filtered/deduped/date-s
 walk remains about 15ms on the development machine.
 
 Live server timing, overnight completion and deployment have not been performed.
+
+## Correction: an unfinished pass was being cached as an answer (0.9.211)
+
+Field report, 2026-09-10: after a full install the created-for playlists come up
+short and stay short, and only a manual refresh picks up the stragglers.
+
+The obvious reading is wrong and worth recording, because two of the changes above
+are in the causal chain and neither is a defect. Diffing `main` (0.9.149) against
+`dev` shows that the watchdog with no timed-out signal, the equal partial and found
+TTLs, and the warm skipping on a merely-present key are all present on `main` too.
+They are latent bugs, not the regression. What `main` had is an unbounded retry: an
+inconclusive track miss was cached for an hour and the list holding it expired on
+the same hour, so the next look re-searched every straggler indefinitely. 0.9.195
+bounded that ladder on purpose, and the build-cache policy above stopped every
+build from wiping the store. Together they removed the brute force that had been
+covering a cold pass which has never matched in one go.
+
+Neither decision is reversed. `RESET_CACHE_ON_BUILD` stays 0 and the retry ladder
+stays bounded at one, six and twenty-four hours. Instead, three signals were added
+so that an incomplete result is never filed as a complete one:
+
+- The shared track resolver reports whether the watchdog ended the pass or the work
+  did. Tracks it never launched contribute nothing to the inconclusive count, so
+  that existing signal could not cover this case.
+- The resolves nobody waits on take a longer ceiling, 150 seconds against the 45
+  the interactive callers keep. The old value predates the building row, and a
+  fifth streaming adapter has joined every track search since.
+- The follower fan-out reports a deadline-cut follower set. Ranking there is one
+  vote per follower, so a partial set reorders the aggregate rather than shortening
+  it, and both trending aggregates now settle short when it happens.
+
+The playlist warm also revisits an incomplete list rather than skipping it, which
+is what lets the retry ladder run on its own clock instead of on the user's browsing
+habits, and it holds the in-flight flag so a browse during the warm cannot double
+the fan-out at the streaming services.
+
+`tools/t_playlistresolve.pl` guards all of it, and its section 5 pins every key
+version, TTL and retry constant this work must not move, including the build-wipe
+switch. A later change that converges the playlists by shortening something else
+fails the suite.
