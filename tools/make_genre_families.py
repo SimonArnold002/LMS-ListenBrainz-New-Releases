@@ -127,7 +127,16 @@ OVERRIDES = {
     "breakcore": "Electronic", "speedcore": "Electronic", "club": "Electronic",
     "wave": "Electronic", "dariacore": "Electronic", "neurofunk": "Electronic",
     "funktronica": "Electronic", "chillsynth": "Electronic", "dreampunk": "Electronic",
-    "cyberpunk": "Electronic", "darkwave": "Electronic", "minimal wave": "Electronic",
+    "cyberpunk": "Electronic", "minimal wave": "Electronic",
+    # DARKWAVE IS ROCK, BOTH SPELLINGS. It sat as Electronic on the line directly
+    # above "coldwave": "Rock" — one scene split across two families, and the split
+    # was invisible because MusicBrainz carries "dark wave" and "darkwave" as
+    # SEPARATE vocabulary entries. norm() flattens hyphens and slashes but not the
+    # space, so the two never shared a lookup: one was overridden to Electronic and
+    # the other fell through the rule entirely and shipped as "?" (family-less).
+    # Simon's call, 2026-09-10, and it puts darkwave with its own lineage — coldwave,
+    # new wave and no wave are all already Rock.
+    "darkwave": "Rock", "dark wave": "Rock",
     "coldwave": "Rock", "crossover prog": "Rock", "blackgaze": "Metal",
     "brazilian phonk": "Hip Hop", "orchestral": "Classical", "filmi": "World",
 }

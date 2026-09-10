@@ -49,12 +49,21 @@ does not cover. Say which ledger entry you are challenging and what changed.
   uncommitted tree means "under review", an unpushed commit means "review not
   passed yet", and a push to `dev` IS the pass signal. Do not report either state,
   and do not prompt to commit **or** push as a fix for anything.
-  *(As of 2026-09-10 the tree is clean at 0.9.209 with commits unpushed on `dev`.
+  *(As of 2026-09-10 the tree is clean at 0.9.210 with commits unpushed on `dev`.
   Do not treat that as the standing state either — check, don't assume.)*
 - **`install.xml` / `repo.xml` being ahead of the docs on `dev`** follows from the
   two rules above.
 
 ### A2. NOT FINDINGS — LBF-specific
+
+- **Created for You showing two rows with the SAME name for one week is CORRECT.**
+  ListenBrainz publishes two playlists per week, Weekly Exploration and Weekly Jams,
+  and the distinguishing name is carried **on the tile image**, not in the text
+  underneath, which is the week. It has always looked like this. *(Raised as a
+  possible duplicate-title hazard in the 2026-09-10 live test and closed by Simon
+  the same day. The rows do open to different content — verified, 50 tracks each,
+  different first track — so nothing is conflated.)* Do not "fix" it by putting the
+  playlist name in the row text.
 
 - **The album→single release-type filter is deliberately LBF-only**, outside the
   shared matcher. It is not matcher drift.
@@ -268,7 +277,51 @@ part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
 
-**0.9.209** — built 2026-09-10 **to be installed and live-tested**. It carries the
+**0.9.210** — built 2026-09-10, from the live test of 0.9.209. **Darkwave is filed
+under Rock.** No schema change, no cache-family bump, **and no cache clear is needed** —
+`genre-families.txt` is read from disk at render time (`Browse.pm` derives its path from
+its own), so the families it defines are recomputed on restart. Nothing stored changes.
+
+**THE BUG WAS A SPLIT SCENE, AND THE SPLIT WAS INVISIBLE BY CONSTRUCTION.**
+`"darkwave": "Electronic"` sat in the generator's OVERRIDES on the line **directly
+above** `"coldwave": "Rock"`. Two names for one scene, two families, adjacent lines.
+It survived because **MusicBrainz carries `dark wave` and `darkwave` as SEPARATE
+vocabulary entries**, and `norm()` flattens hyphens, slashes and underscores but NOT
+the space — so the two never share a lookup. One was overridden to Electronic; the
+other matched no rule (the suffix test needs `" wave"`, with the space) and shipped as
+`?`, family-less. Both are now **Rock**, which is where the rest of the lineage already
+was: `coldwave`, `new wave` and `no wave`.
+
+**Live evidence this was reachable, not theoretical:** the W/C 31 August list rendered
+`-ii- – Ars Erotica, Vol. I` as `Album · dark wave` — a raw family-less label — while
+the week's genre picker filed it under `Other (125)`.
+
+**Fixed in BOTH places, deliberately.** `tools/make_genre_families.py` OVERRIDES is the
+source of truth, and the shipped `genre-families.txt` got the same two lines applied
+surgically **rather than by re-running the generator**: a full regeneration re-pulls the
+whole MusicBrainz vocabulary and would fold in every unrelated upstream change since the
+file was last built, which is not a thing to do inside a one-line fix. The generator was
+run in-process to confirm it now emits `Rock` for both spellings before the file was
+touched.
+
+**NOT swept up, deliberately:** `ethereal wave`, `neoclassical dark wave` and `dreamwave`
+are darkwave-adjacent and remain family-less. They were not asked for, they still display
+their own name, and deciding them silently is how the original inconsistency got in.
+
+**`indie` STAYS family-less, and that is Simon's call, not an oversight** — it is broad
+enough to sit under Rock, Electronic or almost anything, so it is a genuine sub-genre
+with no well-formed parent. It remains valid vocabulary and displays as its own label.
+
+**TESTS — `t_lastfm_priority.pl` 61 → 67.** The pair is asserted TOGETHER, plus the
+`coldwave`/`new wave` lineage as controls, because **testing either spelling alone would
+have passed throughout the entire period the two disagreed** — which is exactly how this
+shipped. `ethereal wave` is pinned family-less so the "not swept up" decision is explicit
+rather than incidental.
+
+### Previous build: 0.9.209
+
+**0.9.209** — built 2026-09-10, installed and live-tested; see the test results folded
+into the entries above and below. It carries the
 0.9.208 hygiene pass plus **the one thing that pass showed was missing: the plugin can
 now say which build is actually running.** No schema change, no cache-family bump, and
 **the caches are deliberately NOT cleared** — nothing about a stored shape or a cached
@@ -2576,14 +2629,14 @@ Full table, with fallbacks and triggers, in `docs/genre-ladder-current.md` §4.
   whose inline-MBID short-circuit then costs **zero** MusicBrainz lookups. Radio ladder is now
   LB similar → hosted → Last.fm → recommendations.
 
-### State of play (rewritten 2026-09-10, current at 0.9.209) — read this before starting anything
+### State of play (rewritten 2026-09-10, current at 0.9.210) — read this before starting anything
 
 *This section was dated 2026-07-30 and had not been rewritten since, so it still
 described a 0.9.151 working tree, a matcher hold that closed in 0.9.194 and four plans
 that have since shipped. Rewritten in the hygiene pass to describe the repo as it is.
 **Re-date it whenever you change it** — a "state of play" that lies is worse than none.*
 
-**BRANCHES.** `dev` is the working line and is at **0.9.209, built and awaiting install**.
+**BRANCHES.** `dev` is the working line and is at **0.9.210**; 0.9.209 was installed and live-tested.
 The tree is CLEAN; there are commits on `dev` not yet pushed, and per the Review Ledger
 that is the deliberate review gate, not a defect. `main` is at **0.9.149** — everything
 from 0.9.150 on has never been promoted, so "what users have" is far behind `dev`, and
@@ -2683,7 +2736,39 @@ drift apart again.)*
 **Known open items on this repo.** *Re-derived from source, tests and git in the
 2026-09-10 hygiene pass — everything listed here was checked, not inherited.*
 
-**Owed VERIFICATION, not design — the whole 0.9.198–0.9.209 run is unproven live.**
+**LIVE TEST OF 0.9.209, 2026-09-10 — what is now PROVEN, and how.** Run entirely over
+`jsonrpc.js` against `http://plex:9000`; no log reading was needed for any of it.
+- **`plugin_version` reads 0.9.209** — the new report works and no shadowing copy was
+  running, which is what makes the rest of this list mean anything.
+- **Indexed week identity (the 0.9.206 review finding, built in 0.9.207) — CONFIRMED END
+  TO END.** The All Releases week cards carry `{"menu":1,"lbf_week":"2026-09-07"}` and
+  `…"2026-08-31"` — a natural key, not a position. Each key resolves to genuinely
+  different content, the key route agrees with the positional route for the same week,
+  and **a bogus `lbf_week:1999-01-04` returns an empty shell rather than falling through
+  to a valid week**, so the key really is validated.
+- **The Last.fm candidate-cap fix (0.9.205) — CONFIRMED.** `genres_lastfm_all`: **368
+  candidates examined, 365 fresh checkpoints found, 3 upstream requests.** The pre-fix
+  worker would have spent its allowance re-asking answered artists.
+- **Warm ORDER matches the agreed direction.** foryou_feed 0.00s, all_feed 0.16s, covers
+  1.26→6.30s, and `genres_lastfm_all` LAST at 2.01→10.00s. Whole tick 10s.
+- **Detail prewarm (0.9.200/0.9.204) — CONFIRMED DRAINING.** `detail_main_ready=1`
+  throughout. Across a browsing session: pending **233 → 7**, completed 567 → 793, cache
+  hits 1130/1140 → 1295/1308, **0 failures**, 3 new fetches.
+- **The Last.fm vocabulary fix (0.9.206) — CONSISTENT, small sample.** 3 requested → 3
+  genres, **0 rejected**, and family-less genres render as their own label. The 31 August
+  week measures **246 of 371 releases carrying a family**, with 125 in `Other` — some of
+  which are family-less labels rather than nothing.
+- **A MEASUREMENT TRAP WORTH KEEPING: the plain `items` CLI query does NOT serialise
+  `line2`.** The genre line lives there, so a walk done with `["…","items",…]` shows rows
+  with no genres and reads as a total genre failure. **Use `menu:menu`**, which returns
+  `text` as `"<name>\n<line2>"`. This was briefly mistaken for a defect.
+
+**STILL unproven live.** The **artwork focus slot map** (0.9.207 finding 1) is the one
+item that needs INFO logs, since it is about which covers a given row range promotes.
+**The MuSpy detail-prewarm union (0.9.207 finding 2) could not be exercised at all** —
+`muspy_feed` returned 0 releases, so it needs a MuSpy user id with something upcoming.
+
+**Owed VERIFICATION, not design — the rest of the 0.9.198–0.9.210 run:**
 0.9.204 and 0.9.205 were installed; **0.9.206, 0.9.207 and 0.9.208 were built and never
 installed**. **0.9.209 is the build going in**, so it is the first observation of
 everything below at once — which also means a failure in it does not immediately say
@@ -2708,7 +2793,7 @@ candidates, not as one suspect:
 - **`docs/lastfm-key-bundling.md`** — proposed 2026-09-03, nothing implemented, and §4
   needs a decision before any code.
 
-**Merge-gate debt.** `main` is at 0.9.149 and `dev` at 0.9.209. The CHANGELOG and README
+**Merge-gate debt.** `main` is at 0.9.149 and `dev` at 0.9.210. The CHANGELOG and README
 are owed for that whole gap, plus **a credit line for honzup** (PR #17's own CHANGELOG
 hunk was deliberately not taken), and **`GENRE_FACT_VERSION` is deliberately NOT bumped
 for the 0.9.194 `_norm` change** — an explicit parser-version decision, recorded in

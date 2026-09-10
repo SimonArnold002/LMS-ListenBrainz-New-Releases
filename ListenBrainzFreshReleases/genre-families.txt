@@ -549,12 +549,12 @@ dark garage	Electronic
 dark jazz	Jazz
 dark plugg	?
 dark psytrance	?
-dark wave	?
+dark wave	Rock
 darkcore	?
 darkcore edm	Electronic
 darkstep	?
 darksynth	?
-darkwave	Electronic
+darkwave	Rock
 data sonification	?
 death 'n' roll	?
 death doom metal	Metal

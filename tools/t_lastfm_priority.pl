@@ -360,5 +360,26 @@ for my $ending (qw(success failure watchdog)) {
     is($genres{'neo progressive rock'}, 'Rock', 'hyphen-normalised Last.fm genre maps to Rock');
     is($genres{'hypnagogic pop'}, 'Pop', 'the formerly documented mismatch maps to Pop');
     is($genres{'space rock revival'}, '?', 'family-less vocabulary genres remain displayable');
+
+    # DARKWAVE IS ROCK, AND BOTH SPELLINGS MUST AGREE (Simon's call, 2026-09-10).
+    # MusicBrainz carries `dark wave` and `darkwave` as SEPARATE vocabulary entries,
+    # and norm() flattens hyphens and slashes but NOT the space — so the two never
+    # share a lookup and drifted apart unnoticed: `darkwave` was overridden to
+    # Electronic while `dark wave` fell through the rule and shipped family-less.
+    # The pair is asserted together because testing either one alone would have
+    # passed throughout the whole period they disagreed.
+    is($genres{'darkwave'},   'Rock', '`darkwave` is Rock');
+    is($genres{'dark wave'},  'Rock', '...and so is the space-separated spelling');
+    is($genres{'darkwave'}, $genres{'dark wave'},
+       '...and the two spellings agree, which is the property that broke');
+
+    # THE LINEAGE IT WAS SPLIT FROM — the control. These were already Rock, and if
+    # they ever stop being, the choice above is the one that needs re-arguing.
+    is($genres{'coldwave'}, 'Rock', 'CONTROL — coldwave was already Rock');
+    is($genres{'new wave'}, 'Rock', 'CONTROL — new wave was already Rock');
+
+    # NOT swept up, deliberately: these are darkwave-adjacent but were not asked
+    # for, and they stay family-less rather than being decided silently.
+    is($genres{'ethereal wave'}, '?', 'ethereal wave is left family-less, not assumed');
 }
 done_testing();
