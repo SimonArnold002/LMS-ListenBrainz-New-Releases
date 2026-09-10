@@ -65,6 +65,33 @@ does not cover. Say which ledger entry you are challenging and what changed.
   different first track — so nothing is conflated.)* Do not "fix" it by putting the
   playlist name in the row text.
 
+- **`darkwave` AND `dark wave` are BOTH Rock, and the duplicate override is
+  DELIBERATE.** Simon's call, 2026-09-10. MusicBrainz carries the two spellings as
+  SEPARATE vocabulary entries and `norm()` flattens hyphens, slashes and underscores
+  but **not the space**, so they never share a lookup — which is exactly how they
+  drifted into different families unnoticed. **Do not "tidy up" the pair into one
+  entry**, and do not move either back to Electronic: the lineage it belongs with
+  (`coldwave`, `new wave`, `no wave`) was already Rock. Pinned together, with those
+  two as controls, in `tools/t_lastfm_priority.pl`.
+- **`ListenBrainzFreshReleases/genre-families.txt` WAS EDITED BY HAND, on purpose,
+  despite its own "do not hand-edit" header — this is not a defect.** The header is
+  right as a default. It was overridden once, for the two darkwave lines, because a
+  regeneration re-pulls the WHOLE MusicBrainz vocabulary and would fold every
+  unrelated upstream change since the last build into a one-line fix. The generator
+  (`tools/make_genre_families.py`) was updated FIRST and run in-process to confirm it
+  emits the same two values, so the file and its source still agree. **A surgical edit
+  is only legitimate when the generator is changed to match; a bare file edit is
+  still a defect.**
+- **`indie` is DELIBERATELY family-less.** Simon's call, 2026-09-10: it is broad
+  enough to sit under Rock, Electronic or almost anything, so it is a genuine
+  sub-genre with no well-formed parent. It stays valid vocabulary and displays as its
+  own label. **Do not propose a family for it**, and do not read its `?` as an
+  unfinished mapping.
+- **`ethereal wave`, `neoclassical dark wave` and `dreamwave` are left family-less
+  DELIBERATELY, not missed.** They are darkwave-adjacent and were considered during
+  the 0.9.210 fix. They were not asked for, they still display their own names, and
+  deciding them silently is how the darkwave split got in. Raising them is fine;
+  raising them as an *oversight* is not.
 - **The album→single release-type filter is deliberately LBF-only**, outside the
   shared matcher. It is not matcher drift.
 - **Artist sort names stay on MusicBrainz.** The ListenBrainz `type`-driven local
@@ -96,6 +123,16 @@ does not cover. Say which ledger entry you are challenging and what changed.
   the plugin already makes — so a global genre wipe would clear EVERY user's store
   to fix a subset. Ordinary dev builds now preserve all caches too, so this remains
   an explicit parser-version decision; do not hide it behind a plugin-version bump.
+
+- **TWO 0.9.207 FIXES ARE STILL UNPROVEN LIVE, and that is known, not missed
+  (2026-09-10).** Both were verified by test and by source reading; neither has been
+  observed on the server. Do not re-report them as untested, and do not "fix" them
+  speculatively.
+  - **The artwork focus slot map.** Needs INFO on `plugin.listenbrainzfreshreleases`
+    to see which covers a given row range promotes. The CLI reports cannot show it.
+  - **The MuSpy detail-prewarm union.** Could not be exercised AT ALL: `muspy_feed`
+    returns 0 releases on the test rig, so it needs a MuSpy user id with something
+    upcoming before it can be observed either way.
 
 ### C. CLOSED FINDINGS
 
@@ -218,6 +255,29 @@ mechanism this ledger replaces.
 - **Plugin location (repo install)**: `/var/lib/squeezeboxserver/cache/InstalledPlugins/Plugins/ListenBrainzFreshReleases/`
 - **Log**: `/var/log/squeezeboxserver/server.log`
 - **Material Skin**: `/var/lib/squeezeboxserver/cache/InstalledPlugins/Plugins/MaterialSkin/` (moved from manual to repo install)
+
+## Testing over the CLI — READ THIS BEFORE CONCLUDING ANYTHING FROM A WALK
+
+`http://plex:9000/jsonrpc.js` reaches everything headlessly, off-network, and needs no
+log access. Three reports answer most questions without touching `server.log`:
+`["lbf","cachestats"]`, `["lbf","warmstats"]` and `["lbf","diag"]`. **All three now
+report `plugin_version`** — check it FIRST (see the 0.9.209 entry: a repo-installed copy
+shadows a manual install, and nothing else observed is meaningful until you know which
+package answered).
+
+**THE TRAP, and it cost a false "genres are completely broken" reading on 2026-09-10:**
+- **`["listenbrainzfreshreleases","items",…]` does NOT serialise `line2`.** The genre
+  label lives there, so a walk done this way returns rows with no genre on them and
+  looks exactly like total genre failure. **Use `menu:menu`**, which returns `text` as
+  `"<name>\n<line2>"`.
+- **The browse dispatch needs a PLAYER ID.** The plugin registers `is_app => 1`, so a
+  request with an empty player returns an EMPTY BODY, not an error. The three `lbf`
+  reports above need no player; the browse walk does.
+- **A drill by `item_id` is BY POSITION** ([[xmlbrowser-positional-crumb-order]]), and
+  some of those positions are ACTIONS, not folders — `item_id:<week>.1.0` is "Show N
+  releases", which CLEARS the genre filter. Prefer the natural key: `lbf_week:<date>`
+  opens an All Releases week directly and is validated, so a bogus date returns an
+  empty shell rather than the wrong week.
 
 ## Install Commands
 ```bash
