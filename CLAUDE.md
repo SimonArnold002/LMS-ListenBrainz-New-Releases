@@ -357,7 +357,8 @@ part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
 
-**0.9.211** — built 2026-09-10, **NOT installed and NOT tested**. **AN UNFINISHED PASS IS NOT AN
+**0.9.211** — built 2026-09-10, **installed and verified the same day** (see the live check at the
+end of this entry — and read its caveat, because the run did NOT exercise the fix). **AN UNFINISHED PASS IS NOT AN
 ANSWER, AT ALL FIVE PLACES THAT CACHE ONE.** **One cache family bumps** (`lbf:pl:resolved:` 8→9)
 to drop the partial playlist resolves already pinned on the server; `lbf:track:` is deliberately
 UNTOUCHED, so a re-resolve reads the expensive layer and is mostly cache hits. New regression
@@ -436,6 +437,26 @@ re-resolves passes its target and fails the no-extra-traffic control. After the 
 not relaxed: it pattern-matched the empty-trending gate, which now requires `$sawListens && !$fanCut`,
 and the updated assertion requires BOTH terms. `t_lastfm_priority.pl` gained the new constant in
 its stub package (it lifts `warmCache`).
+
+**LIVE CHECK, 2026-09-10 11:48 — AND WHAT IT DOES NOT PROVE.** `cachestats` answered
+`plugin_version 0.9.211`, so the new module was loaded (the running code reporting itself, not a
+template re-read — [[plugin-repo-shadows-manual-install]]). The log shows `Build changed (0.9.209 ->
+0.9.211): derived cache KEPT`: the build wipe correctly did NOT run, and the `lbf:pl:resolved:`
+8→9 bump is what dropped the old entries, with `lbf:track:` surviving at 417 rows. **All four
+playlists read 50 of 50**, agreed by two independent readings — the cached payload's own tile count
+and the unmatched-tracks diagnostic ("nothing unmatched" on all four). Because the key bumped there
+were ZERO `:9:` entries when the warm ran, so it could not have skipped: it resolved all four from
+nothing, in **0.27s**. Diag green on 8 targets, 5 adapters installed (Qobuz 1, Tidal 2,
+Bandcamp/Deezer/Spotify 3 — the fifth is the one that made 45s too tight). Trending This Month and
+This Year both still render 53 rows, so the follower-aggregate changes disturbed nothing.
+
+**THE CAVEAT, and do not lose it: NOTHING TRUNCATED, so the fix was not exercised.** 200 tracks
+resolving in 0.27s means the per-track layer already held every one of them as a MATCH — much of
+that from the manual refresh Simon ran before reporting the problem. So this run proves the build is
+correct and nothing regressed; it does not show the truncation path firing. **That needs a genuinely
+cold pass on a busy box** — the next fresh install, or a week whose new playlists carry tracks
+nothing has searched before. The follow-feed half is unverified live for a different reason: the
+warm stage is `skipped — no token`, and stays that way until a token is set.
 
 **READ 4.2 OF THE SUITE AS A PAIR WITH 4.3.** "An open during the warm renders the building row"
 passed BEFORE the fix too, and for the wrong reason: with no flag held the open found no cache
