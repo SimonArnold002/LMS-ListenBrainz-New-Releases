@@ -74,6 +74,14 @@ REPOS = {
 SUBS = [
     '_norm', '%FOLD', '_artistMatch', '_albumMatches', '_trackMatches',
     '_stripFmt', '_asciiNorm', '_punctNorm', '_stripArtistPrefix',
+    # LL-ONLY, and watched because WITHOUT IT THIS CHECK LIES. LL's _norm and
+    # _normStrict both delegate their punctuation pass to _punctPass, so LL's actual
+    # fold can change completely while the _norm body - and therefore its pin - does
+    # not move at all. Measured 2026-09-10: 0.1.145 added the stylised-letter rules to
+    # _punctPass and this script reported LL's _norm "variant OK". A single copy is
+    # never compared against anything, so it earns its alarm from a PIN, not from being
+    # listed here.
+    '_punctPass',
 ]
 
 # (sub, repo) -> (sha1-of-normalised-body, reason). A pinned copy passing its
@@ -93,8 +101,8 @@ VARIANTS = {
     # LL's fold lives in DB.pm, not beside the matcher, because DB::_norm builds the
     # dedupe_key - a UNIQUE column on every stored row. That is also why a fold change
     # there is a MIGRATION rather than a cache bump; see LL's _migrateRefold.
-    ('_norm', 'LL'):         ('a054575b2b5b', 'LL lenient variant: fleet fold (0.1.112) + LL punctuation pass; strips (...) for the fuzzy gate, unlike DB::_norm'),
-    ('_albumMatches', 'LL'): ('2bf38f346e0f', 'LL lenient: empty artist accepts (saved-item replay, LL 0.1.66) + self-titled exact rule (fleet sync from DSC 0.11.1)'),
+    ('_norm', 'LL'):         ('abbfcf31c6fc', 'LL lenient variant: strips (...) for the fuzzy gate, unlike DB::_norm. THE FOLD ITSELF IS NOT IN THIS BODY - it delegates to _punctPass, pinned separately below, so this hash does NOT move when the fold changes'),
+    ('_albumMatches', 'LL'): ('e8b93c7daa26', 'LL lenient: empty artist accepts (saved-item replay, LL 0.1.66) + self-titled exact rule (fleet sync from DSC 0.11.1) + the short-title escape hatch taken FROM the fleet at 0.1.145, where the artist gate is MANDATORY - a match that thin cannot stand on the title alone'),
     ('_artistMatch', 'LL'):  ('ac8401597520', 'LL lenient: empty side matches; length-based short/long split'),
 
     # NOT the matcher's _norm — a DIFFERENT sub that shares the name. DB::_norm builds
@@ -103,7 +111,15 @@ VARIANTS = {
     # way (it calls foldLatin, whose %FOLD is compared above and must match the fleet);
     # only the punctuation pass differs. Pinned so that shared fold cannot drift
     # unnoticed while the two subs stay legitimately different.
-    ('_norm', 'LLDB'):       ('451b0041d305', 'LL dedupe-key normaliser (not the matcher): folds like the fleet, KEEPS bracketed qualifiers'),
+    # LL ONLY - the fleet has no such sub, its punctuation pass is inline in _norm. Pinned
+    # so LL's ACTUAL fold has an alarm; see the note on SUBS above for why listing it is not
+    # enough on its own. TWO substitutions where the fleet has one \p{Alnum} class, and the
+    # ORDER is load-bearing: \w includes '_' and \p{Alnum} does not, so only LL must strip it
+    # separately, and running the non-word pass first leaves '_' out of the separator run
+    # beside it (0.1.144). Carries the fleet's stylised-letter rules verbatim since 0.1.145.
+    ('_punctPass', 'LL'):    ('19c99f86dd6c', 'LL-only shared punctuation pass for _norm and _normStrict: stylised letters (fleet, PFR 0.7.8) + underscore-first ordering (0.1.144) + an all-marks fallback so a name of unmapped symbols does not read as ABSENT to LL lenient gates'),
+
+    ('_norm', 'LLDB'):       ('8d9d8309707d', 'LL dedupe-key normaliser (not the matcher): folds like the fleet, KEEPS bracketed qualifiers. Keeps \\w of EVERY script + an all-punctuation fallback (minus | % _) - it had ERASED non-Latin names into a shared key in a UNIQUE column, silent data loss shipped since 0.1.93. Re-pinned at 0.1.144, which fixed the ORDER of its two substitutions (_+ must run BEFORE [^\\w]+ or 01_-_Intro keys with a doubled separator) and moved the refold to rung 9. The stylised-letter rules are NOT here: the matcher took them at 0.1.145, the key owes a rung and has not'),
 
     # SEARCH HUB IS FROZEN BEHIND THE FLEET, DELIBERATELY — Simon, 2026-08-29:
     # "ignore Search Hub from any changes, it's on hold with no development."

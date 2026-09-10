@@ -35,6 +35,26 @@ does not cover. Say which ledger entry you are challenging and what changed.
 
 ### A. NOT FINDINGS — deliberate, fleet-wide
 
+- **THE FLEET FOLD IS DELIBERATELY NOT LEVEL, 2026-09-10 to the completion of item 1 in
+  LL's `docs/fleet-fold-rollout.md`.** Listen to Later 0.1.143 fixed a fold that ERASED
+  non-Latin names, and the obvious next step looked like porting it here. **It is not.**
+  THIS REPO WAS ALREADY CORRECT — measured by extracting the shipped `_norm` and running it:
+  米津玄師, 아이유 and Кино all survive, and two different CJK artists correctly fail to match.
+  LL was the only repo with the defect.
+  - **`_asciiNorm`'s `s/[^a-z0-9]+/ /g` is NOT that bug and must not be "fixed".** Being
+    ASCII-only is its job. The real `_norm` uses `\p{Alnum}` on a DECODED string. A grep for
+    the old pattern hits `_asciiNorm` in every repo and produced exactly this false finding
+    once already.
+  - **LL's matcher is out of sync in the OTHER direction and that is known.** It is AHEAD on
+    script preservation and BEHIND on the stylised-letter fold (`P!nk` → `p nk` there against
+    `pink` here), and its punctuation fallback keeps raw marks (`!!!` → `!!!`) where this repo
+    folds to `iii`. DSC and Search Hub are ON HOLD, so the fleet cannot be levelled in one
+    pass. **Do not report the divergence, in either direction, as drift.**
+  - **Still open fleet-wide, and small:** an all-symbol name with no fold mapping (`†††`,
+    Crosses) still normalises to `''` here, because `!!!` and `+/-` survive only through their
+    leetspeak mappings. The strict artist gate then rejects everything, so it is a MISS, not a
+    wrong answer. Optional work; re-raise only with a real failing case.
+
 - **The zip is not rebuilt and `repo.xml <sha>` is not recomputed in the working
   tree.** Both happen at build time, together with the version bump. A stale zip
   or sha on `dev` is the normal state, not a defect.
