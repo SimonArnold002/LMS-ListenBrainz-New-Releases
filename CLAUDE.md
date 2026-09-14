@@ -65,6 +65,7 @@ because line numbers rot on the next edit.
 | `GENRE_FACT_VERSION` is NOT bumped for the 0.9.194 `_norm` change — deliberate | B | ``GENRE_FACT_VERSION` is NOT bumped for the` |
 | TWO 0.9.207 FIXES ARE STILL UNPROVEN LIVE, and that is known, not missed | B | `TWO 0.9.207 FIXES ARE STILL UNPROVEN LIVE,` |
 | Last.fm error 6 is an ANSWER; latched key ends the warm pass; error-6 + latch UNPROVEN LIVE | C | `CLOSED IN 0.9.214 —` |
+| Diag's Last.fm row says "HTTP 403", not "rejected the built-in API key" — cosmetic, pre-0.9.213 | B | `Diag's Last.fm row shows "HTTP 403"` |
 
 **Two standing rules that kill most repeat findings:**
 
@@ -262,6 +263,19 @@ invites the next round to find one counter-example and reopen the whole entry.
     returns 0 releases on the test rig, so it needs a MuSpy user id with something
     upcoming before it can be observed either way.
 
+- **Diag's Last.fm row shows "HTTP 403" for a rejected key, never its own "Last.fm rejected
+  the built-in API key" note — `Diag.pm` probe runner, `check` vs the error callback. Cosmetic,
+  accepted open, 2026-09-14 (Simon closed the round).** Last.fm answers an invalid key with HTTP
+  403 + a JSON error body. `SimpleAsyncHTTP` sends any non-2xx to the ERROR callback, and that
+  callback settles on `_httpCode` alone (`warn`, `"HTTP $code"`). It never runs the target's
+  `check` on the body, so `check`'s "rejected" branch is reached only by an HTTP 200 error body,
+  which `auth.gettoken` does not produce for a bad key. **The mechanism is NOT a wrong
+  argument:** the callback's first argument is the `SimpleAsyncHTTP` object, which carries
+  `->code` and `->error`, and `_httpCode` digs the status out of `->error` as its comment
+  documents. The row is still `warn`, so no fault is hidden. Pre-dates 0.9.213 (runner from
+  0.9.158; the GET probe behaved the same). A fix would pass the error body to `check` when
+  the target opts in. Not a regression, and it is not scheduled.
+
 ### C. CLOSED FINDINGS
 
 Fixed findings are recorded per review in `docs/code-review-<version>.md`, each
@@ -330,6 +344,13 @@ follow-up sweep. Both rounds closed by Simon 2026-09-14. Do not re-report:**
   found 220/220 fresh checkpoints and requested nothing) and the latch (no rejection has
   happened). Proven live: the built-in key and the POST transport (Connection Check ok).
   Evidence to look for: `lbf warmstats` Last.fm note with `requested` > 0 and `failed` near 0.
+- **Third round, 2026-09-14, over the two unpushed commits 0.9.213 + 0.9.214: CLEAN, zero
+  findings. Closed by Simon 2026-09-14.** Verified: `LFM_BUILTIN_HEX` decodes to a 32-char key;
+  nothing reads `lastfm_api_key` except `Plugin.pm`'s one-time cleanup; `getLastfmTags`' only
+  caller (the warm) passes an empty album, so its album-tags branch is unreachable; the
+  `_warmLastfm` latch check runs before each request; `getSimilarArtistsLastfm` error bodies fall
+  back through DSTM and a cached empty list is a hit; the Connection Check POST argument order.
+  Its one out-of-diff observation is logged in §B (`Diag's Last.fm row shows "HTTP 403"`).
 
 **A closed finding is not a closed MECHANISM.** Both 0.9.192 findings were
 second-order consequences of the 0.9.191 fixes — not regressions of old code, and
@@ -483,7 +504,8 @@ part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 ## Current Version
 
 **0.9.214** — built 2026-09-14, **INSTALLED on the test rig 2026-09-14 12:34; review CLOSED —
-see Ledger §C (`CLOSED IN 0.9.214`).** The 2026-09-14 review fix on top of 0.9.213's built-in
+see Ledger §C (`CLOSED IN 0.9.214`); a third review round the same day over both commits was
+clean.** The 2026-09-14 review fix on top of 0.9.213's built-in
 Last.fm key: **error 6 is now an ANSWER everywhere it can arrive, and a mid-pass latch stops
 the warm cleanly instead of spinning it.** No schema change, no cache-family bump — see below
 for why.
