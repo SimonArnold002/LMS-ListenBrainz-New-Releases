@@ -109,7 +109,7 @@ our %PREFS = (
     all_artwork_only => 1, all_various => 1,
     foryou_artwork_only => 1, foryou_various => 1,
     blocked_artists => [], all_sort => 'release_date', all_view => 'albums',
-    days => 14, foryou_past => 1, muspy_future => 1,
+    foryou_weeks => 4, foryou_upcoming => 2,
 );
 my $prefs = LBF::PrefsStub->new;
 my $log   = LBF::LogStub->new;

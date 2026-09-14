@@ -14,6 +14,24 @@ browse activity. See [cache-priority-refactor.md](docs/cache-priority-refactor.m
 for implementation, recovery limits, tests and outstanding live scheduling work.
 This is not yet a full fixed-clock overnight-preparation implementation.
 
+## Per-section release window — 0.9.215, built 2026-09-14 (not yet installed)
+
+**The release window is now two number boxes per section, and the current week is week 1.**
+`<section>_weeks` (total shown, 1-4) + `<section>_upcoming` (how many are ahead, 0..weeks-1),
+for `foryou` and `all` independently. It replaces seven controls — `weeks_past`, `weeks_future`
+and the `foryou_past`/`foryou_future`/`all_past`/`all_future`/`muspy_future` gates — none of which
+are migrated (they stop being read; only the four gates and `days` were ever on `main`).
+Defaults keep 0.9.185's behaviour: For You `4`/`2`, All Releases `2`/`0`.
+
+**MuSpy has no window of its own** — Simon's call: it must never show past four weeks and must
+roll over like the LB feed. `_mergeMuSpy` windows on `sectionWindow('foryou')`, the `'muspy'`
+prefix and `%WEEK_GATES` are gone, `_sectionBounds` unions nothing (0.9.207's union is moot, not
+reverted), and the nightly MuSpy warm prepares only the rows inside the window.
+
+Read `docs/week-based-release-window.md` "As changed" before touching any of it. Guards:
+`t_weekwindow.pl` (71, incl. §8 which RUNS `Settings::handler`), `t_detailwarm.pl` §8; both
+anti-tested. Built and versioned as 0.9.215; not yet installed.
+
 ## Review Ledger — READ THIS BEFORE REPORTING ANY FINDING
 
 **Why this exists.** Reviews kept re-reporting things that had already been
@@ -502,6 +520,65 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
+
+**0.9.215** — built 2026-09-14, **NOT installed and NOT tested.** **THE RELEASE WINDOW IS NOW
+TWO NUMBERS PER SECTION, AND THE CURRENT WEEK IS WEEK 1.** Settings only — no schema change, no
+cache-family bump, and nothing stored changes shape. See the "Per-section release window" section
+at the top of this file for the shape, and `docs/week-based-release-window.md` "As changed" for
+the reasoning and the measurements behind the MuSpy half.
+
+**WHY.** Simon, 2026-09-14: the window was "overly complicated and has too many boxes", All
+Releases could not be configured differently from For You, and "starting at week 0 feels wrong.
+Current week should always be 1." Seven controls (`weeks_past`, `weeks_future` and the four
+`*_past`/`*_future` gates plus `muspy_future`) became **two number boxes in each of the For You and
+All Releases sections**: `<section>_weeks` (total shown, this week counted as 1, max 4) and
+`<section>_upcoming` (how many of those are ahead). The General section now has no week fields.
+
+**THE TOTAL IS WHAT MAKES THE BUDGET SAFE.** `upcoming` is clamped to `weeks - 1`, so the
+four-week limit is a property of the input and the old past-first trim — which silently changed
+the value the user had not touched — is gone from the user-facing path. The internal
+`(past, future)` pair is DERIVED (`past = weeks - 1 - upcoming`), so `_feedWindow`,
+`_feedRequestDays`, `_feedMemoKey`, the store and the LB request are untouched.
+`API::clampSectionWeeks` is the ONE rule, applied on save and on read.
+
+**MUSPY NO LONGER HAS A WINDOW OF ITS OWN** — Simon: it must never show past four weeks and must
+roll over like the LB feed. `%WEEK_GATES` and the `'muspy'` prefix are gone, `_mergeMuSpy` windows
+on `sectionWindow('foryou')`, and `_sectionBounds` unions nothing (0.9.207's union is MOOT with one
+window for both feeds, not reverted — it stays the single carrier). **Checked before deciding, in
+muspy's own source** (`app/models.py` `ReleaseGroup.get`): the per-user query is `ORDER BY date
+DESC` with no date bound, so the top of our `?limit=100` slice is the furthest-out announcements —
+the one thing MuSpy can show that ListenBrainz cannot. They are still fetched and stored
+unwindowed and appear as the edge rolls forward; they are simply never displayed early.
+**Also fixed here:** the nightly MuSpy warm used to warm covers and queue detail for EVERY stored
+MuSpy row, months-out announcements included; it now prepares only the rows inside the window.
+
+**NO MIGRATION**, the 0.9.185 precedent: the retired prefs stop being read and everyone lands on
+defaults that reproduce 0.9.185's behaviour (For You 4/2, All Releases 2/0). `main` (0.9.149) never
+shipped `weeks_*`, so only the four gates and `days` are orphaned for real users.
+
+**OBSERVED, NOT CHANGED:** `API::_padDate` fills a year-only or month-only MuSpy date with the 1st,
+so an album announced for just "2026" is dated 1 January and never falls inside a current window.
+Pre-existing, out of scope, and not a regression of this build.
+
+**TESTS.** `tools/t_weekwindow.pl` rewritten, 62 → **71**, including a new **§8 that RUNS
+`Settings::handler`** against stubs — there was no test that executed the handler before, and a
+handler that dies part way still renders a half-filled settings page. `t_detailwarm.pl` §8
+rewritten for the single window. Fixtures moved to the new prefs in `t_feedsingleflight.pl`,
+`t_review_fixes.pl`, `t_cachememo.pl`, `t_coverwarm.pl` (its §4c now resolves a filtered variable,
+not just an inline call) and `bench_walk.pl`. **Anti-tested six ways, each mutant failing only its
+own assertions:** the upcoming clamp removed **4 red**, the sentinel back on `pref_weeks_past`
+**1**, the merge on a `'muspy'` window **1**, `_sectionBounds`' union restored **3** (in
+`t_detailwarm`), the save path unclamped **2**, and a handler dying before the save **7**.
+All 33 `tools/t_*.pl` exit 0; `matcher_sync_check.py` and `singleflight_sync_check.py` exit 0;
+`t_loads.pl` 20/20 against the BUILT ZIP, which was extracted and diffed byte-identical against
+the working tree.
+
+**`bench_walk.pl` EXITS 255, AND IT IS NOT THIS BUILD** — verified by running it against a clean
+`git archive` extract of HEAD, where it fails identically. Its API stub has no `lastfmConfigured`,
+which `Browse::_lastfmGenres` has called since **0.9.213** (`ec3b268`). The bench dies part way and
+prints a SHORTER LIST rather than failing, so the missing line reads as a quiet run — the exact
+trap `bench_walk.pl`'s own comment predicts. **What is lost is the `_bucketFor` measurement**, the
+guard that caught the per-release SELECT in 0.9.165. One stub line fixes it; not done here.
 
 **0.9.214** — built 2026-09-14, **INSTALLED on the test rig 2026-09-14 12:34; review CLOSED —
 see Ledger §C (`CLOSED IN 0.9.214`); a third review round the same day over both commits was
@@ -4719,16 +4796,26 @@ belongs in `handler`, before `SUPER::handler`. Fleet-wide rule — LBF, PFR and 
   count (1-90, default 14) measured from today, which cut the current week in half: the UI renders
   `W/C <Monday>` rows, but the window's edges landed on arbitrary days, so with *Include earlier
   weeks* off the current week held only *today onwards* and **Friday's releases were gone by
-  Saturday**. Now:
-  - `weeks_past` — whole weeks BEFORE the current one (0-3, default **1**)
-  - `weeks_future` — whole weeks AFTER the current one (0-3, default **2**)
-  - the **current week is always included in full**, Monday to Sunday, and `1 + past + future` is
-    clamped to **four weeks** (`API::WEEKS_MAX_SIDE`). Over budget the past side is honoured and the
-    future takes the remainder (3/3 → 3 back, 0 ahead) — clamped BOTH on save (`Settings::handler`)
-    and at read time (`API::_clampWeeks`), because `prefs.yaml` is hand-editable.
-  - **`API::sectionWeeks($prefix)` is the only place these prefs are read** — `'foryou'`, `'all'` or
-    `'muspy'`. It applies that section's two checkbox gates (an unticked box = ZERO weeks on that
-    side, for that section only) so For You and All Releases keep independent defaults. It replaced
+  Saturday**.
+  **SET PER SECTION SINCE 2026-09-14 (working tree, unbuilt)** — Simon: the old seven controls were
+  "overly complicated", couldn't give All Releases a different window from For You, and "starting at
+  week 0 feels wrong. Current week should always be 1". Now two number boxes in EACH of the For You
+  and All Releases settings sections (the General section has none):
+  - `<section>_weeks` — weeks shown **in total, the current week counted as 1** (1-4)
+  - `<section>_upcoming` — how many of those are AFTER the current week (0 .. weeks-1)
+  - defaults = what 0.9.185 shipped: `foryou_weeks` **4** / `foryou_upcoming` **2** (1 back + this +
+    2 ahead), `all_weeks` **2** / `all_upcoming` **0** (1 back + this).
+  - Counting the TOTAL makes the four-week budget a property of the input — `upcoming` is held to
+    `weeks - 1`, nothing is trimmed off the other side. `API::clampSectionWeeks` is the ONE rule, on
+    save (`Settings::handler`, via `->can`) and on read. Internally everything still uses a
+    `(past, future)` pair, DERIVED as `past = weeks - 1 - upcoming`, `future = upcoming`, so
+    `_feedWindow` / `_feedRequestDays` / `_feedMemoKey` / the store did not change.
+  - **Retired, not migrated:** `weeks_past`, `weeks_future`, `foryou_past`, `foryou_future`,
+    `all_past`, `all_future`, `muspy_future` (plus 0.9.185's `days`/`muspy_future_months`). They stop
+    being read; `t_weekwindow.pl` §5 pins that a stale prefs.yaml value moves nothing.
+  - **MuSpy has NO window of its own** — see the MuSpy settings below.
+  - **`API::sectionWeeks($prefix)` is the only place these prefs are read** — `'foryou'` or `'all'`
+    (there is no `'muspy'` prefix any more). It replaced
     ~12 duplicated `$prefs->get('days') // 14` + past/future sites that **disagreed**: `foryou_future`
     fell back to `// 0` in four of them and `// 1` in `warmFeeds`, so a warm and a browse asked
     ListenBrainz two different questions. `API::sectionWindow($prefix)` is the same thing as
@@ -4779,7 +4866,7 @@ belongs in `handler`, before `SUPER::handler`. Fleet-wide rule — LBF, PFR and 
 ### MuSpy Settings (own section, kept LAST — 0.9.81)
 Grouped separately from the ListenBrainz prefs so the two aren't confused. All three drive `API::getMuSpyReleases` → `Browse::_mergeMuSpy` (For You feed only).
 - `muspy_userid` — optional MuSpy (muspy.com) public user ID; folds that user's followed-artist releases into the For You feed. Public endpoint, no auth/password stored. Default empty = disabled
-- `muspy_future` — include MuSpy **upcoming** releases (default ON, 0.9.79). MuSpy is upcoming-heavy, so its future side has its own toggle instead of riding `foryou_future`. That toggle is exactly what `API::sectionWeeks('muspy')` is: the For You window with `muspy_future` swapped in for `foryou_future`. Turn off for already-released MuSpy titles only
+- ~~`muspy_future`~~ — **REMOVED 2026-09-14 (working tree), on Simon's call: MuSpy must never show anything past the four-week window, and must roll over exactly as the ListenBrainz feed does.** MuSpy rows are For You rows: they are windowed by `API::sectionWindow('foryou')` in `_mergeMuSpy`, there is no `'muspy'` prefix and `_sectionBounds` unions nothing (0.9.207's union is MOOT, not reverted — with one window for both feeds it IS the For You window). **What MuSpy can still do that ListenBrainz cannot** (checked in muspy's own source, `app/models.py` `ReleaseGroup.get`): its per-user query is `ORDER BY date DESC` with **no date bound**, so the top of our `?limit=100` slice is the furthest-out announcements. Those are still fetched and stored unwindowed (rotation off, 120-day `seen_at` retention) — they are simply never DISPLAYED beyond the window, and appear as the forward edge rolls on each Monday. The nightly MuSpy warm now prepares only the rows inside the window (`_filterForYou(_mergeMuSpy([], …))`); it used to warm covers and detail for every stored row, months-out announcements included
 - `muspy_future_months` — **RETIRED in 0.9.185** (was 1-24 months, default 12; 0.9.80). MuSpy now rides the same whole-week window as everything else, so `_mergeMuSpy` carries no month arithmetic and `MUSPY_FUTURE_MONTHS_DEFAULT`/`_MAX` and `Browse::_dateShift` are gone. **This loses no far-out announcements:** MuSpy is fetched `?limit=100` newest-first, stored with `rotate => 0` and read back from the store **unwindowed** (`_feedFromStore($feed, undef, undef, 0)`), so an album announced three months out is fetched and HELD today — the week window only decides whether it is DISPLAYED, and each Monday the forward edge rolls on and it appears. Rows age out on `seen_at` in `DB::feedSweep` at 120 days, and upcoming releases sit at the top of MuSpy's newest-first list, so they keep being refreshed while they wait
 
 ### Blocked Artists Settings
@@ -4789,15 +4876,13 @@ Grouped separately from the ListenBrainz prefs so the two aren't confused. All t
 - `svc_priority_<qobuz|bandcamp|tidal>` — search priority per service (number 0–9; lower = searched first, **0 = never search it**). Search stops at the first service that matches. Drives BOTH album play-via and playlist track matching. The page lists each known service as detected/not installed via `Browse::serviceStatus`.
 
 ### For You Settings
-- `foryou_past` — include past releases (default ON)
-- `foryou_future` — include upcoming releases (default ON since 0.9.79; was OFF — new installs only, existing prefs win)
+- `foryou_weeks` — weeks shown in total, **the current week counted as 1** (1-4, default **4**); `foryou_upcoming` — how many of those are after the current week (0 .. weeks-1, default **2**). So the default is last week + this week + the next two. Replaced `foryou_past`/`foryou_future` (and the shared `weeks_past`/`weeks_future`) 2026-09-14 — see the release-window bullet under General Settings. MuSpy rows ride this window
 - `foryou_artwork_only` — hide releases without artwork (default ON)
 - `foryou_various` — include Various Artists releases (default ON)
 - Type checkboxes (`foryou_type_<name>`) — same set as All Releases; default ON: Album, Compilation. Default OFF: everything else. (Replaced the old single `foryou_albums` toggle in 0.6.15.)
 
 ### All Releases Settings
-- `all_past` — include past releases (default ON)
-- `all_future` — include upcoming releases (default OFF)
+- `all_weeks` — weeks shown in total, **the current week counted as 1** (1-4, default **2**); `all_upcoming` — how many of those are after the current week (0 .. weeks-1, default **0**). So the default is last week + this week, no upcoming. **This is the point of the 2026-09-14 change: All Releases can now be windowed differently from For You**, which the shared `weeks_past`/`weeks_future` pair made impossible. Replaced `all_past`/`all_future`
 - `all_artwork_only` — hide releases without artwork (default ON)
 - `all_various` — include Various Artists releases (default ON)
 - Type checkboxes — default ON: Album, Compilation. Default OFF: Single, EP, Broadcast, Other, Soundtrack, Live, Remix, Demo (Soundtrack dropped from defaults in 0.6.15)

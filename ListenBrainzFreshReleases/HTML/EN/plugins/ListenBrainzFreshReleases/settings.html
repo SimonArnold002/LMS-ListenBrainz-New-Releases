@@ -13,19 +13,6 @@
 <div id="lbf_token_status" style="margin-top:6px;font-weight:bold;"></div>
 [% END %]
 
-[%# The week window. pref_weeks_past is ALSO the sentinel Settings::handler uses %]
-[%# to recognise a real form POST before coercing the checkboxes — if this field %]
-[%# ever moves or is renamed, move the `exists $params->{pref_weeks_past}` check %]
-[%# with it, or every checkbox on this page silently stops being able to be      %]
-[%# turned off.                                                                  %]
-[% WRAPPER setting title="PLUGIN_LBF_WEEKS_PAST" desc="PLUGIN_LBF_WEEKS_PAST_HINT" %]
-<input type="number" name="pref_weeks_past" value="[% prefs.weeks_past %]" min="0" max="3" size="4">
-[% END %]
-
-[% WRAPPER setting title="PLUGIN_LBF_WEEKS_FUTURE" desc="PLUGIN_LBF_WEEKS_FUTURE_HINT" %]
-<input type="number" name="pref_weeks_future" value="[% prefs.weeks_future %]" min="0" max="3" size="4">
-[% END %]
-
 [% WRAPPER setting title="PLUGIN_LBF_PLAY_VIA_SETTING" desc="PLUGIN_LBF_PLAY_VIA_SETTING_DESC" %]
 <label><input type="checkbox" name="pref_play_via" value="1" [% IF prefs.play_via %]checked="checked"[% END %]> [% 'PLUGIN_LBF_ENABLED' | string %]</label>
 [% END %]
@@ -100,6 +87,19 @@
 <div class="prefHead collapsableSection" id="lbf_foryou_Header">[% 'PLUGIN_LBF_SECTION_FORYOU' | string %]</div>
 <div id="lbf_foryou">
 
+[%# The week window. pref_foryou_weeks is ALSO the sentinel Settings::handler uses %]
+[%# to recognise a real form POST before coercing the checkboxes — if this field  %]
+[%# ever moves or is renamed, move the `exists $params->{pref_foryou_weeks}` check %]
+[%# with it, or every checkbox on this page silently stops being able to be       %]
+[%# turned off.                                                                   %]
+[% WRAPPER setting title="PLUGIN_LBF_WEEKS_SHOW" desc="PLUGIN_LBF_WEEKS_SHOW_DESC" %]
+<input type="number" name="pref_foryou_weeks" value="[% prefs.foryou_weeks %]" min="1" max="4" size="4">
+[% END %]
+
+[% WRAPPER setting title="PLUGIN_LBF_WEEKS_UPCOMING" desc="PLUGIN_LBF_WEEKS_UPCOMING_DESC" %]
+<input type="number" name="pref_foryou_upcoming" value="[% prefs.foryou_upcoming %]" min="0" max="3" size="4">
+[% END %]
+
 [% WRAPPER setting title="PLUGIN_LBF_ALL_TYPES" desc="PLUGIN_LBF_ALL_TYPES_DESC" %]
 <div>
   <label><input type="checkbox" name="pref_foryou_type_album" value="1" [% IF prefs.foryou_type_album %]checked="checked"[% END %]> Album</label><br>
@@ -115,14 +115,6 @@
 </div>
 [% END %]
 
-[% WRAPPER setting title="PLUGIN_LBF_FORYOU_PAST" desc="PLUGIN_LBF_FORYOU_PAST_DESC" %]
-<label><input type="checkbox" name="pref_foryou_past" value="1" [% IF prefs.foryou_past %]checked="checked"[% END %]> [% 'PLUGIN_LBF_ENABLED' | string %]</label>
-[% END %]
-
-[% WRAPPER setting title="PLUGIN_LBF_FORYOU_FUTURE" desc="PLUGIN_LBF_FORYOU_FUTURE_DESC" %]
-<label><input type="checkbox" name="pref_foryou_future" value="1" [% IF prefs.foryou_future %]checked="checked"[% END %]> [% 'PLUGIN_LBF_ENABLED' | string %]</label>
-[% END %]
-
 [% WRAPPER setting title="PLUGIN_LBF_DISPLAY_ARTWORK" desc="PLUGIN_LBF_DISPLAY_ARTWORK_DESC" %]
 <label><input type="checkbox" name="pref_foryou_artwork_only" value="1" [% IF prefs.foryou_artwork_only %]checked="checked"[% END %]> [% 'PLUGIN_LBF_ENABLED' | string %]</label>
 [% END %]
@@ -136,12 +128,12 @@
 <div class="prefHead collapsableSection" id="lbf_all_Header">[% 'PLUGIN_LBF_SECTION_ALL' | string %]</div>
 <div id="lbf_all">
 
-[% WRAPPER setting title="PLUGIN_LBF_ALL_PAST" desc="PLUGIN_LBF_ALL_PAST_DESC" %]
-<label><input type="checkbox" name="pref_all_past" value="1" [% IF prefs.all_past %]checked="checked"[% END %]> [% 'PLUGIN_LBF_ENABLED' | string %]</label>
+[% WRAPPER setting title="PLUGIN_LBF_WEEKS_SHOW" desc="PLUGIN_LBF_WEEKS_SHOW_DESC" %]
+<input type="number" name="pref_all_weeks" value="[% prefs.all_weeks %]" min="1" max="4" size="4">
 [% END %]
 
-[% WRAPPER setting title="PLUGIN_LBF_ALL_FUTURE" desc="PLUGIN_LBF_ALL_FUTURE_DESC" %]
-<label><input type="checkbox" name="pref_all_future" value="1" [% IF prefs.all_future %]checked="checked"[% END %]> [% 'PLUGIN_LBF_ENABLED' | string %]</label>
+[% WRAPPER setting title="PLUGIN_LBF_WEEKS_UPCOMING" desc="PLUGIN_LBF_WEEKS_UPCOMING_DESC" %]
+<input type="number" name="pref_all_upcoming" value="[% prefs.all_upcoming %]" min="0" max="3" size="4">
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LBF_ALL_TYPES" desc="PLUGIN_LBF_ALL_TYPES_DESC" %]
@@ -174,10 +166,6 @@
 
 [% WRAPPER setting title="PLUGIN_LBF_MUSPY_USERID" desc="PLUGIN_LBF_MUSPY_USERID_HINT" %]
 <input type="text" name="pref_muspy_userid" value="[% prefs.muspy_userid %]" size="40" autocomplete="off">
-[% END %]
-
-[% WRAPPER setting title="PLUGIN_LBF_MUSPY_FUTURE" desc="PLUGIN_LBF_MUSPY_FUTURE_HINT" %]
-<label><input type="checkbox" name="pref_muspy_future" value="1" [% IF prefs.muspy_future %]checked="checked"[% END %]> [% 'PLUGIN_LBF_ENABLED' | string %]</label>
 [% END %]
 
 </div>

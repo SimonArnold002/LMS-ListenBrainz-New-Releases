@@ -242,3 +242,52 @@ convention. README documents *Days window* (`1–90 days`) and *MuSpy upcoming �
 MuSpy paragraph claims the past side "can't reach back further than the Days window, max 90 days" —
 all three need rewriting at that point, along with a `make_readme_html.py` regen so the Pages hero
 badge picks up the new version.
+
+## As changed — per-section weeks, counted from 1 (2026-09-14, 0.9.215, built, not yet installed)
+
+Simon: *"overly complicated and has too many boxes. It also doesn't allow for All Releases to be
+configured differently to For You … starting at week 0 feels wrong. Current week should always be 1."*
+
+**The settings.** Seven controls (`weeks_past`, `weeks_future`, `foryou_past`, `foryou_future`,
+`all_past`, `all_future`, `muspy_future`) became two number boxes per section:
+
+    <section>_weeks     (1-4)            weeks shown IN TOTAL — the current week is week 1
+    <section>_upcoming  (0 .. weeks-1)   how many of those are after the current week
+
+Defaults reproduce what 0.9.185 shipped — For You `4`/`2` (1 back + this + 2 ahead), All Releases
+`2`/`0` (1 back + this). No migration, by the 0.9.185 precedent: the old prefs simply stop being read.
+`main` (0.9.149) never shipped `weeks_*`, so only the four gates and `days` are orphaned for real users.
+
+**Why a total rather than "this week + earlier".** The four-week budget becomes a property of the
+input: `upcoming` is held to `weeks - 1`, so nothing is ever trimmed off one side to make room for
+the other (the old past-first clamp, which silently changed the value the user did not touch, is gone
+from the user-facing path). The internal `(past, future)` pair is DERIVED —
+`past = weeks - 1 - upcoming`, `future = upcoming` — so `_feedWindow`, `_feedRequestDays`,
+`_feedMemoKey` and the store are untouched. `API::clampSectionWeeks` is the one rule, applied on save
+(`Settings::handler`, through `->can`) and on read (`sectionWeeks`).
+
+**MuSpy has no window of its own any more.** Simon: MuSpy should never show anything past four weeks,
+and should roll over the same way the ListenBrainz feed does. Checked before deciding: MuSpy's per-user
+`releases` query is `ORDER BY date DESC` with no date bound (muspy `app/models.py`
+`ReleaseGroup.get`), so the top of our `?limit=100` slice is the furthest-out announcements — the one
+thing MuSpy can show that ListenBrainz cannot. They are still fetched and stored unwindowed; they are
+no longer SHOWN past For You's weeks. So:
+- the `'muspy'` prefix and `%WEEK_GATES` are gone; `_mergeMuSpy` windows on `sectionWindow('foryou')`;
+- `_sectionBounds` no longer unions a MuSpy window (0.9.207's fix is moot, not reverted — with one
+  window for both feeds the union IS the For You window). It stays the single carrier;
+- the nightly MuSpy warm now hands `_warmCovers` / `_queueReleaseDetails` only the rows inside the
+  window (`_filterForYou(_mergeMuSpy([], …))`). It used to warm covers for every stored MuSpy row,
+  months-out announcements included — work for rows nothing draws.
+
+**Observed, not changed:** MuSpy dates with only a year or month are padded to the 1st
+(`API::_padDate`), so an album announced for just "2026" is dated 1 January and never falls inside a
+current window. Pre-existing; out of scope here.
+
+**Tests.** `t_weekwindow.pl` rewritten (62): the (weeks, upcoming) clamp over the whole input space,
+the derived pair, per-section independence, retired prefs inert, MuSpy not a section, the MuSpy warm
+windowed, the sentinel moved to `pref_foryou_weeks`. Anti-tested four ways — upcoming clamp removed
+4 red, sentinel back on `pref_weeks_past` 1 red, merge on a `'muspy'` window 1 red, and (in
+`t_detailwarm.pl` §8, rewritten) the union restored 3 red. `t_feedsingleflight`, `t_review_fixes`,
+`t_cachememo`, `t_coverwarm` and `bench_walk` fixtures moved to the new prefs. `bench_walk.pl` exits
+255 on a clean extract of HEAD too (its API stub lacks `lastfmConfigured`, from 0.9.213) — not this
+change.

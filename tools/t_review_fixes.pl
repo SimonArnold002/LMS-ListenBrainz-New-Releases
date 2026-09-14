@@ -220,7 +220,7 @@ $STUBS
 package F2;
 our \$cache = StubCache->new;
 our \$prefs = StubPrefs->new(
-    weeks_past => 1, weeks_future => 2, foryou_past => 1, foryou_future => 1,
+    foryou_weeks => 4, foryou_upcoming => 2,
     username => 'simon', muspy_userid => ' muspyuser ',
 );
 our \$log = StubLog->new;
@@ -232,10 +232,9 @@ use constant FEED_MEMO_TTL => 30 * 60;
 @{[ grab($api_src, '_memoDropPrefix') ]}
 @{[ grab($api_src, '_today')    ]}
 @{[ ($api_src =~ /^(use constant WEEKS_MAX_SIDE\s*=>.*?;)/m)[0] ]}
-@{[ ($api_src =~ /^(use constant WEEKS_PAST_DEFAULT\s*=>.*?;)/m)[0] ]}
-@{[ ($api_src =~ /^(use constant WEEKS_FUTURE_DEFAULT\s*=>.*?;)/m)[0] ]}
-@{[ ($api_src =~ /^(my %WEEK_GATES = \(.*?\n\);)/ms)[0] ]}
-@{[ grab($api_src, '_clampWeeks')   ]}
+@{[ ($api_src =~ /^(use constant WEEKS_MAX\s*=>.*?;)/m)[0] ]}
+@{[ ($api_src =~ /^(my %WEEK_PREFS = \(.*?\n\);)/ms)[0] ]}
+@{[ grab($api_src, 'clampSectionWeeks') ]}
 @{[ grab($api_src, 'sectionWeeks')  ]}
 @{[ grab($api_src, '_feedMemoKey')  ]}
 @{[ grab($api_src, 'clearFeedCache') ]}

@@ -76,8 +76,8 @@ unlike($1, qr/_queueReleaseDetails/, 'list open, Show more and Show all focus ar
 $src =~ /^(sub _warmReleaseDetails \{.*?^\})/ms or die 'runner missing';
 my $runner = $1;
 # _sectionBounds is lifted too, not stubbed. It is the sub under test in section 8:
-# a hand-written copy here could agree with a broken shipped one, which is the whole
-# failure mode the union exists to prevent.
+# a hand-written copy here could agree with a broken shipped one — say, one that
+# went back to widening For You with a MuSpy window of its own.
 $src =~ /^(sub _sectionBounds \{.*?^\})/ms or die 'section bounds missing';
 my $bounds = $1;
 {
@@ -98,8 +98,8 @@ my $bounds = $1;
     package Slim::Player::Client; sub clients { $R::player ? ('player') : () }
     package Plugins::ListenBrainzFreshReleases::API;
     # PREFIX-AWARE, and that is the point of the stub. A single window for every
-    # prefix cannot tell _sectionBounds' union apart from the plain For You window,
-    # so the old flat stub would have passed against the defect being fixed here.
+    # prefix cannot tell a For You window widened by some other prefix apart from
+    # the plain For You window, so a flat stub would pass against that regression.
     our %WINDOW = (foryou => ['2026-09-01','2026-09-30'],
                    muspy  => ['2026-09-01','2026-09-30'],
                    all    => ['2026-09-01','2026-09-30']);
@@ -145,48 +145,46 @@ is_deeply(\@R::calls, [], 'queued release outside both current windows is skippe
 is($retry, 0, 'obsolete job leaves the queue instead of retrying');
 
 # ==========================================================================
-# 8. MUSPY'S FUTURE GATE IS ITS OWN, AND SOURCE 0 CARRIES BOTH FEEDS
+# 8. MUSPY RIDES FOR YOU'S WEEKS — SOURCE 0 HAS ONE WINDOW
 # ==========================================================================
-# For You renders the LB feed and MuSpy together, on independent future gates
-# (API's %WEEK_GATES). Both enqueue at priority 0 and DetailWarm keys its sources
-# set by priority, so a source-0 job cannot say which feed it came from — which is
-# why eligibility takes the UNION of the two windows rather than the For You one.
+# MuSpy used to carry its own future gate, and source-0 eligibility took the UNION
+# of the For You and MuSpy windows (both feeds enqueue at priority 0, so a job
+# cannot say which feed it came from). MuSpy has no window of its own now: its rows
+# merge into For You and are windowed by For You's weeks, so a source-0 job is
+# judged by the For You window alone — the same window the merge shows.
 #
-# The live shape: foryou_future off, muspy_future on. The merge keeps an upcoming
-# MuSpy release and puts it on screen; judging it by the For You window alone
-# discards its prewarm job with retry 0, so it leaves the queue for good.
+# The stub still answers a WIDER window for a 'muspy' prefix on purpose: if anything
+# went back to asking for one, the bounds below would widen and this section fails.
 {
     local $R::values{'lbf:mb:id'} = undef;
     %R::values = (); @R::calls = (); $R::player = 1;
     local $Plugins::ListenBrainzFreshReleases::API::WINDOW{foryou}
-        = ['2026-09-01','2026-09-07'];    # later weeks off: stops this Sunday
+        = ['2026-09-01','2026-09-14'];    # this week + one upcoming
     local $Plugins::ListenBrainzFreshReleases::API::WINDOW{muspy}
-        = ['2026-09-01','2026-09-30'];    # its own gate reaches three weeks on
+        = ['2026-09-01','2026-09-30'];    # a stale, wider window that must NOT leak in
 
     my $upcoming = {%$rel, release_date => '2026-09-24', _source => 'muspy'};
 
-    my ($from, $to) = R::_sectionBounds('foryou');
-    is_deeply([$from, $to], ['2026-09-01','2026-09-30'],
-              'For You bounds take the far edge of the wider MuSpy window');
+    is_deeply([R::_sectionBounds('foryou')], ['2026-09-01','2026-09-14'],
+              'For You bounds are the For You window — no MuSpy union');
     is_deeply([R::_sectionBounds('all')], ['2026-09-01','2026-09-30'],
-              'All Releases is unaffected — it has no second source to union with');
+              'All Releases bounds are its own window');
 
-    # THE CONTROL. Without it every assertion below also passes against code that
-    # simply widened the For You window: assert the narrow window really would have
-    # refused this release.
-    my ($fFrom, $fTo) = Plugins::ListenBrainzFreshReleases::API->sectionWindow('foryou');
-    ok($upcoming->{release_date} gt $fTo,
-       'the release really does fall outside the For You window — else this proves nothing');
+    # THE CONTROL: the stale MuSpy window really would have accepted this release,
+    # else refusing it below proves nothing about the union being gone.
+    my (undef, $mTo) = Plugins::ListenBrainzFreshReleases::API->sectionWindow('muspy');
+    ok($upcoming->{release_date} le $mTo,
+       'the release is inside the old MuSpy window — else this proves nothing');
 
     R::_warmReleaseDetails($upcoming, sub { $retry = shift }, [0]);
-    is_deeply(\@R::calls, ['mb','stream'],
-              'an upcoming MuSpy release is prewarmed, not discarded as out of window');
+    is_deeply(\@R::calls, [],
+              'a MuSpy release past For You\'s weeks is not prewarmed — it is not shown');
+    is($retry, 0, 'and it leaves the queue rather than retrying');
 
-    # And the bound still bounds: a date past BOTH edges is refused as before.
     @R::calls = ();
-    R::_warmReleaseDetails({%$upcoming, release_date => '2026-11-01'},
+    R::_warmReleaseDetails({%$upcoming, release_date => '2026-09-10'},
                            sub { $retry = shift }, [0]);
-    is_deeply(\@R::calls, [], 'a release past both windows is still skipped');
-    is($retry, 0, 'and still leaves the queue rather than retrying');
+    is_deeply(\@R::calls, ['mb','stream'],
+              'a MuSpy release inside For You\'s weeks is prewarmed');
 }
 done_testing();

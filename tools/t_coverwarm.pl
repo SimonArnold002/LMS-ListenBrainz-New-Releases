@@ -1078,13 +1078,20 @@ section('4c. the warm warms only what will be rendered');
     $warm =~ s/^\s*#.*$//mg;                      # comments cannot satisfy this
     my @calls = $warm =~ /_warmCovers\(([^,]+),/g;
     is_count(scalar(@calls), 4, 'warmFeeds has four cover-warm call sites');
-    my @raw = grep { !/_filter(All|ForYou)\(/ } @calls;
+    # A call site may hand over a variable; it counts as filtered only if that
+    # variable was ASSIGNED from a filter in the same sub.
+    my @raw = grep {
+        my $arg = $_;
+        !($arg =~ /_filter(All|ForYou)\(/
+          || ($arg =~ /^\s*(\$\w+)\s*$/ && $warm =~ /my \Q$1\E = _filter(?:All|ForYou)\(/))
+    } @calls;
     ok(!@raw, 'every one of them filters the feed first'
               . (@raw ? ' — raw: ' . join(' | ', @raw) : ''));
     # And the right filter each: MuSpy rows are merged into For You, so they
-    # answer to that section's settings, not All Releases'.
-    ok(scalar($warm =~ /_warmCovers\(_filterForYou\(\$_\[0\]\), 'muspy'\)/),
-       'the MuSpy site filters through For You, whose feed its rows are merged into');
+    # answer to that section's settings, not All Releases' — and to its WEEKS, so
+    # the far-off announcements MuSpy's store holds are not warmed months early.
+    ok(scalar($warm =~ /my \$shown = _filterForYou\(_mergeMuSpy\(\[\], \$_\[0\]\)\);\s*_warmCovers\(\$shown, 'muspy'\)/),
+       'the MuSpy site filters through For You, windowed to its weeks, whose feed its rows are merged into');
     ok(scalar($warm =~ /_warmCovers\(_filterAll\(\$_\[0\]\), 'all releases'\)/),
        'the All Releases sites filter through All Releases');
 }

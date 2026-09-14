@@ -186,16 +186,13 @@ $prefs->init({
     username             => '',
     token                => '',
     muspy_userid         => '',
-    muspy_future         => 1,
-    # THE RELEASE WINDOW IS WHOLE MONDAY-TO-SUNDAY WEEKS (0.9.185), replacing the
-    # rolling `days` count (1-90, default 14) and MuSpy's `muspy_future_months`.
-    # The current week is ALWAYS included in full — these are the whole weeks
-    # EITHER SIDE of it, and 1 + past + future is capped at four. See
-    # API::sectionWeeks, which is the only place they are read.
-    # `days` and `muspy_future_months` are deliberately NOT migrated or deleted:
-    # they simply stop being read, and everyone lands on 1 back / 2 ahead.
-    weeks_past           => 1,
-    weeks_future         => 2,
+    # THE RELEASE WINDOW IS WHOLE MONDAY-TO-SUNDAY WEEKS, set PER SECTION as
+    # <section>_weeks (total, this week = 1, max 4) + <section>_upcoming (how many
+    # of those are ahead) — see the For You / All Releases blocks below and
+    # API::sectionWeeks, the only reader. MuSpy has no window of its own; it rides
+    # For You's. The retired `days`, `muspy_future_months`, `muspy_future`,
+    # `weeks_past`/`weeks_future` and the four `*_past`/`*_future` gates are
+    # deliberately NOT migrated or deleted: they simply stop being read.
     # Per-view content sort (release_date / artist / album), flipped in place by
     # the "Sorted by …" toggle in each view's Options section — not on the settings
     # page. Both are DURABLE, so the choice sticks across visits and restarts.
@@ -302,8 +299,8 @@ $prefs->init({
     dstm_batch => 15,
 
     # For You section
-    foryou_past             => 1,
-    foryou_future           => 1,   # upcoming releases on by default (0.9.79) — new installs only; existing prefs win
+    foryou_weeks            => 4,   # this week counts as 1; total, max 4 (API::WEEKS_MAX)
+    foryou_upcoming         => 2,   # of those, how many are ahead — 1 back + this + 2 ahead
     foryou_artwork_only     => 1,
     foryou_various          => 1,
     foryou_type_album       => 1,
@@ -318,8 +315,8 @@ $prefs->init({
     foryou_type_demo        => 0,
 
     # All Releases section
-    all_past             => 1,
-    all_future           => 0,
+    all_weeks            => 2,   # last week + this week
+    all_upcoming         => 0,
     all_artwork_only     => 1,
     all_various          => 1,
     all_type_album       => 1,

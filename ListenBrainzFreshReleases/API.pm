@@ -171,11 +171,13 @@ use constant INFLIGHT_MAX => 3 * FEED_TIMEOUT;
 # ragged 14 days of history rather than whole weeks.
 #
 # So the window is now expressed in weeks anchored to Monday, with a hard budget
-# of four weeks in total:
+# of four weeks in total, internally as a (past, future) pair:
 #
-#     weeks_past   (0-3)   whole weeks BEFORE the current one
+#     past   (0-3)         whole weeks BEFORE the current one
 #     [current week]       ALWAYS included, Monday to Sunday, IN FULL
-#     weeks_future (0-3)   whole weeks AFTER the current one
+#     future (0-3)         whole weeks AFTER the current one
+#
+# The user sets it per section as a total and an upcoming count — see %WEEK_PREFS.
 #
 # The current week always being whole is the entire point: a Friday release stays
 # visible until the WEEK rolls out of scope, not until midnight.
@@ -187,24 +189,65 @@ use constant INFLIGHT_MAX => 3 * FEED_TIMEOUT;
 # re-serves releases inside the window it is asked for).
 # ---------------------------------------------------------------------------
 use constant WEEKS_MAX_SIDE => 3;   # current week + 3 = the four-week budget
+use constant WEEKS_MAX      => 1 + WEEKS_MAX_SIDE;   # the same budget, this week counted as 1
 
-# Pref defaults and per-section checkbox gates for the week window. The four
-# per-section boxes survive the move from days to weeks as pure ON/OFF GATES —
-# unticked means ZERO weeks on that side, for that section only — which is what
-# keeps For You and All Releases on their independent defaults (foryou_future on,
-# all_future off) without a second window pref each.
-#
-# 'muspy' is the For You window with a different FUTURE gate: MuSpy is a small,
-# user-curated follow list whose whole value is upcoming releases, so its future
-# side has always had its own toggle. It is just measured in the same weeks now
-# (muspy_future_months is retired).
+# _clampWeeks' fallbacks for a garbage (past, future) pair handed straight to
+# _feedWindow. sectionWeeks never produces one; these are a backstop only.
 use constant WEEKS_PAST_DEFAULT   => 1;
 use constant WEEKS_FUTURE_DEFAULT => 2;
-my %WEEK_GATES = (
-    foryou => [ 'foryou_past', 1, 'foryou_future', 1 ],
-    all    => [ 'all_past',    1, 'all_future',    0 ],
-    muspy  => [ 'foryou_past', 1, 'muspy_future',  1 ],
+
+# THE WINDOW PREFS ARE PER SECTION, AND COUNTED THE WAY A PERSON COUNTS.
+# Each section stores two numbers:
+#
+#     <section>_weeks     (1-4)            weeks shown IN TOTAL — this week is week 1
+#     <section>_upcoming  (0 .. weeks-1)   how many of those are AHEAD of this week
+#
+# They replace the shared weeks_past / weeks_future pair, the four per-section
+# past/future checkboxes and MuSpy's own future checkbox: seven controls to say two
+# numbers per section, with no way to give All Releases a different window from
+# For You, and a zero on the field that meant "this week only". Counting the TOTAL
+# makes the four-week budget a property of the input — nothing is ever trimmed off
+# one side to make room for the other. The internal (past, future) pair everything
+# downstream uses is derived, never stored:
+#
+#     past = weeks - 1 - upcoming,   future = upcoming
+#
+# MUSPY HAS NO WINDOW OF ITS OWN. Its rows merge into For You and answer to For
+# You's two numbers exactly, rolling over each Monday with the ListenBrainz feed.
+# MuSpy's API still returns announcements months ahead (newest-first, no date
+# bound) and those are still stored — they are just never SHOWN past four weeks.
+#
+# The defaults are what 0.9.185 shipped: For You 1 back + this + 2 ahead, All
+# Releases 1 back + this. Old prefs are not migrated (the 0.9.185 precedent); they
+# simply stop being read.
+my %WEEK_PREFS = (
+    foryou => [ 'foryou_weeks', 4, 'foryou_upcoming', 2 ],
+    all    => [ 'all_weeks',    2, 'all_upcoming',    0 ],
 );
+
+# ($weeksPref, $weeksDefault, $upcomingPref, $upcomingDefault) for a section, or ()
+# — what Settings::handler needs to clamp the form by the same rule as the read.
+sub sectionWeekPrefs {
+    my ($class, $prefix) = @_;
+    ($class, $prefix) = (undef, $class) unless defined $prefix;
+    my $p = $WEEK_PREFS{ $prefix // '' } or return ();
+    return @$p;
+}
+
+# THE ONE CLAMP for a section's (weeks, upcoming), used on save AND on read because
+# prefs.yaml is hand-editable. Garbage falls back to the default; weeks is held to
+# 1..WEEKS_MAX and upcoming to 0..weeks-1, so the current week is always shown.
+sub clampSectionWeeks {
+    my ($weeks, $upcoming, $defWeeks, $defUpcoming) = @_;
+    $weeks    = $defWeeks    unless defined $weeks    && $weeks    =~ /^\s*\d+\s*$/;
+    $upcoming = $defUpcoming unless defined $upcoming && $upcoming =~ /^\s*\d+\s*$/;
+    $weeks    += 0;
+    $upcoming += 0;
+    $weeks    = 1          if $weeks < 1;
+    $weeks    = WEEKS_MAX  if $weeks > WEEKS_MAX;
+    $upcoming = $weeks - 1 if $upcoming > $weeks - 1;
+    return ($weeks, $upcoming);
+}
 
 # THE ONE PLACE THE WEEK PREFS ARE READ. It replaces ~12 duplicated
 # `$prefs->get('days') // 14` + past/future read sites across Browse.pm and the
@@ -216,16 +259,16 @@ my %WEEK_GATES = (
 # the identical memo key, and a memo key that disagrees with the fetcher's is the
 # 0.9.141 Refresh bug arriving from a new direction.
 #
-# Returns the GATED, CLAMPED week counts for $prefix ('foryou' | 'all' | 'muspy').
+# Returns the CLAMPED (past, future) whole-week counts for $prefix ('foryou' | 'all'),
+# derived from that section's (weeks, upcoming). MuSpy asks for 'foryou'.
 sub sectionWeeks {
     my ($class, $prefix) = @_;
     ($class, $prefix) = (undef, $class) unless defined $prefix;   # callable either way
-    my $g = $WEEK_GATES{ $prefix // '' } or return (0, 0);
+    my $p = $WEEK_PREFS{ $prefix // '' } or return (0, 0);
 
-    my ($wp, $wf) = _clampWeeks($prefs->get('weeks_past'), $prefs->get('weeks_future'));
-    $wp = 0 unless ($prefs->get($g->[0]) // $g->[1]);
-    $wf = 0 unless ($prefs->get($g->[2]) // $g->[3]);
-    return ($wp, $wf);
+    my ($weeks, $upcoming) = clampSectionWeeks(
+        $prefs->get($p->[0]), $prefs->get($p->[2]), $p->[1], $p->[3]);
+    return ($weeks - 1 - $upcoming, $upcoming);
 }
 
 # THE FEED MEMO KEY, BUILT IN EXACTLY ONE PLACE. The fetcher mints it and
@@ -302,7 +345,7 @@ sub _feedWindow {
 # old pref's 90 ceiling; the over-fetched rows on the narrower side are simply
 # stored, and nothing shows them.
 #
-# `future` comes back TRUE even when the user's "later weeks" box is off, because
+# `future` comes back TRUE even when the section has zero upcoming weeks, because
 # the current week runs to Sunday. That is intended, and it is the mechanism
 # behind whole weeks.
 sub _feedRequestDays {

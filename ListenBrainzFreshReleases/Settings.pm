@@ -22,9 +22,9 @@ my $log   = logger('plugin.listenbrainzfreshreleases');
 # undef-reads-ON bug for that one type).
 my @TYPE_KEYS = qw(album single ep broadcast other compilation soundtrack live remix demo);
 my @CHECKBOX_PREFS = (
-    qw(play_via people_follow prefer_library debug_log warm_covers muspy_future),
-    qw(foryou_past foryou_future foryou_artwork_only foryou_various),
-    qw(all_past all_future all_artwork_only all_various),
+    qw(play_via people_follow prefer_library debug_log warm_covers),
+    qw(foryou_artwork_only foryou_various),
+    qw(all_artwork_only all_various),
     (map { "foryou_type_$_" } @TYPE_KEYS),
     (map { "all_type_$_"    } @TYPE_KEYS),
 );
@@ -39,12 +39,12 @@ sub page {
 
 sub prefs {
     return ($prefs, qw(
-        username token muspy_userid muspy_future weeks_past weeks_future play_via people_follow prefer_library mb_base_url genre_lookup debug_log warm_covers
+        username token muspy_userid play_via people_follow prefer_library mb_base_url genre_lookup debug_log warm_covers
         svc_priority_qobuz svc_priority_bandcamp svc_priority_tidal svc_priority_deezer svc_priority_spotify
-        foryou_past foryou_future foryou_artwork_only foryou_various
+        foryou_weeks foryou_upcoming foryou_artwork_only foryou_various
         foryou_type_album foryou_type_single foryou_type_ep foryou_type_broadcast foryou_type_other
         foryou_type_compilation foryou_type_soundtrack foryou_type_live foryou_type_remix foryou_type_demo
-        all_past all_future all_artwork_only all_various
+        all_weeks all_upcoming all_artwork_only all_various
         all_type_album all_type_single all_type_ep all_type_broadcast all_type_other
         all_type_compilation all_type_soundtrack all_type_live all_type_remix all_type_demo
     ));
@@ -67,17 +67,17 @@ sub handler {
         # Guard: only coerce when this is the REAL settings form (an unchecked box
         # and a box absent because the POST is partial/non-form are indistinguishable,
         # so a blind coercion would zero every toggle on a partial save — the same
-        # hazard the svc_priority block below guards against). `pref_weeks_past` is a
-        # number field the full form always submits, so its presence confirms the
+        # hazard the svc_priority block below guards against). `pref_foryou_weeks` is
+        # a number field the full form always submits, so its presence confirms the
         # form was posted; a partial POST skips coercion and falls back to the base
         # handler (same philosophy as the svc_priority "keep current on partial" rule).
         #
-        # THE SENTINEL MOVES WITH THE FORM. It was `pref_days` until 0.9.185, and
-        # `days` was retired by the week-window change. Deleting that field without
-        # moving the sentinel would have broken EVERY checkbox on the page at once —
-        # never coerced, so an unticked box stores undef and reads back ON through
-        # the `// 1` guards, making all_past / foryou_past impossible to turn off.
-        if (exists $params->{pref_weeks_past}) {
+        # THE SENTINEL MOVES WITH THE FORM. It was `pref_days` until 0.9.185, then
+        # `pref_weeks_past` until the per-section week window retired that field.
+        # Deleting the field without moving the sentinel breaks EVERY checkbox on the
+        # page at once — never coerced, so an unticked box stores undef and reads
+        # back ON through the `// 1` guards, and can never be turned off.
+        if (exists $params->{pref_foryou_weeks}) {
             for my $cb (@CHECKBOX_PREFS) {
                 $params->{"pref_$cb"} = $params->{"pref_$cb"} ? 1 : 0;
             }
@@ -87,32 +87,30 @@ sub handler {
         # params BEFORE SUPER::handler runs. These prefs are in the prefs() list,
         # so the base handler re-sets each one from $params->{pref_*}; setting the
         # pref directly here would simply be overwritten by the raw input.
-        # THE WEEK WINDOW. 0-3 a side, and the current week plus both sides is
-        # capped at four (API::WEEKS_MAX_SIDE). Over budget, the PAST side is
-        # honoured and the future takes what is left — the same rule as
-        # API::_clampWeeks, which clamps again at read time because a pref can also
-        # be hand-edited in prefs.yaml. Writing the clamped value back into $params
-        # is what makes the page come back showing what was actually stored.
-        # Runtime `require` + arrow calls, never bareword cross-package constants:
+        # THE WEEK WINDOW, per section: weeks shown in total (1-4, this week is
+        # week 1) and how many of those are upcoming (0 .. weeks-1). The rule is
+        # API::clampSectionWeeks — the same one sectionWeeks applies at read time,
+        # because a pref can also be hand-edited in prefs.yaml. A field missing
+        # from the POST keeps its STORED value, not a default. Writing the clamped
+        # pair back into $params is what makes the page come back showing what was
+        # actually stored (e.g. 2 weeks with 3 upcoming comes back as 2 with 1).
+        # Runtime `require` + `->can`, never a bareword cross-package reference:
         # a bareword is resolved at COMPILE time and killed the whole module in
-        # 0.9.166. Settings.pm is loaded before API.pm at startup, so the bounds
-        # cannot be read at compile time here even if they were spelled that way.
+        # 0.9.166, and Settings.pm is loaded before API.pm at startup.
         require Plugins::ListenBrainzFreshReleases::API;
-        my $A    = 'Plugins::ListenBrainzFreshReleases::API';
-        my $max  = $A->WEEKS_MAX_SIDE;
-        my %wdef = ( weeks_past   => $A->WEEKS_PAST_DEFAULT,
-                     weeks_future => $A->WEEKS_FUTURE_DEFAULT );
-        my %w;
-        for my $k (qw(weeks_past weeks_future)) {
-            my $v = $params->{"pref_$k"};
-            $v = $wdef{$k} unless defined $v && $v =~ /^\d+$/;
-            $v = 0    if $v < 0;
-            $v = $max if $v > $max;
-            $w{$k} = $v + 0;
+        my $A     = 'Plugins::ListenBrainzFreshReleases::API';
+        my $clamp = $A->can('clampSectionWeeks');
+        for my $section (qw(foryou all)) {
+            my ($wk, $wd, $uk, $ud) = $A->sectionWeekPrefs($section);
+            next unless $wk && $clamp;
+            for my $k ($wk, $uk) {
+                $params->{"pref_$k"} = $prefs->get($k)
+                    unless defined $params->{"pref_$k"} && $params->{"pref_$k"} =~ /\S/;
+            }
+            my ($w, $u) = $clamp->($params->{"pref_$wk"}, $params->{"pref_$uk"}, $wd, $ud);
+            $params->{"pref_$wk"} = $w;
+            $params->{"pref_$uk"} = $u;
         }
-        $w{weeks_future} = $max - $w{weeks_past}
-            if $w{weeks_past} + $w{weeks_future} > $max;
-        $params->{"pref_$_"} = $w{$_} for keys %w;
 
         # Normalise the service priorities to integers 0-9 (0 = never search).
         # If a field is absent from the POST (a partial / non-form submission)

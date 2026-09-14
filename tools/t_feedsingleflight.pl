@@ -230,13 +230,12 @@ require Plugins::ListenBrainzFreshReleases::API;
 my $api = 'Plugins::ListenBrainzFreshReleases::API';
 
 $PREFS{username} = 'CrystalGipsy';
-# BOTH GATES ON, or sectionWeeks zeroes the side the section is varying and every
-# section collapses onto one memo key again. all_future is `// 0` by default, which
-# is correct for the product and useless here.
-$PREFS{all_past} = 1;
-$PREFS{all_future} = 1;
-$PREFS{foryou_past} = 1;
-$PREFS{foryou_future} = 1;
+
+# The section's week prefs for a (past, future) pair: a total, this week counted as
+# 1, and how many of those are upcoming. Every pair this file uses fits the four-week
+# budget, so nothing is clamped onto a key another section already holds.
+sub all_weeks_for  { my ($wp, $wf) = @_; ($PREFS{all_weeks},    $PREFS{all_upcoming})    = (1 + $wp + $wf, $wf) }
+sub foryou_weeks_for { my ($wp, $wf) = @_; ($PREFS{foryou_weeks}, $PREFS{foryou_upcoming}) = (1 + $wp + $wf, $wf) }
 
 # Open the All Releases feed. Returns a recorder the test inspects.
 #
@@ -248,8 +247,9 @@ $PREFS{foryou_future} = 1;
 # actually happened on the first run of this file.)
 sub open_feed {
     my (%o) = @_;
-    local $PREFS{weeks_past}   = $o{wp} // 0;
-    local $PREFS{weeks_future} = $o{wf} // 0;
+    local $PREFS{all_weeks}    = $PREFS{all_weeks};
+    local $PREFS{all_upcoming} = $PREFS{all_upcoming};
+    all_weeks_for($o{wp} // 0, $o{wf} // 0);
     my $r = { done => [], error => [] };
     $api->getFreshReleasesAll(
         sort => 'release_date',
@@ -388,8 +388,8 @@ section '6. ONLY IDENTICAL REQUESTS SHARE — the headers are part of the key';
     my $mk = sub {
         my ($token) = @_;
         local $PREFS{token} = $token;
-        local $PREFS{weeks_past}   = 2;
-        local $PREFS{weeks_future} = 1;
+        local $PREFS{foryou_weeks}    = 4;   # 2 back + this + 1 ahead
+        local $PREFS{foryou_upcoming} = 1;
         my $r = { done => [], error => [] };
         $api->getFreshReleasesForUser(
             sort => 'release_date',
@@ -423,8 +423,8 @@ section '7. A DIE IN THE FIRST CALLER MUST NOT STRAND THE CLAIM';
     # returned without rendering, for the life of the process.
     my $waiter = { done => [], error => [] };
     {
-        local $PREFS{weeks_past}   = 3;
-        local $PREFS{weeks_future} = 1;
+        local $PREFS{all_weeks}    = 4;   # 3 back + this
+        local $PREFS{all_upcoming} = 0;
         $api->getFreshReleasesAll(
             sort => 'release_date',
             onDone  => sub { die "render blew up\n" },     # the FIRST caller
@@ -448,8 +448,8 @@ section '7. A DIE IN THE FIRST CALLER MUST NOT STRAND THE CLAIM';
     @REQUESTS = ();
     my $later = { done => [], error => [] };
     {
-        local $PREFS{weeks_past}   = 3;
-        local $PREFS{weeks_future} = 1;
+        local $PREFS{all_weeks}    = 4;   # 3 back + this
+        local $PREFS{all_upcoming} = 0;
         $api->getFreshReleasesAll(
             sort => 'release_date',
             onDone  => sub { push @{ $later->{done} },  $_[0] },
@@ -478,9 +478,9 @@ section '8. THE LEAK WATCHDOG — a result that NEVER ARRIVES still frees the ke
     # in-process by design, so nothing else would ever free the key.
     my $waiter = { done => [], error => [] };
     {
-        local $PREFS{weeks_past}   = 2;
-        local $PREFS{weeks_future} = 2;
-        open_feed(wp => 2, wf => 2);
+        local $PREFS{all_weeks}    = 4;   # 2 back + this + 1 ahead
+        local $PREFS{all_upcoming} = 1;
+        open_feed(wp => 2, wf => 1);
         $api->getFreshReleasesAll(
             sort => 'release_date',
             onDone  => sub { push @{ $waiter->{done} },  $_[0] },
@@ -502,7 +502,7 @@ section '8. THE LEAK WATCHDOG — a result that NEVER ARRIVES still frees the ke
 
     %Plugins::ListenBrainzFreshReleases::API::FEED_MEMO = ();
     @REQUESTS = ();
-    open_feed(wp => 2, wf => 2);
+    open_feed(wp => 2, wf => 1);
     is(scalar(@REQUESTS), 1, 'and the freed key lets the next open reach the network');
 }
 

@@ -122,7 +122,7 @@ my %SECTION_MEMO;
 
     %ViewPrefs::P = (
         all_type_album => 1, all_artwork_only => 1, all_various => 1,
-        all_past => 1, all_future => 0, weeks_past => 1, weeks_future => 2,
+        all_weeks => 2, all_upcoming => 0,
         blocked_artists => [],
     );
     my $source = [{ release_name => 'A' }];

@@ -3502,9 +3502,9 @@ sub warmFeeds {
         $finish->();
     });
 
-    # MuSpy rides the For You feed and has its own (much wider) window, so warm it
-    # too — it is a no-op without a configured user id. Last because it is the
-    # narrowest audience: most users have no MuSpy id at all.
+    # MuSpy rides the For You feed and its window, so warm it too — it is a no-op
+    # without a configured user id. Last because it is the narrowest audience: most
+    # users have no MuSpy id at all.
     my $muspy = sub {
         _stage('start', 'muspy_feed');
         Plugins::ListenBrainzFreshReleases::API->getMuSpyReleases(
@@ -3515,11 +3515,16 @@ sub warmFeeds {
                 my $n = scalar(@{ $_[0] // [] });
                 _stage('end', 'muspy_feed', 'done', "$n releases");
                 _dbg("warm: muspy — $n stored");
-                # FILTER FIRST — same rule and same reason as _warmGenres above it.
-                # MuSpy rows are merged into For You, so they answer to that
-                # section's settings.
-                _warmCovers(_filterForYou($_[0]), 'muspy');
-                _queueReleaseDetails(_filterForYou($_[0]), 'muspy');
+                # WINDOW AND FILTER FIRST — same rule and same reason as _warmGenres
+                # above it. MuSpy rows are merged into For You, so they answer to
+                # that section's settings AND its weeks. The store holds MuSpy's
+                # far-off announcements unwindowed (so they appear when the week
+                # rolls round); warming their covers and details months early is
+                # work for rows nothing draws. _mergeMuSpy onto an empty LB list
+                # is exactly the rows the view will show.
+                my $shown = _filterForYou(_mergeMuSpy([], $_[0]));
+                _warmCovers($shown, 'muspy');
+                _queueReleaseDetails($shown, 'muspy');
                 $finish->();
             },
         );
@@ -3816,8 +3821,8 @@ sub _warmReleaseDetails {
             my $section = $source == 0 ? 'foryou' : 'all';
             my $filtered = $source == 0 ? _filterForYou([$rel]) : _filterAll([$rel]);
             next unless @$filtered;
-            # _sectionBounds, NOT sectionWindow: priority 0 carries MuSpy as well as
-            # For You, and MuSpy's future gate is its own.
+            # _sectionBounds, the one carrier of a section's date bounds (priority 0
+            # carries MuSpy as well as For You; both answer to For You's weeks).
             my ($from, $to) = _sectionBounds($section);
             my $date = $rel->{release_date} // '';
             $eligible = 1 if !$date || ($date ge $from && $date le $to);
@@ -4580,10 +4585,11 @@ my %SECTION_MEMO;    # prefix => [ expiry, sig, [ source refs ], result ]
 
 # Every pref that can change what a section's derived list contains: the type
 # checkboxes, the Various-Artists and artwork gates, the blocklist, and the exact
-# date bounds the section's rows can occupy (_sectionBounds — For You that is the
-# For You window unioned with MuSpy's). The LB source identity already changes with
-# its dated memo key, but recording the effective window here too makes the
-# processed-list cache independently safe across Monday and preference rollovers.
+# date bounds the section's rows can occupy (_sectionBounds — one window per
+# section; MuSpy rows are For You rows and answer to For You's weeks). The LB
+# source identity already changes with its dated memo key, but recording the
+# effective window here too makes the processed-list cache independently safe
+# across Monday and preference rollovers.
 # Artist-sort and genre facts are deliberately absent: neither is baked into this
 # list. _sortWithin and _withGenres re-read them downstream on every render, so a
 # newly landed enrichment is visible without throwing away filtering/dedupe work.
@@ -4593,7 +4599,7 @@ sub _sectionSig {
     push @v, ($prefs->get("${prefix}_artwork_only") // 1) ? 1 : 0;
     push @v, ($prefs->get("${prefix}_various")      // 1) ? 1 : 0;
     push @v, map { $prefs->get($_) // '' }
-        qw(foryou_past foryou_future all_past all_future muspy_future weeks_past weeks_future);
+        qw(foryou_weeks foryou_upcoming all_weeks all_upcoming);
     push @v, _sectionBounds($prefix);
     my $blocked = $prefs->get('blocked_artists');
     push @v, ref $blocked eq 'ARRAY'
@@ -4650,56 +4656,35 @@ sub _forYouSection {
 # MuSpy merge (For You feed only)
 # ---------------------------------------------------------------------------
 # Merge the user's MuSpy followed-artist releases into the ListenBrainz For You
-# list. MuSpy returns release groups newest-first but NOT windowed to the plugin's
-# day range (its API takes limit/offset only), so window them here, then
-# concatenate. Overlap dedupe is left to _dedupeReleases (via _sortReleases), which
-# prefers the copy that has cover art — naturally keeping the richer ListenBrainz
-# entry on a duplicate.
+# list. MuSpy returns release groups NOT windowed to the plugin's range — its API
+# takes limit/offset only and sorts newest-first, so the furthest-out announcements
+# come FIRST — so window them here, then concatenate. Overlap dedupe is left to
+# _dedupeReleases (via _sortReleases), which prefers the copy that has cover art —
+# naturally keeping the richer ListenBrainz entry on a duplicate.
 #
-# MUSPY RIDES THE SAME WEEK WINDOW (0.9.185). It used to have its own units — a
-# `muspy_future_months` cap, up to 24 MONTHS, against the LB feed's rolling days —
-# and that pref is retired. What survives is the GATE: `muspy_future` (default ON)
-# decides whether MuSpy contributes a future side at all, independently of
-# foryou_future, because MuSpy is a small list of artists the user explicitly
-# followed and upcoming releases are the whole point of following them. That is
-# exactly what API::sectionWeeks' 'muspy' prefix is — the For You window with
-# muspy_future in place of foryou_future. (Consequence, unchanged: with the
-# defaults, even when the LB "later weeks" box is off the feed can show past-LB +
-# future-MuSpy together. A user who doesn't want that turns muspy_future off.)
+# MUSPY RIDES FOR YOU'S WEEKS, EXACTLY. It used to have its own units — a
+# `muspy_future_months` cap (retired 0.9.185), then its own `muspy_future` gate on
+# the upcoming side (retired with the per-section week prefs). Neither survives:
+# MuSpy rows ARE For You rows, so they are windowed by API::sectionWindow('foryou')
+# and can never be shown past the four-week budget.
 #
-# NOTHING FAR OUT IS LOST BY THE NARROWER WINDOW. MuSpy is fetched `?limit=100`
-# newest-first, stored with rotation OFF and read back from the store UNWINDOWED,
-# so an album announced three months out is fetched and HELD today — the week
-# window only decides whether it is DISPLAYED. Each Monday the forward edge rolls
-# on and it appears. Rows age out on `seen_at` in DB::feedSweep at 120 days, and
-# upcoming releases sit at the top of MuSpy's newest-first list, so they keep being
+# NOTHING FAR OUT IS LOST BY THAT. MuSpy is fetched `?limit=100`, stored with
+# rotation OFF and read back from the store UNWINDOWED, so an album announced three
+# months out is fetched and HELD today — the window only decides whether it is
+# DISPLAYED. Each Monday the forward edge rolls on and it appears: the same rollover
+# the ListenBrainz feed gets. Rows age out on `seen_at` in DB::feedSweep at 120
+# days, and upcoming releases sit at the top of MuSpy's list, so they keep being
 # refreshed while they wait.
+#
 # THE DATE BOUNDS A SECTION'S ROWS CAN OCCUPY — one carrier, because three places
-# outside the merge below have to answer this and two of them used to answer it
-# with the For You window alone.
-#
-# For You renders TWO sources with INDEPENDENT future gates: the LB feed on API's
-# 'foryou' prefix and MuSpy on 'muspy' (the same past gate, its own future one —
-# see %WEEK_GATES). The section's bounds are therefore the UNION of the two, and
-# that is not rounding up: with foryou_future off and muspy_future on, the merge
-# below KEEPS an upcoming MuSpy release that the For You window alone calls out of
-# range — which is exactly how a visible release lost its detail prewarm.
-#
-# The union rather than a per-release test, because the detail-warm queue cannot
-# tell the two apart: both feeds enqueue at priority 0 and DetailWarm keys its
-# sources set by priority, while $job->{rel} is replaced by whichever enqueue
-# landed last. Over-accepting costs one prewarm nobody reads; under-accepting
-# costs the user a cold tap on a release that is on screen.
+# outside the merge (the detail-warm eligibility test, _sectionSig and _windowSpan)
+# have to answer it, and two of them once answered it differently from the merge.
+# For You used to be the UNION of its own window and MuSpy's, while MuSpy had a
+# separate future gate. With one window for both, the For You window IS the bound —
+# and this stays the single sub those callers go through, so they cannot drift.
 sub _sectionBounds {
     my ($section) = @_;
-
-    my ($from, $to) = Plugins::ListenBrainzFreshReleases::API->sectionWindow($section);
-    return ($from, $to) unless $section eq 'foryou';
-
-    # Zero-padded, so a lexical compare is a chronological one (as in the merge).
-    my ($mFrom, $mTo) = Plugins::ListenBrainzFreshReleases::API->sectionWindow('muspy');
-    return ((defined $mFrom && $mFrom lt $from ? $mFrom : $from),
-            (defined $mTo   && $mTo   gt $to   ? $mTo   : $to));
+    return Plugins::ListenBrainzFreshReleases::API->sectionWindow($section);
 }
 
 sub _mergeMuSpy {
@@ -4707,16 +4692,13 @@ sub _mergeMuSpy {
     $lb = [] unless ref $lb eq 'ARRAY';
     return $lb unless ref $muspy eq 'ARRAY' && @$muspy;
 
-    my ($lo, $hi) = Plugins::ListenBrainzFreshReleases::API->sectionWindow('muspy');
+    my ($lo, $hi) = Plugins::ListenBrainzFreshReleases::API->sectionWindow('foryou');
 
     my @kept;
     for my $r (@$muspy) {
         my $d = $r->{release_date} // '';
         next unless $d =~ /^\d{4}-\d{2}-\d{2}$/;   # padded on ingest; skip the undatable
-        # Dates are zero-padded, so a lexical compare is a chronological one. Both
-        # gates are already folded into the window: a side whose box is unticked
-        # contributes zero weeks, so its edge collapses onto the current week's
-        # Monday or Sunday and nothing beyond it can match.
+        # Dates are zero-padded, so a lexical compare is a chronological one.
         push @kept, $r if $d ge $lo && $d le $hi;
     }
     $log->info("MuSpy merge: kept " . scalar(@kept) . " of " . scalar(@$muspy) . " within window [$lo .. $hi]")
@@ -6133,17 +6115,14 @@ sub _dateSpan {
     return _fmtDate($min) . " \x{2013} " . _fmtDate($max);
 }
 
-# The date window implied by the user's settings for a section, used as the tile
-# subtitle until a real feed summary is cached. past → back $days; future →
-# forward $days; both → either side; neither → today only.
+# The date window implied by the user's settings for a section — its whole weeks —
+# used as the tile subtitle until a real feed summary is cached.
 sub _windowSpan {
     my ($which) = @_;
     # The SAME bounds the section's rows can occupy, from _sectionBounds — not a
     # second computation from the same prefs. The tile subtitle is the one place
     # a drifting copy would be invisible: it would simply state a span the feed
-    # never had. For You takes the bounds rather than API::sectionWindow('foryou')
-    # because the MuSpy rows merged into it answer to their own future gate, and
-    # a subtitle that stops short of them describes a feed the user isn't looking at.
+    # never had.
     my ($from, $to) = _sectionBounds($which eq 'user' ? 'foryou' : 'all');
     return _dateSpan($from, $to);
 }
