@@ -13,6 +13,8 @@ use Slim::Music::Import;
 use Slim::Utils::OSDetect;
 use File::Spec;
 use Time::HiRes ();
+use Digest::MD5 qw(md5_hex);
+use POSIX ();
 
 # Background cache-warm timing: first run shortly after startup (so it doesn't
 # compete with boot), then once a day. Daily is cheap because the playlist
@@ -43,8 +45,22 @@ sub version {
     return $VERSION;
 }
 
-use constant WARM_DELAY      => 60;          # seconds after startup
-use constant WARM_INTERVAL   => 24 * 3600;   # daily
+use constant WARM_DELAY      => 180;         # seconds after startup, before the CATCH-UP
+                                            # warm. Raised from 60 in the fixed-clock
+                                            # build: the 0.9.195 diagnosis is direct
+                                            # evidence that 60s post-boot is the worst
+                                            # moment on the machine — the cold pass ran
+                                            # while the box was saturated by its own boot
+                                            # and pinned 8 false no-matches. Under the
+                                            # startup gate the catch-up fires far less
+                                            # often, which makes waiting longer cheap.
+use constant WARM_MERGE      => 3600;        # a tick due this close BEFORE a scheduled
+                                            # warm folds into it — see _catchUpFold.
+use constant WARM_INTERVAL   => 24 * 3600;   # daily — the documented CEILING and the
+                                            # fallback if _secsUntilNextWarm ever answers
+                                            # something non-sensical. NOT the re-arm.
+use constant WARM_HOUR       => 5;          # LOCAL hour to start the overnight warm
+use constant WARM_JITTER_MAX => 1800;       # per-install spread, 0..1799s
 # While a library scan is running the local-library tier is incomplete, so a warm
 # that ran then would miss every owned track and cache that all-streaming result
 # for the resolved-playlist TTL (days) — and later warms skip an already-cached
@@ -680,7 +696,7 @@ sub postinitPlugin {
         1;
     } or $log->error("Store prefix retirement failed: $@");
 
-    _buildChanged();
+    my $buildChanged = _buildChanged();
 
     if ( Slim::Utils::PluginManager->isEnabled('Plugins::MaterialSkin::Plugin')
       && Plugins::MaterialSkin::Plugin->can('registerHomeExtra') ) {
@@ -706,7 +722,10 @@ sub postinitPlugin {
     # playlist open instantly and the tile artwork is pre-rendered. A daily tick
     # is cheap (caches keyed by last_modified; real work only when a new week's
     # playlist lands). First run is delayed so it doesn't compete with boot.
-    Slim::Utils::Timers::setTimer(undef, time() + WARM_DELAY, \&_warmTick);
+    # Through the GATE, not unconditionally — see _armWarm. The answer to "did the
+    # build change?" is PASSED IN because _buildChanged consumed it above and
+    # cannot be re-asked.
+    _armWarm($buildChanged);
 
     # If no MusicBrainz base is configured, probe for a same-host mirror once so a
     # musicbrainz-docker instance on this machine is used with zero config. Async,
@@ -735,7 +754,14 @@ sub _buildChanged {
     return unless length $version;
 
     my $seen = $prefs->get('last_build') // '';
-    return if $seen eq $version;
+    # ANSWER THE QUESTION, do not just act on it. The startup warm gate has to know
+    # whether this fired, and it CANNOT re-ask: the eval below sets `last_build` to
+    # the running version as its last act, so a second call takes this very return.
+    # Returning a bare `return` here (undef) and the eval's value below would make
+    # the two paths indistinguishable, and the gate's build-changed branch would be
+    # dead code — a clean-load test build restarting after its scheduled hour would
+    # silently skip the refill it exists for.
+    return 0 if $seen eq $version;
 
     eval {
         require Plugins::ListenBrainzFreshReleases::DB;
@@ -781,6 +807,244 @@ sub _buildChanged {
         $prefs->set('last_build', $version);
         1;
     } or $log->error("Build-change cache handling failed: $@");
+
+    # A DIFFERENT BUILD WAS SEEN, whether or not the wipe itself succeeded. The gate
+    # wants "is this a new build?", not "did the wipe work" — a half-wiped store is
+    # the case that most needs a catch-up warm, not least.
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# THE MOST RECENT SCHEDULED WARM INSTANT.
+#
+# The mirror image of _secsUntilNextWarm, built by the SAME one-liner (_warmInstantOn)
+# so the two can never disagree about where the boundary is: today's scheduled
+# instant if it has already passed, otherwise yesterday's. At or before $now, and
+# never more than a local day back (25 hours across the autumn change).
+#
+# NOT `$now + _secsUntilNextWarm($now) - 86400`, which is what this was. A local day
+# is not 86400 seconds twice a year, so on those days that answer was an hour off
+# the real instant — and on the autumn day it made a restart that had already
+# warmed read as "no warm since the last scheduled hour" and run a needless
+# catch-up.
+sub _lastWarmInstant {
+    my ($now) = @_;
+    $now = time() unless defined $now;
+    # FROM TOMORROW DOWN, not from today: the first candidate at or before $now is
+    # then the LATEST one even if the local date were ever read one day off — a
+    # loop starting at today would stop at yesterday's and skip today's.
+    for my $d (1, 0, -1, -2) {
+        my $at = _warmInstantOn($now, $d);
+        return $at if $at <= $now;
+    }
+    return $now - 86400;   # unreachable: yesterday's instant is always in the past
+}
+
+# The scheduled instant on the local day $d days from $now's: WARM_HOUR plus the
+# jitter, as a real LOCAL time. mktime normalises the day overflow (the 32nd, the
+# 0th) and, with isdst = -1, works out whether that date is in summer time — which
+# is the whole reason it exists. See _secsUntilNextWarm for why seconds-arithmetic
+# cannot do this.
+sub _warmInstantOn {
+    my ($now, $d) = @_;
+    my @t = localtime($now);
+    return POSIX::mktime(_warmJitter(), 0, WARM_HOUR, $t[3] + $d, $t[4], $t[5], 0, 0, -1);
+}
+
+# One place that arms a warm timer, so the suite has a seam and the three kinds are
+# named rather than told apart by their delay.
+sub _armTimer {
+    my ($in, $what) = @_;
+    my %cb = (
+        tick   => \&_warmTick,      # the catch-up, shortly after startup
+        clock  => \&_warmTick,      # the next scheduled overnight run
+        reseed => \&_warmReseed,    # skip path: rebuild the queue, fetch nothing
+    );
+    Slim::Utils::Timers::setTimer(undef, time() + $in, $cb{$what});
+}
+
+# ---------------------------------------------------------------------------
+# THE STARTUP GATE — "have you had today's warm?", asked once, at startup.
+#
+# WHAT THIS FIXES. Every restart used to run a complete warm 60 seconds later,
+# unconditionally: three forced feed fetches, the genre ladder up to its 400-artist
+# Last.fm cap at one request a second, the playlist listing forced, the follower
+# builds. Restart five times over an evening — a build test, a settings change, a
+# crash — and that is five complete warms, of which only the first could have found
+# anything.
+#
+# WHAT IT MUST NOT BREAK, and this is the regression the whole change could
+# plausibly introduce. The startup tick is NOT redundant and is not being removed:
+#
+#   - THE SCHEDULE HAS NO EXISTENCE OUTSIDE THE PROCESS. The timer lives in
+#     Slim::Utils::Timers, in memory. Nothing on disk remembers that a tick is due.
+#     A machine powered down at 05:00, or restarted more often than the interval,
+#     would NEVER warm at all if the startup tick were simply deleted — and a fixed
+#     clock makes that worse, not better: 24h-from-startup at least fires on any
+#     machine with 24h of uptime, whereas a fixed 05:00 never fires on a server its
+#     owner switches off overnight. The startup tick is the catch-up, and the fixed
+#     clock makes it load-bearing.
+#   - kvSweep AND feedSweep RUN FROM _warmTick AND NOWHERE ELSE. No tick means the
+#     kv table grows without bound.
+#
+# So the gate is "has a tick run since the most recent scheduled instant?", derived
+# from the same clock helper as the schedule itself — there is no second number to
+# tune and no way for the two to disagree. A threshold in hours would have been a
+# second source of truth.
+#
+# THE SKIP BRANCH IS NOT A BARE RETURN. It arms the clock (a gate that skipped the
+# catch-up AND forgot the schedule would stop the plugin warming at all, and would
+# pass a test that only checked "no tick ran"), and it re-seeds the in-memory detail
+# queue from the store, because warmFeeds is that queue's only seeder — see
+# Browse::reseedFromStore.
+#
+# THE CATCH-UP BRANCH ARMS UNCONDITIONALLY, AND THAT IS CORRECT. Whether it should
+# fold into an imminent scheduled warm is decided when it FIRES, in _warmTick, not
+# here — a boot-time scan can move it arbitrarily close to the instant after this
+# sub has answered. See _catchUpFold.
+sub _armWarm {
+    my ($buildChanged, $now) = @_;
+    $now = time() unless defined $now;
+
+    my $lastTick = $prefs->get('warm_last_at') || 0;
+    my $due      = _lastWarmInstant($now);
+
+    my $why;
+    if    ($buildChanged)    { $why = 'build changed' }
+    elsif (!$lastTick)       { $why = 'no warm on record' }
+    elsif ($lastTick < $due) { $why = 'no warm since the last scheduled hour' }
+
+    if ($why) {
+        dbg("warm: catch-up armed in " . WARM_DELAY . "s ($why)");
+        _armTimer(WARM_DELAY, 'tick');
+        return;
+    }
+
+    my $clockIn = _secsUntilNextWarm($now);
+    _armTimer($clockIn, 'clock');
+
+    # NO RE-SEED WHEN THE CLOCK BEATS IT. A restart in the WARM_DELAY before the
+    # scheduled instant would otherwise fire the clock tick first — warmFeeds sets
+    # $detailMainReady to 0 for its phase ordering — and then the re-seed, which
+    # releases that flag outright. Detail work would start in the gap between the
+    # feed chain releasing its Last.fm hold and _warmGenres taking its own (the
+    # streaming-readiness wait, up to WARM_SVC_MAX_WAIT, likeliest right after a
+    # boot): the 0.9.204 phase inversion for that one warm. Not arming it is exact
+    # rather than a guard: the tick seeds the same queue itself, from a forced fetch.
+    # The reverse order (re-seed, then a later tick) is safe and stays — the tick
+    # re-zeroes the flag for its own phase.
+    if ($clockIn <= WARM_DELAY) {
+        dbg("warm: today's warm already ran — catch-up skipped; clock due in ${clockIn}s, "
+          . "so it seeds the queue itself (no re-seed)");
+        return;
+    }
+    dbg("warm: today's warm already ran — catch-up skipped; clock armed, queue re-seeding");
+    _armTimer(WARM_DELAY, 'reseed');
+}
+
+# The skip path's only work: rebuild the in-memory detail queue from what the store
+# already holds. Issues no feed fetch — see Browse::reseedFromStore.
+sub _warmReseed {
+    eval {
+        require Plugins::ListenBrainzFreshReleases::Browse;
+        Plugins::ListenBrainzFreshReleases::Browse::reseedFromStore();
+        1;
+    } or $log->error("Detail queue re-seed failed: $@");
+}
+
+# ---------------------------------------------------------------------------
+# THE OVERNIGHT CLOCK — a fixed LOCAL hour, not 24 hours after startup.
+#
+# Modelled on API::_secsUntilNextWeeklyRefresh but deliberately NOT placed beside
+# it. That one lives in API.pm because its consumer — the created-for listing TTL
+# — is in API.pm; this one's only consumer is _warmTick, so putting it there would
+# mean Plugin.pm reaching across for a private sub it alone uses. Same style, same
+# arithmetic-only discipline: no Time::Local, nothing to get wrong.
+#
+# WHY A FIXED CLOCK AT ALL. WARM_INTERVAL re-armed 24 hours from STARTUP, so the
+# daily tick landed at whatever o'clock the server was last restarted at — on the
+# live rig 08:58, the middle of the day, competing with listening and ~6 hours
+# adrift of ListenBrainz's own 03:00 UTC job purely by coincidence.
+#
+# WHY LOCAL AND NOT UTC. The release-window arithmetic is local throughout
+# (API::_today, DB::_weekStart), so a UTC schedule would roll the warm and the
+# window on different clocks. And the requirement is about the USER's night, not
+# ListenBrainz's: a fixed UTC hour would put the warm at 16:00 in Sydney.
+#
+# WHY 05:00. Two constraints. It must be after ListenBrainz's 03:00 UTC job has
+# actually LANDED (the job is only *requested* at 03:00; the Spark cluster then
+# takes its time), and it must sit outside 00:00-03:00 so a daylight-saving
+# transition can never make the target hour ambiguous or non-existent. 05:00 local
+# satisfies both from UTC-12 to UTC+2. East of that the tick lands before that
+# day's job and picks up the previous run — the same freshness any fixed schedule
+# gives, and stale-while-revalidate still corrects it on the first browse.
+#
+# DST IS HANDLED BY ASKING FOR A LOCAL TIME, NOT BY ADDING SECONDS — and the first
+# version of this sub got that exactly backwards. It computed "target minus
+# seconds-into-day, plus 86400 if past", on the stated theory that the transition
+# day would land an hour off and the next tick would be back on target. That is
+# true of the SPRING change only. On the AUTUMN change (a 25-hour day) the tick at
+# 05:10 BST re-armed for 86400s later = 04:10 GMT, and THAT tick, being before
+# 05:10, re-armed for an hour later: TWO complete warms on one morning, the second
+# resetting the first's detail phase. Measured with TZ=Europe/London, 2026-10-25.
+# t_warmclock.pl section 3 missed it because it never followed the re-arm CHAIN.
+#
+# So the target is built as a real local time on a real local date (_warmInstantOn,
+# POSIX::mktime with isdst = -1), and every run lands on WARM_HOUR + jitter local,
+# the transition days included — section 3 now demands exactness and one run per
+# local date. POSIX is core and LMS loads it; WARM_HOUR sits outside 00:00-03:00,
+# so the target is never the hour a transition makes ambiguous or non-existent.
+#
+# $now is an argument ONLY so the suite can ask about a chosen instant. Nothing in
+# the plugin passes it.
+sub _secsUntilNextWarm {
+    my ($now) = @_;
+    $now = time() unless defined $now;
+
+    # STRICTLY FUTURE, AND THE `>` IS LOAD-BEARING. _warmTick re-arms from this at
+    # the bottom of the sub, so an answer of 0 at the moment the tick fires would
+    # re-arm for NOW — firing again immediately, and again, for ever. Asked AT
+    # today's instant, today's does not qualify and tomorrow's is returned.
+    # From YESTERDAY up, for the reason _lastWarmInstant walks down from tomorrow:
+    # the first candidate after $now is the EARLIEST one either way.
+    for my $d (-1, 0, 1, 2) {
+        my $at = _warmInstantOn($now, $d);
+        return $at - $now if $at > $now;
+    }
+    return 86400;          # unreachable: tomorrow's instant is always in the future
+}
+
+# A per-install offset of 0..WARM_JITTER_MAX-1 seconds, STABLE for the life of the
+# install.
+#
+# WHY SPREAD. Without it every copy of this plugin in a given timezone hits
+# api.listenbrainz.org in the same second. MetaBrainz is publicly asking for relief
+# from exactly that kind of surge (their 2026-08-19 status post reports the Spark
+# cluster failing every other week), and half an hour of spread costs us nothing.
+#
+# WHY STABLE. Derived from a fixed local value rather than rand(), so it survives a
+# restart and does not move between ticks. A wandering jitter would make the
+# `next_tick_at` this build adds unverifiable — which is the whole point of
+# reporting it.
+#
+# `our`, not `my`, for the reason %REVALIDATING and %FEED_MEMO are: the suite has
+# to clear the memo to drive several seeds through the real sub, and a lexical
+# would make the "not a constant zero for every install" assertion untestable.
+#
+# md5_hex DIES on any codepoint above 255 and the username is free text a user
+# typed, so the seed is encoded to octets first — the 0.6.15 / 0.9.66 wide-character
+# trap arriving at a third site.
+our $warmJitter;
+sub _warmJitter {
+    return $warmJitter if defined $warmJitter;
+
+    my $seed = eval { preferences('server')->get('server_uuid') } // '';
+    $seed = $prefs->get('username') // '' unless length $seed;
+    $seed = 'listenbrainzfreshreleases' unless length $seed;   # deterministic last resort
+
+    utf8::encode($seed) if utf8::is_utf8($seed);
+    $warmJitter = hex(substr(md5_hex($seed), 0, 8)) % WARM_JITTER_MAX;
+    return $warmJitter;
 }
 
 # Run the warm, then re-arm for the next day. Deferred while a library scan is in
@@ -821,10 +1085,56 @@ sub _warmPlaylistsWhenReady {
         1;
     } or $log->error("Playlist warm failed: $@");
 }
+# ---------------------------------------------------------------------------
+# A TICK DUE SHORTLY BEFORE A SCHEDULED WARM FOLDS INTO IT.
+#
+# The catch-up is armed WARM_DELAY after startup, and every tick re-arms for the
+# next scheduled instant when it finishes. So a catch-up that lands just before
+# 05:0x — LMS started at 05:01 on a 05:04:30 install — re-arms for 29 seconds later
+# and TWO complete warms run over each other: three forced feed fetches twice, and
+# the second warmFeeds zeroing $detailMainReady while the first warm's genre tail
+# is about to set it back to 1, releasing detail work mid-feed-chain — the 0.9.204
+# phase inversion, reached through the catch-up branch this time. Found by the
+# 2026-09-14 review of 0.9.217.
+#
+# WHY HERE AND NOT IN _armWarm. A gate-time check sees only the boot instant, and
+# the scan defer below moves a tick in 120s steps after that: a boot-time library
+# scan carries the catch-up right up to the instant however far away it started.
+# Simulated: a gate-only fix still left warms 160s apart after a 1h scan and 40s
+# after a 2h one. Asked at the moment the tick is about to warm, one rule covers
+# both paths.
+#
+# WHY IT CAN NEVER SWALLOW A SCHEDULED TICK. The clock tick fires AT or after its
+# instant, and _secsUntilNextWarm is strictly future, so from there the next
+# instant is 23-25 hours away — never inside WARM_MERGE. t_warmclock.pl §6b pins
+# that across both DST weeks, and pins a tick firing ten minutes late.
+#
+# WHAT IT COSTS, stated: a catch-up due within an hour of the instant now warms AT
+# the instant, up to WARM_DELAY + WARM_MERGE after boot, with no re-seed in the
+# wait (the store is stale on that path, so a non-forced re-seed would revalidate in
+# the background and duplicate the forced fetch minutes later). And an hour keeps
+# two warms apart only while a warm's main phase finishes inside it — measured ~22s
+# warm and ~10 minutes cold, so a wide margin, not a bound.
+sub _catchUpFold {
+    my ($now) = @_;
+    $now = time() unless defined $now;
+    my $in = _secsUntilNextWarm($now);
+    return $in <= WARM_MERGE ? $in : 0;
+}
+
 sub _warmTick {
     if ( Slim::Music::Import->stillScanning() ) {
         dbg("warm: library scan in progress — deferring " . WARM_SCAN_RETRY . "s");
         Slim::Utils::Timers::setTimer(undef, time() + WARM_SCAN_RETRY, \&_warmTick);
+        return;
+    }
+
+    # AFTER the scan defer, so a scan-blocked tick keeps retrying on its own clock;
+    # BEFORE stageReset and the warm_last_at stamp, because a folded tick is not a
+    # warm and must not read as one. See _catchUpFold.
+    if ( my $fold = _catchUpFold() ) {
+        dbg("warm: scheduled warm due in ${fold}s — folding this tick into it");
+        Slim::Utils::Timers::setTimer(undef, time() + $fold, \&_warmTick);
         return;
     }
 
@@ -879,7 +1189,19 @@ sub _warmTick {
         1;
     } or $log->error("Store sweep failed: $@");
 
-    Slim::Utils::Timers::setTimer(undef, time() + WARM_INTERVAL, \&_warmTick);
+    # STAMP THE SCHEDULE MARKER, on the synchronous path, beside the re-arm.
+    #
+    # It records "the warm ran at this hour", NOT "the warm succeeded" — written
+    # here rather than from an async callback deliberately, so a tick whose chain
+    # later fails still counts. The alternative makes a run of feed failures turn
+    # every restart back into a full warm, which is the behaviour being fixed.
+    # warmstats remains the record of what actually succeeded.
+    $prefs->set('warm_last_at', time());
+
+    # RE-ARM ON THE CLOCK, not on an interval measured from this tick. Computed
+    # fresh every time, which is what makes the schedule self-correcting across a
+    # DST transition and what stops the drift an interval accumulates.
+    Slim::Utils::Timers::setTimer(undef, time() + _secsUntilNextWarm(), \&_warmTick);
 }
 
 # ---------------------------------------------------------------------------

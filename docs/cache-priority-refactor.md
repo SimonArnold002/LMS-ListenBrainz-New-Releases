@@ -135,7 +135,7 @@ The queue runs after startup and existing regular warm ticks, not at a newly
 introduced overnight clock time. Upstream availability and volume still determine
 whether a first cold pass finishes before morning.
 
-Validation: `t_detailwarm.pl` (26 checks) exercises queue ordering, active-work
+Validation: `t_detailwarm.pl` (45 checks) exercises queue ordering, active-work
 coalescing, pause/resume, retries, checkpoint reuse, unavailable players, cache
 write failures, stale windows and watchdog recovery. `t_detailflight.pl` (15)
 exercises real fetcher bodies and SingleFlight for request coalescing, public
@@ -361,14 +361,23 @@ warm and core warm functions with controlled timers and upstream callbacks. Its
 positive/negative checkpoint ages, forced upstream retries, observable answer counts,
 main-before-detail phase ownership, preserved artwork-marker
 scans, fresh negative Last.fm checkpoints, shared pacing, watchdog/late-callback
-recovery, independent reservations and foreground release holds. The **38**-check
+recovery, independent reservations and foreground release holds. The **46**-check
 `tools/t_detailwarm.pl` suite covers artwork-only list focus, cache/fetch
 diagnostics, restart checkpoint reuse, post-main resumption, retries and worker
 watchdog recovery — including §8's `_sectionBounds` union, whose stub had to be made
-PREFIX-AWARE before it could tell the union apart from the plain For You window.
+PREFIX-AWARE before it could tell the union apart from the plain For You window,
+and §9's startup re-seed, which asserts the re-seeded queue is RUNNABLE rather than
+merely populated (a paused queue has a pending count too).
 
-*Counts re-run and corrected 2026-09-10 (was 55 and 32). A stated assertion count that
-drifts is worse than none: it reads as a checksum and is not one.*
+*Counts re-run and corrected 2026-09-10 (was 55 and 32); `t_detailwarm.pl` 38 → 45 with
+§9 on 2026-09-14, then 45 → 46 the same day when §9's re-seed label assertion became a
+control plus a comparison against `warmFeeds`' own labels. A stated assertion count that drifts is worse than none: it reads as
+a checksum and is not one.*
+
+**Remaining implementation #2 is IN PROGRESS, not open.** `docs/scheduled-overnight-warm.md`
+§4A (the fixed local clock, `tools/t_warmclock.pl`, 46 checks) and §4B/§4F (the startup
+gate and the store re-seed) are built; §4C-§4E are not yet. §4G is PARKED on the
+MusicBrainz 503 rate — see the banner on that section and the Review Ledger.
 
 Existing load, genre, artwork, feed coalescing, building-state, warm statistics,
 cold-start and follower rate-limit suites also pass. The genre test's detail-barrier

@@ -3477,6 +3477,116 @@ sub _holdLastfmForDetail {
     };
 }
 
+# ---------------------------------------------------------------------------
+# THE ONE FAN-OUT FROM A LANDED FEED.
+#
+# Every path that has a filtered release list and wants it PREPARED hands it to
+# exactly these two queues, through here. There were four copies of the pair
+# inline in warmFeeds' callbacks, and the startup re-seed (reseedFromStore below)
+# would have been a fifth — so a later change to what gets prepared would have
+# applied to some callers and not others. Factored deliberately, per
+# docs/scheduled-overnight-warm.md §4F: "Do not implement this as a second seeding
+# path."
+#
+# It also removes a real duplicate: the All Releases sites each called _filterAll
+# TWICE on the same arrayref, once per queue.
+sub _fanOutFeed {
+    my ($rels, $label) = @_;
+    return unless ref $rels eq 'ARRAY';
+    _warmCovers($rels, $label);
+    _queueReleaseDetails($rels, $label);
+    return scalar @$rels;
+}
+
+# ---------------------------------------------------------------------------
+# RE-SEED THE DETAIL QUEUE FROM THE STORE — the startup SKIP path (§4F).
+#
+# WITHOUT THIS, SKIPPING THE CATCH-UP WARM IS A REGRESSION, NOT A SAVING.
+# _queueReleaseDetails has exactly four call sites and all four are inside
+# warmFeeds, and the queue itself is a hash in MEMORY. So a restart that skips the
+# catch-up would leave the detail queue EMPTY until the next scheduled tick — a
+# restart at 20:00 would mean no tracklist or streaming pre-warm at all until
+# 05:00, on a plugin whose stated requirement is that the user never waits for one.
+# The adopted plan depends on the startup feed pass to rebuild this: "after
+# restart, the normal startup feed pass reconstructs the queue and skips already
+# cached results."
+#
+# NO NETWORK. The getters are called WITHOUT force, which is the browse path: a
+# populated, fresh store answers onDone from the store and nothing is fetched.
+# `force => 1` stays exactly where it is, on the four warm fetches, for the reason
+# its own comment gives. The gate only reaches here when a tick has already run
+# since the last scheduled instant, so the store is same-day. Stated honestly
+# rather than overclaimed: right at the FEED_STALE_AFTER boundary the store may be
+# a minute over and kick ONE background revalidation — that is the ordinary
+# stale-while-revalidate doing its job, not a warm, and it costs one request.
+#
+# What the re-seeded queue then does is cheap by construction: it re-verifies
+# checkpoints at the measured 97% hit rate and fetches only for releases that
+# genuinely never got prepared — which is the work a restart is supposed to resume.
+sub reseedFromStore {
+    # RELEASE THE DETAIL QUEUE, AND THIS LINE IS THE WHOLE DIFFERENCE BETWEEN A
+    # RE-SEED AND A FROZEN ONE.
+    #
+    # $detailMainReady starts at 0 and is set to 1 in exactly ONE place — the genre
+    # tails inside warmFeeds — while _detailPriorityBusy reports "busy" for as long
+    # as it is 0. On this path warmFeeds never runs, so the flag would stay 0 for
+    # the life of the process and the queue we are about to fill would sit PAUSED
+    # until the next scheduled tick. That is the same nine-hour hole this sub
+    # exists to close, moved one layer down, and it is invisible to any assertion
+    # that only counts detail_pending — a paused queue has a pending count too.
+    #
+    # Released outright rather than watchdogged because there is genuinely nothing
+    # here to wait for: no feed chain, no genre ladder, no Last.fm pass. The phase
+    # ordering the flag encodes is about a WARM, and this is not one.
+    $detailMainReady = 1;
+
+    my $api  = 'Plugins::ListenBrainzFreshReleases::API';
+    my $user = ($prefs->get('username') // '') ne '';
+
+    _dbg("warm: re-seeding the detail queue from the store (no catch-up warm today)");
+
+    # THE LABELS ARE THE WARM'S OWN, BYTE FOR BYTE, AND THAT IS NOT COSMETIC.
+    # The label is not a log tag — it is the key the two queues decide ORDER on:
+    # _warmCovers and _queueReleaseDetails both week-order only when it is exactly
+    # 'all releases' (and _coverGroupsFor keeps that order only then). A first cut
+    # passed 'all releases (re-seed)', so every restart on this path queued covers
+    # and details newest-release-date-first, upcoming weeks ahead of the current
+    # one. The "re-seed" in the log comes from the _dbg lines below instead.
+    # t_detailwarm.pl §9 pins these against the labels warmFeeds passes.
+    #
+    # All Releases needs no account, so it is re-seeded for everyone — the same
+    # reason warmFeeds runs it outside the username gate.
+    $api->getFreshReleasesAll(
+        sort    => 'release_date',
+        onDone  => sub {
+            my $n = _fanOutFeed(_filterAll($_[0]), 'all releases') // 0;
+            _dbg("warm: re-seed — all releases, $n release(s) from the store");
+        },
+        onError => sub { _dbg("warm: re-seed — all releases unavailable: " . ($_[0] // '?')) },
+    );
+
+    return unless $user;
+
+    $api->getFreshReleasesForUser(
+        sort    => 'release_date',
+        onDone  => sub {
+            my $n = _fanOutFeed(_filterForYou($_[0]), 'for you') // 0;
+            _dbg("warm: re-seed — for you, $n release(s) from the store");
+        },
+        onError => sub { _dbg("warm: re-seed — for you unavailable: " . ($_[0] // '?')) },
+    );
+
+    # MuSpy rows are For You rows and answer to For You's window, exactly as they
+    # do in warmFeeds. A user with no MuSpy id gets an immediate empty answer.
+    $api->getMuSpyReleases(
+        onDone  => sub {
+            my $n = _fanOutFeed(_filterForYou(_mergeMuSpy([], $_[0])), 'muspy') // 0;
+            _dbg("warm: re-seed — muspy, $n release(s) from the store");
+        },
+        onError => sub { _dbg("warm: re-seed — muspy unavailable: " . ($_[0] // '?')) },
+    );
+}
+
 sub warmFeeds {
     my ($onDone) = @_;
     # Jobs are admitted as each feed lands, but cannot run during the possible
@@ -3523,8 +3633,7 @@ sub warmFeeds {
                 # work for rows nothing draws. _mergeMuSpy onto an empty LB list
                 # is exactly the rows the view will show.
                 my $shown = _filterForYou(_mergeMuSpy([], $_[0]));
-                _warmCovers($shown, 'muspy');
-                _queueReleaseDetails($shown, 'muspy');
+                _fanOutFeed($shown, 'muspy');
                 $finish->();
             },
         );
@@ -3543,8 +3652,7 @@ sub warmFeeds {
                 my $n = scalar(@{ $_[0] // [] });
                 _stage('end', 'all_feed', 'done', "$n releases");
                 _dbg("warm: all releases — $n stored");
-                _warmCovers(_filterAll($_[0]), 'all releases');
-                _queueReleaseDetails(_filterAll($_[0]), 'all releases');
+                _fanOutFeed(_filterAll($_[0]), 'all releases');
                 $muspy->();
             },
             # A warm failure is not the user's problem: they are not looking at
@@ -3574,8 +3682,7 @@ sub warmFeeds {
                 my $n = scalar(@{ $_[0] // [] });
                 _stage('end', 'all_feed', 'done', "$n releases");
                 _dbg("warm: all releases — $n stored");
-                _warmCovers(_filterAll($_[0]), 'all releases');
-                _queueReleaseDetails(_filterAll($_[0]), 'all releases');
+                _fanOutFeed(_filterAll($_[0]), 'all releases');
                 $finish->();
             },
             onError => sub {
@@ -3598,8 +3705,7 @@ sub warmFeeds {
             my $n = scalar(@{ $_[0] // [] });
             _stage('end', 'foryou_feed', 'done', "$n releases");
             _dbg("warm: for you — $n stored");
-            _warmCovers(_filterForYou($_[0]), 'for you');
-            _queueReleaseDetails(_filterForYou($_[0]), 'for you');
+            _fanOutFeed(_filterForYou($_[0]), 'for you');
             $all->();
         },
         onError => sub {

@@ -187,4 +187,99 @@ is($retry, 0, 'obsolete job leaves the queue instead of retrying');
     is_deeply(\@R::calls, ['mb','stream'],
               'a MuSpy release inside For You\'s weeks is prewarmed');
 }
+
+# ==========================================================================
+# SECTION 9 — THE STARTUP SKIP PATH RE-SEEDS A QUEUE THAT CAN ACTUALLY RUN.
+#
+# docs/scheduled-overnight-warm.md §4B stops a restart re-running a full warm when
+# one already ran today. §4F is what stops that being a regression: _queueReleaseDetails
+# has four call sites and ALL FOUR are inside warmFeeds, and the queue is a hash in
+# MEMORY — so a skipped catch-up would leave it empty until the next scheduled tick.
+#
+# THE ASSERTION THE DESIGN DOCUMENT ASKED FOR IS NOT SUFFICIENT, AND THAT IS THE
+# POINT OF THIS SECTION. It asked for "detail_pending is non-zero". A queue that is
+# seeded and then PAUSED has a non-zero pending count too, and that is exactly the
+# state the skip path would leave behind: $detailMainReady is a file lexical that
+# starts at 0 and is set to 1 in ONE place — the genre tails inside warmFeeds —
+# while _detailPriorityBusy reports busy for as long as it is 0. warmFeeds does not
+# run on this path, so without an explicit release the flag stays 0 for the life of
+# the process and nothing drains. Nine hours of no pre-warm, reported as success.
+#
+# So this pins RUNNABLE, not merely POPULATED, and it pins the control that makes
+# that mean something: the queue really was paused beforehand.
+{
+    package S;
+    our (@queued, @covers, @forced, $detailMainReady, $lastfmWarmPending,
+         $lastfmRequestBusy);
+    our $prefs = bless {username => 'someone'}, 'Prefs';
+
+    # The two queues, recorded rather than driven — section 1 already proves the
+    # runner, and what is under test here is which releases reach it.
+    sub _warmCovers         { push @covers, [ scalar @{$_[0]}, $_[1] ] }
+    sub _queueReleaseDetails{ push @queued, [ scalar @{$_[0]}, $_[1] ] }
+    sub _filterForYou       { $_[0] }
+    sub _filterAll          { $_[0] }
+    sub _mergeMuSpy         { $_[1] // [] }
+    sub _dbg                {}
+    sub _lastfmPriorityBusy { 0 }
+
+    package Plugins::ListenBrainzFreshReleases::API;
+    # RECORD WHETHER `force` WAS PASSED. This is the control half: a re-seed that
+    # quietly re-fetched every feed would satisfy every "the queue is populated"
+    # assertion while costing three ListenBrainz requests on every restart — which
+    # is most of what the startup gate exists to save.
+    sub _answer {
+        my ($class, %a) = @_;
+        push @S::forced, ($a{force} ? 'FORCED' : 'store');
+        $a{onDone}->([ {release_mbid=>'a'}, {release_mbid=>'b'} ]) if $a{onDone};
+    }
+    sub getFreshReleasesForUser { shift->_answer(@_) }
+    sub getFreshReleasesAll     { shift->_answer(@_) }
+    sub getMuSpyReleases        { shift->_answer(@_) }
+}
+{
+    my $bsrc = do { open my $f, '<', $BROWSE or die $!; local $/; <$f> };
+    for my $name (qw(reseedFromStore _fanOutFeed _detailPriorityBusy)) {
+        $bsrc =~ /^(sub \Q$name\E \{.*?^\})/ms or die "$name missing";
+        eval "package S; no strict 'vars'; $1"; die $@ if $@;
+    }
+
+    # THE CONTROL, FIRST. $detailMainReady starts at 0 — the state a freshly booted
+    # process is in — so the detail queue is PAUSED. Without this line the assertion
+    # below would pass against a re-seed that never touched the flag at all.
+    $S::detailMainReady = 0;
+    ok(S::_detailPriorityBusy(),
+       'before the re-seed the detail queue is paused — else the next assertion proves nothing');
+
+    S::reseedFromStore();
+
+    ok(!S::_detailPriorityBusy(),
+       'after the re-seed the detail queue can actually RUN, not merely hold jobs');
+
+    is(scalar @S::queued, 3,
+       're-seed queues detail work for all three feeds from the store');
+    is(scalar @S::covers, 3,
+       'and warms their artwork through the same one fan-out');
+    # THE LABELS MUST BE THE WARM'S OWN. This assertion used to require a
+    # '(re-seed)' suffix "so warmstats cannot read it as a warm" — but the label
+    # reaches no report; it is the key _warmCovers and _queueReleaseDetails decide
+    # ORDER on (`eq 'all releases'` week-orders both queues). The suffix silently
+    # queued a restart's covers and details newest-date-first. Read the warm's
+    # labels out of warmFeeds rather than restating them, so the two cannot drift.
+    my ($wf) = $bsrc =~ /^(sub warmFeeds \{.*?^\})/ms;
+    my %warmLabels = map { $_ => 1 } ($wf // '') =~ /_fanOutFeed\([^;]*?,\s*'([^']+)'\s*\)/g;
+    is_deeply([ sort keys %warmLabels ], [ 'all releases', 'for you', 'muspy' ],
+              'control: warmFeeds fans out under exactly these three labels');
+    is_deeply([ sort map { $_->[1] } @S::queued ], [ sort keys %warmLabels ],
+              're-seed labels are byte-identical to the warm\'s, so both queues order a restart the same way');
+
+    # THE OTHER HALF. Asserting only "the queue is populated" passes against a skip
+    # that quietly fetched; asserting only "no request" passes against a skip that
+    # seeds nothing. Both are required, which is why they sit together.
+    is_deeply([ grep { $_ eq 'FORCED' } @S::forced ], [],
+              'no feed is force-fetched — the re-seed reads the store, it does not warm');
+    is(scalar @S::forced, 3,
+       'all three feeds were nonetheless consulted (control: it did not simply skip them)');
+}
+
 done_testing();

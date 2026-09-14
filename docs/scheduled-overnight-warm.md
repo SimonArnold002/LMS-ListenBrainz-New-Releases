@@ -1,6 +1,65 @@
 # A fixed overnight clock for the warm — design, before any code
 
-**Status: DESIGNED, NOT BUILT. 2026-09-11.** This closes the last unbuilt item of the
+**Status: PARTLY BUILT as 0.9.216, review fixes in 0.9.217 (INSTALLED on the rig 2026-09-14 16:54)
+and 0.9.218 (built 2026-09-14, NOT installed); both review rounds CLOSED, and the review of 0.9.218
+itself found nothing (CLAUDE.md Ledger §C `CLOSED IN THE 0.9.218 REVIEW`); pushed to `dev` 2026-09-14. PARTLY verified live:** the build-changed catch-up fired exactly `WARM_DELAY`
+after load, stamped `warm_last_at` and completed in order. **§7 is NOT yet passed** — the skip
+branch + re-seed, the first fixed-clock tick (~05:04, 2026-09-15) and the DST fix (2026-10-25)
+are still to be observed. Record: CLAUDE.md Ledger §C (`CLOSED IN THE 0.9.216 REVIEW`).
+**BUILT: §4A** (the fixed 05:00 local clock + per-install jitter), **§4B** (the startup gate,
+`warm_last_at`, `WARM_DELAY` 60->180) and **§4F** (`Browse::reseedFromStore`, plus the one
+`_fanOutFeed` carrier). **NOT BUILT: §4C** (the `$detailMainReady` watchdog), **§4D**
+(`next_tick_at`/`warm_last_at` in `warmstats`) and **§4E** (the convergence follow-up tick).
+**PARKED: §4G** — see its banner. Guards: `tools/t_warmclock.pl` (57), `t_detailwarm.pl` §9
+(46), `t_coverwarm.pl` §4c re-pointed at the fan-out.
+
+**THREE MORE DEFECTS WERE FOUND BY THE 2026-09-14 REVIEW OF THE 0.9.216 WORKING TREE, and all
+three are fixed and built as 0.9.217:**
+1. **The autumn DST change ran the warm TWICE.** §4A's arithmetic-only helper, and its claim
+   that "the transition day lands an hour off and the next tick is back on target", were wrong
+   for the 25-hour day: the 05:10 BST tick on 2026-10-24 re-armed for 04:10 GMT, and that tick
+   re-armed an hour later. Measured with TZ=Europe/London. The target is now a real local time
+   (`_warmInstantOn`, `POSIX::mktime` with isdst = -1) and every run lands exactly on target,
+   one per local date. `_lastWarmInstant` had the same `- 86400` slop and is built the same way.
+   §4A's code block and DST paragraph, and §6 item 3, are corrected below.
+2. **The re-seed lost All Releases' week ordering.** It fanned out under
+   `'all releases (re-seed)'`, but `_warmCovers` and `_queueReleaseDetails` week-order only on
+   `eq 'all releases'`. The label is an ordering key, not a log tag; the re-seed now passes the
+   warm's labels byte for byte, and `t_detailwarm.pl` §9 reads them out of `warmFeeds`.
+3. **A restart in the `WARM_DELAY` before the scheduled instant released the detail queue
+   mid-warm.** The clock tick fired first and zeroed `$detailMainReady`, then the re-seed set it
+   back to 1 during the streaming-readiness wait. `_armWarm` no longer arms the re-seed when the
+   clock is due within `WARM_DELAY` — the tick seeds the queue itself. `t_warmclock.pl` §6 pins
+   both sides of the boundary.
+
+**ONE MORE DEFECT, FOUND BY THE 2026-09-14 REVIEW OF 0.9.217, FIXED AND BUILT AS 0.9.218:**
+4. **A catch-up landing shortly before the scheduled instant ran a SECOND, overlapping warm.** The
+   catch-up is armed at `WARM_DELAY` unconditionally and every tick re-arms for the next instant, so
+   a start at 05:01 on a 05:04:30 install warmed at 05:04:00 and again at 05:04:30 — the second
+   `warmFeeds` zeroing `$detailMainReady` under the first. **§4B's gate cannot fix this on its own**:
+   a boot-time library scan moves the catch-up in `WARM_SCAN_RETRY` steps after the gate has
+   answered. So the check is made when the tick is about to warm: `Plugin::_catchUpFold`, at the top
+   of `_warmTick` after the scan defer — a tick whose instant is within `WARM_MERGE` (3600s) re-arms
+   for that instant instead. A clock tick can never fold itself (from its instant the next is 23-25h
+   away). Costs and the two fixes that did not work: CLAUDE.md Ledger §C
+   `CLOSED IN THE 0.9.217 REVIEW`. `t_warmclock.pl` §6b (57). **`WARM_HOUR` stays 05:00** — §8
+   item 1 is now answered.
+
+**TWO DEFECTS IN THIS DOCUMENT WERE FOUND WHEN IT WAS BUILT, and are corrected in place
+below — read them before trusting any unbuilt section:**
+1. **§4F as written re-seeds a queue that cannot run.** `$detailMainReady` is a file lexical
+   starting at 0, set to 1 ONLY by `_warmGenres`' `branchDone`; `_detailPriorityBusy` reports
+   busy until then. `warmFeeds` never runs on the skip path, so the flag would stay 0 and the
+   re-seeded queue would sit PAUSED until the next scheduled tick. **§6's test 13 as written
+   passes against this** — a paused queue has a non-zero `detail_pending`. The skip path now
+   releases the flag itself, and the assertion is "the queue can RUN", not "the queue is
+   populated". §4C's watchdog does NOT cover this: it is armed inside `warmFeeds`.
+2. **§4B's build-changed branch could not be answered where it was asked.** `_buildChanged`
+   sets `last_build` inside its own eval as its last act, so a second call returns early and
+   the gate would always be told "no change". It now returns 1/0 and `postinitPlugin` passes
+   the answer into `_armWarm`.
+
+*(Original status: DESIGNED, NOT BUILT. 2026-09-11; §4G added 2026-09-14.)* This closes the last unbuilt item of the
 overnight-preparation direction — *"a fixed overnight clock; the timer is still 24 hours
 relative to STARTUP"* (CLAUDE.md, and `docs/overnight-detail-prewarm.md` "Still open").
 Nothing here changes what the warm *does*; it changes **when it starts** and **how often a
@@ -18,6 +77,14 @@ explicitly left out, its **Remaining implementation #2**:
 Both halves are in scope here: the fixed schedule (§4A/§4B) and the incremental
 regular-update policy (§4E). `docs/overnight-detail-prewarm.md` holds the original
 requirement capture; its "Still open: a fixed overnight clock" line is what this closes.
+
+**§4G was added on 2026-09-14 and PARKED the same day** (Simon — the 503 rate has to be
+diagnosed first; see the banner on §4G). It is the one part of this document that changes what
+the warm *does* rather than when it starts: the artist sort-name backfill becomes a latched warm
+stage, because it was measured on the rig converging at roughly one artist per browse minute
+against ~2,889 outstanding. It is here rather than in its own document because §4G.1's hazard
+is answered by §4E's follow-up tick, and because its budget is the same knob §5 holds out of
+scope. **Read §4G.1 before writing any of it** — the obvious implementation idles for ever.
 
 Three things in the adopted plan constrain this design before it starts, and all three were
 checked against the code rather than taken from the older docs:
@@ -94,7 +161,7 @@ The waste is somewhere else entirely — §3.
 
 Reviewed in full before designing, because the ask was explicitly "don't break this".
 
-**The timer.** `Plugin::initPlugin` arms `_warmTick` at startup + `WARM_DELAY` (60s).
+**The timer.** `Plugin::postinitPlugin` (NOT `initPlugin` — this document said `initPlugin` in two places and both were wrong) arms `_warmTick` at startup + `WARM_DELAY`.
 `_warmTick` re-arms itself at `time() + WARM_INTERVAL` (24h) at the END of the sub,
 synchronously — so the interval is measured from tick START, not completion, and does not
 drift. A library scan defers the whole tick by `WARM_SCAN_RETRY` (120s) and re-arms only the
@@ -201,7 +268,7 @@ logged still has to be plumbed, and my first draft called two of those "already 
 | what | state | where / the phrase to grep |
 |---|---|---|
 | daily re-arm at 24h from startup | **EXISTS** | `_warmTick`, `time() + WARM_INTERVAL` at the bottom of the sub |
-| startup arm at +60s | **EXISTS** | `initPlugin`, `time() + WARM_DELAY` |
+| startup arm at +`WARM_DELAY` | **EXISTS** | `postinitPlugin`, now via `_armWarm` |
 | scan defer, re-arms only the retry | **EXISTS** | `_warmTick`, `WARM_SCAN_RETRY` |
 | a Monday-aligned UTC clock helper to copy | **EXISTS** | `API::_secsUntilNextWeeklyRefresh`, `PLAYLIST_REFRESH_HOUR` |
 | `kvSweep` / `feedSweep` have no other caller | **EXISTS (confirmed)** | both called only inside `_warmTick` |
@@ -220,6 +287,10 @@ logged still has to be plumbed, and my first draft called two of those "already 
 | a scheduled-instant helper | **ABSENT** | — |
 | `next_tick_at` in `warmstats` | **ABSENT** | `_cliWarmStats` reports `ticks` and `tick_at` only |
 | any follow-up / convergence tick | **ABSENT** | — |
+| artist sort-name warm, bounded + browse-gated | **EXISTS** | `warmArtistSorts`, `SORT_WARM_MAX`; called only from `Browse::_warmArtistSorts`, `$mode eq 'artist'` |
+| a sorts stage in the tick | **ABSENT** | `warmstats` on the rig lists no sort stage — see §4G |
+| an "has ever artist-sorted" latch | **ABSENT** | — ; §4G adds `artist_sort_seen` |
+| a count of recorded "MB has no sort-name" | **ABSENT** | `DB::stats` counts `artist_sorts` only; §4G.1 needs `artist_sort_none` / `artist_sort_never` |
 
 **So the build is: three ABSENT pieces, two LOGGED-ONLY signals to promote to fields, and no
 change at all to any EXISTS row.** §4C is the one exception and it is argued separately.
@@ -278,20 +349,31 @@ necessary.
 **It goes in `Plugin.pm`, not `API.pm`** — modelled on `API::_secsUntilNextWeeklyRefresh`
 but not placed beside it. That one lives in `API.pm` because its consumer, the created-for
 listing TTL, is in `API.pm`. This one's only consumer is `_warmTick`, so putting it in
-`API.pm` would mean Plugin.pm reaching across for a private sub it alone uses. Same style,
-same arithmetic-only discipline:
+`API.pm` would mean Plugin.pm reaching across for a private sub it alone uses.
+
+> **⚠️ CORRECTED 2026-09-14 (review of the build).** This section originally specified an
+> arithmetic-only helper (`WARM_HOUR*3600 + jitter - secsIntoDay`, `+= 86400` if past) "with
+> nothing to get wrong". It ran the warm twice on the autumn DST morning. As built now:
 
 ```perl
 use constant WARM_HOUR => 5;      # LOCAL hour to start the overnight warm
 
-sub _secsUntilNextWarm {
-    my @t = localtime(time);
-    my $secsIntoDay = $t[2]*3600 + $t[1]*60 + $t[0];
-    my $secs = WARM_HOUR*3600 + _warmJitter() - $secsIntoDay;
-    $secs += 86400 if $secs <= 0;
-    return $secs;
+sub _warmInstantOn {              # the instant on the local day $d days from $now's
+    my ($now, $d) = @_;
+    my @t = localtime($now);
+    return POSIX::mktime(_warmJitter(), 0, WARM_HOUR, $t[3] + $d, $t[4], $t[5], 0, 0, -1);
+}
+
+sub _secsUntilNextWarm {          # first candidate strictly after $now
+    my ($now) = @_;
+    for my $d (-1, 0, 1, 2) {
+        my $at = _warmInstantOn($now, $d);
+        return $at - $now if $at > $now;
+    }
 }
 ```
+
+`_lastWarmInstant` is the mirror image: candidates from tomorrow down, first at or before `$now`.
 
 `_warmTick`'s re-arm becomes `time() + _secsUntilNextWarm()`. `WARM_INTERVAL` stays as the
 documented ceiling and as the fallback if the helper ever returns something non-sensical.
@@ -309,11 +391,15 @@ zone from UTC−12 to UTC+2. East of that the tick lands before that day's job a
 the previous run — the same freshness any fixed schedule gives, and the existing
 stale-while-revalidate still corrects it on the first browse.
 
-**DST is handled by recomputation, not by arithmetic.** The helper is arithmetic-only, like
-`_secsUntilNextWeeklyRefresh` — no `Time::Local`, nothing to get wrong. On the two days a
-year the local day is 23 or 25 hours long the tick lands an hour off target, and the next
-tick — computed fresh from the new local time — is back on it. That is the behaviour the
-test pins, not an accident to be discovered later.
+**DST is handled by asking for a local time, not by adding seconds.** *(Corrected 2026-09-14.
+This paragraph used to say the helper was arithmetic-only and that the two transition days
+"land an hour off and the next tick is back on target". That holds for the SPRING change only.
+On the 25-hour AUTUMN day, 86400 seconds after 05:10 BST is 04:10 GMT, and a tick at 04:10
+re-arms for 05:10 the same morning — two complete warms, the second resetting the first's
+detail phase. The suite passed because it asked one landing from midnight and never followed
+the re-arm chain.)* `POSIX::mktime` with isdst = -1 resolves the date's own offset, so every
+run lands exactly on `WARM_HOUR` + jitter local, the change days included. `_secsUntilNextWeeklyRefresh`
+is unaffected: it is UTC, which has no DST.
 
 **Jitter, `_warmJitter()`: 0–1799 seconds, stable per install.** Derived once from a stable
 local value (the LMS server UUID, or the configured username) so it survives restarts and
@@ -348,6 +434,10 @@ matter:
 | always on, no restarts | — | the 05:0x timer does it; startup never involved |
 | fresh install, no `warm_last_at` | — | warms, as it must |
 | restarted at 04:00, warmed yesterday 05:0x | yesterday 05:0x, tick ran | skips, then the 05:0x timer fires an hour later |
+| started 05:01, clock 05:04:30, last warm missed *(0.9.218)* | yesterday 05:0x, **no tick** | catch-up would fire at 05:04:00 — **folds**: one warm at 05:04:30, not two 29s apart |
+| on at 04:10, clock 05:04, last warm missed *(0.9.218)* | yesterday 05:0x, **no tick** | catch-up would fire at 04:13, 51 min before the clock — **folds**: one warm at 05:04 |
+| on at 04:00, clock 05:04, last warm missed *(0.9.218)* | yesterday 05:0x, **no tick** | 04:03 is 61 min before the clock, outside `WARM_MERGE`: catch-up at 04:03 **and** the 05:04 warm, an hour apart — by design |
+| booted 03:30 with a 1h library scan, clock 05:04, last warm missed *(0.9.218)* | yesterday 05:0x, **no tick** | the scan carries the catch-up from 03:33 to ~04:31, 33 min before the clock; the fold is asked when it FIRES, so it folds — one warm at 05:04. A gate-time check (at 03:30, 94 min out) would have let both run |
 
 No user-visible behaviour changes in any skipped case: the data is from the same day, and the
 feeds' own stale-while-revalidate covers the first browse regardless.
@@ -466,6 +556,124 @@ callbacks already make; factor the fan-out into one small sub that both the warm
 and the skip path call, so a future change to what gets queued cannot apply to only one of
 them.
 
+### G. The artist sort-name backfill becomes a warm stage, latched on first Artist sort
+
+> **⚠️ PARKED — Simon, 2026-09-14: *"leave the artist sort for now, it feels like we need more
+> work to get this to work better, we should not be hitting 503's."*** The design below stands
+> and was reviewed against the source; it is NOT built and is NOT the next piece of work.
+> **The blocker is the 503 rate, not the budget.** Measured 2026-08-22, public MusicBrainz
+> 503'd us twice inside eight requests paced at 1.2s — *wider* than the 1.1s `warmArtistSorts`
+> actually sends — so the throttling is not explained by our own pacing, and a nightly stage
+> would meet the same wall unattended and on a schedule. Diagnose the 503s first (who else on
+> the box talks to public MusicBrainz; whether the limit is shared per-IP). §4A–§4F do not
+> depend on any of this and proceed without it.
+
+
+**This is new scope, added 2026-09-14 after Simon asked why sort-names are not warmed and
+cached "as it really should be".** It belongs here rather than in its own document because it
+is the same question §4E answers for playlists: a bounded pass that only runs on the user's
+browsing habits never converges. Everything below was measured on the live rig at 0.9.215,
+not inferred.
+
+**What is happening today, measured.** `lbf cachestats` reports **5,089 artists and 2,200
+sort-names**, and sampling it twice a few minutes apart showed `artist_sorts` moving 2,199 →
+2,200 while `release` and `kv` row counts stayed flat. So nothing is being re-fetched — the
+table has simply never finished filling, and it is filling at roughly one artist per browse
+minute. `server.log` over the same window is nothing but `_mbNoteLimit` backoff curves
+(5s → 10s → 20s), and `lbf diag` reports the MusicBrainz row as **"public MusicBrainz"** — no
+mirror, exactly as §7 of `hosted-lms-community-api.md` says to assume from now on.
+
+**Why it cannot converge, and none of the three reasons is a bug in isolation:**
+
+- `warmArtistSorts` is called **only** from `Browse::_warmArtistSorts`, gated on
+  `$mode eq 'artist'` at both call sites. That is deliberate and recorded in the ledger —
+  *"a user who never picks Artist sort triggers no MB traffic"* — and it is the guarantee
+  this section must not break.
+- `SORT_WARM_MAX` is **100 per pass**. Against ~2,889 outstanding that is 29 Artist-sorted
+  opens at an absolute minimum.
+- **A 503 ends the pass** and hands the whole reservation back (`_mbNoteLimit`, "A RATE LIMIT
+  ENDS THE PASS"). On a box that is being limited as steadily as this one, a pass delivers
+  far fewer than its 100. `warmstats` confirms there is **no sort stage in the tick at all**.
+
+`API.pm`'s own comment already predicted the outcome — *"a multi-day reconvergence on a
+2,900-release feed"* — so this is the design working as written, not a defect. The defect is
+that the design assumed the backfill would be carried by browsing, and it is not.
+
+**The change.** A `sorts` stage in `_warmTick`, placed in the REMAINDER phase beside detail
+(it is MusicBrainz traffic, and artwork and the feed chain outrank it), calling the existing
+`warmArtistSorts` with the artists of both windowed feeds. No new fetch path: the pump, the
+courtesy gap, the in-flight reservation and the 503 backoff are all reused unchanged.
+
+**Gated by a latch, so the ledger's guarantee survives.** A new pref — `artist_sort_seen`,
+set once by `Browse::_warmArtistSorts` the first time an Artist-sorted view is opened, never
+cleared. The stage is skipped entirely while it is unset, and reports `skipped` with the note
+`never artist-sorted` so the gate is visible in `warmstats` rather than silent. A user who
+never picks Artist sort still generates **zero** MusicBrainz traffic, which is the whole of
+what the ledger entry protects. Simon's rig latches on his next Artist-sorted open.
+
+#### G.1 THE HAZARD THAT DECIDES THE DESIGN — `SORT_NONE_AGE` is one day
+
+**This is the part a nightly stage gets wrong if it is written from the obvious shape, and it
+would not show up on the rig for weeks.**
+
+An artist MusicBrainz genuinely has no sort-name for is stored as an empty `sort_name` with
+`sort_src` set, and aged against **`SORT_NONE_AGE`, which is one day** — deliberately, so a
+transient miss retries tomorrow instead of pinning credit-name sort for a month. Under
+today's browse-gated warm that costs nothing anyone notices. **Under a nightly stage it
+becomes a permanent nightly floor of MusicBrainz requests, one per recorded-none artist,
+for ever** — and the plugin would be re-asking MusicBrainz the same question every night on a
+public API that is already 503ing us.
+
+Worse, it can stop the backlog draining at all. `@todo` is filled by walking `@cand` in feed
+order and stops at `SORT_WARM_MAX`, so the nones — which expire every 24 hours and are
+therefore *always* eligible — compete for the same cap as artists that have never been tried
+once. With enough of them the nightly stage would spend its entire budget re-asking known
+negatives and never reach a new artist. The stage would run, report a full pass, and
+`artist_sorts` would not move.
+
+**So the stage cannot simply call `warmArtistSorts` and take what it gives.** Two things are
+required, and both are small:
+
+1. **The nightly stage prioritises never-tried artists.** Partition `@cand` into
+   never-tried (no `sort_src`) and due-for-recheck (`sort_src` set, aged out), and fill
+   `@todo` from the first list before the second. The browse path keeps today's behaviour;
+   only the warm caller asks for the ordering. This is the difference between a stage that
+   converges and one that idles.
+2. **`SORT_NONE_AGE` is re-examined for the warm caller only** — one day is right for a user
+   who just sorted a view and wants the name now, and wrong for an unattended nightly pass.
+   Recommend the warm path ages nones on a **7-day** floor, leaving the browse path at one
+   day. **Do not simply raise the constant**: the one-day retry is the fix from 0.9.186 for a
+   `fetched_at` bug and its reasoning is still correct for the path it was written for.
+
+**How big is the floor? UNMEASURED, and it must be measured before this is built.**
+`cachestats` counts `artist_sorts` as `sort_name <> ''` and has **no counter for recorded
+nones**, so the 2,889 figure above is "artists without a name", not "artists still to try" —
+an unknown share of it is MusicBrainz answering "none" every single day already. Add
+`artist_sort_none` (`sort_src <> '' AND sort_name = ''`) and `artist_sort_never`
+(`sort_src = ''`) to `DB::stats` **first**, read them off the rig, and size the stage against
+the real numbers. If the nones dominate, G.1's item 2 is the whole of the win and the budget
+question in §8 barely matters.
+
+#### G.2 Budget, and how it ties into the rest of this plan
+
+**The per-night budget is deliberately NOT settled here** — it is the same knob as
+Remaining implementation #4, which §5 holds out of scope for this document, and it should be
+set once against the measured numbers G.1 asks for rather than twice. What this section fixes
+is the *shape*: a stage that exists, is latched, and asks for the right artists first.
+
+- The stage takes its own constant, `SORT_WARM_NIGHT`, rather than raising `SORT_WARM_MAX` —
+  the browse cap of 100 is correct for a foreground open and must not move. **This does not
+  contradict §5's "whole-pass limits stay as they are"**: that row is about retuning
+  `LFM_WARM_ALL` / `GENRE_WARM_ALL` / `COVER_WARM_MAX`, and a new constant for a new stage is
+  not a retune of any of them. A future round reading §5 as a bar on this has misread it.
+- **A 503 ends the stage, not the tick.** The existing pass-ending behaviour is already right
+  and is reused as-is; the stage simply reports `deferred` with the remaining count.
+- **It feeds §4E.** A sorts stage that ends short on a rate limit is exactly the "work it
+  knows is unfinished" signal §4E arms a follow-up on, and the count is already in hand at
+  the pass end — so this needs no new plumbing there, unlike the two LOGGED-ONLY signals in
+  §3.2. A +4h follow-up on a rate-limited sort pass is also the politest possible retry.
+- `warmstats` reports the stage like any other: fetched, deferred, and the latch state.
+
 ---
 
 ## 5. Deliberately NOT changing — do not re-propose these
@@ -512,10 +720,13 @@ Drives the real `_secsUntilNextWarm` / `_warmJitter` / startup gate out of mutat
    than `86400 + max jitter` away.
 2. **It lands on the target hour**, checked by converting the answer back through `localtime`
    — for every hour of the day, on an ordinary day.
-3. **The DST days are asserted as designed, not as accidents.** Across the UK spring-forward
-   and autumn-back boundaries the answer is within one hour of target, and the *following*
-   day's answer is exactly on target. A suite that demanded exactness here would be pinning a
-   behaviour the arithmetic-only helper does not have.
+3. **Across both DST changes the RE-ARM CHAIN is exact.** *(Corrected 2026-09-14 — this item
+   used to demand only "within an hour" on the change day, which is how the autumn double run
+   passed.)* The suite follows `_warmTick`'s re-arm from two days before each change to two
+   after and requires every run exactly on target, ONE run per local date, 23-25 hours between
+   runs, and `_lastWarmInstant` exact on the day before, of and after. Runs green under
+   `LBF_TZ=` Europe/London, America/New_York, Australia/Sydney, Australia/Lord_Howe,
+   America/Santiago, Europe/Berlin and Pacific/Auckland.
 4. **The jitter is stable and bounded** — two calls in one process give the same offset, it
    lies in `[0, 1800)`, and it is not zero for every install (a constant-zero implementation
    must go red).
@@ -578,6 +789,34 @@ only from the success callback.
     22:00 could suppress the following morning's tick, which is the same class of bug as §3.4
     and just as invisible.
 
+### New, for §4G: `tools/t_sortwarm.pl`
+
+Every one of these is anti-tested — the §4G hazards are all "the stage runs, reports a full
+pass, and nothing converges", which a naive assertion on "did the stage run" passes against.
+
+15. **The latch gates the stage in both directions.** With `artist_sort_seen` unset the tick
+    issues **no MusicBrainz request at all** and the stage reports `skipped`/`never
+    artist-sorted`; with it set, the stage runs. Anti-test: a stage that always runs must turn
+    the first half red.
+16. **`Browse::_warmArtistSorts` sets the latch, and only the Artist-sort path reaches it.**
+    Drive a non-artist-sorted render and assert the pref is still unset — the control that
+    stops the latch becoming "any browse at all", which would silently void the ledger's
+    guarantee.
+17. **NEVER-TRIED ARTISTS ARE FETCHED BEFORE DUE-FOR-RECHECK ONES — §4G.1 item 1.** Seed a
+    store with more aged recorded-nones than the night's budget plus a handful of never-tried
+    artists, run the stage, and assert **the never-tried ones were the artists requested**.
+    Anti-test: with the partition removed this must go red, or the suite is not testing the
+    thing that decides whether the backlog ever drains. Assert on *which MBIDs were requested*,
+    not on a count — a count passes against a stage that spent its whole budget on nones.
+18. **The warm path's none-age floor does not change the browse path's.** Same store, same
+    aged none: the warm caller skips it, a browse-path call still re-asks it. Both halves, or
+    a single shared constant passes the half that is checked.
+19. **A 503 ends the stage, not the tick.** Stub a rate limit mid-pass and assert the stages
+    after `sorts` still ran, the stage reports `deferred` with the remaining count, and the
+    in-flight reservation was handed back — the "stay in flight for the life of the process"
+    trap `_mbNoteLimit`'s own comment names.
+20. **A rate-limited sorts pass arms a §4E follow-up**, and a clean one does not.
+
 ### Housekeeping that is part of the work, not after it
 
 `docs/cache-priority-refactor.md`'s Validation section states suite counts — currently **61**
@@ -604,6 +843,12 @@ Over HTTP at `http://plex:9000`, no ssh:
 2b. Open a release detail page that the store knows about but nobody has opened. **Expect a
    cache hit, not a live fetch** — this is the requirement in its original words, and it is
    what proves §4F re-seeded something real rather than an empty list.
+2c. **The catch-up fold (0.9.218) — NOT STAGED, by decision (2026-09-14).** It needs a start in the
+   hour before 05:0x with the last warm missed, which the rig never does in routine use (its
+   services stop for a 06:30 backup) and nobody is awake to stage. It rests on `t_warmclock.pl` §6b
+   and the chain simulation; it is not a gate on "done". If it ever fires, the log line is
+   `warm: scheduled warm due in Ns — folding this tick into it`. **The rig's routine night covers
+   steps 2 and 3 instead:** the 05:0x tick, then the 06:30 backup restart taking the skip branch.
 3. Let the 05:0x tick run. **Expect** `foryou_feed` / `all_feed` / `muspy_feed` to record
    real elapsed times (not 0.00s, which would mean the store answered and `force` regressed),
    and the detail queue to drain after the genre tails.
@@ -624,6 +869,9 @@ Over HTTP at `http://plex:9000`, no ssh:
 
 1. **`WARM_HOUR` = 5 local** — agreed, or do you want it earlier (03:00/04:00, closer to
    ListenBrainz's job but inside the DST-ambiguous band) or later?
+   **ANSWERED 2026-09-14: 05:00 stays.** 03:30 was asked for and declined once costed — the For You
+   feed would sit a day behind ListenBrainz's 03:00 UTC job in Europe, and 03:30 is inside the EET
+   DST change hour. CLAUDE.md Ledger §A2 `WARM_HOUR STAYS AT 05:00 LOCAL`.
 2. **Does `WARM_DELAY` stay at 60s for the catch-up tick?** The 0.9.195 diagnosis (§3.1) is
    direct evidence that 60 seconds after startup is the worst moment on the machine — the
    cold pass ran while the box was saturated by its own boot and pinned 8 false no-matches.
@@ -642,3 +890,13 @@ Over HTTP at `http://plex:9000`, no ssh:
    values in the design — if you would rather the follow-up ran at +2h and +6h explicitly,
    mirroring the ladder instead of approximating it, say so now rather than after the tests
    are written around it.
+6. **§4G's budget — and it should probably not be answered yet.** The recommendation is to
+   add the two missing counters (`artist_sort_none`, `artist_sort_never`), read them off the
+   rig, and only then pick `SORT_WARM_NIGHT` — because if recorded nones dominate the 2,889,
+   the fix is G.1's ordering and age floor and the budget barely matters. **Do you want the
+   counters added as a standalone measurement first**, or the whole of §4G built in one go
+   with a provisional number?
+7. **Does the sorts stage latch, or would you rather it just always ran?** §4G keeps the
+   ledger's "no Artist sort, no MusicBrainz traffic" guarantee with a one-way pref. You
+   chose the latch on 2026-09-14; recorded here because it is the one part of §4G that is a
+   policy decision rather than a measurement.

@@ -12,9 +12,11 @@ processing. The first patch separates the two feeds' ListenBrainz passes from th
 Last.fm tails and gates all Last.fm warm/top-up calls on core work, cover work and
 browse activity. See [cache-priority-refactor.md](docs/cache-priority-refactor.md)
 for implementation, recovery limits, tests and outstanding live scheduling work.
-This is not yet a full fixed-clock overnight-preparation implementation.
+**As of 0.9.218 (0.9.216 plus two rounds of review fixes) the fixed overnight clock is PARTLY BUILT** — §4A (a fixed 05:00 local
+tick), §4B (the startup gate) and §4F (the store re-seed) are in; §4C-§4E are not, and
+§4G is PARKED. See `docs/scheduled-overnight-warm.md`.
 
-## Per-section release window — 0.9.215, built 2026-09-14 (not yet installed)
+## Per-section release window — 0.9.215, built 2026-09-14 (carried into 0.9.216-0.9.218; installed as part of 0.9.217, 2026-09-14)
 
 **The release window is now two number boxes per section, and the current week is week 1.**
 `<section>_weeks` (total shown, 1-4) + `<section>_upcoming` (how many are ahead, 0..weeks-1),
@@ -84,7 +86,12 @@ because line numbers rot on the next edit.
 | TWO 0.9.207 FIXES ARE STILL UNPROVEN LIVE, and that is known, not missed | B | `TWO 0.9.207 FIXES ARE STILL UNPROVEN LIVE,` |
 | Last.fm error 6 is an ANSWER; latched key ends the warm pass; error-6 + latch UNPROVEN LIVE | C | `CLOSED IN 0.9.214 —` |
 | Diag's Last.fm row says "HTTP 403", not "rejected the built-in API key" — cosmetic, pre-0.9.213 | B | `Diag's Last.fm row shows "HTTP 403"` |
+| Sort-names not converging / MB hammered — measured, nightly stage PARKED on the 503 rate, not a cache defect | B | `The artist sort-name backfill does not converge` |
 | The 0.9.215 week-window review: both findings were PROSE, the code was clean | C | `CLOSED IN 0.9.215 —` |
+| 0.9.216 review: re-seed labels, autumn DST double warm, re-seed vs clock race — fixed in 0.9.217, installed, round CLOSED. Closes the three ORIGINAL defects only; the fix code is open to review | C | `CLOSED IN THE 0.9.216 REVIEW —` |
+| 0.9.217 review: a catch-up landing just before 05:xx ran a second, overlapping warm — `_catchUpFold` in `_warmTick`, built 0.9.218, NOT installed. Closes that defect only; the fold code is open to review. Two fixes that did NOT work are recorded there | C | `CLOSED IN THE 0.9.217 REVIEW —` |
+| 0.9.218 review: NO findings — records what was checked (gate, clock helpers, fold, skip path, re-seed, fan-out) and one ruled-out candidate. Not a suppression | C | `CLOSED IN THE 0.9.218 REVIEW —` |
+| `WARM_HOUR` stays 05:00 local — 03:30 (and "N hours after restart") asked for, costed, declined | A2 | `WARM_HOUR STAYS AT 05:00 LOCAL` |
 
 **Two standing rules that kill most repeat findings:**
 
@@ -101,6 +108,11 @@ FIRST LINE names the **symbols** a future review would grep for, then the verdic
 date and who decided. Add a row to the index above in the same edit. State the reason as a
 fact that can be DISPROVEN ("no service returns X"), never as "unlikely" — a rarity claim
 invites the next round to find one counter-example and reopen the whole entry.
+
+**CLOSING A ROUND IS NOT A SUPPRESSION** (Simon, 2026-09-14). A §C entry records that a defect,
+as described, was fixed. Never head it "Do not re-report" — that wording is for a DECISION Simon
+asked for (declined, by design, a stated residual, null behaviour that keeps being mis-reported),
+always with its reason, and those stay suppressed. The code a fix added is new and open to review.
 
 ### A. NOT FINDINGS — deliberate, fleet-wide
 
@@ -254,6 +266,25 @@ invites the next round to find one counter-example and reopen the whole entry.
   → 1h, and a resolve that COMPLETED short → still the full partial TTL. Do not
   "simplify" it into the `$inconclusive` term; they mean different things and the
   anti-test catches a blanket downgrade. *(0.9.211.)*
+- **WARM_HOUR STAYS AT 05:00 LOCAL — `WARM_HOUR`, `_warmInstantOn`, `_secsUntilNextWarm`. Simon,
+  2026-09-14, having asked for 03:30 and been shown what it costs.** Two reasons, both measured:
+  1. **For You would sit a day behind, all year, in Europe.** ListenBrainz's For You job is DAILY at
+     03:00 UTC (their crontab — see memory `listenbrainz-update-cadences`). 03:30 BST is 02:30 UTC,
+     before it starts; 03:30 GMT is 30 minutes after it is merely requested. The warm stamps the
+     feed fresh and `FEED_STALE_AFTER` (= `FEED_TTL`, 24h) lets no browse revalidate it before the
+     next warm (`getFreshReleasesForUser` serves a fresh store without a fetch), so the stored list
+     would be the previous day's job until the following morning. All Releases (live SQL) and the
+     weekly playlists (land ~00:15-00:30 UTC) are unaffected.
+  2. **03:30 sits inside the DST change hour in ~20 zones** — all of EET (Helsinki, Athens, Kyiv,
+     Riga, Tallinn, Vilnius, Sofia, Bucharest, Chisinau, Nicosia) and Pacific/Chatham. On the
+     spring day 03:30 does not exist and `mktime` lands the warm at 04:30; `t_warmclock.pl` §3's
+     "exactly on target" goes red there. Measured by sweeping every zone's 2026 transitions with
+     `zdump`; 05:00-05:30 hits none.
+  **"Why a fixed time and not N hours after a restart?" was asked the same day and answered:** the
+  interval put the warm at whatever o'clock LMS last restarted (08:58 on the rig) and every restart
+  re-ran a complete warm. Simon's server stops all services for a 06:30 backup — the 05:00-05:30
+  warm lands before it and the restart skips through the gate. If margin before a backup is ever
+  wanted, shrink `WARM_JITTER_MAX`; do not move the hour ahead of ListenBrainz's job.
 
 ### B. KNOWN-OPEN AND ACCEPTED — do not re-report as new
 
@@ -295,12 +326,48 @@ invites the next round to find one counter-example and reopen the whole entry.
   0.9.158; the GET probe behaved the same). A fix would pass the error body to `check` when
   the target opts in. Not a regression, and it is not scheduled.
 
+- **The artist sort-name backfill does not converge, and the nightly `sorts` stage is
+  PARKED — Simon, 2026-09-14: "leave the artist sort for now, it feels like we need more work
+  to get this to work better, we should not be hitting 503's."** Do not report "sort names are
+  missing / MusicBrainz is being hammered / why is this not cached" as a new finding: it is
+  known, measured and planned. **It is not a caching defect** — sort names live in the
+  `artist` table on a 30d-found / 1d-none age policy, survive an ordinary build AND an
+  explicit clean-load reset, and nothing wipes them; `cachestats` on the rig showed
+  `artist_sorts` CLIMBING (2,199 → 2,200) while `release` and `kv` stayed flat. The gap is
+  that `warmArtistSorts` is reached only from `Browse::_warmArtistSorts` (`$mode eq 'artist'`),
+  is capped at `SORT_WARM_MAX` 100 a pass, and a 503 ends the pass — against ~2,889 artists
+  without a name on a box whose `mb_base_url` is PUBLIC MusicBrainz (confirmed in `lbf diag`;
+  no mirror is assumed going forward, §7 of `hosted-lms-community-api.md`). `API.pm`'s own
+  comment already called it *"a multi-day reconvergence on a 2,900-release feed"*.
+  - **WHY IT IS PARKED, and it is NOT the budget question.** The design (§4G of
+    `docs/scheduled-overnight-warm.md`) is sound and reviewed; what stopped it is that the
+    box is being 503'd at a pace WIDER than the courtesy gap the code applies — measured
+    2026-08-22, two 503s inside eight requests paced at 1.2s against the 1.1s `warmArtistSorts`
+    sends. So the throttling is not explained by our own pacing, and a nightly stage would meet
+    the same wall unattended, in the dark, on a schedule. **The 503 rate is the open question,
+    not `SORT_WARM_NIGHT`.** Diagnose that first — who else on the box talks to public
+    MusicBrainz (Discography is a live candidate), and whether the limit is per-IP shared.
+    Do not build the stage until that is answered, and do not re-raise the stage as the fix
+    for slow sort-names: it was considered, designed and deliberately held.
+  - **Two numbers are STILL UNMEASURED and gate any later build:** `DB::stats` counts `artist_sorts`
+    (`sort_name <> ''`) and has no counter for recorded nones, so the 2,889 is "artists
+    without a name", NOT "artists still to try". `artist_sort_none` / `artist_sort_never` are
+    to be added and read off the rig BEFORE `SORT_WARM_NIGHT` is chosen.
+  - **Do not re-propose moving sort-names off MusicBrainz.** Settled: neither ListenBrainz
+    nor the hosted API carries the field, probed live.
+  - **Do not re-propose raising `SORT_WARM_MAX`** as the fix. The browse cap is correct for a
+    foreground open; the stage takes its own constant. And do not propose simply raising
+    `SORT_NONE_AGE` — one day is the 0.9.186 `fetched_at` fix and is still right for the
+    browse path; §4G.1 splits it per caller instead.
+
 ### C. CLOSED FINDINGS
 
 Fixed findings are recorded per review in `docs/code-review-<version>.md`, each
 with its mechanism, its guard and its test. Check there before reporting: the
 **0.9.160, 0.9.174, 0.9.184, 0.9.191, 0.9.192 and 0.9.206** findings are all fixed
-and verified. Do not re-derive them.
+and verified. A finding that is one of those defects as described is a repeat; a finding about
+the code those fixes added is not. Suppression applies only to recorded decisions, below and in
+§A2/§B.
 
 **CLOSED IN THE 2026-09-10 HYGIENE PASS — the two review docs that still said
 "nothing here is fixed yet".** Both had been closed in code for weeks; only the
@@ -315,7 +382,9 @@ documents were stale, which is the failure mode this whole ledger exists to stop
   checker exits 0, re-run 2026-09-10); the CHANGELOG gap was never a defect and is
   now section A's first entry.
 
-**CLOSED IN 0.9.197 — two field bugs, both fixed, both pinned. Do not re-report:**
+**CLOSED IN 0.9.197 — two field bugs, both fixed, both pinned.** Closes the two defects as
+described; the stated residual below is a recorded decision and stays suppressed. The fix code is
+not thereby settled:
 - **An All Releases week's row order moving between render and click** (the
   wrong-row-on-tap report). Fixed by `_frozenOrder`; `tools/t_orderfreeze.pl`,
   23 assertions, five anti-tests. **The residual is STATED, not missed:** a row that
@@ -327,8 +396,9 @@ documents were stale, which is the failure mode this whole ledger exists to stop
   claim corrected, not a new mechanism** — see the ⚠️ blocks in
   `docs/artwork-and-event-loop-rework.md`.
 
-**CLOSED IN 0.9.207 — both 0.9.206 findings, plus a third carrier the review missed.
-Do not re-report:**
+**CLOSED IN 0.9.207 — both 0.9.206 findings, plus a third carrier the review missed.**
+Closes the three defects as described; the by-design residual and the declined source id below
+are recorded decisions and stay suppressed. The fix code is not thereby settled:
 - **The artwork focus addressing the wrong releases on For You.** Fixed by replacing
   the scalar options offset with a SLOT MAP (`_weekGroups` → `_renderSlots`), one entry
   per rendered row. `t_coverwarm.pl` §4e, three anti-tests (3/5/1 red). **The residual
@@ -348,7 +418,8 @@ Do not re-report:**
   `_sectionBounds` with `_sectionSig`.
 
 **CLOSED IN 0.9.214 — the 2026-09-14 review of 0.9.213 (built-in Last.fm key), and its
-follow-up sweep. Both rounds closed by Simon 2026-09-14. Do not re-report:**
+follow-up sweep. Both rounds closed by Simon 2026-09-14.** Closes the defects as described;
+the fix code is not thereby settled:
 - **`_lastfmPost` / `getLastfmTags` / `getSimilarArtistsLastfm` treating Last.fm error 6 as
   a failure.** Error 6 is HTTP 200 + `{"error":6}` for an artist Last.fm does not know —
   an ANSWER, ~20% of a sampled week's feed artists (named in the 0.9.214 entry). Fixed:
@@ -372,7 +443,9 @@ follow-up sweep. Both rounds closed by Simon 2026-09-14. Do not re-report:**
   Its one out-of-diff observation is logged in §B (`Diag's Last.fm row shows "HTTP 403"`).
 
 **CLOSED IN 0.9.215 — the 2026-09-14 review of the per-section release window. Closed by
-Simon 2026-09-14. Two findings, BOTH PROSE; the code was clean. Do not re-report:**
+Simon 2026-09-14. Two findings, BOTH PROSE; the code was clean.** Closes the two prose
+defects as described; the two entries in the last bullet are recorded decisions and stay
+suppressed:
 - **`_sectionSig`'s header comment still called `_sectionBounds` "the For You window unioned
   with MuSpy's".** The union was removed in this same change and every other copy of that
   comment was rewritten; this one was missed. Fixed: it now reads "one window per section;
@@ -404,6 +477,144 @@ Simon 2026-09-14. Two findings, BOTH PROSE; the code was clean. Do not re-report
 - **Two ledger entries were correctly NOT re-reported and must stay that way:** `_padDate`
   dating a year-only MuSpy release 1 January (pre-existing, out of scope) and `bench_walk.pl`
   exiting 255 on a missing `lastfmConfigured` stub (proven not this build).
+
+**CLOSED IN THE 0.9.216 REVIEW — the 2026-09-14 review of the fixed-overnight-clock working
+tree. Fixed and built as 0.9.217, INSTALLED on the rig 2026-09-14 16:54; round CLOSED by Simon
+2026-09-14.**
+
+> **SCOPE OF THIS ENTRY — READ BEFORE USING IT TO DROP A FINDING.** What is closed is the three
+> ORIGINAL defects exactly as described below: the `(re-seed)` label defeating week order, the
+> seconds-arithmetic double warm, and the re-seed firing after an imminent clock tick. Re-reporting
+> THOSE is a repeat. **The code written to fix them is NEW and is NOT reviewed-and-settled** — a
+> grep hit on these symbols is not a reason to drop a finding about them. In scope for any later
+> review, as new surface: `_warmInstantOn` and the rewritten `_secsUntilNextWarm` /
+> `_lastWarmInstant` (the `POSIX::mktime` call, the widened candidate loops, zones and dates the
+> suite does not cover); the `$clockIn <= WARM_DELAY` branch in `_armWarm` (anything it now fails
+> to seed); and the plain labels in `reseedFromStore` (any consumer that behaves differently now a
+> re-seed is indistinguishable from a warm). A defect a fix INTRODUCED is new information, per
+> "A closed finding is not a closed MECHANISM" below.
+- **`Browse::reseedFromStore` / `_fanOutFeed` labels.** The re-seed passed `'… (re-seed)'`
+  labels; `_warmCovers` and `_queueReleaseDetails` compare `$label eq 'all releases'` to
+  week-order (and `_coverGroupsFor` keeps order only then). Fixed: the warm's own labels.
+  **The label is an ORDERING KEY, not a log tag** — the old §9 assertion pinned the suffix
+  "so warmstats cannot read it as a warm", and no report reads the label at all.
+  `t_detailwarm.pl` §9 now reads the labels out of `warmFeeds` (anti-tested: suffix restored, 1 red).
+  Regex consumers (`/for you|muspy/` priority, `/all releases/` cover rank) were unaffected.
+- **`_secsUntilNextWarm` / `_lastWarmInstant` across DST.** Seconds-into-day arithmetic re-armed
+  the autumn tick for 04:10 GMT and then 05:10 GMT: two full warms on 2026-10-25, the second
+  zeroing the first's `$detailMainReady`. Spring was only an hour late. Fixed with
+  `_warmInstantOn` (`POSIX::mktime`, isdst -1); both loops start a day wide so a date read one
+  day off still finds the right instant. `t_warmclock.pl` §3 follows the re-arm CHAIN (the old
+  section asked one landing from midnight, which cannot see a second run). Anti-tested: old
+  arithmetic 3 red, old `_lastWarmInstant` 1 red, `>=` boundary 4 red, UTC-built instant red.
+  Green under seven DST zones via `LBF_TZ=`, including Lord Howe's half hour and Santiago.
+  **The design doc's "arithmetic-only, nothing to get wrong" was the defect** — do not
+  "simplify" the helper back to seconds arithmetic.
+- **`_armWarm` arming the re-seed when the clock is due within `WARM_DELAY`.** The tick zeroed
+  `$detailMainReady`, the re-seed released it during the streaming-readiness wait. Fixed: no
+  re-seed on that path (the tick seeds the queue). `t_warmclock.pl` §6: clock due in 180s and
+  60s → no re-seed; 181s → re-seed (control). Anti-tested 2 red. **The reverse order is safe
+  and deliberately unguarded**: a re-seed followed by a later tick is just the tick re-zeroing
+  the flag for its own phase.
+- **What was checked and is unaffected:** no cache key, TTL, family version or stored shape
+  changed; `_warmTick`'s re-arm and scan-defer are untouched; `_warmTick` is `warmFeeds`' only
+  caller; all 34 suites exit 0, both sync checks 0, `bench_walk.pl` still 255 for its known
+  pre-existing stub (not this change).
+- **LIVE CHECK, 2026-09-14, over `jsonrpc.js` — what is PROVEN.** `plugin_version` 0.9.217 in
+  `cachestats`, `warmstats` and `diag` (all diag targets ok, MuSpy skipped: no id). The log read
+  `Build changed (0.9.215 -> 0.9.217): derived cache KEPT; genre cache KEPT` — 0.9.216 was never
+  installed. The gate took the BUILD-CHANGED branch: one catch-up tick at **16:57:53, exactly
+  `WARM_DELAY` after load**, and `warm_last_at` equals `tick_at`. The warm completed in ~22s in
+  the agreed order — feeds (For You 43, All Releases 1,576), covers (1,698 already warm, 2
+  fetched), genres and playlists, `genres_lastfm_all` LAST (220/222 fresh checkpoints, 2
+  requested, 0 failed). Detail queue released (`detail_main_ready` 1): 479 completed, 962/966
+  cache hits, 4 fetches, 0 failed, 11 pending = 11 deferred.
+- **UNPROVEN LIVE, and that is known, not missed:** the SKIP branch and the re-seed under the
+  fixed labels (needs a restart after today's warm — expect `ticks` 0, `detail_main_ready` 1 ~3
+  minutes after load, pending/completed non-zero, no forced feed fetch); the within-`WARM_DELAY`
+  re-seed skip (needs a restart in the three minutes before 05:xx — not practical to stage); the
+  DST fix (not observable until 2026-10-25). The first fixed-clock tick is due ~05:04 on
+  2026-09-15: `tick_at` should read that time and `ticks` 2 with no restart in between.
+
+**CLOSED IN THE 0.9.217 REVIEW — the 2026-09-14 review of the 0.9.217 working tree. One finding,
+fixed and built as 0.9.218, NOT installed.** Closes the defect as described. **The fold code is new
+and open to review** — `_catchUpFold`, its placement in `_warmTick` and `WARM_MERGE` are in scope
+for any later round.
+- **`_armWarm` catch-up branch + `_warmTick` re-arm: a catch-up landing shortly before 05:xx ran a
+  second, overlapping warm.** The catch-up arms `_warmTick` at `WARM_DELAY` unconditionally and every
+  tick re-arms from `_secsUntilNextWarm`, so LMS started at 05:01 on a 05:04:30 install warmed at
+  05:04:00 and again at 05:04:30: three forced feed fetches twice, and the second `warmFeeds`
+  zeroing `$detailMainReady` while the first warm's `_warmGenres` `branchDone` set it back to 1
+  mid-chain — the 0.9.204 phase inversion through the catch-up branch. Simulated against the real
+  helpers for every boot minute: min gap **40s**, 60 boot-minutes a day under 30 minutes apart.
+  Reached by any start in the minutes before 05:xx with the last warm missed (a build install, a
+  fresh install, a box switched on before 05:00).
+- **TWO FIXES THAT DID NOT WORK — do not propose either again.**
+  1. **A `$clockIn <= WARM_DELAY` guard on the catch-up branch** (proposed in the round itself).
+     It misses the reported case outright — 210s is > 180s — and fires only where the catch-up
+     already lands AFTER the instant, which is a single warm anyway.
+  2. **A gate-time fold** (arm the clock instead when `clockIn` is within `WARM_DELAY + WARM_MERGE`).
+     Correct with no scan, but a boot-time library scan moves the catch-up in `WARM_SCAN_RETRY`
+     steps right up to the instant after the gate has answered: still **160s** apart behind a 1h
+     scan and **40s** behind a 2h one.
+- **Fixed: `_catchUpFold`, asked at the top of `_warmTick`** — after the scan defer, before
+  `stageReset` and the `warm_last_at` stamp. A tick with a scheduled instant within `WARM_MERGE`
+  (3600s) re-arms for that instant and does not warm. **A clock tick can never fold itself**: from
+  its own instant `_secsUntilNextWarm` is strictly future, 23-25h away. `_armWarm` is unchanged.
+  Simulated for every boot minute, four store states (missed / today's warm ran / none / build
+  changed), scans of 0/1h/2h, London on a normal week and both DST weeks, Lord Howe and Santiago:
+  min gap **3640s** everywhere, every boot warms within 26h, no re-seed inside a warm, and the
+  today's-warm-ran rows byte-identical to 0.9.217 (the skip path is untouched).
+- **Guard: `t_warmclock.pl` §6b, 46 -> 57** — the `WARM_MERGE` boundary both sides, the clock tick at
+  and up to 10 minutes past its instant never folding, every instant across both DST weeks, the
+  followed CHAIN for every boot minute of two days with scans, and the order inside `_warmTick`.
+  Green under London, Helsinki, New York, Lord Howe and Santiago. **Anti-tested three ways:** helper
+  deleted **8 red**, `<` for `<=` **1**, the fold block deleted from `_warmTick` **2** — and only the
+  two ORDER assertions see that last one, because the chain models the fold through the helper.
+  All 34 `tools/t_*.pl` exit 0; both sync checks 0.
+- **STATED COSTS — decided, not missed:** a catch-up due within an hour of 05:xx now warms AT
+  05:xx, up to `WARM_DELAY + WARM_MERGE` after boot, with **no re-seed in the wait** (the store is
+  stale on that path, so a non-forced re-seed would revalidate in the background and duplicate the
+  forced fetch minutes later). An hour keeps two warms apart only while a warm's main phase finishes
+  inside it — measured ~22s warm, ~10 minutes cold: a wide margin, not a bound. A
+  `RESET_CACHE_ON_BUILD` clean-load build started in that hour refills at 05:xx.
+- **PRE-EXISTING, NOT CHANGED:** the skip branch arms the clock at `clockIn` even when that is under
+  `WARM_DELAY`, so a restart minutes before 05:xx having warmed the day before warms inside the boot
+  window (6-12 boot-minutes a day in the simulation). A quality point, not a correctness one.
+- **UNPROVEN LIVE, AND DELIBERATELY NOT STAGED (Simon, 2026-09-14 — "I'll be asleep").** The fold
+  needs a start in the hour before 05:xx with the last warm missed. The rig never does that in
+  routine use — it stops all services for a backup at 06:30 and restarts after — so the fold rests
+  on `t_warmclock.pl` §6b and the chain simulation, and that is accepted. Do not list it as owed
+  verification. If it ever fires, the line is `warm: scheduled warm due in Ns — folding this tick
+  into it`. **What the rig's routine night DOES prove, with no one awake:** the 05:xx clock tick
+  (`tick_at` at 05:xx) and, after the 06:30 backup restart, the SKIP branch + re-seed still open from
+  the 0.9.216 round (`ticks` unchanged, `detail_main_ready` 1, no forced feed fetch) — read
+  `["lbf","warmstats"]` over HTTP the next morning.
+
+**CLOSED IN THE 0.9.218 REVIEW — the 2026-09-14 review of the 0.9.216-0.9.218 working tree. NO
+FINDINGS; round CLOSED by Simon 2026-09-14; committed and pushed to `dev` the same day.** This entry
+records a clean read, not a decision: it suppresses nothing, and every symbol below stays open to a
+later round that brings new evidence. It exists so the next round need not re-derive these checks.
+- **`_buildChanged` / `postinitPlugin` / `_armWarm`.** `_buildChanged` returns 0 or 1 and
+  `postinitPlugin` hands that answer to `_armWarm`, so the build-changed branch is reachable.
+- **`_lastWarmInstant` / `_secsUntilNextWarm`.** Both search a day wide on each side; the first
+  returns the latest instant at or before now, the second the earliest strictly after it. The `>`
+  keeps the re-arm strictly future, so a tick never re-arms for the instant it fires on.
+- **`_catchUpFold` in `_warmTick`.** Runs after the scan defer and before the `warm_last_at` stamp, so
+  a folded tick is never recorded as a warm. A scheduled tick cannot fold itself even when a scan
+  delays it (its next instant is then ~24h out). A folded tick that later waits behind a scan still
+  warms when the scan ends.
+- **Skip path.** Always arms the clock; arms no re-seed when the clock is due within `WARM_DELAY`,
+  so the flag race closed in the 0.9.216 round stays closed.
+- **`Browse::reseedFromStore`.** Uses the warm's own labels (week order kept), calls the getters
+  without `force`, and setting `$detailMainReady` directly is safe because `_detailPriorityBusy`
+  still waits on Last.fm activity.
+- **`_fanOutFeed`.** All four call sites in `warmFeeds` pass the same filtered lists as before.
+- **RULED OUT, with the reason:** the re-seed waits for neither a library scan nor streaming
+  readiness, and releases the detail queue ~180s after boot. Harmless: `_warmReleaseDetails`
+  checks `streamingNotReady()` itself and backs off 300s, and the album resolver `_findPlayable`
+  never reads the local library, so a half-scanned library cannot cache a wrong answer there.
+  Re-raise only with a consumer of the released queue that DOES read the library.
 
 **A closed finding is not a closed MECHANISM.** Both 0.9.192 findings were
 second-order consequences of the 0.9.191 fixes — not regressions of old code, and
@@ -556,7 +767,158 @@ part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
 
-**0.9.215** — built 2026-09-14, **NOT installed and NOT tested.** **THE RELEASE WINDOW IS NOW
+**0.9.218** — built 2026-09-14, **NOT installed; reviewed clean and pushed to `dev` 2026-09-14**
+(Ledger §C `CLOSED IN THE 0.9.218 REVIEW —`). **A TICK THAT LANDS JUST BEFORE THE SCHEDULED
+WARM FOLDS INTO IT.** No schema change, no cache-family bump, no stored shape changed; caches are
+preserved as on every ordinary build. One mechanism: `Plugin::_catchUpFold`, asked at the top of
+`_warmTick` after the scan defer, with `WARM_MERGE` 3600. Everything in the 0.9.217 and 0.9.216
+entries below still describes what ships. Full record, including the two fixes that did NOT work:
+Ledger §C (`CLOSED IN THE 0.9.217 REVIEW —`).
+- **The defect:** a catch-up tick (or a scan-deferred one) that warmed just before 05:xx re-armed for
+  seconds later, so two complete warms ran over each other and the second reset the first's detail
+  phase. Now a tick whose scheduled instant is within an hour re-arms for it instead of warming.
+- **`WARM_HOUR` stays 05:00** — 03:30 was asked for and declined the same day (For You a day behind in
+  Europe; inside the EET DST hour). Ledger §A2 `WARM_HOUR STAYS AT 05:00 LOCAL`.
+
+**TESTS.** `t_warmclock.pl` 46 -> **57** (§6b), green in London, Helsinki, New York, Lord Howe and
+Santiago; anti-tested three ways (8 / 1 / 2 red). All 34 `tools/t_*.pl` exit 0; both sync checks 0;
+`t_loads.pl` 20/20 against the BUILT ZIP, extracted and diffed byte-identical against the working
+tree.
+
+**0.9.217** — built 2026-09-14, **INSTALLED on the test rig 2026-09-14 16:54; superseded by 0.9.218
+(built, not installed); catch-up warm verified live; review CLOSED — see Ledger §C
+(`CLOSED IN THE 0.9.216 REVIEW`).** **THE THREE 0.9.216 REVIEW
+FIXES, BUILT.** No schema change, no cache-family bump, no stored shape changed, and caches are
+preserved as on every ordinary build (`RESET_CACHE_ON_BUILD` 0, `t_buildwipe.pl` 44/44).
+Everything in the 0.9.216 entry below still describes what ships; read it with these three
+corrections. Full record: Ledger §C (`CLOSED IN THE 0.9.216 REVIEW —`) and the status block of
+`docs/scheduled-overnight-warm.md`.
+1. **`reseedFromStore` fans out under the warm's own labels.** The `(re-seed)` suffix defeated
+   the `eq 'all releases'` week ordering in `_warmCovers` / `_queueReleaseDetails`, so a restart
+   queued covers and details newest-release-date-first.
+2. **The overnight clock builds a real local time** (`_warmInstantOn`, `POSIX::mktime` isdst -1).
+   The seconds-arithmetic helper ran the warm TWICE on the autumn DST morning (04:10 and 05:10
+   GMT, 2026-10-25); `_lastWarmInstant` had the same slop. Both candidate loops start a day wide.
+3. **`_armWarm` skips the re-seed when the clock is due within `WARM_DELAY`**, so a restart just
+   before 05:00 cannot release `$detailMainReady` mid-warm.
+
+**TESTS.** `t_warmclock.pl` 37 -> **46** (§3 follows the re-arm chain across both DST changes;
+§6 pins the `WARM_DELAY` boundary; `LBF_TZ=` runs it in any zone — green in seven DST zones
+including Lord Howe and Santiago). `t_detailwarm.pl` 45 -> **46** (§9 reads the labels out of
+`warmFeeds`). Anti-tested six ways, each failing only its own property: seconds arithmetic
+**3 red**, old `_lastWarmInstant` **1**, `>=` boundary **4**, UTC-built instant **14**,
+re-seed armed unconditionally **2**, `(re-seed)` suffix restored **1**. All 34 `tools/t_*.pl`
+exit 0; both sync checks 0; `t_loads.pl` 20/20 against the BUILT ZIP, extracted and diffed
+byte-identical against the working tree. `bench_walk.pl` still exits 255 on its pre-existing
+missing `lastfmConfigured` stub.
+
+**CHECKED LIVE, 2026-09-14:** `plugin_version` 0.9.217; the build-changed catch-up fired at
+16:57:53 (exactly `WARM_DELAY` after load), stamped `warm_last_at`, completed in ~22s with
+Last.fm last and released the detail queue (479 completed, 0 failed). **Still unproven live:**
+the skip branch + re-seed (next restart after today's warm), the within-`WARM_DELAY` skip, the
+DST fix (2026-10-25), and the first fixed-clock tick (~05:04 on 2026-09-15). Details in §C.
+
+**0.9.216** — built 2026-09-14, superseded by 0.9.217 the same day; **NOT installed and NOT tested.** **THE OVERNIGHT WARM NOW
+RUNS ON A FIXED LOCAL CLOCK, AND A RESTART NO LONGER RE-RUNS IT.** No schema change, no
+cache-family bump, nothing stored changes shape. Design and reasoning:
+`docs/scheduled-overnight-warm.md` §4A / §4B / §4F.
+
+**WHY.** `WARM_INTERVAL` re-armed 24 hours from STARTUP, so the daily tick landed at
+whatever o'clock the server was last restarted at — on the rig 08:58, the middle of the day,
+~6 hours adrift of ListenBrainz's own 03:00 UTC job purely by coincidence. And EVERY restart
+ran a complete warm 60s later, unconditionally: three forced feed fetches, the genre ladder,
+the forced playlist listing, the follower builds. Five restarts in an evening meant five
+complete warms, of which only the first could have found anything.
+
+**WHAT SHIPS.**
+- **`_secsUntilNextWarm` / `_warmJitter` (§4A).** The tick re-arms at the next `WARM_HOUR`
+  (5) LOCAL, recomputed fresh each time, plus a stable per-install jitter of 0-1799s so
+  every install in a timezone does not hit `api.listenbrainz.org` in the same second. LOCAL
+  because the release-window arithmetic is local throughout; 05:00 because it must clear
+  ListenBrainz's 03:00 UTC job AND sit outside the DST-ambiguous 00:00-03:00 band. **DST is
+  handled by asking for a LOCAL TIME** (`_warmInstantOn`, `POSIX::mktime` isdst -1) — every run
+  lands exactly on target, one per local date, the change days included. *(The first build said
+  "recomputation, not arithmetic — the transition day lands an hour off". It ran the warm TWICE
+  on the autumn morning; see the review round below.)*
+- **The startup gate, `_armWarm` (§4B).** "Has a tick run since the most recent scheduled
+  instant?" — derived from the same clock helper as the schedule, so there is no second
+  number to tune. `warm_last_at` is stamped at the BOTTOM of `_warmTick`, on the synchronous
+  path: it is a SCHEDULE MARKER, not a success record, so a tick whose async chain later
+  fails still counts as today's warm. **The startup tick is NOT removed and must never be**
+  — the schedule exists only in process memory, and `kvSweep`/`feedSweep` have no other
+  caller, so a machine switched off overnight would never warm at all.
+- **`Browse::reseedFromStore` (§4F), and the skip branch is NOT a bare return.** It arms the
+  clock and rebuilds the in-memory detail queue from the store, because `_queueReleaseDetails`
+  has four call sites and all four are inside `warmFeeds`. Non-forced getters, so it reads the
+  store and issues no feed request. `_fanOutFeed` is now the ONE carrier both the warm
+  callbacks and the re-seed go through (it also removed a real duplicate — the All Releases
+  sites each called `_filterAll` twice).
+- **`WARM_DELAY` 60 -> 180.** The 0.9.195 diagnosis is direct evidence that 60s after boot is
+  the worst moment on the machine — the cold pass ran while the box was saturated by its own
+  boot and pinned 8 false no-matches. That damage was fixed at the caching layer, so this is a
+  quality call not a correctness one; under the new gate the catch-up fires far less often,
+  which is what makes waiting longer cheap. A separate knob from the clock, deliberately.
+
+**TWO REVIEW FINDINGS AGAINST THE PLAN ITSELF, both fixed here. Neither was in the design
+document, and each would have shipped a silent defect:**
+1. **The re-seed would have filled a queue that could not run.** `$detailMainReady` starts at
+   0 and is set to 1 in exactly ONE place — the genre tails inside `warmFeeds` — while
+   `_detailPriorityBusy` reports busy until it is. `warmFeeds` does not run on the skip path,
+   so the flag would have stayed 0 for the life of the process and the re-seeded queue would
+   have sat PAUSED until the next scheduled tick: the same nine-hour hole §4F exists to close,
+   moved one layer down. **The plan's own proposed assertion (`detail_pending` non-zero) passes
+   against it** — a paused queue has a pending count too. `reseedFromStore` releases the flag
+   outright (there is no feed chain or genre tail here to wait for) and `t_detailwarm.pl` §9
+   asserts the queue is RUNNABLE, with a control proving it was genuinely paused first.
+2. **The gate's build-changed branch would have been dead code.** `_buildChanged` sets
+   `last_build` to the running version INSIDE its own eval, so a second call returns early —
+   a gate that re-asked would always be told "no change", and a `RESET_CACHE_ON_BUILD`
+   clean-load build restarting after its scheduled hour would skip the refill it exists for.
+   It now returns 1/0 and `postinitPlugin` passes the answer in.
+
+**THE 2026-09-14 REVIEW OF THIS WORKING TREE — three findings, all fixed and BUILT as 0.9.217**
+(see that entry; this 0.9.216 zip never shipped with them). Logged in
+Ledger §C (`CLOSED IN THE 0.9.216 REVIEW —`):
+1. **`reseedFromStore` fanned out under `'all releases (re-seed)'`**, and `_warmCovers` /
+   `_queueReleaseDetails` week-order only on `eq 'all releases'` — a restart queued covers and
+   details newest-date-first, upcoming weeks ahead of the current one. Now the warm's labels.
+2. **The autumn DST change ran the warm twice** (measured: 04:10 and 05:10 GMT, 2026-10-25). The
+   helpers now build a real local time; `_lastWarmInstant` had the same slop and a needless
+   catch-up with it.
+3. **A restart within `WARM_DELAY` of the scheduled instant** let the re-seed release
+   `$detailMainReady` after the clock tick had zeroed it — the 0.9.204 phase inversion for one
+   warm. `_armWarm` skips the re-seed when the clock is due that soon.
+
+**TESTS.** New `tools/t_warmclock.pl` (**46**; 37 at build, +9 in the review), driving the real helpers and the real gate
+through a timer seam — every row of §4B's table, including the switched-off-overnight machine
+asserted explicitly, since a gate that stopped THAT machine warming is the regression this
+change could plausibly introduce. `t_detailwarm.pl` 38 -> 45 (§9, the re-seed) -> **46** (review).
+`t_coverwarm.pl` 134 -> **136**: its §4c pinned the SOURCE SHAPE of the four `_warmCovers`
+call sites and went red on a correct refactor, so it now pins the PROPERTY through
+`_fanOutFeed` — **plus the half that makes it mean anything**, since four filtered call sites
+routing to a fan-out that warms nothing would otherwise pass. All 34 `tools/t_*.pl` exit 0;
+both sync checks 0; `t_loads.pl` 20/20 against the BUILT ZIP, extracted and diffed
+byte-identical against the working tree.
+
+**ANTI-TESTED NINE WAYS**, each mutant failing only its own property: the `<= 0` boundary
+dropped to `< 0` **2 red**, `gmtime` for `localtime` **3**, jitter returning a constant
+**2**, the re-arm back on `WARM_INTERVAL` **2**, the gate made unconditional in each
+direction **5** and **4**, the skip path not arming the clock **2**, not re-seeding **1**,
+`warm_last_at` never stamped **3**, `_buildChanged` reverted to a bare return **1**, the
+re-seed force-fetching **1**, and finding 1 reverted **1** (assertion 40 alone).
+
+**A HARNESS BUG WAS FOUND BY THE ANTI-TEST AND IS WORTH KEEPING.** One §5 assertion reported
+**PASS at the exact moment it detected the regression**: `$body =~ /no captures/` in LIST
+context yields the EMPTY LIST on a miss, so the message shifted into `$cond`, where a
+non-empty string is true. A defensive "default the message" guard is what hid it through a
+full anti-test run. Every binding there is now `scalar()`-wrapped, and `ok()` reports a
+missing message as a FAIL naming the harness bug rather than defaulting it.
+
+**`bench_walk.pl` still exits 255 and it is STILL not this build** — verified against a clean
+`git archive` extract of HEAD, where it fails identically (the missing `lastfmConfigured`
+stub, 0.9.215's entry).
+
+**0.9.215** — built 2026-09-14, superseded by 0.9.216 the same day; **NOT installed and NOT tested.** **THE RELEASE WINDOW IS NOW
 TWO NUMBERS PER SECTION, AND THE CURRENT WEEK IS WEEK 1.** Settings only — no schema change, no
 cache-family bump, and nothing stored changes shape. See the "Per-section release window" section
 at the top of this file for the shape, and `docs/week-based-release-window.md` "As changed" for
@@ -3206,16 +3568,23 @@ Full table, with fallbacks and triggers, in `docs/genre-ladder-current.md` §4.
   whose inline-MBID short-circuit then costs **zero** MusicBrainz lookups. Radio ladder is now
   LB similar → hosted → Last.fm → recommendations.
 
-### State of play (rewritten 2026-09-10, current at 0.9.210) — read this before starting anything
+### State of play (re-dated 2026-09-14, current at 0.9.218) — read this before starting anything
 
 *This section was dated 2026-07-30 and had not been rewritten since, so it still
 described a 0.9.151 working tree, a matcher hold that closed in 0.9.194 and four plans
 that have since shipped. Rewritten in the hygiene pass to describe the repo as it is.
 **Re-date it whenever you change it** — a "state of play" that lies is worse than none.*
 
-**BRANCHES.** `dev` is the working line and is at **0.9.210**; 0.9.209 was installed and live-tested.
-The tree is CLEAN; there are commits on `dev` not yet pushed, and per the Review Ledger
-that is the deliberate review gate, not a defect. `main` is at **0.9.149** — everything
+**BRANCHES.** `dev` is the working line and is at **0.9.218** (built 2026-09-14, **NOT installed** —
+the catch-up fold, Ledger §C `CLOSED IN THE 0.9.217 REVIEW`). **0.9.217 is what is INSTALLED on the
+rig (2026-09-14 16:54)** — it carries 0.9.215 (the per-section release window, never installed on
+its own), 0.9.216 (the fixed overnight clock, never installed) and that clock's review fixes.
+The catch-up warm is verified live; the skip branch, the re-seed and the first 05:xx tick are
+not yet — see Ledger §C (`CLOSED IN THE 0.9.216 REVIEW`). `plugin_version` is still the first
+thing to read.
+0.9.218 passed review (no findings, Ledger §C `CLOSED IN THE 0.9.218 REVIEW`) and is committed
+and pushed to `dev`, 2026-09-14. When a later tree is uncommitted or unpushed, per the Review
+Ledger both states are the deliberate review gate, not a defect. `main` is at **0.9.149** — everything
 from 0.9.150 on has never been promoted, so "what users have" is far behind `dev`, and
 the CHANGELOG/README debt for that gap is a merge-gate item. `alpha` holds the parked
 genre work at 0.9.140 and **must not be merged** — the feature was ported onto `dev` in
@@ -3352,8 +3721,13 @@ everything below at once — which also means a failure in it does not immediate
 WHICH version introduced it. Check `plugin_version` first; then read the list as
 candidates, not as one suspect:
 - Detail-prewarm queue throughput and restart/checkpoint behaviour on the real server.
-- **A fixed overnight clock.** The timer is still 24 hours relative to STARTUP, which is
-  the last unbuilt piece of the agreed overnight-preparation direction.
+- ~~**A fixed overnight clock.**~~ **PARTLY BUILT in 0.9.216, review fixes in 0.9.217 and 0.9.218** (the latter: a catch-up just before 05:xx folds into it) — the tick now fires at a
+  fixed 05:00 LOCAL (plus a stable per-install jitter) rather than 24 hours after startup,
+  and a restart no longer re-runs a warm that already ran today. **Unbuilt:** §4C (the
+  `$detailMainReady` watchdog), §4D (`next_tick_at` in `warmstats`) and §4E (the convergence
+  follow-up tick). **PARKED:** §4G, the nightly sort-name stage — see the Review Ledger.
+  **NOT VERIFIED LIVE**, so `docs/overnight-detail-prewarm.md` keeps its "Still open" line
+  until §7 of the plan passes on the real server.
 - Adaptive artwork priority, the explicit release actions, generation-backed reuse and
   the indexed week-summary navigation.
 - Whole-pass limits, including Last.fm's 400-artist cap, as part of durable queue
@@ -4882,7 +5256,7 @@ belongs in `handler`, before `SUPER::handler`. Fleet-wide rule — LBF, PFR and 
   - **For You** is now ALWAYS weekly (W/C material headers, newest week first); the toggle sorts the releases *inside* each week and persists to the durable `foryou_sort` pref (default `release_date`; set only via the in-view toggle, not on the settings page — like `follow_sort`).
   - **All Releases** per-week views each carry the toggle, backed by a **single durable `all_sort` pref shared across every week** — set it once and every week honours it, and it survives restarts. (0.9.97 first shipped this as per-week module state; that was changed because opening a *different* week always started at the default, which read as "the sort keeps resetting".) Paging stays per-week module state (`%pageState`); only the sort is a pref now.
   - Feeds are always fetched with `sort=release_date` (stable cache key); all ordering is client-side (`_sortReleases` pre-sorts by date for week-bucketing, `_sortWithin` applies the per-view mode within each week). `group_by_artist`'s collapse was effectively dead anyway (the weekly branch always outranked it) — see the 0.9.97 changelog.
-  - **Artist sort keys on the MusicBrainz sort-name** ("White, Jack"; a stage name like "Panda Bear" keeps its natural order), not the display credit. The LB feed sends only the display credit, so the sort-name comes from MB by artist MBID: `API::warmArtistSorts(\@mbids)` fetches `artist/<mbid>` → `sort-name` serially (MB courtesy gap on public, none on a mirror; capped `SORT_WARM_MAX`=100/pass, in-flight-guarded), cached `lbf:artistsort:1:<mbid>` (30d found / 1d none); `API::peekArtistSort($mbid)` is the sync render-path read. `Browse::_artistSortKey` = `artist_sort_name` (MuSpy supplies it inline) → `peekArtistSort` → display credit. The warm fires **only from the Artist-sort code paths** (`_warmArtistSorts`, gated on `$mode eq 'artist'` in `fetchForYou` and the All-Releases week coderef), so a user who never picks Artist sort triggers no MB traffic; a cold artist sorts by display credit on the first Artist-sorted render and corrects on re-entry (second-load, like bios/emblems).
+  - **Artist sort keys on the MusicBrainz sort-name** ("White, Jack"; a stage name like "Panda Bear" keeps its natural order), not the display credit. The LB feed sends only the display credit, so the sort-name comes from MB by artist MBID: `API::warmArtistSorts(\@mbids)` fetches `artist/<mbid>` → `sort-name` serially (MB courtesy gap on public, none on a mirror; capped `SORT_WARM_MAX`=100/pass, in-flight-guarded), cached `lbf:artistsort:1:<mbid>` (30d found / 1d none); `API::peekArtistSort($mbid)` is the sync render-path read. `Browse::_artistSortKey` = `artist_sort_name` (MuSpy supplies it inline) → `peekArtistSort` → display credit. The warm fires **only from the Artist-sort code paths** (`_warmArtistSorts`, gated on `$mode eq 'artist'` in `fetchForYou` and the All-Releases week coderef), so a user who never picks Artist sort triggers no MB traffic; a cold artist sorts by display credit on the first Artist-sorted render and corrects on re-entry (second-load, like bios/emblems). **PLANNED CHANGE, 2026-09-14 — the browse gate STAYS but stops being the only carrier:** measured on the rig at 0.9.215, the browse-only backfill converges at about one artist per browse minute against ~2,889 outstanding, so `docs/scheduled-overnight-warm.md` §4G adds a LATCHED nightly `sorts` stage (`artist_sort_seen`, set on the first Artist-sorted open). A user who never picks Artist sort still generates zero MB traffic — that guarantee is preserved, not traded. **Read §4G.1 first: `SORT_NONE_AGE` is one day, so a naive nightly stage re-asks every known negative every night and can spend its whole budget without fetching a single new artist.**
 - **Release-family view is per-view too (0.9.124–0.9.128).** Each list has an **Albums / Singles & EPs toggle** — ONE cycling row, "Showing Albums (tap for Singles & EPs)", icon reflecting the current family (`_viewToggle`) — in its Options section (next to Sorted-by), backed by a durable pref set only via the in-view toggle (not on the settings page — like `foryou_sort`):
   - **For You** → `foryou_view`; **All Releases** per-week views → shared `all_view`. Both default `albums`.
   - `_viewFilter` partitions by PRIMARY type: `singles_eps` = primary Single/EP; `albums` = everything else. Applied AFTER `_filterSection`, so it NARROWS within the ticked type checkboxes. Nothing ticked is lost (non-single/EP types fall into `albums`). Home shelves are deliberately unfiltered.

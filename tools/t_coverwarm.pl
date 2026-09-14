@@ -1073,11 +1073,24 @@ section('4c. the warm warms only what will be rendered');
 # COVER_WARM_MAX. _warmGenres has filtered first since it was written; this is
 # the same rule arriving at the covers. Source-level over the warm's call sites,
 # for the same reason as above: the bug is a call site that forgot.
+#
+# RE-POINTED AT THE FAN-OUT (fixed-clock build). The four call sites used to name
+# _warmCovers inline; they now hand the filtered list to _fanOutFeed, the ONE
+# carrier both warmFeeds' callbacks and the startup re-seed go through. The
+# PROPERTY is unchanged — every feed that lands is prepared through its section's
+# filter — so this pins the property rather than the shape it used to have.
+#
+# IT TAKES TWO HALVES AND THE SECOND IS NOT OPTIONAL. Counting four filtered
+# _fanOutFeed sites says nothing about whether covers get warmed at all: all four
+# would pass against a _fanOutFeed that warms none. The second half is what makes
+# the first mean something. (The 0.9.196 lesson: work that MOVES between two places
+# is new information about BOTH — re-point the counter, or it measures the place
+# the work left.)
 {
     my $warm = grab($bsrc, 'warmFeeds');
     $warm =~ s/^\s*#.*$//mg;                      # comments cannot satisfy this
-    my @calls = $warm =~ /_warmCovers\(([^,]+),/g;
-    is_count(scalar(@calls), 4, 'warmFeeds has four cover-warm call sites');
+    my @calls = $warm =~ /_fanOutFeed\(([^,]+),/g;
+    is_count(scalar(@calls), 4, 'warmFeeds has four feed fan-out call sites');
     # A call site may hand over a variable; it counts as filtered only if that
     # variable was ASSIGNED from a filter in the same sub.
     my @raw = grep {
@@ -1090,10 +1103,20 @@ section('4c. the warm warms only what will be rendered');
     # And the right filter each: MuSpy rows are merged into For You, so they
     # answer to that section's settings, not All Releases' — and to its WEEKS, so
     # the far-off announcements MuSpy's store holds are not warmed months early.
-    ok(scalar($warm =~ /my \$shown = _filterForYou\(_mergeMuSpy\(\[\], \$_\[0\]\)\);\s*_warmCovers\(\$shown, 'muspy'\)/),
+    ok(scalar($warm =~ /my \$shown = _filterForYou\(_mergeMuSpy\(\[\], \$_\[0\]\)\);\s*_fanOutFeed\(\$shown, 'muspy'\)/),
        'the MuSpy site filters through For You, windowed to its weeks, whose feed its rows are merged into');
-    ok(scalar($warm =~ /_warmCovers\(_filterAll\(\$_\[0\]\), 'all releases'\)/),
+    ok(scalar($warm =~ /_fanOutFeed\(_filterAll\(\$_\[0\]\), 'all releases'\)/),
        'the All Releases sites filter through All Releases');
+
+    # HALF TWO — the fan-out really does warm covers, and warmFeeds no longer
+    # reaches past it. Without the second assertion a later call site could warm
+    # covers directly and skip the filter check above entirely.
+    my $fan = eval { grab($bsrc, '_fanOutFeed') } || '';
+    $fan =~ s/^\s*#.*$//mg;
+    ok(scalar($fan =~ /_warmCovers\(/),
+       '_fanOutFeed is what actually warms the covers (or the four sites above prove nothing)');
+    ok($warm !~ /_warmCovers\(/,
+       'warmFeeds reaches the cover warm ONLY through the fan-out (control)');
 }
 # NO BEHAVIOURAL CASE HERE, AND THAT IS A DECISION RATHER THAN AN OMISSION.
 # Driving a blocked artist end-to-end means lifting _filterSection and its five
