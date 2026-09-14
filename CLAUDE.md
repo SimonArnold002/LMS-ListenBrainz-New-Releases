@@ -12,9 +12,9 @@ processing. The first patch separates the two feeds' ListenBrainz passes from th
 Last.fm tails and gates all Last.fm warm/top-up calls on core work, cover work and
 browse activity. See [cache-priority-refactor.md](docs/cache-priority-refactor.md)
 for implementation, recovery limits, tests and outstanding live scheduling work.
-**As of 0.9.218 (0.9.216 plus two rounds of review fixes) the fixed overnight clock is PARTLY BUILT** — §4A (a fixed 05:00 local
+**As of 0.9.218 (0.9.216 plus two rounds of review fixes; carried unchanged into 0.9.219) the fixed overnight clock is PARTLY BUILT** — §4A (a fixed 05:00 local
 tick), §4B (the startup gate) and §4F (the store re-seed) are in; §4C-§4E are not, and
-§4G is PARKED. See `docs/scheduled-overnight-warm.md`.
+§4G is DECLINED (2026-09-14 — the MusicBrainz sort-name was dropped). See `docs/scheduled-overnight-warm.md`.
 
 ## Per-section release window — 0.9.215, built 2026-09-14 (carried into 0.9.216-0.9.218; installed as part of 0.9.217, 2026-09-14)
 
@@ -33,6 +33,46 @@ reverted), and the nightly MuSpy warm prepares only the rows inside the window.
 Read `docs/week-based-release-window.md` "As changed" before touching any of it. Guards:
 `t_weekwindow.pl` (71, incl. §8 which RUNS `Settings::handler`), `t_detailwarm.pl` §8; both
 anti-tested. Built and versioned as 0.9.215; not yet installed.
+
+## MusicBrainz 503s — built 0.9.219, 2026-09-14 (not installed; review CLOSED, pushed to dev)
+
+**Diagnosed on the rig from `log.txt`:** ~80 MusicBrainz 503s in ten minutes after the 06:31
+restart, smaller bursts after every restart. MusicBrainz refuses EVERY request from an IP whose
+average rate is over ~1/s, and five LBF paths called it with no shared pacing — the Trending album
+search (unpaced, no backoff) the worst. The server was NOT being refused when idle. Three changes,
+all decided by Simon the same day — Ledger §A2 `ONE MUSICBRAINZ QUEUE, ONE COMMUNITY-API QUEUE`:
+1. **`API::_mbGet` is the one MusicBrainz queue** (one in flight, `MB_GAP` 1.1s between sends, the
+   shared 503 backoff); **`_hostedGet` is a one-in-flight queue** (MAI's own precedent). Diag's MB
+   probes go through the MB queue and report a backoff instead of timing out.
+2. **Trending's album search uses the community API only** — no MusicBrainz leg; collaborations
+   are split on the community API instead.
+3. **Tracklists come from ListenBrainz by release group** (`API::getTracklist` / `peekTracklist`),
+   MusicBrainz for the exact release only when ListenBrainz has none. ~1 album in 10 may show
+   another edition's track list — accepted.
+Guards: new `tools/t_mbqueue.pl` (67), `t_rgresolver.pl` §5/5b, `t_diag.pl` §9, `t_detailflight.pl`,
+`t_detailwarm.pl`, `t_genrefill.pl` §11B/§13 re-pointed. 35 suites exit 0; 11 anti-test mutants each
+red. The artist sort was decided later the same day — next section.
+
+## Artist sort A–Z, radio lookup, streaming aliases — built 0.9.219, 2026-09-14 (not installed; review CLOSED, pushed to dev)
+
+Three more changes, all Simon's call the same day — Ledger §A2 `ARTIST SORT IS A–Z ON THE DISPLAY
+NAME` and `STREAMING ALIAS PASS`:
+1. **The Artist sort is A–Z on the display name**, a leading article skipped with LMS's own
+   `ignoredarticles` list (`Slim::Utils::Text::ignoreArticles`). Gone: the MusicBrainz sort-name warm
+   (`warmArtistSorts`, `peekArtistSort(s)`, `SORT_*`), the store API (`artistSortGet/Put`,
+   `importSorts`), the `artist_sorts` stat and the `sort_name`/`sort_src`/`sort_at` columns. MuSpy's
+   inline `sort_name` is ignored. No migration — `main` ships no `DB.pm`. §4G is DECLINED.
+2. **The radio's name → MBID lookup is community API only** (`getArtistMbidByName` → new
+   `getArtistAliases`, `/artist/<name>/aliases`), accepted on the canonical name OR an alias.
+   `lbf:artistmbid:` retired, `lbf:aliases:` 1 added.
+3. **A streaming album miss retries the artist's other names** — `_albumMatchesAlt` (joint-credit
+   parts, then aliases) at all five album adapters; `_findPlayable` runs ONE alias pass on a clean
+   miss. Outside the shared matcher; no `lbf:stream:` bump.
+Guards: new `tools/t_aliasmatch.pl` (61), `t_orderfreeze.pl` rewritten (32; §9 is the sort key),
+`t_db.pl` (250), `t_genrefill.pl` §5/§13, `t_detailflight.pl`, `t_review_fixes.pl`, `bench_walk.pl`,
+`t_diag.pl` §6 (79 — the community-API probe is on `/aliases` and its amber note no longer promises a
+MusicBrainz fallback). 36 suites exit 0, both sync checks 0; 11 mutants each red, plus 2 on the Diag
+row. **UNPROVEN LIVE.**
 
 ## Review Ledger — READ THIS BEFORE REPORTING ANY FINDING
 
@@ -74,7 +114,7 @@ because line numbers rot on the next edit.
 | `indie` is DELIBERATELY family-less | A2 | ``indie` is DELIBERATELY family-less` |
 | `ethereal wave`, `neoclassical dark wave` and `dreamwave` are left family-less | A2 | ``ethereal wave`, `neoclassical dark wave` and` |
 | The album→single release-type filter is deliberately LBF-only | A2 | `The album→single release-type filter is` |
-| Artist sort names stay on MusicBrainz | A2 | `Artist sort names stay on MusicBrainz` |
+| Artist sort is A–Z on the display name (LMS article list); MusicBrainz sort-names, their columns and §4G are GONE — reverses "Artist sort names stay on MusicBrainz" | A2 | `ARTIST SORT IS A–Z ON THE DISPLAY NAME` |
 | The hosted API is not a genre backend | A2 | `The hosted API is not a genre backend` |
 | LB / MB / hosted genre sources are all MB-derived and fail together | A2 | `LB / MB / hosted genre sources are all` |
 | The bio parser is end-of-life | A2 | `The bio parser is end-of-life` |
@@ -86,12 +126,15 @@ because line numbers rot on the next edit.
 | TWO 0.9.207 FIXES ARE STILL UNPROVEN LIVE, and that is known, not missed | B | `TWO 0.9.207 FIXES ARE STILL UNPROVEN LIVE,` |
 | Last.fm error 6 is an ANSWER; latched key ends the warm pass; error-6 + latch UNPROVEN LIVE | C | `CLOSED IN 0.9.214 —` |
 | Diag's Last.fm row says "HTTP 403", not "rejected the built-in API key" — cosmetic, pre-0.9.213 | B | `Diag's Last.fm row shows "HTTP 403"` |
-| Sort-names not converging / MB hammered — measured, nightly stage PARKED on the 503 rate, not a cache defect | B | `The artist sort-name backfill does not converge` |
+| ~~Sort-names not converging~~ — MOOT 2026-09-14, the MusicBrainz sort-name was dropped; history only | B | `The artist sort-name backfill does not converge` |
 | The 0.9.215 week-window review: both findings were PROSE, the code was clean | C | `CLOSED IN 0.9.215 —` |
 | 0.9.216 review: re-seed labels, autumn DST double warm, re-seed vs clock race — fixed in 0.9.217, installed, round CLOSED. Closes the three ORIGINAL defects only; the fix code is open to review | C | `CLOSED IN THE 0.9.216 REVIEW —` |
 | 0.9.217 review: a catch-up landing just before 05:xx ran a second, overlapping warm — `_catchUpFold` in `_warmTick`, built 0.9.218, NOT installed. Closes that defect only; the fold code is open to review. Two fixes that did NOT work are recorded there | C | `CLOSED IN THE 0.9.217 REVIEW —` |
 | 0.9.218 review: NO findings — records what was checked (gate, clock helpers, fold, skip path, re-seed, fan-out) and one ruled-out candidate. Not a suppression | C | `CLOSED IN THE 0.9.218 REVIEW —` |
+| 0.9.219 review: NO findings — records what was checked (both queues, callers, alias pass, tracklists, Diag) and one ruled-out candidate (`$live` before a queued send). Not a suppression | C | `CLOSED IN THE 0.9.219 REVIEW —` |
 | `WARM_HOUR` stays 05:00 local — 03:30 (and "N hours after restart") asked for, costed, declined | A2 | `WARM_HOUR STAYS AT 05:00 LOCAL` |
+| One MusicBrainz queue + one community-API queue; Trending album search community-API ONLY; tracklists ListenBrainz-first (edition may differ ~1 in 10, accepted) | A2 | `ONE MUSICBRAINZ QUEUE, ONE COMMUNITY-API QUEUE` |
+| Streaming album match retries joint-credit parts and community-API aliases (ONE pass, clean misses only, tracks not covered); radio name lookup community API only, no MB fallback | A2 | `STREAMING ALIAS PASS` |
 
 **Two standing rules that kill most repeat findings:**
 
@@ -234,9 +277,44 @@ always with its reason, and those stay suppressed. The code a fix added is new a
   or propose restoring it.
 - **The album→single release-type filter is deliberately LBF-only**, outside the
   shared matcher. It is not matcher drift.
-- **Artist sort names stay on MusicBrainz.** The ListenBrainz `type`-driven local
-  sort key mis-files stage names (Panda Bear → "Bear, Panda"). Settled; the
-  detail tracklist stays on MB for the same reason, probed live.
+- **ARTIST SORT IS A–Z ON THE DISPLAY NAME — `Browse::_artistSortKey`, `_sortWithin`. Simon,
+  2026-09-14 ("return A-Z, it will make it all work quicker"; ignore "The").** Reverses "Artist sort
+  names stay on MusicBrainz" (2026-08-22). The key is the display credit, lowercased, with a leading
+  article removed by LMS's own `Slim::Utils::Text::ignoreArticles` (server pref `ignoredarticles`,
+  default "The El La Los Las Le Les" — server-wide, not library-only). Only the first word goes:
+  "The The" keys as "the". Each part, with a disprovable reason:
+  - **No MusicBrainz sort-name, and nothing replaces it.** ListenBrainz, the community API and MuSpy's
+    public lookup carry no usable field (probed 2026-09-14: MuSpy knew 11 of 40 feed artists); a
+    `type`-driven name inversion files stage names wrongly (Panda Bear → "Bear, Panda"). MuSpy's
+    inline `sort_name` is IGNORED so both feeds sort alike. **Do not re-propose a sort-name source or
+    a name-inversion heuristic.**
+  - **The columns went too** (`sort_name`/`sort_src`/`sort_at` from the `artist` CREATE and migration
+    3; `artistSortGet/Put`, `importSorts`, the `artist_sorts` stat). NOT a migration finding: `main`
+    ships no `DB.pm` (Gate 2). A dev store keeps the dead columns and nothing reads them.
+  - **The order freeze STAYS** (`_frozenOrder`) — the genre filter is still a warm-filled peek.
+  - **§4G of `docs/scheduled-overnight-warm.md` (the nightly sort stage) is DECLINED**, not parked.
+- **STREAMING ALIAS PASS, AND THE RADIO LOOKUP ON THE COMMUNITY API ONLY — `Browse::_albumMatchesAlt`,
+  `_artistAltNames`, `_findPlayable`; `API::getArtistAliases`, `getArtistMbidByName`. Simon,
+  2026-09-14.** Field case: Dexys Midnight Runners – LOVE did not match in All Releases and Refresh did
+  not help; Qobuz credits several Dexys releases "Dexys, Kevin Rowland".
+  - **`_albumMatchesAlt` is LBF-only and OUTSIDE the shared matcher** — it CALLS `_albumMatches` and
+    never changes it, so `matcher_sync_check.py` has nothing to say and no other repo owes a port.
+    Order: the shared matcher; each part of the service's joint credit (`splitArtistCredits`); the
+    artist's other names. The TITLE must match every time.
+  - **ONE alias pass, clean misses only.** `_findPlayable` fetches aliases (`/artist/<name>/aliases`,
+    `?mbid=` when the release carries an artist MBID; 30d found / 1d none) only when EVERY service
+    answered and none matched, then searches once more. An inconclusive miss keeps its retry schedule;
+    a FAILED lookup makes the miss inconclusive; a Various Artists credit is never alias-searched.
+  - **No `lbf:stream:` bump.** Only misses change, and a miss is cached a day (retries within ~31h) —
+    the 0.9.212 false-miss-not-false-hit reasoning.
+  - **Radio: no MusicBrainz fallback** ("if it fails in the API it will fail via MB too"). What the
+    fallback really rescued was renamed artists, which the alias accept now covers ("Oh Sees" →
+    Osees). `lbf:artistmbid:` is retired (orphan rows age out); `lbf:aliases:` is the family.
+    **Known gap, accepted:** "The Oh Sees" gets no community-API answer at all (MusicBrainz's alias
+    search found it), so the radio skips it.
+  - **Not covered, known:** the TRACK path (`_findPlayableTrack` — playlists, DSTM) has no alias pass.
+    Raise it only with a real track that failed.
+  - **UNPROVEN LIVE.** Guard `tools/t_aliasmatch.pl` (61, anti-tested seven ways).
 - **The hosted API is not a genre backend.** The ARTIST tier was built in 0.9.162
   and REMOVED in 0.9.173 at ~2% coverage. Only the ALBUM route survives, detail
   page only. Do not propose reinstating the artist tier.
@@ -266,6 +344,28 @@ always with its reason, and those stay suppressed. The code a fix added is new a
   → 1h, and a resolve that COMPLETED short → still the full partial TTL. Do not
   "simplify" it into the `$inconclusive` term; they mean different things and the
   anti-test catches a blanket downgrade. *(0.9.211.)*
+- **ONE MUSICBRAINZ QUEUE, ONE COMMUNITY-API QUEUE — `API::_mbGet`/`_mbPump`/`_mbSend`,
+  `_hostedGet`/`_hostedPump`/`_hostedSend`, `getReleaseGroupByName`, `getTracklist`/`peekTracklist`.
+  Simon, 2026-09-14 ("we just cannot go over its rate"; "if it fails in the API it will fail via MB
+  too"; "happy with doing what's suggested").** Decisions, each with its disprovable reason:
+  - **No MusicBrainz request may bypass `_mbGet`** (the mirror-only `getArtistGenres` is the one
+    direct call, and never reaches the public host). MusicBrainz's limit is on the SUM per IP; five
+    paths each pacing themselves put the rig over it after every restart (log, 2026-09-14 06:35-06:45).
+    A request to a MIRROR is not queued; the decision is on the URL, because the mirror paths retry
+    the PUBLIC host. Callers must not call `_mbNoteLimit`/`_mbNoteOk` — the queue does.
+  - **The community API is one request at a time.** MAI (the API author's plugin) sends synchronously;
+    the dev publishes no rate. Do not reintroduce concurrency against it.
+  - **`getReleaseGroupByName` has NO MusicBrainz fallback.** The community API is built from
+    MusicBrainz, so its miss is a MusicBrainz miss bar same-week additions. Do not re-propose the MB
+    leg. Collaborations are split on the community API (live: "Panda Bear & Sonic Boom" = 0 albums,
+    "Reset" is under Panda Bear); `artist_mbid` rides with the full credit only. A FAILED request is
+    not cached; an answered miss is cached 1 day.
+  - **Tracklists: ListenBrainz by release group first**, MusicBrainz for the exact release only when LB
+    has none; an exact MB answer already stored is served first. **The edition can differ** (measured
+    2026-08-22: LB's representative = the feed's release 38/43) — accepted, NOT a finding. Trending and
+    MuSpy rows now get a tracklist too.
+  - **NOT covered, known:** other plugins on the same IP (Discography's public-MB fallbacks) are not
+    in LBF's queue. Raise it only with a log showing the other plugin's requests in a 503 window.
 - **WARM_HOUR STAYS AT 05:00 LOCAL — `WARM_HOUR`, `_warmInstantOn`, `_secsUntilNextWarm`. Simon,
   2026-09-14, having asked for 03:30 and been shown what it costs.** Two reasons, both measured:
   1. **For You would sit a day behind, all year, in Europe.** ListenBrainz's For You job is DAILY at
@@ -326,7 +426,8 @@ always with its reason, and those stay suppressed. The code a fix added is new a
   0.9.158; the GET probe behaved the same). A fix would pass the error body to `check` when
   the target opts in. Not a regression, and it is not scheduled.
 
-- **The artist sort-name backfill does not converge, and the nightly `sorts` stage is
+- **~~The artist sort-name backfill does not converge~~ — MOOT, 2026-09-14: the MusicBrainz sort-name was
+  dropped (§A2 `ARTIST SORT IS A–Z ON THE DISPLAY NAME`) and §4G is DECLINED. History below.** The nightly `sorts` stage was
   PARKED — Simon, 2026-09-14: "leave the artist sort for now, it feels like we need more work
   to get this to work better, we should not be hitting 503's."** Do not report "sort names are
   missing / MusicBrainz is being hammered / why is this not cached" as a new finding: it is
@@ -339,6 +440,11 @@ always with its reason, and those stay suppressed. The code a fix added is new a
   without a name on a box whose `mb_base_url` is PUBLIC MusicBrainz (confirmed in `lbf diag`;
   no mirror is assumed going forward, §7 of `hosted-lms-community-api.md`). `API.pm`'s own
   comment already called it *"a multi-day reconvergence on a 2,900-release feed"*.
+  - **THE 503 RATE IS ANSWERED — 2026-09-14.** It was not the sort warm's own pacing and not
+    another plugin: LBF's OTHER MusicBrainz callers (the Trending album search above all) sent
+    unpaced beside it after every restart, pushing the IP over MusicBrainz's per-IP average so every
+    request was refused. Fixed structurally by the one MusicBrainz queue (§A2 `ONE MUSICBRAINZ QUEUE`).
+    Whether the sort stays on MusicBrainz at all is now Simon's open decision, not a parked build.
   - **WHY IT IS PARKED, and it is NOT the budget question.** The design (§4G of
     `docs/scheduled-overnight-warm.md`) is sound and reviewed; what stopped it is that the
     box is being 503'd at a pace WIDER than the courtesy gap the code applies — measured
@@ -353,8 +459,8 @@ always with its reason, and those stay suppressed. The code a fix added is new a
     (`sort_name <> ''`) and has no counter for recorded nones, so the 2,889 is "artists
     without a name", NOT "artists still to try". `artist_sort_none` / `artist_sort_never` are
     to be added and read off the rig BEFORE `SORT_WARM_NIGHT` is chosen.
-  - **Do not re-propose moving sort-names off MusicBrainz.** Settled: neither ListenBrainz
-    nor the hosted API carries the field, probed live.
+  - ~~**Do not re-propose moving sort-names off MusicBrainz.**~~ Superseded 2026-09-14: the sort no
+    longer uses a sort-name. Neither ListenBrainz nor the hosted API carries the field, probed live.
   - **Do not re-propose raising `SORT_WARM_MAX`** as the fix. The browse cap is correct for a
     foreground open; the stage takes its own constant. And do not propose simply raising
     `SORT_NONE_AGE` — one day is the 0.9.186 `fetched_at` fix and is still right for the
@@ -616,6 +722,28 @@ later round that brings new evidence. It exists so the next round need not re-de
   never reads the local library, so a half-scanned library cannot cache a wrong answer there.
   Re-raise only with a consumer of the released queue that DOES read the library.
 
+**CLOSED IN THE 0.9.219 REVIEW — the 2026-09-14 review of the 0.9.219 working tree (MusicBrainz
+queue, community-API queue, ListenBrainz-first tracklists, A–Z artist sort, alias pass). NO
+FINDINGS; round CLOSED by Simon 2026-09-14; committed and pushed to `dev` the same day.** A clean
+read, not a decision: it suppresses nothing, and every symbol below stays open to new evidence.
+- **`_mbGet` / `_mbPump` / `_mbSend`.** Re-entrancy guard, timer handling and watchdog hold;
+  `LostResponse` answers the `->code` / `->error` that `_mbIsRateLimited` and `_handleError` call.
+- **`_hostedGet` / `_hostedPump` / `_hostedSend`.** The slot is released exactly once, a 429 job
+  goes back to the queue head BEFORE the release, a callback after the watchdog is ignored.
+- **Callers.** Both DSTM `getArtistMbidByName` callers handle the new error callback; every
+  `_findPlayable` caller passes the artist MBID as the 9th argument. Three direct MusicBrainz calls
+  remain: the mirror-only genre fetch (§A2) and `getReleaseDetails` / Diag, both now queued.
+- **`getReleaseGroupByName` / `getArtistAliases`.** A failed lookup is not cached, an answered empty
+  one is; by-MBID and by-name cache keys differ; the unknown-artist no-MBID check is kept.
+- **Alias pass.** Once, clean misses only, a failed lookup makes the miss inconclusive; the VA check
+  works (`VA_MBID` is defined in `Browse.pm`); `_albumMatchesAlt` still requires the title.
+- **`peekTracklist` / `getTracklist`.** Every LB-answer × MB-answer × missing-id combination handled;
+  `_warmReleaseDetails` retries; `SingleFlight` join/resolve arguments match its API.
+- **Diag.** Backoff rows are excluded from the pending count; `$started` is set at the queue's send.
+- **RULED OUT, with the reason:** `getReleaseDetails` no longer checks `$live` before a queued send,
+  so a send could outlive its 120s single-flight claim. Nothing waits that long today: `DetailWarm`
+  has ONE active slot and the MB backoff tops out at 30s. Re-raise if either changes.
+
 **A closed finding is not a closed MECHANISM.** Both 0.9.192 findings were
 second-order consequences of the 0.9.191 fixes — not regressions of old code, and
 not re-reports either. A fix that changes WHO participates in a mechanism (which
@@ -767,7 +895,29 @@ part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
 
-**0.9.218** — built 2026-09-14, **NOT installed; reviewed clean and pushed to `dev` 2026-09-14**
+**0.9.219** — built 2026-09-14, **NOT installed, not committed, UNPROVEN LIVE.** The two working-tree
+sections at the top of this file, built together: **MusicBrainz 503s** (one MusicBrainz queue, one
+community-API queue, Trending album search community-API only, tracklists ListenBrainz-first) and
+**Artist sort A–Z, radio lookup, streaming aliases** (no MusicBrainz sort-name, the sort columns and
+store API dropped, `getArtistMbidByName` on `/aliases` only, a one-pass streaming alias retry).
+Read those two sections and Ledger §A2 `ONE MUSICBRAINZ QUEUE, ONE COMMUNITY-API QUEUE`,
+`ARTIST SORT IS A–Z ON THE DISPLAY NAME`, `STREAMING ALIAS PASS`.
+- **No schema rung.** The `artist` CREATE lost `sort_name`/`sort_src`/`sort_at` in place — `main`
+  ships no `DB.pm`, so no released db holds them. A dev db built before this keeps the dead columns
+  harmlessly; nothing reads them.
+- **Cache families:** `lbf:aliases:` 1 added, `lbf:artistmbid:` retired (orphans age out).
+  `lbf:stream:` deliberately NOT bumped — the shared matcher is untouched, and a cached miss re-tries
+  on the normal miss schedule, which is when the alias pass gets its chance.
+- **Stale-reference sweep at build:** Diag's community-API row probed `/mbid` and its amber note said
+  "MusicBrainz fallback still applies" — now `/aliases` and "the radio may fall back to generic
+  recommendations"; four comments (API.pm ×3, DB.pm) and the `scheduled-overnight-warm.md` EXISTS
+  table no longer describe the sort warm as live.
+
+**TESTS.** All 36 `tools/t_*.pl` exit 0; both sync checks 0; `git diff --check` clean; `t_loads.pl`
+20/20 against the BUILT ZIP, extracted and diffed byte-identical against the working tree;
+`t_buildwipe.pl` 44/44 (`DEV_BUILD` 1, `RESET_CACHE_ON_BUILD` 0 — caches preserved).
+
+**0.9.218** — built 2026-09-14, **NOT installed; reviewed clean and pushed to `dev` 2026-09-14; superseded by 0.9.219**
 (Ledger §C `CLOSED IN THE 0.9.218 REVIEW —`). **A TICK THAT LANDS JUST BEFORE THE SCHEDULED
 WARM FOLDS INTO IT.** No schema change, no cache-family bump, no stored shape changed; caches are
 preserved as on every ordinary build. One mechanism: `Plugin::_catchUpFold`, asked at the top of
@@ -1616,6 +1766,8 @@ the click is resolved"*. That is only safe while the list is stable, and **both 
 ordering inputs are cache-only PEEKS that a background warm is actively filling**:
 - **artist sort** — `_sortWithin` reads `peekArtistSorts`. An unwarmed name falls back
   to the display credit, so *Panda Bear* sorts under P and, once MB answers, under B.
+  *(GONE 2026-09-14: the sort is A–Z on the display name, no peek — the genre filter
+  below is now the freeze's only live mover. §A2 `ARTIST SORT IS A–Z ON THE DISPLAY NAME`.)*
 - **the genre filter** — `_genreSelectFilter` buckets on peeked genre facts while
   `_kickGenreFill` tops them up. A release with no genre yet is filtered OUT and
   filtered back IN when its genre lands, shifting every row after it.
@@ -3547,22 +3699,21 @@ now says so.
   ARTIST, not per album. **Never swap this for `/album/<t>/<a>` — that returns a RELEASE mbid.**
 - ~~`album/<album>/<artist>/genres`~~ → **REMOVED 0.9.185.** The detail page fetches no genres at
   all now; it reads the store, which the ladder and the trending build have already filled.
-- `artist/<name>/mbid` → **DSTM radio** only (seed artist, then each similar artist).
+- `artist/<name>/aliases` → **DSTM radio** (seed artist, then each similar artist) through
+  `getArtistMbidByName`, and the streaming **alias pass** in `_findPlayable` (2026-09-14; replaced `/mbid`).
 - `artist/<name>/relatedArtists` → **DSTM radio** only, when LB has no similar artists for the seed.
 - `artist/<probe>/mbid` → the **diagnostics page**, once per open.
 
-**What stays on MusicBrainz, settled and not to be re-proposed** (`hosted-lms-community-api.md` §7):
-`warmArtistSorts` (sort-names) and `getReleaseDetails` (tracklist) have no alternative anywhere —
-neither LB nor the hosted API carries the field. 0.9.180 therefore made the sort path well-behaved
-(the 503 backoff above) rather than moving it. See also §2.4.3 of `caching-rework.md` for why the
-`type`-driven local sort key was dropped rather than built.
+**What stays on MusicBrainz** (`hosted-lms-community-api.md` §7), **as of 2026-09-14:** only the
+tracklist for the exact release when ListenBrainz has none (`getReleaseDetails`, through the one
+MusicBrainz queue) and the mirror-only artist genres. The sort-name warm is GONE — the Artist sort is
+A–Z on the display name (Ledger §A2 `ARTIST SORT IS A–Z ON THE DISPLAY NAME`).
 
 Full table, with fallbacks and triggers, in `docs/genre-ladder-current.md` §4.
-- `getArtistMbidByName` is two-tier: hosted first, accepted **only** when the returned name folds
-  equal to the query (via `Browse::_norm`) **and** the MBID is non-empty. That length check is
-  load-bearing — an unknown artist returns `{"name":"<query lowercased>","mbid":""}`, so the name
-  folds equal to itself. Anything else falls back to the previous MusicBrainz search, byte for byte
-  and unconditionally.
+- `getArtistMbidByName` is **community API only since 2026-09-14** (via `getArtistAliases`): accepted
+  **only** when the MBID is non-empty **and** the query folds equal to the canonical name OR one of
+  its aliases. The length check is load-bearing — an unknown artist returns `{"name":"<query>"}`, so
+  the name folds equal to itself. No MusicBrainz fallback (Ledger §A2 `STREAMING ALIAS PASS`).
 - `getSimilarArtistsHosted` → `/artist/<n>/relatedArtists`: 25 artists, **100% carrying MBIDs**, no
   API key. Emits the same shape as the Last.fm rung so it drops into `DSTM::_resolveArtistMbids`,
   whose inline-MBID short-circuit then costs **zero** MusicBrainz lookups. Radio ladder is now
@@ -3725,7 +3876,7 @@ candidates, not as one suspect:
   fixed 05:00 LOCAL (plus a stable per-install jitter) rather than 24 hours after startup,
   and a restart no longer re-runs a warm that already ran today. **Unbuilt:** §4C (the
   `$detailMainReady` watchdog), §4D (`next_tick_at` in `warmstats`) and §4E (the convergence
-  follow-up tick). **PARKED:** §4G, the nightly sort-name stage — see the Review Ledger.
+  follow-up tick). **DECLINED:** §4G, the nightly sort-name stage — the MusicBrainz sort-name was dropped 2026-09-14.
   **NOT VERIFIED LIVE**, so `docs/overnight-detail-prewarm.md` keeps its "Still open" line
   until §7 of the plan passes on the real server.
 - Adaptive artwork priority, the explicit release actions, generation-backed reuse and
@@ -5256,7 +5407,7 @@ belongs in `handler`, before `SUPER::handler`. Fleet-wide rule — LBF, PFR and 
   - **For You** is now ALWAYS weekly (W/C material headers, newest week first); the toggle sorts the releases *inside* each week and persists to the durable `foryou_sort` pref (default `release_date`; set only via the in-view toggle, not on the settings page — like `follow_sort`).
   - **All Releases** per-week views each carry the toggle, backed by a **single durable `all_sort` pref shared across every week** — set it once and every week honours it, and it survives restarts. (0.9.97 first shipped this as per-week module state; that was changed because opening a *different* week always started at the default, which read as "the sort keeps resetting".) Paging stays per-week module state (`%pageState`); only the sort is a pref now.
   - Feeds are always fetched with `sort=release_date` (stable cache key); all ordering is client-side (`_sortReleases` pre-sorts by date for week-bucketing, `_sortWithin` applies the per-view mode within each week). `group_by_artist`'s collapse was effectively dead anyway (the weekly branch always outranked it) — see the 0.9.97 changelog.
-  - **Artist sort keys on the MusicBrainz sort-name** ("White, Jack"; a stage name like "Panda Bear" keeps its natural order), not the display credit. The LB feed sends only the display credit, so the sort-name comes from MB by artist MBID: `API::warmArtistSorts(\@mbids)` fetches `artist/<mbid>` → `sort-name` serially (MB courtesy gap on public, none on a mirror; capped `SORT_WARM_MAX`=100/pass, in-flight-guarded), cached `lbf:artistsort:1:<mbid>` (30d found / 1d none); `API::peekArtistSort($mbid)` is the sync render-path read. `Browse::_artistSortKey` = `artist_sort_name` (MuSpy supplies it inline) → `peekArtistSort` → display credit. The warm fires **only from the Artist-sort code paths** (`_warmArtistSorts`, gated on `$mode eq 'artist'` in `fetchForYou` and the All-Releases week coderef), so a user who never picks Artist sort triggers no MB traffic; a cold artist sorts by display credit on the first Artist-sorted render and corrects on re-entry (second-load, like bios/emblems). **PLANNED CHANGE, 2026-09-14 — the browse gate STAYS but stops being the only carrier:** measured on the rig at 0.9.215, the browse-only backfill converges at about one artist per browse minute against ~2,889 outstanding, so `docs/scheduled-overnight-warm.md` §4G adds a LATCHED nightly `sorts` stage (`artist_sort_seen`, set on the first Artist-sorted open). A user who never picks Artist sort still generates zero MB traffic — that guarantee is preserved, not traded. **Read §4G.1 first: `SORT_NONE_AGE` is one day, so a naive nightly stage re-asks every known negative every night and can spend its whole budget without fetching a single new artist.**
+  - **Artist sort is A–Z on the display name (2026-09-14)** — the credit as the row shows it, lowercased, with a leading article skipped via LMS's own `ignoredarticles` list (`Slim::Utils::Text::ignoreArticles`), so "The Cure" files under C and "The The" under T. No MusicBrainz sort-name is fetched or stored, MuSpy's inline one is ignored, and opening an Artist-sorted view sends nothing anywhere. See Ledger §A2 `ARTIST SORT IS A–Z ON THE DISPLAY NAME`.
 - **Release-family view is per-view too (0.9.124–0.9.128).** Each list has an **Albums / Singles & EPs toggle** — ONE cycling row, "Showing Albums (tap for Singles & EPs)", icon reflecting the current family (`_viewToggle`) — in its Options section (next to Sorted-by), backed by a durable pref set only via the in-view toggle (not on the settings page — like `foryou_sort`):
   - **For You** → `foryou_view`; **All Releases** per-week views → shared `all_view`. Both default `albums`.
   - `_viewFilter` partitions by PRIMARY type: `singles_eps` = primary Single/EP; `albums` = everything else. Applied AFTER `_filterSection`, so it NARROWS within the ticked type checkboxes. Nothing ticked is lost (non-single/EP types fall into `albums`). Home shelves are deliberately unfiltered.

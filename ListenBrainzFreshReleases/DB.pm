@@ -39,8 +39,8 @@ package Plugins::ListenBrainzFreshReleases::DB;
 #   3. THREE THINGS IN THE CACHE WERE NOT CACHES. `lbf:bcmatch:` (hand-curated
 #      Bandcamp pins with no automatic repopulation), `lbf:follow:accum:` (builds
 #      forward from first capture; unrecoverable once events leave ListenBrainz's
-#      75-event window) and `lbf:artistsort:` (re-derivable only at 100 artists a
-#      pass, serially). They get TABLES so their lifetime is governed by their
+#      75-event window) and `lbf:artistsort:` (MusicBrainz artist sort-names —
+#      dropped 2026-09-14 with the MusicBrainz Artist sort). They get TABLES so their lifetime is governed by their
 #      own fact versions rather than by a disposable derived-cache key.
 #
 # THE RULE THAT MAKES THE TIERS SELF-ENFORCING:
@@ -238,8 +238,8 @@ sub _migrate_2 {
 # has to remember, and it closes three defects that all have the same shape.
 #
 # 1. ONE `fetched_at` SERVED A ROW HOLDING SEVERAL INDEPENDENT ANSWERS. `_factPut`
-#    stamps it on every write, and an `artist` row is written by the sort warm, the
-#    hosted genre tier and the mirror genre tier. So the sort warm refreshing a
+#    stamps it on every write, and an `artist` row was written by the sort warm (gone
+#    2026-09-14), the hosted genre tier and the mirror genre tier. So the sort warm refreshing a
 #    sort-name RE-AGED the genre answer beside it, and could hold an empty or stale
 #    genre answer alive indefinitely without ever asking about genres. Freshness was
 #    judged per ROW; the data is per ANSWER.
@@ -275,7 +275,6 @@ sub _migrate_3 {
         'ALTER TABLE artist ADD COLUMN mb_genres        BLOB',
         'ALTER TABLE artist ADD COLUMN n_mb_genres      INTEGER NOT NULL DEFAULT -1',
         'ALTER TABLE artist ADD COLUMN mb_genres_at     INTEGER NOT NULL DEFAULT 0',
-        'ALTER TABLE artist ADD COLUMN sort_at          INTEGER NOT NULL DEFAULT 0',
         'ALTER TABLE release_group ADD COLUMN genres_at INTEGER NOT NULL DEFAULT 0',
     ) {
         eval { $h->do($ddl); 1 } or $log->info("store: migration 3 column already present");
@@ -299,7 +298,7 @@ SQL
     my $rows = eval {
         $h->selectall_arrayref(
             'SELECT artist_key AS k, genres AS g, genres_src AS src, n_genres AS n,
-                    sort_name AS sn, fetched_at AS ts
+                    fetched_at AS ts
                FROM artist', { Slice => {} })
     } || [];
     for my $r (@$rows) {
@@ -315,10 +314,6 @@ SQL
                     [1], _freeze($v), scalar(@$v), ($r->{ts} || time()), $r->{k});
             }
         }
-        # A sort-name that is already present was fetched at the row's stamp too.
-        $h->do('UPDATE artist SET sort_at = ? WHERE artist_key = ?', undef,
-               ($r->{ts} || time()), $r->{k})
-            if length($r->{sn} // '');
     }
 
     # A release group that has been ASKED about genres (n_genres >= 0, set by
@@ -595,12 +590,12 @@ SQL
     # tier that answers for Trending rows arriving with no MBID needs a name key.
     #
     # ONE COLUMN PER TIER, ONE STAMP PER ANSWER (schema 3). Every independent thing
-    # this row can hold — the hosted genres, the mirror genres, the sort-name — has
+    # this row can hold — the hosted genres, the mirror genres, the Last.fm genres — has
     # its OWN blob, its OWN count and its OWN timestamp, so no tier can overwrite or
     # re-age another's answer. Two tiers sharing one `genres` column with a
     # `genres_src` discriminator produced a permanent refetch/overwrite ping-pong
-    # wherever both were live; a shared `fetched_at` let the sort warm declare the
-    # genres fresh. Both defects are now inexpressible rather than avoided.
+    # wherever both were live; a shared `fetched_at` let one tier's write declare
+    # another's genres fresh. Both defects are now inexpressible rather than avoided.
     #
     # `genres` / `genres_src` / `n_genres` are the pre-schema-3 columns. They are no
     # longer read or written — migration 3 files their contents under the right
@@ -611,9 +606,6 @@ CREATE TABLE IF NOT EXISTS artist (
     fact_version     INTEGER NOT NULL DEFAULT 0,
     mbid             TEXT    NOT NULL DEFAULT '',
     name             TEXT    NOT NULL DEFAULT '',
-    sort_name        TEXT    NOT NULL DEFAULT '',
-    sort_src         TEXT    NOT NULL DEFAULT '',
-    sort_at          INTEGER NOT NULL DEFAULT 0,
     artist_type      TEXT    NOT NULL DEFAULT '',
     lb_genres        BLOB,
     n_lb_genres      INTEGER NOT NULL DEFAULT -1,
@@ -885,7 +877,7 @@ sub store { return bless {}, 'Plugins::ListenBrainzFreshReleases::DB::Store' }
 #   * 'lbf:stream:' / 'lbf:track:' — the DECISION. A cached match (or no-match)
 #     was reached with the old normaliser. The resolved-LIST families wrapping
 #     them re-key for free through the layer tags above.
-#   * 'lbf:artistmbid:' / 'lbf:rgbyname:' — also the decision, one layer out:
+#   * 'lbf:aliases:' / 'lbf:rgbyname:' — also the decision, one layer out:
 #     both accept a candidate through API::_foldEq, which delegates to `_norm`.
 #     A cached MISS is the stale one that matters — a name the new fold accepts
 #     would keep answering "not found" for the whole TTL.
@@ -901,7 +893,7 @@ sub store { return bless {}, 'Plugins::ListenBrainzFreshReleases::DB::Store' }
 # matcher's own callers.
 # ---------------------------------------------------------------------------
 use constant KEY_VERSIONS => {
-    'lbf:artistmbid:'        => 3,
+    'lbf:aliases:'           => 1,   # community API artist mbid + aliases, by mbid or name (API::getArtistAliases)
     'lbf:bcdone:'            => 6,   # the "searched Bandcamp, found nothing" marker IS disposable
     # 'lbf:bio:' removed 0.9.186 with the detail page's Last.fm bio fallback (MAI's
     # own sources already include Last.fm). Like the two genre families below it
@@ -925,6 +917,7 @@ use constant KEY_VERSIONS => {
     # cold on first sight — the exact failure the warm exists to prevent.
     'lbf:imgwarm:'           => 2,
     'lbf:lastlisten:'        => 1,
+    'lbf:lbtracks:'          => 1,   # ListenBrainz tracklist per release GROUP (API::getTracklist)
     'lbf:rgbyname:'          => 2,
     'lbf:stream:'            => 29,
     'lbf:track:'             => 10,
@@ -1441,8 +1434,8 @@ sub feedReleases {
 #     from the response. Infer it and a day that legitimately went empty can never
 #     be cleaned, because nothing in the response names that day.
 #  3. UPSERT MERGES, IT NEVER BLANKS. ListenBrainz and MuSpy describe the same
-#     release with different completeness — MuSpy has the artist sort-name and no
-#     release mbid, LB has the caa ids — so an empty incoming field must leave the
+#     release with different completeness — MuSpy has no release mbid,
+#     LB has the caa ids — so an empty incoming field must leave the
 #     stored one alone.
 #
 # $opt{rotate} defaults ON and MUST be passed 0 for a source whose response is a
@@ -1840,7 +1833,7 @@ sub feedSweep {
 # duration is ever handed to LMS and no value can mean 1970.
 #
 # WRITES MERGE, THEY NEVER BLANK. Different tiers fill different columns — the
-# hosted tier writes genres, the sort tier writes sort_name — and they arrive in
+# hosted tier writes its genres, the Last.fm tier its own — and they arrive in
 # either order. Done as INSERT OR IGNORE + a targeted UPDATE of only the columns
 # the caller actually supplied, rather than SQLite's UPSERT/excluded syntax, which
 # needs 3.24+ and would tie the plugin's storage to the SQLite version bundled
@@ -1866,14 +1859,13 @@ my %FACT = (
     artist => {
         table => 'artist',
         key   => 'artist_key',
-        text  => [qw(mbid name sort_name sort_src artist_type)],
+        text  => [qw(mbid name artist_type)],
         blobs => [qw(lb_genres hosted_genres lastfm_genres mb_genres)],
         stamp => {
             lb_genres     => 'lb_genres_at',
             hosted_genres => 'hosted_genres_at',
             lastfm_genres => 'lastfm_genres_at',
             mb_genres     => 'mb_genres_at',
-            sort_name     => 'sort_at',
         },
         alias => {},
     },
@@ -1953,7 +1945,7 @@ sub _factGet {
 # or the caller's alias), any of its blob columns as an arrayref, and
 # `fact_version`. ANYTHING ABSENT IS LEFT ALONE — that is the merge rule, and it
 # is what lets different tiers fill different columns in either order (the hosted
-# tier writes genres, the sort tier writes sort_name).
+# tier writes its genres, the Last.fm tier its own).
 #
 # AN EMPTY ARRAYREF IS A REAL ANSWER, NOT A MISS. The hosted API returns `[]` for
 # an artist it knows and has no genres for (Panda Bear), which is a DIFFERENT
@@ -2013,7 +2005,7 @@ sub _factPut {
 
         # ONLY the answers this call actually wrote are stamped. `fetched_at` above
         # still records "the row was touched", but nothing judges a tier's freshness
-        # by it any more — that is the whole point. A sort-name write must not make
+        # by it any more — that is the whole point. A write to one tier must not make
         # the genres beside it look freshly fetched.
         for my $s (sort keys %stamped) {
             push @set, "$s = ?";
@@ -2048,30 +2040,6 @@ sub rgPut { return _factPut('release_group', @_) }
 
 sub recGet { return _factGet('recording', @_) }
 sub recPut { return _factPut('recording', @_) }
-
-# A MusicBrainz sort-name is one of the three things that were never caches: it is
-# re-derivable only at SORT_WARM_MAX(100) artists per pass, serially, with a
-# courtesy gap between each — so a wipe costs a multi-day reconvergence on an
-# artist-sorted view. It lives here rather than in `kv` for that reason, and the
-# dev-build genre wipe deliberately leaves it alone.
-#
-# `sort_src` records WHICH tier answered ('mb' | 'local' | 'hosted'), so the
-# MusicBrainz tier and the local tier can be re-run independently.
-sub artistSortGet {
-    my ($keys) = @_;
-    my $got = artistGet($keys);
-    my %out;
-    for my $k (keys %$got) {
-        next unless length($got->{$k}{sort_name} // '');
-        $out{$k} = $got->{$k}{sort_name};
-    }
-    return \%out;
-}
-
-sub artistSortPut {
-    my ($key, $sortName, $src) = @_;
-    return artistPut($key, sort_name => ($sortName // ''), sort_src => ($src // 'mb'));
-}
 
 # ---------------------------------------------------------------------------
 # Key-version retirement.
@@ -2117,8 +2085,8 @@ sub wipeDerived {
     return int($n);
 }
 
-# The genre-parser/reset half. Years, types, MBIDs and sort-names survive so a
-# genre change never re-inflicts a multi-day artist-sort reconvergence.
+# The genre-parser/reset half. Years, types and MBIDs survive, so repairing a
+# genre parse never re-fetches every date in the feed.
 sub wipeGenres {
     my $h = dbh() or return 0;
     my $n = 0;
@@ -2130,7 +2098,7 @@ sub wipeGenres {
         # Clearing the answer and leaving its clock running is the bug; the two
         # always move together.
         #
-        # `fetched_at`, `year`, `rel_date`, `type` and the sort-name are deliberately
+        # `fetched_at`, `year`, `rel_date` and `type` are deliberately
         # untouched — they are different answers on the same rows, and re-fetching
         # every date in the feed to repair a genre parse is exactly the cost per-answer
         # stamps exist to avoid.
@@ -2299,37 +2267,6 @@ sub importFollow {
     return $n;
 }
 
-# Artist sort-names, in bulk, for the MBIDs a warm pass was about to fetch. The
-# value was written through API::_setText, so it is `{ t => ... }`; a legacy BARE
-# string is read too, because 0.9.141's fix deliberately left old entries readable.
-# Returns { lc mbid => sort-name } for EVERY key it wrote, empty strings included —
-# the caller re-reads exactly these, and an artist whose recorded answer is "MB has
-# none" must be among them or the warm queues it for a fetch anyway, which is the
-# work this exists to avoid.
-sub importSorts {
-    my ($mbids) = @_;
-    return {} unless ref $mbids eq 'ARRAY' && @$mbids;
-    my $c = _legacy() or return {};
-
-    my (%got, $named);
-    for my $mbid (@$mbids) {
-        next unless defined $mbid && length $mbid;
-        my $lc = lc $mbid;
-        my $v = eval { $c->get('lbf:artistsort:1:' . $lc) };
-        next unless defined $v;
-        my $sort = ref $v eq 'HASH' ? $v->{t} : (ref $v ? undef : $v);
-        next unless defined $sort;
-        # An empty string is a real answer here ("MB has no sort-name for this
-        # artist"), and carrying it over is what stops the warm re-asking
-        # MusicBrainz for every artist it had already established has none.
-        artistSortPut($lc, $sort, 'mb');
-        $got{$lc} = $sort;
-        $named++ if length $sort;
-    }
-    $log->info("store: imported " . scalar(keys %got) . " legacy sort-names ($named named)") if %got;
-    return \%got;
-}
-
 # ---------------------------------------------------------------------------
 # Reporting — what ["lbf","cachestats"] renders.
 #
@@ -2417,9 +2354,6 @@ sub stats {
     # writes release_group.genres_src at all, so a count over it is 0 forever and
     # reads as evidence about the store when it is only evidence about the schema.
     # That is the exact trap this block replaced — do not add one back.
-    $extra{artist_sorts} = int(eval {
-        $h->selectrow_array("SELECT COUNT(*) FROM artist WHERE sort_name <> ''")
-    } || 0);
 
     # Per-family kv counts. The whole point of KEY_VERSIONS is that a family is a
     # thing you can name; reporting the total row count alone would have said

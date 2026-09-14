@@ -23,7 +23,7 @@ my $prefs = preferences('plugin.listenbrainzfreshreleases');
 # sites were deliberately left alone. The genre bug was never in them.
 my $cache = Plugins::ListenBrainzFreshReleases::DB::store();
 
-# Various Artists MBID — skip the (pointless) sort-name lookup for VA credits.
+# Various Artists MBID — per-artist lookups are pointless for a VA credit.
 use constant VA_MBID => '89ad4ac3-39f7-470e-963a-56509c546377';
 
 # A MusicBrainz tracklist never changes, so cache a found result for a long time;
@@ -620,9 +620,10 @@ sub _mbThrottled {
 # album names, and a '/' inside one would otherwise invent a route).
 #
 # EVERYTHING is a miss, never an exception: HTTP error, unparseable body, or a
-# non-HASH payload all call $onMiss. Callers rely on that — each one has a
-# MusicBrainz fallback behind it, so an outage degrades to today's behaviour
-# rather than breaking. $onFound gets the decoded hashref.
+# non-HASH payload all call $onMiss. Callers rely on that — the artist-ID and
+# similar-artist lookups fall back to other sources on a miss, and the Trending
+# album search (community API only since 2026-09-14) reports no answer rather
+# than failing. $onFound gets the decoded hashref.
 # ---------------------------------------------------------------------------
 # 429 BACKOFF FOR THE COMMUNITY API — modelled on what MusicArtistInfo does
 # against this same service, because MAI is the precedent for doing this job at
@@ -646,10 +647,10 @@ use constant HOSTED_BACKOFF_MAX   => 30;
 # A RETRY THAT NEVER GIVES UP IS A HANG, NOT A RETRY. The ListenBrainz side has
 # capped its 429 retries at LB_RETRY_MAX since it was written; this side did not,
 # so a sustained 429 rescheduled _hostedGet for ever and $onMiss was never called.
-# That is not merely a slow lookup: getArtistMbidByName's miss branch IS the
-# MusicBrainz fallback, and DSTM::_resolveArtistMbids pumps one artist at a time
-# waiting on the callback — so one wedged lookup stalls the whole radio seed
-# rather than degrading to the slower source.
+# That is not merely a slow lookup: DSTM::_resolveArtistMbids pumps one artist at a
+# time waiting on getArtistMbidByName's callback — so one wedged lookup stalls the
+# whole radio seed rather than skipping that artist. (Its miss branch was the
+# MusicBrainz fallback until 2026-09-14; it is now an error callback.)
 #
 # TWO counters, because there are two ways back into this sub and only one of them
 # is this caller's fault. `tries` counts requests THIS caller made that came back
@@ -694,27 +695,76 @@ sub _hostedNoteLimit {
 
 sub _hostedNoteOk { $hostedDelay = 0; return }
 
+# ONE REQUEST IN FLIGHT, FOR THE WHOLE PLUGIN — the other half of the MAI
+# precedent above. MAI (`Common.pm`, scanner path) sends to this service with a
+# synchronous `$ua->get`, so the next request cannot start until the last one has
+# returned and the round-trip time IS the pacing. We copied its backoff and never
+# its serialisation: DSTM resolved four artist names at once, and the Trending
+# builds, the radio's similar artists and the connection check could all be calling
+# at the same moment. The dev publishes no rate, so the precedent from the author's
+# own plugin is the rate. _hostedGet queues; _hostedPump sends one at a time and
+# waits out the shared 429 deadline; _hostedSend frees the slot on every exit (both
+# callbacks and a watchdog, for a transport that never calls back).
+use constant HOSTED_WATCHDOG_PAD => 5;
+our @hostedQueue;
+our $hostedInFlight = 0;
+our $hostedTimer;
+our $hostedPumping  = 0;
+our $hostedRepump   = 0;
+
 sub _hostedGet {
     my ($path, $onFound, $onMiss, $st) = @_;
     $onFound ||= sub {};
     $onMiss  ||= sub {};
-    # $st is INTERNAL — the retry budget, threaded through the reschedules. No
-    # caller passes it, so every entry from outside starts with a full budget.
+    # $st is INTERNAL — the retry budget, carried by the job through every requeue.
+    # No caller passes it, so every entry from outside starts with a full budget.
     $st ||= { tries => 0, waits => 0 };
+    push @hostedQueue, { path => $path, found => $onFound, miss => $onMiss, st => $st };
+    _hostedPump();
+    return;
+}
 
-    # BACK OFF TOGETHER. If another caller has already been rate-limited, wait out
-    # the shared deadline rather than joining the queue that caused it.
-    if ((my $wait = _hostedWait()) > 0) {
-        if ($st->{waits}++ >= HOSTED_WAIT_MAX) {
-            $log->info("Hosted API: still rate-limited after " . HOSTED_WAIT_MAX
-                . " waits for $path — falling back");
-            $onMiss->();
-            return;
+# A loop with re-entry folded into it, for the reason _mbPump gives: a callback
+# that lands synchronously re-enters from inside _hostedSend, and a plain guard
+# would drop that wake-up and strand the queue. `local` restores the guard even if
+# a caller's callback dies inside the loop.
+sub _hostedPump {
+    my ($fromTimer) = @_;
+    if ($hostedPumping) { $hostedRepump = 1; return }
+    local $hostedPumping = 1;
+    do {
+        $hostedRepump = 0;
+        while (!$hostedInFlight && @hostedQueue) {
+            # BACK OFF TOGETHER. While the shared deadline is in force nothing is
+            # sent; the queue waits it out.
+            if ((my $wait = _hostedWait()) > 0) {
+                my $head = $hostedQueue[0];
+                # A permanently-busy deadline must not become a hang. Only a wake-up
+                # by the timer counts against the head job's wait budget — being
+                # queued behind somebody else's 429 is not this caller's fault.
+                if ($fromTimer && $head->{st}{waits}++ >= HOSTED_WAIT_MAX) {
+                    shift @hostedQueue;
+                    $log->info("Hosted API: still rate-limited after " . HOSTED_WAIT_MAX
+                        . " waits for $head->{path} — giving up");
+                    $head->{miss}->();
+                    next;
+                }
+                $hostedTimer ||= Slim::Utils::Timers::setTimer(undef, Time::HiRes::time() + $wait,
+                                     sub { $hostedTimer = undef; _hostedPump(1) });
+                last;
+            }
+            my $job = shift @hostedQueue;
+            $hostedInFlight = 1;
+            _hostedSend($job);
         }
-        Slim::Utils::Timers::setTimer(undef, Time::HiRes::time() + $wait,
-                                      sub { _hostedGet($path, $onFound, $onMiss, $st) });
-        return;
-    }
+        $fromTimer = 0;
+    } while ($hostedRepump);
+    return;
+}
+
+sub _hostedSend {
+    my ($job) = @_;
+    my ($path, $onFound, $onMiss, $st) = @{$job}{qw(path found miss st)};
 
     # The apiHeaders helper is NEW in Slim::Utils::Misc and is absent on older
     # LMS, so it must be probed rather than called — a bare call would die at
@@ -725,15 +775,29 @@ sub _hostedGet {
 
     # AUTH SLOT: when the dev publishes a scheme, read the token pref here and
     # add $headers{Authorization}. Treat 401/403 in the error handler below as a
-    # MISS (fall back to MusicBrainz), never as a hard failure.
+    # MISS, never as a hard failure.
 
     my $url = HOSTED_BASE_URL . $path;
     $log->info("Hosted API: $url");
 
+    my ($settled, $watchdog) = (0);
+    # Frees the slot exactly once, whichever gets there first, and BEFORE the
+    # caller's callback runs, so a callback that queues its next request finds the
+    # queue ready for it.
+    my $release = sub {
+        return if $settled++;
+        Slim::Utils::Timers::killSpecific($watchdog) if $watchdog;
+        $hostedInFlight = 0;
+        _hostedPump();
+    };
+
     my $http = Slim::Networking::SimpleAsyncHTTP->new(
         sub {
             my $resp = shift;
+            my $already = $settled;
             _hostedNoteOk();                     # a success clears the backoff
+            $release->();
+            return if $already;
             my $data = eval { from_json($resp->content) };
             if ($@ || ref $data ne 'HASH') {
                 $log->info("Hosted API: unparseable response for $path");
@@ -744,29 +808,32 @@ sub _hostedGet {
         },
         sub {
             my $resp = shift;
+            my $already = $settled;
             # A 429 IS NOT A MISS — it is a request that has not been made yet.
             # Treating it as "this artist has no genres" would be a cached lie, and
             # (worse) would let the caller march straight on to the next artist at
             # full speed. Retried once the shared deadline passes — but a BOUNDED
             # number of times: past HOSTED_RETRY_MAX this stops being "not tried
-            # yet" and becomes a service that is not answering, which is a miss,
-            # and a miss is what releases the caller to MusicBrainz.
+            # yet" and becomes a service that is not answering, which is a miss.
             if (_hostedIsRateLimited($resp)) {
                 _hostedNoteLimit();
                 if ($st->{tries}++ >= HOSTED_RETRY_MAX) {
+                    $release->();
+                    return if $already;
                     $log->info("Hosted API: rate-limited " . HOSTED_RETRY_MAX
-                        . " times for $path — falling back");
+                        . " times for $path — giving up");
                     $onMiss->();
                     return;
                 }
-                # Retry against the deadline IN FORCE, not against this caller's own
-                # backoff — another caller may hold a longer one, and waking before it
-                # expires only spends a wait slot rediscovering that.
-                my $wait = _hostedWait();
-                Slim::Utils::Timers::setTimer(undef, Time::HiRes::time() + $wait,
-                                              sub { _hostedGet($path, $onFound, $onMiss, $st) });
+                # Back to the FRONT of the queue with its budget ($st rides on the
+                # job), BEFORE the slot is freed — the pump then finds the deadline
+                # in force and waits it out rather than sending anything else first.
+                unshift @hostedQueue, $job unless $already;
+                $release->();
                 return;
             }
+            $release->();
+            return if $already;
             $log->info("Hosted API: request failed for $path: "
                 . (ref $resp && $resp->can('error') ? ($resp->error // '?') : '?'));
             $onMiss->();
@@ -774,7 +841,17 @@ sub _hostedGet {
         { timeout => HOSTED_TIMEOUT },
     );
 
+    $watchdog = Slim::Utils::Timers::setTimer(undef,
+        Time::HiRes::time() + HOSTED_TIMEOUT + HOSTED_WATCHDOG_PAD, sub {
+            return if $settled;
+            $log->warn("Hosted API: no callback for $path — freeing the queue");
+            $watchdog = undef;
+            $release->();
+            $onMiss->();
+        });
+
     $http->get($url, %headers, 'Accept' => 'application/json');
+    return;
 }
 
 # Percent-encode ONE path segment for the hosted API. Works in octets (the same
@@ -1401,8 +1478,7 @@ sub getMuSpyReleases {
     # it is read back UNWINDOWED and held far beyond what is displayed (see
     # Browse::_mergeMuSpy — a followed artist's album announced three months out is
     # fetched and stored today, and simply appears when the forward edge reaches
-    # it), so it is the case where a window change most needs to be free; and MuSpy
-    # rows are the only source of an inline artist_sort_name.
+    # it), so it is the case where a window change most needs to be free.
     # ------------------------------------------------------------------
     my ($stored, $stale) = _feedFromStore($feed, undef, undef, 0);
     if ($stored && !$stale && !$force) {
@@ -1467,6 +1543,7 @@ sub getMuSpyReleases {
 # an arrayref (possibly empty) on success, or undef if the body isn't the
 # expected JSON array (so the caller can fall back to the last good copy).
 # MuSpy release object: { artist => { name, mbid, sort_name, disambiguation },
+# (sort_name is deliberately NOT read: the Artist sort is A-Z on the display name),
 # mbid => <release-group-mbid>, name => <title>, type => <primary type>,
 # date => 'YYYY' | 'YYYY-MM' | 'YYYY-MM-DD' }.
 sub _parseMuSpy {
@@ -1486,16 +1563,12 @@ sub _parseMuSpy {
         next unless ref $r eq 'HASH';
         my $artist = $r->{artist};
         my $aname  = ref $artist eq 'HASH' ? ($artist->{name} // '') : (defined $artist ? $artist : '');
-        my $asort  = ref $artist eq 'HASH' ? ($artist->{sort_name} // '') : '';
         my $ambid  = ref $artist eq 'HASH' ? $artist->{mbid} : undef;
         my $title  = $r->{name} // '';
         my $rgMbid = $r->{mbid} // '';
         next unless length $aname || length $title;
         push @out, {
             artist_credit_name         => $aname,
-            # MusicBrainz sort-name ("White, Jack"; "Panda Bear" stays as-is for a
-            # stage name). MuSpy supplies it; the LB feed does not (warmed from MB).
-            artist_sort_name           => $asort,
             release_name               => $title,
             release_group_mbid         => $rgMbid,
             release_group_primary_type => $r->{type} // '',
@@ -2105,8 +2178,8 @@ sub _factFresh {
 #
 # `$nCol` is the mirrored length (-1 never asked, 0 asked and the answer was
 # none), `$atCol` is that answer's OWN timestamp. Reading both is what keeps a
-# tier's freshness independent of everything else on the row — a sort-name write
-# must not make the genres beside it look freshly fetched, which is what a shared
+# tier's freshness independent of everything else on the row — a write to another
+# answer must not make the genres beside it look freshly fetched, which is what a shared
 # `fetched_at` did until schema 3.
 #
 # Nothing is immutable: a populated answer is held for $foundAge, an empty one for
@@ -2575,7 +2648,8 @@ sub splitArtistCredits {
 # AND THE DECIDING ARGUMENT IS NOT THIS MACHINE. Pointing mb_base_url at a local
 # mirror fixes the latency for anyone who HAS a mirror. LBF ships to people who do
 # not, and their default path is the public API at 1 req/s — a ~23s stall inside a
-# background warm, every time. Same reasoning as getArtistMbidByName's hosted tier.
+# background warm, every time. Same reasoning that took getArtistMbidByName onto
+# the community API alone.
 #
 # THE IDS ARE INTERCHANGEABLE, which is the part that makes this safe.
 # `/discography` returns release-GROUP mbids, verified identical to MusicBrainz's
@@ -2620,9 +2694,11 @@ sub _hostedDiscoPick {
 }
 
 # Fetch (or read from cache) the folded title -> answer map for ONE artist.
-# $onDone gets the map on success, or undef on ANY miss — unknown artist, bad
-# shape, rate-limited past the budget, service down. undef means "fall back",
-# never "this album does not exist".
+# $onDone gets ($map) on success, or (undef, $failed) on a miss. $failed is 1 when
+# the request itself did not produce an answer (rate-limited past the budget, bad
+# shape, service down) and 0 when the service ANSWERED that it has no such artist.
+# The caller needs the difference: an answered miss may be cached as "not found",
+# a failed request must not be.
 sub _hostedDiscoMap {
     my ($artist, $artistMbid, $onDone) = @_;
 
@@ -2631,7 +2707,7 @@ sub _hostedDiscoMap {
     utf8::encode($ck) if utf8::is_utf8($ck);
 
     if (defined(my $c = $cache->get($ck))) {
-        $onDone->(ref $c eq 'HASH' ? $c : undef);   # '' is the cached "no discography"
+        $onDone->(ref $c eq 'HASH' ? $c : undef, 0);   # '' is the cached "no discography"
         return;
     }
 
@@ -2653,7 +2729,7 @@ sub _hostedDiscoMap {
             # artist absent from a weekly snapshot may be in the next one.
             eval { $cache->set($ck, '', MB_EMPTY_TTL); 1 }
                 or $log->warn("hosted-discography cache set failed: $@");
-            $onDone->(undef);
+            $onDone->(undef, 0);
             return;
         }
 
@@ -2692,7 +2768,7 @@ sub _hostedDiscoMap {
                  . ' distinct title(s) from ' . scalar(@$rows) . ' entr(y/ies)'
                  . (length($artistMbid // '') ? ' [by mbid]' : ''));
         $onDone->(\%flat);
-    }, sub { $onDone->(undef) });
+    }, sub { $onDone->(undef, 1) });
 }
 
 # The fold used to key the map and to look titles up in it. Delegates to the
@@ -2712,17 +2788,39 @@ sub _foldKey {
 }
 
 # ---------------------------------------------------------------------------
-# Resolve an artist + album NAME to its MusicBrainz release-group. Needed for
-# the People You Follow trending lists: ListenBrainz listen-stats rows are only
-# as good as each follower's LISTEN MAPPING, and unmapped listens come back with
-# release_group_mbid/caa_id = null (verified live — the same album can appear
-# BOTH mapped and unmapped across different followers). NRFY never sees this
-# because the fresh-releases feed is MusicBrainz-derived. Without the MBID a row
-# has no cover, no date and no type — this fills the gap the same way the DSTM
-# radio resolves artist names (fielded ws/2 search, mirror-aware base, score>=90
-# gate, mirror-0-results→public retry, per-name cache). $onDone gets
-# { mbid, date, year, type } or undef. One lookup per artist|title (cached
-# 30d found / 1d miss, so a brand-new album that lands in MB soon retries daily).
+# Resolve an artist + album NAME to its MusicBrainz release-group, from the
+# LMS-COMMUNITY API ONLY. Needed for the People You Follow trending lists:
+# ListenBrainz listen-stats rows are only as good as each follower's LISTEN
+# MAPPING, and unmapped listens come back with release_group_mbid/caa_id = null
+# (verified live — the same album can appear BOTH mapped and unmapped across
+# different followers). Without the id a row has no cover, no date and no type.
+#
+# NO MUSICBRAINZ FALLBACK — Simon, 2026-09-14. This sub used to search public
+# MusicBrainz whenever the community API did not have the album, back-to-back with
+# no pacing and blind to the 503 backoff, up to 25 albums per Trending Tracks build
+# and every unmapped Trending Albums row, three searches each for a collaboration.
+# After each LMS restart that pushed the server over MusicBrainz's per-IP limit and
+# got every MusicBrainz request refused for minutes. And it bought almost nothing:
+# the community API IS built from MusicBrainz, so an album it does not list is, bar
+# one added since its last refresh, an album a MusicBrainz search will not find
+# either (the recurring live failure, "Thomas Dybdahl, Stavanger Symphony
+# Orchestra - Tilbake Til Tottori! (Originalmusikk)", is absent from both). A row
+# the community API cannot place stays without an id — which is what a MusicBrainz
+# miss gave it anyway.
+#
+# COLLABORATIONS ARE SPLIT HERE NOW, because the MusicBrainz leg is what used to do
+# it. Verified live 2026-09-14: "Thomas Dybdahl, Stavanger Symphony Orchestra" and
+# "Julianna Barwick & Mary Lattimore" resolve to the first artist's discography on
+# their own, but "Panda Bear & Sonic Boom" matches a duo entry with ZERO albums
+# while "Reset" is listed under Panda Bear. So: the full credit first, then each
+# collaborator, capped at three (splitArtistCredits, the one splitter). The artist
+# MBID names the credit's FIRST artist, so it rides with the full credit only — sent
+# with a collaborator's name it would override that name and fetch the first
+# artist's catalogue again.
+#
+# $onDone gets { mbid, date, year, type } or undef. Cached 30d found; an ANSWERED
+# miss (every term's discography came back, none lists the title) 1d; a miss where
+# any request FAILED is not cached, so it is asked again on the next build.
 # ---------------------------------------------------------------------------
 sub getReleaseGroupByName {
     my ($class, $artist, $title, $onDone, %opt) = @_;   # %opt: artist_mbid
@@ -2746,113 +2844,47 @@ sub getReleaseGroupByName {
         return;
     }
 
-    # Artist terms to try, in order. MB's fielded search misses a JOINED collab
-    # credit — verified live: releasegroup:"Tragic Magic" AND artist:"Julianna
-    # Barwick & Mary Lattimore" = 0 results, either collaborator alone = score
-    # 100 — so on a full-credit miss each collaborator is retried individually
-    # (same separators as the manual Bandcamp collab split). Capped at 3 terms.
-    # (Full credit is tried FIRST because some collabs are entered in MB as one
-    # unique artist; the split terms then cover the joined-credit case — the
-    # same class as the NRFY "Panda Bear & Sonic Boom" Bandcamp gap (0.9.56),
-    # now served by ONE shared splitter.)
     my @artistTerms = grep { length($_) >= 2 || $_ eq $artist } splitArtistCredits($artist);
     splice(@artistTerms, 3) if @artistTerms > 3;
+    my $want   = _foldKey($title);
+    my $failed = 0;
 
-    # Fielded exact-phrase query (embedded double quotes stripped — they'd break
-    # the Lucene phrase). Same escaping as getArtistMbidByName's $mkQuery.
-    my $mkQ = sub {
-        my ($aTerm) = @_;
-        (my $t = $title) =~ s/"//g;
-        (my $a = $aTerm) =~ s/"//g;
-        my $s = 'releasegroup:"' . $t . '" AND artist:"' . $a . '"';
-        utf8::encode($s) if utf8::is_utf8($s);
-        $s =~ s/([^A-Za-z0-9])/sprintf("%%%02X",ord($1))/ge;
-        return 'release-group?query=' . $s . '&fmt=json&limit=1';
-    };
+    # Self-passing sub (not a self-capturing closure) — the leak fixed in
+    # getArtistMbidByName in 0.9.95. $ti indexes @artistTerms.
+    my $try = sub {
+        my ($self, $ti) = @_;
+        my $term = $artistTerms[$ti];
+        _hostedDiscoMap($term, ($ti == 0 ? $opt{artist_mbid} : undef), sub {
+            my ($map, $mapFailed) = @_;
+            $failed = 1 if $mapFailed;
 
-    my $mirror = !_mbThrottled();
-
-    # Self-passing sub (not a self-capturing closure) — same leak-avoidance as
-    # getArtistMbidByName (0.9.95). $ti indexes @artistTerms.
-    my $run = sub {
-        my ($self, $base, $isFb, $ti) = @_;
-        my $http = Slim::Networking::SimpleAsyncHTTP->new(
-            sub {
-                my $resp = shift;
-                my $data = eval { from_json($resp->content) };
-                my $rgs  = (!$@ && ref $data eq 'HASH' && ref $data->{'release-groups'} eq 'ARRAY')
-                           ? $data->{'release-groups'} : undef;
-
-                # Unbuilt-Solr mirror → one public retry (see getArtistMbidByName).
-                if ($rgs && !@$rgs && $mirror && !$isFb) {
-                    $log->info("RG '$artist - $title' => 0 results on mirror; retrying public API");
-                    return $self->($self, MB_DEFAULT_BASE_URL, 1, $ti);
-                }
-
-                my $out;
-                if ($rgs && @$rgs) {
-                    my $rg = $rgs->[0];
-                    if ($rg->{id} && ($rg->{score} // 0) >= 90) {
-                        my $date = $rg->{'first-release-date'} // '';
-                        $out = {
-                            mbid => lc $rg->{id},
-                            date => $date,
-                            year => ($date =~ /^(\d{4})/) ? $1 : '',
-                            type => ($rg->{'primary-type'} // ''),
-                        };
-                    }
-                }
-
-                # This term found nothing acceptable → try the next collaborator.
-                if (!$out && $ti < $#artistTerms) {
-                    return $self->($self, _mbBase(), 0, $ti + 1);
-                }
-                eval { $cache->set($cacheKey, ($out // ''), $out ? MB_FOUND_TTL : MB_EMPTY_TTL); 1 }
+            my $hit = (ref $map eq 'HASH' && length $want) ? $map->{$want} : undef;
+            if (ref $hit eq 'HASH' && length($hit->{mbid} // '')) {
+                my $out = { mbid => $hit->{mbid}, date => $hit->{date},
+                            year => $hit->{year}, type => $hit->{type} };
+                eval { $cache->set($cacheKey, $out, MB_FOUND_TTL); 1 }
                     or $log->warn("rg-by-name cache set failed: $@");
-                $log->info("RG '$artist - $title' => " . ($out ? $out->{mbid} : 'no match')
-                    . ($ti ? " [term: $artistTerms[$ti]]" : '') . ($isFb ? ' [public fallback]' : ''));
+                $log->info("RG '$artist - $title' => $out->{mbid} [hosted]"
+                         . ($ti ? " [term: $term]" : ''));
                 $onDone->($out);
-            },
-            sub {
-                if ($mirror && !$isFb) {
-                    $log->info("RG '$artist - $title' => mirror search error; retrying public API");
-                    return $self->($self, MB_DEFAULT_BASE_URL, 1, $ti);
-                }
-                $log->warn("RG '$artist - $title' search failed: " . ($_[0] && $_[0]->can('error') ? ($_[0]->error // '?') : '?'));
-                $onDone->(undef);   # never cache a network failure as a miss
-            },
-            { timeout => 12 }
-        );
-        $http->get($base . $mkQ->($artistTerms[$ti]), 'Accept' => 'application/json', 'User-Agent' => USER_AGENT);
+                return;
+            }
+
+            # Not under this credit -> the next collaborator.
+            return $self->($self, $ti + 1) if $ti < $#artistTerms;
+
+            if ($failed) {
+                $log->info("RG '$artist - $title' => no answer (community API request failed; not cached)");
+            }
+            else {
+                eval { $cache->set($cacheKey, '', MB_EMPTY_TTL); 1 }
+                    or $log->warn("rg-by-name cache set failed: $@");
+                $log->info("RG '$artist - $title' => not in the community API");
+            }
+            $onDone->(undef);
+        });
     };
-
-    # HOSTED FIRST, MusicBrainz behind it. The fallback is UNCONDITIONAL by
-    # design, exactly as in getArtistMbidByName: any hosted outcome that is not a
-    # confident hit — unknown artist, no fold-equal title, rate-limited past the
-    # budget, bad JSON, service down — runs $run, which is the previous
-    # implementation reached unchanged. An outage here degrades to today's
-    # behaviour rather than breaking resolution.
-    my $mbFallback = sub { $run->($run, _mbBase(), 0, 0) };
-
-    _hostedDiscoMap($artist, $opt{artist_mbid}, sub {
-        my ($map) = @_;
-        return $mbFallback->() unless ref $map eq 'HASH';
-
-        my $hit = $map->{ _foldKey($title) };
-        unless (ref $hit eq 'HASH' && length($hit->{mbid} // '')) {
-            $log->info("Hosted API: '$artist - $title' not in discography; falling back to MusicBrainz");
-            return $mbFallback->();
-        }
-
-        # Cached in the SAME shape and under the SAME key the MusicBrainz path
-        # writes, so every reader stays oblivious to which tier answered.
-        my $out = { mbid => $hit->{mbid}, date => $hit->{date},
-                    year => $hit->{year}, type => $hit->{type} };
-        eval { $cache->set($cacheKey, $out, MB_FOUND_TTL); 1 }
-            or $log->warn("rg-by-name cache set failed: $@");
-        $log->info("RG '$artist - $title' => $out->{mbid} [hosted]");
-        $onDone->($out);
-    });
+    $try->($try, 0);
 }
 
 # ===========================================================================
@@ -3155,12 +3187,23 @@ sub _parseTopReleaseGroups {
 }
 
 # ---------------------------------------------------------------------------
-# Resolve an artist NAME to a MusicBrainz artist MBID. Needed for the radio when
-# the seed track came from a streaming service (Qobuz/Tidal/etc.) and carries no
-# MusicBrainz ID — without this the radio can't fetch similar artists and falls
-# back to generic recommendations. One cached lookup per artist; requires a
-# strong (score>=90) match to avoid seeding off the wrong artist. Calls $onDone
-# with a lower-case MBID or undef.
+# Resolve an artist NAME to a MusicBrainz artist MBID — for the DSTM radio, when
+# the seed track came from a streaming service and carries no MusicBrainz ID, and
+# for each Last.fm similar artist. Without it the radio cannot fetch similar
+# artists and falls back to generic recommendations. Calls $onDone with a
+# lower-case MBID or undef, and $onError when the community API could not be asked.
+#
+# COMMUNITY API ONLY (Simon, 2026-09-14). This used to fall back to a MusicBrainz
+# name search — then an alias-field search, then a public retry from a mirror — on
+# every miss. The community API is BUILT FROM MusicBrainz, so a name it does not
+# know is a name MusicBrainz's search does not know either, bar additions since its
+# last rebuild: the same rule that took the MusicBrainz leg out of the Trending
+# album search. What the fallback really rescued was RENAMED artists — the
+# community API resolves "Oh Sees" to Osees correctly, and the old fold gate threw
+# that answer away because the echoed name differs. getArtistAliases accepts it on
+# the alias list instead, and that is what made dropping MusicBrainz safe.
+# KNOWN GAP, ACCEPTED: "The Oh Sees" gets no answer from the community API at all
+# (MusicBrainz's alias search did find it), so the radio skips such an artist.
 # ---------------------------------------------------------------------------
 sub getArtistMbidByName {
     my ($class, $name, $onDone, $onError) = @_;
@@ -3171,149 +3214,76 @@ sub getArtistMbidByName {
     $name =~ s/^\s+|\s+$//g;
     unless (length $name) { $onDone->(undef); return; }
 
-    my $cacheKey = Plugins::ListenBrainzFreshReleases::DB::kver("lbf:artistmbid:") . lc $name;
-    utf8::encode($cacheKey) if utf8::is_utf8($cacheKey);
-    if (defined(my $c = $cache->get($cacheKey))) {
-        $onDone->($c || undef);   # '' is the cached "not found" sentinel
+    $class->getArtistAliases($name, undef, sub {
+        my ($entry) = @_;
+        unless ($entry) {
+            # The request FAILED. Nothing was cached, so the next seed asks again.
+            $log->info("Artist '$name': community API unavailable");
+            $onError->('community API unavailable');
+            return;
+        }
+        my $mbid = $entry->{mbid} // '';
+        $log->info("Artist '$name' => " . (length $mbid ? $mbid : 'no match'));
+        $onDone->(length $mbid ? $mbid : undef);
+    });
+}
+
+# ---------------------------------------------------------------------------
+# An artist's MBID, canonical name and ALIASES from the community API — ONE request,
+# `/artist/<name>/aliases`. Used by getArtistMbidByName (the radio) and by the
+# streaming album match (Browse::_artistAltNames), which retries an album a service
+# credits under another of the artist's names: Qobuz files Dexys Midnight Runners
+# as "Dexys"; Osees has also been Oh Sees, Thee Oh Sees and OCS.
+#
+# $onDone gets { mbid, name, aliases => [...] }. An artist the service does not
+# know, or a reply that is not about the artist asked for, comes back with an empty
+# mbid — an ANSWER, cached for a day. A request that FAILED gets undef and caches
+# nothing.
+#
+# THE ACCEPT GATE. Without an MBID the service picks by POPULARITY and returns no
+# score, so a reply is accepted only when it is about the name we asked: its
+# canonical name folds equal to ours (Beyonce -> Beyoncé), or ours folds equal to
+# one of its aliases (Oh Sees -> Osees). With an MBID (`?mbid=`, which overrides the
+# name — verified live on Dexys and on the UK Nirvana) the reply must carry that
+# same MBID. THE LENGTH CHECK IS LOAD-BEARING: an unknown artist is not a 404 but
+# {"name":"<the query>"} with no mbid, so its name folds equal to itself and a
+# fold-only gate would accept nothing as a hit. Verified live 2026-09-14.
+# ---------------------------------------------------------------------------
+sub getArtistAliases {
+    my ($class, $name, $artistMbid, $onDone) = @_;
+    $onDone ||= sub {};
+    $name = defined $name ? $name : '';
+    $name =~ s/^\s+|\s+$//g;
+    $artistMbid = lc($artistMbid // '');
+    my $none = sub { +{ mbid => '', name => '', aliases => [] } };
+    unless (length $name) { $onDone->($none->()); return; }
+
+    my $key = Plugins::ListenBrainzFreshReleases::DB::kver('lbf:aliases:')
+            . (length $artistMbid ? "m:$artistMbid" : 'n:' . lc $name);
+    utf8::encode($key) if utf8::is_utf8($key);
+    if (ref(my $c = $cache->get($key)) eq 'HASH') {
+        $onDone->($c);
         return;
     }
 
-    # Fielded exact-phrase query. The 'artist' field searches the NAME only —
-    # an artist reachable solely through an MB ALIAS ("The Oh Sees" -> Osees)
-    # returns 0 results there, so a second stage retries the 'alias' field
-    # (verified live: artist:"The Oh Sees" = 0, alias:"The Oh Sees" = score
-    # 100). Alias runs ONLY when the name field found nothing acceptable, so
-    # it can never change a resolution that works today. Matters here for the
-    # DSTM radio's Last.fm similar-artist names, which are full of alias-era
-    # spellings. (Ported from Discography 0.32.0.)
-    my $mkQuery = sub {
-        my ($field) = @_;
-        my $q = $field . ':"' . $name . '"';
-        utf8::encode($q) if utf8::is_utf8($q);
-        (my $safe = $q) =~ s/([^A-Za-z0-9])/sprintf("%%%02X",ord($1))/ge;
-        return 'artist?query=' . $safe . '&fmt=json&limit=1';
-    };
+    my $path = 'artist/' . _hostedSeg($name) . '/aliases'
+             . (length $artistMbid ? '?mbid=' . _hostedSeg($artistMbid) : '');
 
-    # MIRROR SEARCH FALLBACK (ported from Discography 0.23.0): a musicbrainz-docker
-    # mirror serves entity BROWSES from Postgres, but ?query= SEARCH goes through
-    # Solr — and a mirror whose search index was never built returns count:0 for
-    # EVERY query while browses work. That would silently fail every name→MBID
-    # resolution (the DSTM radio seed, Last.fm similar-artist resolution). So when
-    # the configured base is a mirror and its search yields zero results (or is
-    # unreachable), retry the SAME query ONCE against the public API before caching
-    # a miss. The MBID is universal, so a public-resolved MBID still browses fine
-    # against the mirror. $mirror gates it; $isFb guards against a loop.
-    my $mirror = !_mbThrottled();
-
-    # Pass the sub to itself ($self) rather than capturing $run lexically: a
-    # self-capturing closure is a reference cycle Perl never collects, and this
-    # resolver runs once per artist name (DSTM seeds, Last.fm similar-artist
-    # resolution) so each call would leak. $self keeps the CV alive across the
-    # async gap (the in-flight callbacks hold it), then frees when they do.
-    my $run = sub {
-        my ($self, $base, $isFb, $field) = @_;
-        $log->info("Resolving artist name to MBID: $name ($field field"
-            . ($isFb ? ', public fallback' : '') . ')');
-
-        my $http = Slim::Networking::SimpleAsyncHTTP->new(
-            sub {
-                my $resp = shift;
-                my $data = eval { from_json($resp->content) };
-                my $arts = (!$@ && ref $data eq 'HASH' && ref $data->{artists} eq 'ARRAY')
-                           ? $data->{artists} : undef;
-
-                if ($arts && !@$arts && $mirror && !$isFb) {
-                    $log->info("Artist '$name' ($field) => 0 results on mirror; retrying public API");
-                    return $self->($self, MB_DEFAULT_BASE_URL, 1, $field);
-                }
-
-                my $mbid = '';
-                if ($arts && @$arts) {
-                    my $a = $arts->[0];
-                    $mbid = lc $a->{id} if $a->{id} && ($a->{score} // 0) >= 90;
-                }
-
-                # Name field found nothing acceptable -> ONE alias-field pass
-                # (same base/fallback state; the mirror-0-results branch above
-                # still gives the alias pass its own public retry).
-                if (!$mbid && $field eq 'artist') {
-                    $log->info("Artist '$name' => no name-field match; retrying alias field");
-                    return $self->($self, $base, $isFb, 'alias');
-                }
-                eval { $cache->set($cacheKey, $mbid, $mbid ? MB_FOUND_TTL : MB_EMPTY_TTL); 1 }
-                    or $log->warn("artist-mbid cache set failed: $@");
-                $log->info("Artist '$name' ($field) => " . ($mbid || 'no match') . ($isFb ? ' [public fallback]' : ''));
-                $onDone->($mbid || undef);
-            },
-            sub {
-                my $err = shift;
-                if ($mirror && !$isFb) {
-                    $log->info("Artist '$name' ($field) => mirror search error; retrying public API");
-                    return $self->($self, MB_DEFAULT_BASE_URL, 1, $field);
-                }
-                _handleError($err, $onError);
-            },
-            { timeout => 12 }
-        );
-
-        $http->get($base . $mkQuery->($field), 'Accept' => 'application/json', 'User-Agent' => USER_AGENT);
-    };
-
-    # -----------------------------------------------------------------------
-    # TIER 1: the hosted LMS-community API, in front of everything above.
-    #
-    # WHY: on public MusicBrainz — which is what the majority run, since most
-    # users have no mirror — this resolver is throttled to ~1 req/s, and it is
-    # called in LOOPS (a DSTM radio seed, then every Last.fm similar artist).
-    # Resolving 25 names is ~25s of enforced throttle there versus ~57ms each
-    # here, against a globally shared Cloudflare cache that is usually already
-    # warm for anyone popular enough to be a radio seed.
-    #
-    # THE GATE, and it is the whole reason this is safe. The hosted endpoint
-    # picks by POPULARITY and returns no score, while the MusicBrainz path below
-    # deliberately requires score >= 90 — because these MBIDs seed radio and
-    # similar-artist chains that resolve UNATTENDED, so a wrong artist silently
-    # pollutes the output for hours. So we do not trust the hosted answer just
-    # because it came back: it is accepted ONLY if the name it echoes folds equal
-    # to the name we asked for.
-    #
-    # Fold-comparing (via Browse::_norm — lowercase, strip diacritics) is what
-    # makes that gate correct rather than merely strict: it ACCEPTS the API's
-    # diacritic corrections, which are the common case and are right
-    # (Beyonce -> Beyoncé, Motorhead -> Motörhead — both verified live), while
-    # REJECTING a fuzzy mapping to a differently-named popular namesake.
-    #
-    # THE LENGTH CHECK IS LOAD-BEARING. An unknown artist does not 404 and does
-    # not return {} — it returns the QUERY NAME back with an empty mbid:
-    #   {"name":"zzzqqq notanartist","mbid":""}
-    # so the name folds equal to itself and the gate would pass on nothing at
-    # all. Verified live 2026-08-12. Never drop `length $mbid`.
-    #
-    # Anything else — unknown artist, fold mismatch, bad JSON, HTTP failure,
-    # service down — falls through to $run, which is the previous implementation
-    # byte for byte. That fallback is UNCONDITIONAL by design: an outage here
-    # degrades to exactly today's behaviour rather than breaking resolution.
-    my $mbFallback = sub { $run->($run, _mbBase(), 0, 'artist') };
-
-    _hostedGet('artist/' . _hostedSeg($name) . '/mbid', sub {
+    _hostedGet($path, sub {
         my ($data) = @_;
-        my $mbid = lc($data->{mbid} // '');
-        my $got  = $data->{name} // '';
-
-        unless (length $mbid) {
-            $log->info("Hosted API: no MBID for '$name'; falling back to MusicBrainz");
-            return $mbFallback->();
-        }
-        unless (_foldEq($got, $name)) {
-            $log->info("Hosted API: '$name' resolved to a different artist ('$got'); falling back to MusicBrainz");
-            return $mbFallback->();
-        }
-
-        eval { $cache->set($cacheKey, $mbid, MB_FOUND_TTL); 1 }
-            or $log->warn("artist-mbid cache set failed: $@");
-        $log->info("Artist '$name' => $mbid [hosted]");
-        $onDone->($mbid);
-    }, $mbFallback);
+        my $mbid    = lc($data->{mbid} // '');
+        my $got     = $data->{name} // '';
+        my @aliases = ref $data->{aliases} eq 'ARRAY'
+                    ? grep { defined $_ && !ref $_ && length $_ } @{ $data->{aliases} } : ();
+        my $about = length $artistMbid
+                  ? $mbid eq $artistMbid
+                  : (_foldEq($got, $name) || scalar(grep { _foldEq($_, $name) } @aliases));
+        my $ok    = (length $mbid && $about) ? 1 : 0;
+        my $entry = $ok ? { mbid => $mbid, name => $got, aliases => \@aliases } : $none->();
+        eval { $cache->set($key, $entry, $ok ? MB_FOUND_TTL : MB_EMPTY_TTL); 1 }
+            or $log->warn("artist-aliases cache set failed: $@");
+        $onDone->($entry);
+    }, sub { $onDone->(undef) });
 }
 
 # Fold two names for the resolver's accept gate. Delegates to Browse::_norm —
@@ -3339,32 +3309,6 @@ sub _foldEq {
     my $norm = Plugins::ListenBrainzFreshReleases::Browse->can('_norm');
     return $norm ? ($norm->($x) eq $norm->($y)) : (lc($x) eq lc($y));
 }
-
-# ---------------------------------------------------------------------------
-# Artist sort-name (for the Artist sort). The ListenBrainz feed only carries the
-# display credit ("Jack White"); the sort-name ("White, Jack"; a stage name like
-# "Panda Bear" stays as-is) lives in MusicBrainz. We look it up by the artist
-# MBID the feed DOES give us (artist/<mbid> → sort-name), store it, and warm it
-# in the background so the Artist sort keys on it. A cold artist falls back to
-# the display credit and self-corrects on re-entry (the plugin's second-load
-# contract). Fast on an MB mirror; a courtesy-throttled background trickle on the
-# public API (bounded per pass, so each open fills a little more of the table).
-#
-# THIS IS ONE OF THE THREE THINGS THAT WERE NEVER CACHES, so it lives in the
-# `artist` TABLE, not in `kv`. Re-deriving it costs SORT_WARM_MAX(100) artists per
-# pass, serially, with a 1.1s courtesy gap on public MusicBrainz — a multi-day
-# reconvergence on a 2,900-release feed. It survives ordinary builds and an
-# explicit clean-load reset alike; a genre-parser change clears only genre fields.
-#
-# STALENESS IS AN AGE POLICY ON `fetched_at`, NOT A TTL. Nothing here hands a
-# duration to anyone, so no value can mean 1970. `sort_src` records which tier
-# answered, so the MusicBrainz tier can be re-run without disturbing a future
-# local or hosted one.
-# ---------------------------------------------------------------------------
-use constant SORT_FOUND_AGE => 30 * 86400;   # a sort-name does not move
-use constant SORT_NONE_AGE  =>  1 * 86400;   # "MB had none" — retry tomorrow, not in a month
-use constant SORT_WARM_MAX  => 100;   # artists fetched per warm pass (rest self-heal on later opens)
-my %sortInFlight;
 
 # ---------------------------------------------------------------------------
 # MUSICBRAINZ RATE-LIMIT BACKOFF. The other two network paths have had one for
@@ -3393,9 +3337,8 @@ my %sortInFlight;
 # assignment would then let a fresh 503 shorten a window still in force,
 # releasing the pump early straight back into the live limit.
 #
-# Named for MusicBrainz rather than for the sort warm because nothing here is
-# sort-specific — `getReleaseGroupByName` and the mirror genre path are the
-# obvious next adopters. The sort warm is simply the only caller today.
+# Named for MusicBrainz rather than for any one caller: the one MusicBrainz queue
+# (_mbGet, below) applies it to every request to that host.
 use constant MB_BACKOFF_START => 5;
 use constant MB_BACKOFF_MAX   => 30;
 my $mbBusyUntil = 0;
@@ -3427,6 +3370,139 @@ sub _mbNoteLimit {
 }
 
 sub _mbNoteOk { $mbDelay = 0; return }
+
+# ---------------------------------------------------------------------------
+# THE ONE MUSICBRAINZ QUEUE. Every request to public musicbrainz.org goes through
+# _mbGet — nothing in this plugin may build its own SimpleAsyncHTTP to that host.
+#
+# WHY (measured on the live server, 2026-09-14). MusicBrainz's published rule is
+# about ONE request per second per IP, averaged, and above it EVERY request from
+# the IP is refused with 503 until the rate drops. Five code paths called it, and
+# each paced itself at best: the tracklist fetch and the sort warm (since removed) kept their own
+# 1.1s gaps (independently of each other), while the Trending album search, the
+# DSTM artist-ID lookup (four at once) and the connection check paced nothing and
+# ignored the backoff. Right after each LMS restart the sum went over the limit —
+# the log showed ~80 refusals in ten minutes from 06:35, the paced tracklist
+# retries being refused every ~6s because the unpaced callers kept the average up.
+# Per-caller pacing cannot work: the limit is on the SUM.
+#
+# THE RULE, enforced here and nowhere else:
+#   * ONE request in flight at a time;
+#   * the next one no sooner than MB_GAP after the previous one was SENT;
+#   * nothing goes out while the shared 503 backoff (_mbWait) is in force, and the
+#     queue itself notes a 503 (_mbNoteLimit) and a success (_mbNoteOk) — callers
+#     must not, or one refusal would double the curve twice.
+#
+# A MIRROR IS NOT QUEUED. The decision is made on the URL, not on _mbBase, because
+# the mirror paths deliberately retry a zero-result search against the PUBLIC host
+# (MB_DEFAULT_BASE_URL) — that retry must be paced even when the configured base
+# is a mirror, and a request to the user's own box must not wait behind it.
+#
+# $onOk / $onErr receive exactly what SimpleAsyncHTTP hands its callbacks, so a
+# call site converts by replacing `->new(...)->get(...)` and nothing else.
+# %opt: timeout (seconds), onSend (called when the request actually goes out —
+# the connection check times its own round trip from there, not from the queue).
+use constant MB_GAP          => 1.1;
+use constant MB_WATCHDOG_PAD => 5;    # past the request timeout, a lost callback frees the slot
+our @mbQueue;
+our $mbInFlight = 0;
+our $mbNextAt   = 0;
+our $mbTimer;
+our $mbPumping  = 0;
+our $mbRepump   = 0;
+
+sub _mbIsPublicUrl {
+    my ($url) = @_;
+    return (defined $url && $url =~ m{^https?://([^/]*\.)?musicbrainz\.org/}i) ? 1 : 0;
+}
+
+sub _mbGet {
+    my ($url, $onOk, $onErr, %opt) = @_;
+    my $job = { url => $url, ok => ($onOk || sub {}), err => ($onErr || sub {}),
+                timeout => ($opt{timeout} || 15), onSend => $opt{onSend} };
+    unless (_mbIsPublicUrl($url)) { _mbSend($job, 0); return }
+    push @mbQueue, $job;
+    _mbPump();
+    return;
+}
+
+# Seconds until the queue may send again (0 = now), for the connection check.
+sub _mbQueueWait {
+    my $now = Time::HiRes::time();
+    my $at  = $mbNextAt > $mbBusyUntil ? $mbNextAt : $mbBusyUntil;
+    return $at > $now ? $at - $now : 0;
+}
+
+# A LOOP, NOT RECURSION, AND RE-ENTRY IS FOLDED INTO IT. A callback that lands
+# synchronously (a cached transport, a test stub) re-enters the pump from inside
+# _mbSend; a plain guard would then drop that wake-up and strand the queue. `local`
+# restores the guard even if a caller's callback dies inside the loop — a flag left
+# set would silence every MusicBrainz request for the life of the process.
+sub _mbPump {
+    if ($mbPumping) { $mbRepump = 1; return }
+    local $mbPumping = 1;
+    do {
+        $mbRepump = 0;
+        while (!$mbInFlight && @mbQueue) {
+            my $now = Time::HiRes::time();
+            my $at  = $mbNextAt > $mbBusyUntil ? $mbNextAt : $mbBusyUntil;
+            if ($at > $now) {
+                $mbTimer ||= Slim::Utils::Timers::setTimer(undef, $at, sub { $mbTimer = undef; _mbPump() });
+                last;
+            }
+            my $job = shift @mbQueue;
+            $mbInFlight = 1;
+            $mbNextAt   = $now + MB_GAP;
+            _mbSend($job, 1);
+        }
+    } while ($mbRepump);
+    return;
+}
+
+sub _mbSend {
+    my ($job, $public) = @_;
+    my ($settled, $watchdog) = (0);
+    # Frees the slot exactly once, whichever of the two callbacks or the watchdog
+    # gets there first. The slot is freed BEFORE the caller's callback runs, so a
+    # callback that queues its next request finds the queue ready for it.
+    my $release = sub {
+        return if $settled++;
+        return unless $public;
+        Slim::Utils::Timers::killSpecific($watchdog) if $watchdog;
+        $mbInFlight = 0;
+        _mbPump();
+    };
+    my $http = Slim::Networking::SimpleAsyncHTTP->new(
+        sub {
+            my $already = $settled;
+            _mbNoteOk() if $public;
+            $release->();
+            $job->{ok}->(@_) unless $already;
+        },
+        sub {
+            my $already = $settled;
+            _mbNoteLimit() if $public && _mbIsRateLimited($_[0], $_[1]);
+            $release->();
+            $job->{err}->(@_) unless $already;
+        },
+        { timeout => $job->{timeout} },
+    );
+    if ($public) {
+        $watchdog = Slim::Utils::Timers::setTimer(undef,
+            Time::HiRes::time() + $job->{timeout} + MB_WATCHDOG_PAD, sub {
+                return if $settled;
+                $log->warn("MusicBrainz: no callback for $job->{url} — freeing the queue");
+                $watchdog = undef;
+                $release->();
+                # A response-shaped object, because error handlers call ->error and
+                # ->code on their first argument (_handleError, _mbIsRateLimited).
+                $job->{err}->(Plugins::ListenBrainzFreshReleases::API::LostResponse->new, 'timed out');
+            });
+    }
+    $job->{onSend}->() if ref $job->{onSend} eq 'CODE';
+    $http->get($job->{url}, 'Accept' => 'application/json', 'User-Agent' => USER_AGENT);
+    return;
+}
 
 # ---------------------------------------------------------------------------
 # Artist genres straight from MusicBrainz — the MIRROR-ONLY fast path
@@ -3468,8 +3544,7 @@ sub _mbNoteOk { $mbDelay = 0; return }
 # the mechanism. It is now compared against `artist.fetched_at` in Perl, so the
 # number is just a number again and 90 days means 90 days.
 # AGE POLICY — docs/feed-findings-2026-08-14.md §2, and it is a standing rule, not
-# a tuning knob: FOUND = 30 days, EMPTY = 1 day, matching SORT_FOUND_AGE /
-# SORT_NONE_AGE above. No genre answer may sit stale for longer. The old 90d/7d
+# a tuning knob: FOUND = 30 days, EMPTY = 1 day. No genre answer may sit stale for longer. The old 90d/7d
 # pinned "this artist has no genres" across a week in which the upstream dataset
 # was actively filling.
 use constant AGEN_FOUND_AGE   => 30 * 86400;   # an artist's genres barely move
@@ -3491,7 +3566,7 @@ sub hasMirror { return _mbThrottled() ? 0 : 1 }
 #
 # Store-only read: the artist's genres (possibly an empty arrayref, meaning "MB
 # has none"), or undef when we've simply never looked. NEVER fetches — same
-# contract as peekArtistSort/peekLastfmTags.
+# contract as peekLastfmTags.
 #
 # The mirror tier keys on the MBID and the hosted tier on `n:<normalised name>`
 # (it has no MBID lookup at all), so the two occupy DIFFERENT ROWS of the same
@@ -3593,8 +3668,8 @@ sub getArtistGenres {
     }
     unless (@todo) { $onDone->(\%out); return }
 
-    # Reserve the whole batch up front — see warmArtistSorts for why doing it one
-    # at a time lets a second pass re-fetch everything still queued.
+    # Reserve the whole batch up front: reserving one at a time as each fetch
+    # starts lets a second pass re-fetch everything still queued.
     $agenInFlight{$_} = 1 for @todo;
 
     my $active = 0;
@@ -3742,8 +3817,9 @@ sub _mbGenreNames {
 # Caching FREE TEXT (0.9.141) — THE RULE STANDS; ITS HELPERS ARE GONE (0.9.186)
 # ---------------------------------------------------------------------------
 # `_setText`/`_getText` were removed with `getArtistBio`, their last caller (the
-# other one, the MusicBrainz sort-name, moved to `DB::artistPut` when the store
-# landed). NOTHING in this file writes a bare string to the cache any more.
+# other one, the MusicBrainz sort-name, moved to the store when it landed and was
+# dropped altogether 2026-09-14). NOTHING in this file writes a bare string to the
+# cache any more.
 #
 # THE RULE IS KEPT HERE BECAUSE IT IS ABOUT THE NEXT ONE, not about the two that
 # have gone: never `$cache->set($key, $some_string)` with text that came from an
@@ -3776,188 +3852,6 @@ sub _mbGenreNames {
 # this file that builds a key out of an artist name.)
 
 
-# BULK sync read for the sorter: { lc mbid => sort-name } holding only the artists
-# actually known. No network.
-#
-# THE RENDER PATH MUST USE THIS ONE. An artist-sorted All Releases view is ~2,900
-# releases, so a per-release read is ~2,900 synchronous SELECTs — exactly the
-# blocking work 0.9.130 moved off the render path, and exactly the hazard the
-# hosted-genre tier hit in 0.9.165 (caught by bench_walk.pl, not by review). One
-# statement for the whole bucket instead.
-sub peekArtistSorts {
-    my ($class, $mbids) = @_;
-    return {} unless ref $mbids eq 'ARRAY' && @$mbids;
-    my %want;
-    for my $m (@$mbids) { next unless defined $m && length $m; $want{ lc $m } = 1 }
-    return {} unless %want;
-    return Plugins::ListenBrainzFreshReleases::DB::artistSortGet([ keys %want ]);
-}
-
-# Single-key convenience — the sort-name string, or undef when it isn't known yet
-# OR MB had none (both fall back to the display credit). Kept for callers outside
-# a sort; a comparator must never reach it, see peekArtistSorts.
-sub peekArtistSort {
-    my ($class, $mbid) = @_;
-    return undef unless $mbid;
-    my $v = $class->peekArtistSorts([$mbid])->{ lc $mbid };
-    return (defined $v && length $v) ? $v : undef;
-}
-
-# Background-fill sort-names for a list of artist MBIDs. Dedupes, skips anything
-# already cached (found OR a cached "none") and anything in flight, then fetches
-# the remainder ONE AT A TIME with the MB courtesy gap (0 on a mirror), capped at
-# SORT_WARM_MAX per pass. Fire-and-forget — no client needed, never blocks a feed.
-sub warmArtistSorts {
-    my ($class, $mbids) = @_;
-    return unless ref $mbids eq 'ARRAY' && @$mbids;
-
-    my (%seen, @cand);
-    for my $m (@$mbids) {
-        next unless $m;
-        my $lc = lc $m;
-        next if $seen{$lc}++;
-        next if $lc eq lc VA_MBID;
-        push @cand, $lc;
-    }
-    return unless @cand;
-
-    # ONE bulk read to decide what still needs fetching, rather than a read per
-    # candidate. Staleness is decided HERE, in Perl, from `fetched_at` — a found
-    # sort-name is good for 30 days, a recorded "MB had none" for one, so a
-    # transient miss retries tomorrow instead of pinning credit-name sort for a
-    # month. Nothing hands a duration to a store, which is the whole point.
-    my $have = Plugins::ListenBrainzFreshReleases::DB::artistGet(\@cand);
-    my $now  = time();
-
-    # Anything with no row at all might already be answered in the outgoing LMS
-    # cache. Asking before fetching is what stops this warm re-deriving, at 100
-    # artists a pass with a courtesy gap between each, a set MusicBrainz has
-    # already been asked for. Bounded by DB::IMPORT_WINDOW.
-    my @cold = grep { !$have->{$_} } @cand;
-    if (@cold) {
-        my $carried = Plugins::ListenBrainzFreshReleases::DB::importSorts(\@cold);
-        if (%$carried) {
-            my $again = Plugins::ListenBrainzFreshReleases::DB::artistGet([ keys %$carried ]);
-            $have->{$_} = $again->{$_} for keys %$again;
-        }
-    }
-
-    my @todo;
-    for my $lc (@cand) {
-        my $row = $have->{$lc};
-        if ($row && length($row->{sort_src} // '')) {
-            # AGE THE SORT-NAME AGAINST ITS OWN STAMP, not the row's. `fetched_at`
-            # moves whenever ANY tier writes this artist row, and the mirror genre
-            # tier rewrites the same MBID-keyed row daily — so a row that recorded
-            # "MusicBrainz has no sort-name" (SORT_NONE_AGE, one day) had its clock
-            # reset every night and was never re-asked, while a real sort-name was
-            # held well past SORT_FOUND_AGE for the same reason. `sort_at` is the
-            # per-answer stamp schema 3 added for exactly this and was written but
-            # never read. Fall back to `fetched_at` only for a pre-migration row
-            # whose stamp is still 0.
-            my $age = $now - ($row->{sort_at} || $row->{fetched_at} || 0);
-            next if $age < (length($row->{sort_name} // '') ? SORT_FOUND_AGE : SORT_NONE_AGE);
-        }
-        next if $sortInFlight{$lc};
-        push @todo, $lc;
-        last if @todo >= SORT_WARM_MAX;
-    }
-    return unless @todo;
-
-    # Reserve the WHOLE batch as in-flight up front, not one MBID at a time as
-    # each fetch starts. The pump processes @todo serially over many seconds; if
-    # a second warm pass ran in that window and only the single currently-fetching
-    # MBID were marked, every queued-but-not-yet-fetched MBID would pass this
-    # pass's in-flight guard and be fetched AGAIN in parallel — doubling MB traffic
-    # past the 1 req/s courtesy gap. Each is cleared as the pump completes it
-    # (success OR error/timeout, both via $next), so the batch never leaks.
-    $sortInFlight{$_} = 1 for @todo;
-
-    # RELEASE THE WHOLE RESERVATION WHEN THE PASS GIVES UP EARLY. The reservation
-    # above is what stops a second pass re-fetching a queued MBID, and until now
-    # the only way out of it was completing the fetch. A pass that abandons its
-    # queue (below, on a rate limit) must hand every unfetched MBID back, or they
-    # stay marked in flight for the life of the process and the in-flight guard
-    # silently excludes them from EVERY later pass — a permanent hole in the table
-    # that looks exactly like "MusicBrainz has no sort-name for these".
-    my $release = sub {
-        delete $sortInFlight{$_} for @todo;
-        @todo = ();
-    };
-
-    # Somebody already hit the limit — don't start at all. Without this the warm
-    # re-enters on every artist-sorted open and spends its whole pass discovering
-    # the same deadline one request at a time.
-    if ((my $wait = _mbWait()) > 0) {
-        $log->info("artist-sort warm: MusicBrainz backing off ${wait}s — deferring "
-                 . scalar(@todo) . " artist(s) to a later open");
-        $release->();
-        return;
-    }
-
-    my $gap = _mbThrottled() ? 1.1 : 0;   # 1 req/s courtesy on public MB; a mirror is our own box
-
-    my $pump;
-    $pump = sub {
-        my ($self) = @_;
-        my $mbid = shift @todo;
-        unless ($mbid) { return }
-        # already reserved in %sortInFlight above; $next clears it when this one done
-
-        (my $safe = $mbid) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
-        my $url = _mbBase() . 'artist/' . $safe . '?fmt=json';
-
-        my $next = sub {
-            delete $sortInFlight{$mbid};
-            return unless @todo;
-            if ($gap) { Slim::Utils::Timers::setTimer(undef, Time::HiRes::time() + $gap, sub { $self->($self) }) }
-            else      { $self->($self) }
-        };
-
-        my $http = Slim::Networking::SimpleAsyncHTTP->new(
-            sub {
-                my $data = eval { from_json($_[0]->content) };
-                my $sort = (ref $data eq 'HASH') ? ($data->{'sort-name'} // '') : '';
-                # An EMPTY answer is stored too, with `sort_src` set — that is what
-                # makes "MB has none for this artist" a recorded fact the age policy
-                # can retry on a day, rather than an absence that is refetched every
-                # single pass. (The old `artist-sort cache set failed` spam in live
-                # logs was a non-Latin sort-name dying on the way into the LMS cache;
-                # a frozen value cannot do that.)
-                _mbNoteOk();                         # a success clears the backoff curve
-                Plugins::ListenBrainzFreshReleases::DB::artistPut(
-                    $mbid, mbid => $mbid, sort_name => $sort, sort_src => 'mb')
-                    or $log->warn("artist-sort store write failed for $mbid");
-                $next->();
-            },
-            sub {
-                # A RATE LIMIT ENDS THE PASS; any other error is just this artist's.
-                # The distinction matters because the remedies are opposites: an
-                # artist MB genuinely cannot answer for should not stop the other
-                # ninety-nine, while a 503 means every one of those ninety-nine is
-                # about to be refused too, and sending them is what holds the limit
-                # open. Nothing is stored either way — an HTTP error is not an
-                # answer — so the deferred artists are picked up whole on a later
-                # open, which is the same self-healing path a partial pass uses.
-                if (_mbIsRateLimited($_[0], $_[1])) {
-                    _mbNoteLimit();
-                    delete $sortInFlight{$mbid};
-                    $log->info("artist-sort warm: rate-limited — deferring "
-                             . scalar(@todo) . " remaining artist(s)");
-                    $release->();
-                    return;
-                }
-                # HTTP error: don't cache (retry next pass); just move on.
-                $log->info("artist-sort fetch error for $mbid: " . ($_[1] // '?')) if $log->is_info;
-                $next->();
-            },
-            { timeout => 12 }
-        );
-        $http->get($url, 'Accept' => 'application/json', 'User-Agent' => USER_AGENT);
-    };
-
-    $pump->($pump);
-}
 
 # ---------------------------------------------------------------------------
 # Similar artists (labs dataset) — GET labs/similar-artists/json?artist_mbids=<m>
@@ -4103,7 +3997,6 @@ sub validateToken {
 # 1 req/sec MusicBrainz rate limit is not a concern.
 # ---------------------------------------------------------------------------
 my $releaseDetailFlights;
-my $releaseDetailNextAt = 0;
 sub getReleaseDetails {
     my ($class, $mbid, $onDone, $onError) = @_;
 
@@ -4138,11 +4031,12 @@ sub getReleaseDetails {
 
     $log->info("Fetching MusicBrainz release details: $url");
 
-    my $http = Slim::Networking::SimpleAsyncHTTP->new(
+    # Through the one MusicBrainz queue, which owns the pacing and the 503 backoff
+    # (this sub used to keep its own 1.1s gap, blind to every other caller).
+    _mbGet($url,
         sub {
             return unless $live;
             my $resp = shift;
-            _mbNoteOk() if _mbThrottled();
             my $data = eval { from_json($resp->content) };
             if ($@) {
                 $log->error("MusicBrainz JSON parse error: $@");
@@ -4161,30 +4055,177 @@ sub getReleaseDetails {
         sub {
             return unless $live;
             my $resp = shift;
-            _mbNoteLimit() if _mbThrottled() && _mbIsRateLimited($resp);
             _handleError($resp, $onError);
         },
-        { timeout => 15 }
+        timeout => 15,
     );
+}
 
-    # Public MusicBrainz misses are spaced; mirrors bypass the courtesy gap.
-    # Re-check the shared backoff at dispatch time, since another request can
-    # receive a rate limit while this one is waiting.
-    my $send;
-    $send = sub {
-        unless ($live) { undef $send; return }
-        my $wait = _mbThrottled() ? _mbWait() : 0;
-        my $gap = $releaseDetailNextAt - Time::HiRes::time();
-        $wait = $gap if _mbThrottled() && $gap > $wait;
-        if ($wait > 0) {
-            Slim::Utils::Timers::setTimer(undef, Time::HiRes::time() + $wait, $send);
+# ---------------------------------------------------------------------------
+# TRACKLISTS: LISTENBRAINZ FIRST, MUSICBRAINZ ONLY WHEN LISTENBRAINZ HAS NONE.
+# Decided by Simon 2026-09-14, with the catch below stated and accepted.
+#
+# WHY. Every tracklist used to be one public-MusicBrainz request, and the overnight
+# detail prewarm asks for hundreds of them; that queue was the one being refused
+# every few seconds for ten minutes after the 06:31 restart on 2026-09-14.
+# ListenBrainz serves the same MusicBrainz-derived tracklist from
+# `/1/metadata/release_group/?inc=recording` (recording.mediums[].tracks[]) under
+# its own, far looser limit — verified live: Sinister Grift, the same 10 tracks and
+# lengths MusicBrainz gives.
+#
+# THE CATCH, and it is why this is an approximation. That route is keyed by release
+# GROUP and ListenBrainz picks its own representative release. Measured 2026-08-22
+# on a live 43-row feed carrying both ids: the representative was the feed's own
+# release 38/43 (88%); 4 gave another edition with a real tracklist (a deluxe with
+# extra tracks, say) and 1 gave none. So about one album in ten may show a different
+# edition's track list. Where ListenBrainz gives none, the exact release is asked of
+# MusicBrainz — through the one queue.
+#
+# CACHE. `lbf:lbtracks:<rg>` holds ListenBrainz's answer, found or empty (30d /
+# 1d). A MusicBrainz answer stays under `lbf:mb:<release mbid>`, and one already
+# stored there WITH tracks is served first: it is exact and it is already paid for.
+# peekTracklist is the ONE reader of "is this answered?" — the prewarm must not
+# build its own key and disagree with it.
+# ---------------------------------------------------------------------------
+my $lbTrackFlights;
+
+sub _hasTracks {
+    my ($p) = @_;
+    return 0 unless ref $p eq 'HASH' && ref $p->{media} eq 'ARRAY';
+    return scalar grep { ref $_ eq 'HASH' && ref $_->{tracks} eq 'ARRAY' && @{ $_->{tracks} } } @{ $p->{media} };
+}
+
+sub _lbTracksKey { Plugins::ListenBrainzFreshReleases::DB::kver('lbf:lbtracks:') . lc($_[0]) }
+
+# Cached answer for this album, or undef when nothing has answered yet. Never fetches.
+sub peekTracklist {
+    my ($class, $rg, $mbid) = @_;
+    $rg   = defined $rg   ? lc $rg : '';
+    $mbid = defined $mbid ? $mbid  : '';
+
+    my $mb = length $mbid ? $cache->get('lbf:mb:' . $mbid) : undef;
+    $mb = undef unless ref $mb eq 'HASH';
+    return $mb if $mb && _hasTracks($mb);              # exact, and already paid for
+
+    return $mb unless length $rg;                      # no group: MusicBrainz's answer or nothing
+
+    my $lb = $cache->get(_lbTracksKey($rg));
+    return undef unless ref $lb eq 'HASH';             # ListenBrainz not asked yet
+    return $lb if _hasTracks($lb);
+    # ListenBrainz has none. With a release to ask about, the answer is
+    # MusicBrainz's once it has given one; without one, "none" is the answer.
+    return length $mbid ? $mb : $lb;
+}
+
+# $onDone gets { media => [ { position, format, tracks => [ { position, title,
+# length(ms) } ] } ] } — the shape _parseReleaseDetails has always produced, so the
+# detail page renders either source unchanged. $onError only comes from the
+# MusicBrainz leg; a ListenBrainz failure falls through to it.
+sub getTracklist {
+    my ($class, $rg, $mbid, $onDone, $onError) = @_;
+    $onDone  ||= sub {};
+    $onError ||= sub {};
+    $rg   = defined $rg   ? lc $rg : '';
+    $mbid = defined $mbid ? $mbid  : '';
+
+    if (my $have = $class->peekTracklist($rg, $mbid)) { $onDone->($have); return }
+
+    my $viaMb = sub {
+        if (length $mbid) { $class->getReleaseDetails($mbid, $onDone, $onError) }
+        else              { $onDone->({ media => [] }) }
+    };
+    return $viaMb->() unless length $rg;
+    # ListenBrainz already answered "none" for this group: straight to MusicBrainz.
+    return $viaMb->() if ref $cache->get(_lbTracksKey($rg)) eq 'HASH';
+
+    _fetchLbTracklist($rg, sub {
+        my ($parsed) = @_;                 # undef = the request failed
+        return $onDone->($parsed) if _hasTracks($parsed);
+        $viaMb->();
+    });
+}
+
+# One ListenBrainz request per release group, coalesced (a detail open and the
+# prewarm asking for the same album share it), on the shared ListenBrainz 429
+# backoff every other LB call uses. $cb gets the parsed answer, or undef.
+sub _fetchLbTracklist {
+    my ($rg, $cb) = @_;
+
+    require Plugins::ListenBrainzFreshReleases::SingleFlight;
+    $lbTrackFlights ||= Plugins::ListenBrainzFreshReleases::SingleFlight->new(
+        name => 'lb-tracklist', max => 120, log => $log);
+    my $live = 1;
+    return unless $lbTrackFlights->join($rg,
+        onDone  => sub { $live = 0; $cb->($_[0]) },
+        onError => sub { $live = 0; $cb->(undef) });
+
+    (my $safe = $rg) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
+    my $url = BASE_URL . '/1/metadata/release_group/?inc=recording&release_group_mbids=' . $safe;
+
+    my $attempt = 1;
+    my $go = sub {
+        my ($self) = @_;
+        return unless $live;
+        if ((my $wait = _lbWait()) > 0) {
+            Slim::Utils::Timers::setTimer(undef, Time::HiRes::time() + $wait, sub { $self->($self) });
             return;
         }
-        $releaseDetailNextAt = Time::HiRes::time() + 1.1 if _mbThrottled();
+        $log->info("Fetching ListenBrainz tracklist: $url");
+        my $http = Slim::Networking::SimpleAsyncHTTP->new(
+            sub {
+                return unless $live;
+                my $data = eval { from_json($_[0]->content) };
+                if ($@ || ref $data ne 'HASH') {
+                    $lbTrackFlights->reject($rg, 'unparseable');
+                    return;
+                }
+                # {} for a group ListenBrainz does not know — an answer: "none".
+                my $parsed = _parseLbTracklist($data->{$rg});
+                eval { $cache->set(_lbTracksKey($rg), $parsed,
+                                   _hasTracks($parsed) ? MB_FOUND_TTL : MB_EMPTY_TTL); 1 }
+                    or $log->warn("ListenBrainz tracklist cache set failed: $@");
+                $lbTrackFlights->resolve($rg, $parsed);
+            },
+            sub {
+                return unless $live;
+                my $resp = shift;
+                if (_lbIsRateLimited($resp) && $attempt < LB_RETRY_MAX) {
+                    my $in = _lbNoteLimit($resp, $attempt++);
+                    Slim::Utils::Timers::setTimer(undef, Time::HiRes::time() + $in, sub { $self->($self) });
+                    return;
+                }
+                $log->info("ListenBrainz tracklist failed for $rg: "
+                    . (ref $resp && $resp->can('error') ? ($resp->error // '?') : '?'));
+                $lbTrackFlights->reject($rg, 'request failed');
+            },
+            { timeout => 15 }
+        );
         $http->get($url, 'Accept' => 'application/json', 'User-Agent' => USER_AGENT);
-        undef $send;
     };
-    $send->();
+    $go->($go);
+}
+
+# ListenBrainz `recording` block -> the _parseReleaseDetails shape. Only two names
+# differ from MusicBrainz ws/2: `mediums`/`name` where ws/2 says `media`/`title`.
+sub _parseLbTracklist {
+    my ($entry) = @_;
+    my %out = (media => []);
+    my $rec = ref $entry eq 'HASH' ? $entry->{recording} : undef;
+    return \%out unless ref $rec eq 'HASH' && ref $rec->{mediums} eq 'ARRAY';
+    for my $m (@{ $rec->{mediums} }) {
+        next unless ref $m eq 'HASH';
+        my @tracks = map { {
+            position => $_->{position},
+            title    => $_->{name} // '',
+            length   => $_->{length},
+        } } grep { ref $_ eq 'HASH' } @{ ref $m->{tracks} eq 'ARRAY' ? $m->{tracks} : [] };
+        push @{ $out{media} }, {
+            position => $m->{position},
+            format   => $m->{format} // '',
+            tracks   => \@tracks,
+        };
+    }
+    return \%out;
 }
 
 # ---------------------------------------------------------------------------
@@ -4362,7 +4403,7 @@ sub _cleanBio {
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Cache-ONLY read of the Last.fm tags for an artist/album — never makes a request.
-# Mirrors peekArtistSort. The list-render path uses this so browsing can never pay
+# The list-render path uses this so browsing can never pay
 # for a per-artist Last.fm call: the background warm populates the cache, the render
 # just reads whatever is already there. Returns an arrayref (possibly empty).
 #
@@ -5029,5 +5070,19 @@ sub hostedHeaders {
         ? { Slim::Utils::Misc::apiHeaders(PLUGIN_PACKAGE) }
         : { 'X-LMS-Plugin-ID' => PLUGIN_PACKAGE };
 }
+# The one MusicBrainz queue, for the connection check: its probes must be paced
+# with everything else the plugin is sending, not beside it.
+sub mbGet       { shift; _mbGet(@_) }
+sub mbQueueWait { _mbQueueWait() }
+
+# What a caller's error handler receives when the queue's watchdog gives up on a
+# request whose transport never called back. Shaped like a SimpleAsyncHTTP
+# response so every existing handler reads it without a special case.
+package Plugins::ListenBrainzFreshReleases::API::LostResponse;
+sub new     { bless {}, shift }
+sub code    { 0 }
+sub error   { 'timed out' }
+sub content { '' }
+sub headers { undef }
 
 1;

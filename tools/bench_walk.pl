@@ -77,7 +77,6 @@ my @SUBS = qw(
     _pickValue _norm _allowedTypes _typeMatches _secondaryType _filterSection
     _filterForYou _filterAll _isVariousArtists _blockedSet _isBlocked
     _dedupeReleases _sortReleases _weekStart _sortWithin _artistSortKey
-    _firstArtistMbids
     _viewFilter _releaseTags _genreKey _genreFamily _genreModifier _genreKnown
     _loadGenreFamilies _bucketFor _genresFor _lastfmGenres
     _hostedArtistKey _lbArtistGenres _lastfmArtistGenres _artistTierGenres
@@ -135,14 +134,7 @@ sub coverArtUrl {
     }
     return $rel ? CAA_BASE_URL . $rel . '/front-250' : undef;
 }
-sub peekArtistSort { undef }
 sub sectionWindow { ('2026-08-03', '2026-08-30') }
-# PLURAL, and it is the one _sortWithin('artist') actually calls. Its absence made
-# the bench DIE at the _sortWithin bench and skip everything after it — including
-# the `_bucketFor` line, which is the guard that caught the per-release SELECT in
-# 0.9.165. A harness that dies half way through reports a shorter list, not a
-# failure, so the missing guard looked like a guard that had nothing to say.
-sub peekArtistSorts { {} }
 sub peekLastfmTags { [] }
 # The ARTIST-LEVEL genre tiers are read out of the render's own $meta map, so the
 # only thing the render calls here is the key builder. THAT IS THE PROPERTY THIS

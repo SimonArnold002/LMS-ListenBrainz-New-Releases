@@ -895,11 +895,6 @@ sub fetchForYou {
                     $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_ERROR'), type => 'text' }], cachetime => 0 });
                     return;
                 }
-                # Only when the Artist sort is active, fire a background MB warm of
-                # the artists' sort-names (second-load: cold artists key on the
-                # display credit this render, correct on re-entry). No MB traffic
-                # for users who never pick the Artist sort.
-                _warmArtistSorts($releases) if $mode eq 'artist';
                 # Options section (Material header + rows) at the top: the sort
                 # toggle then Refresh, like Discography/Pitchfork. The toggle sorts
                 # the releases inside each W/C week; Refresh re-fetches the feed.
@@ -2322,9 +2317,10 @@ sub _resolveTrending {
 
                         # LAST year fallback: candidates from UNMAPPED listens have no
                         # recording mbid (so no metadata, no rg mbid, no year at all) —
-                        # resolve their album by artist+name against MusicBrainz
-                        # (mirror-aware, per-name cached 30d, so this drains to zero
-                        # over builds). Bounded per build; sequential pump.
+                        # resolve their album by artist+name against the LMS-community
+                        # API (per-artist discography, cached, so this drains to zero
+                        # over builds; no MusicBrainz leg since 2026-09-14 — see
+                        # API::getReleaseGroupByName). Bounded per build; sequential pump.
                         my $fillByName = sub {
                             my @miss = grep { !$_->{year}
                                               && length($_->{artist} // '') && length($_->{album} // '') } @$cands;
@@ -2687,7 +2683,7 @@ sub _buildAlbumsData {
                                         $finish->();
                                     }
                                     elsif ($kept < TRENDING_MAX) { $pump->(); }
-                                }, $a->{artist}, $a->{title}, '', $force, $a->{year}, $a->{type});
+                                }, $a->{artist}, $a->{title}, '', $force, $a->{year}, $a->{type}, $a->{artist_mbid});
                             }
                         };
                         $pump->();
@@ -2721,8 +2717,8 @@ sub _buildAlbumsData {
 
                     # Rows STILL missing an rg mbid = every follower's listen was
                     # UNMAPPED on ListenBrainz (verified live — those rows also have
-                    # no caa/date/type). Resolve them by artist+album against
-                    # MusicBrainz (mirror-aware, per-name cached) so they get an
+                    # no caa/date/type). Resolve them by artist+album against the
+                    # LMS-community API (per-artist, cached) so they get an
                     # mbid + date + type — and thereby art (CAA release-group) and a
                     # full NRFY-equivalent detail page. Sequential pump: typically a
                     # handful of rows; each result is cached 30d so later builds are
@@ -3984,15 +3980,23 @@ sub _warmReleaseDetails {
                 undef $finish;
             };
             $finish->();
-        }, $artist, $album, $mbid, undef, $year, $rel->{release_group_primary_type});
+        }, $artist, $album, $mbid, undef, $year, $rel->{release_group_primary_type},
+           (ref $rel->{artist_mbids} eq 'ARRAY' ? $rel->{artist_mbids}[0] : undef));
     };
-    if ($mbid) { $work{cache_checks}++ }
-    my $trackCached = $mbid ? $cache->get('lbf:mb:' . $mbid) : undef;
+    # The tracklist is cached by API::getTracklist (ListenBrainz by release group,
+    # MusicBrainz for the exact release only when ListenBrainz has none), and
+    # peekTracklist is the one reader of that answer — a second hand-built cache
+    # key here could disagree with it about what counts as "already answered".
+    my $rg = $rel->{release_group_mbid} // '';
+    my $API = 'Plugins::ListenBrainzFreshReleases::API';
+    my $wantTracks = (length $mbid || length $rg) ? 1 : 0;
+    if ($wantTracks) { $work{cache_checks}++ }
+    my $trackCached = $wantTracks ? $API->peekTracklist($rg, $mbid) : undef;
     $work{cache_hits}++ if $trackCached;
-    if ($mbid && !$trackCached) {
+    if ($wantTracks && !$trackCached) {
         $work{fetches}++;
-        Plugins::ListenBrainzFreshReleases::API->getReleaseDetails($mbid,
-            sub { $retry = 300 unless $cache->get('lbf:mb:' . $mbid); $stream->() },
+        $API->getTracklist($rg, $mbid,
+            sub { $retry = 300 unless $API->peekTracklist($rg, $mbid); $stream->() },
             sub { $retry = 300; $stream->() });
     }
     else { $stream->() }
@@ -4908,55 +4912,32 @@ sub _sortLabel {
 
 # Sort a bucket of releases by the chosen mode. Secondary key is release_date
 # (newest first) so ties within an artist/album sort still read chronologically.
-# The key the Artist sort orders on: the MusicBrainz sort-name ("White, Jack";
-# a stage name like "Panda Bear" keeps its natural order) when known, else the
-# display credit ("Jack White"). The sort-name rides on the release (MuSpy) or is
-# filled from a background MB warm keyed by the first artist MBID; until then a
-# cold artist falls back to the display credit (self-corrects on re-entry).
 #
-# $sorts is the BULK map from API::peekArtistSorts, built once per bucket by the
-# caller. Passing it is not an optimisation detail — without it this reads the
-# store once per release, which on an artist-sorted All Releases view is ~2,900
-# synchronous SELECTs on the render path. The single-key fallback is kept only for
-# a caller outside a sort.
+# THE ARTIST SORT IS A-Z ON THE DISPLAY NAME — the credit exactly as the row shows
+# it — with a leading article skipped using LMS's OWN list (Settings > Advanced,
+# `ignoredarticles`, default "The El La Los Las Le Les"). So it files names the way
+# the user's library does, in the user's language. Only the first word goes: "The
+# Cure" sorts as "Cure", and "The The" as "The".
+#
+# NO MUSICBRAINZ SORT-NAME — decided 2026-09-14 (Simon). It used to key on MB's
+# sort-name ("White, Jack"), filled per artist in the background: 100 artists a pass
+# against ~2,900, a list that reshuffled under the user as names arrived, and a share
+# of the MusicBrainz traffic behind the 503s. No source that avoids MusicBrainz
+# carries the field (ListenBrainz, the community API and MuSpy's public lookup were
+# all checked), and guessing a person's name order files stage names wrongly ("Panda
+# Bear" -> "Bear, Panda"). MuSpy's inline sort_name is ignored as well, so its rows
+# sort exactly like ListenBrainz's.
+#
+# Slim::Utils::Text is reached through ->can, so a harness without LMS still sorts
+# (case-folded, articles kept).
 sub _artistSortKey {
-    my ($rel, $sorts) = @_;
-    my $s = $rel->{artist_sort_name};
-    if (!(defined $s && length $s)) {
-        my $mbids = $rel->{artist_mbids};
-        my $mbid  = (ref $mbids eq 'ARRAY' && @$mbids) ? $mbids->[0] : undef;
-        if ($mbid) {
-            $s = ref $sorts eq 'HASH'
-                ? $sorts->{ lc $mbid }
-                : Plugins::ListenBrainzFreshReleases::API->peekArtistSort($mbid);
-        }
+    my ($rel) = @_;
+    my $name  = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist') // '';
+    if (my $strip = Slim::Utils::Text->can('ignoreArticles')) {
+        my $s = eval { $strip->($name) };
+        $name = $s if defined $s && length $s;
     }
-    $s = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist')
-        unless defined $s && length $s;
-    return lc $s;
-}
-
-# Every first-artist MBID in a list, deduped — the input to both the bulk
-# sort-name read and the background warm.
-sub _firstArtistMbids {
-    my ($releases) = @_;
-    my (%seen, @mbids);
-    for my $r (@{ $releases || [] }) {
-        my $m = $r->{artist_mbids};
-        next unless ref $m eq 'ARRAY' && @$m && $m->[0];
-        push @mbids, $m->[0] unless $seen{ lc $m->[0] }++;
-    }
-    return \@mbids;
-}
-
-# Kick off a background MB sort-name warm for a list's artists (the API dedupes,
-# skips cached, throttles + bounds the fetch). Called only from the Artist-sort
-# paths, so a user who never sorts by artist never triggers an MB lookup.
-sub _warmArtistSorts {
-    my ($releases) = @_;
-    return unless ref $releases eq 'ARRAY' && @$releases;
-    my $mbids = _firstArtistMbids($releases);
-    Plugins::ListenBrainzFreshReleases::API->warmArtistSorts($mbids) if @$mbids;
+    return lc $name;
 }
 
 sub _sortWithin {
@@ -4965,18 +4946,12 @@ sub _sortWithin {
     $mode ||= 'release_date';
 
     if ($mode eq 'artist') {
-        # TWO separate reasons this is shaped the way it is, and losing either one
-        # puts synchronous work back on the render path:
-        #  1. ONE bulk store read for the whole bucket's sort-names, not one per
-        #     release (~2,900 SELECTs on a full artist-sorted All Releases view).
-        #  2. A Schwartzian transform, because Perl's sort calls the comparator
-        #     O(N log N) times and the key must be computed exactly once each.
+        # A Schwartzian transform, because Perl's sort calls the comparator
+        # O(N log N) times and the key must be computed exactly once each.
         # Primary A-Z, secondary date newest-first (element [1] compared b-vs-a).
-        my $sorts = Plugins::ListenBrainzFreshReleases::API
-                        ->peekArtistSorts(_firstArtistMbids($releases));
         return [ map  { $_->[2] }
                  sort { $a->[0] cmp $b->[0] || $b->[1] cmp $a->[1] }
-                 map  { [ _artistSortKey($_, $sorts), $_->{release_date} // '', $_ ] } @$releases ];
+                 map  { [ _artistSortKey($_), $_->{release_date} // '', $_ ] } @$releases ];
     }
     elsif ($mode eq 'album') {
         return [ map  { $_->[2] }
@@ -5020,12 +4995,11 @@ sub _relKey {
 # rebuilt from topLevel down on every click ([[xmlbrowser-no-session-cache]]). So
 # '6.57' does not mean "the row you tapped" — it means "whatever is 57th when the
 # click is resolved". That is only safe while the list is deterministic, and this
-# one is not: BOTH of its ordering inputs are cache-only PEEKS that a background
-# warm is actively filling.
+# one is not: its genre filter is a cache-only PEEK that a background warm is
+# actively filling. (The Artist sort used to be a second one — it read MusicBrainz
+# sort-names as they arrived, so "Panda Bear" moved from P to B. Since 2026-09-14 it
+# sorts on the display name alone, which never moves.)
 #
-#   - Artist sort reads peekArtistSorts (_sortWithin). A name not yet warm falls
-#     back to the display credit, so "Panda Bear" sorts under P and then, once MB
-#     answers, under B — hundreds of places away.
 #   - The genre filter buckets on peeked genre facts, and _kickGenreFill tops them
 #     up in the background. A release with no genre yet is filtered OUT; when its
 #     genre lands it is filtered IN, shifting every row after it.
@@ -5915,7 +5889,6 @@ sub _buildAllWeekItems {
                 # Re-read each walk so the selector refreshes in place, like sort.
                 my ($view, $vHasAlb, $vHasSing) = _effectiveView('all', 'all_view');
                 my $rows  = _viewFilter($rels, $view);
-                _warmArtistSorts($rows) if $mode eq 'artist';
                 # Refresh belongs HERE, not only in fetchAll. Since the top-level menu
                 # started inlining these week rows directly (0.9.99–0.9.119), fetchAll —
                 # the only other place with a Refresh row — is reached only via the
@@ -6365,7 +6338,10 @@ sub _releaseDetail {
     # without one (an unmapped listen aggregated into Trending Albums) can still get
     # genres. Without either the mbid or a name pair there is nothing to ask with.
     my $wantGenres = ($rgMbid || (length $artist && length $album)) ? 1 : 0;
-    my $wantTracks = $mbid   ? 1 : 0;
+    # A release-GROUP id is enough now: the tracklist comes from ListenBrainz by
+    # group (API::getTracklist), so Trending and MuSpy rows, which carry no release
+    # id, get one too.
+    my $wantTracks = ($mbid || $rgMbid) ? 1 : 0;
     # MAI-ONLY, and the gate says so. Without MAI there is no bio and no photo, so
     # there is nothing for this task to fetch and it is not counted at all — see
     # _fetchArtistInfo.
@@ -6480,7 +6456,8 @@ sub _releaseDetail {
             } if $mbid;
             $pending--;
             $finish->();
-        }, $artist, $album, $mbid, undef, $year, $rel->{release_group_primary_type});
+        }, $artist, $album, $mbid, undef, $year, $rel->{release_group_primary_type},
+           (ref $rel->{artist_mbids} eq 'ARRAY' ? $rel->{artist_mbids}[0] : undef));
     }
 
     # Genres — the SAME source the lists use, so the detail page can no longer
@@ -6554,10 +6531,11 @@ sub _releaseDetail {
         }, undef, peek => 1, kick => 0);
     }
 
-    # Tracklist — from the release
+    # Tracklist — ListenBrainz by release group, MusicBrainz for the exact release
+    # only when ListenBrainz has none (API::getTracklist).
     if ($wantTracks) {
-        Plugins::ListenBrainzFreshReleases::API->getReleaseDetails(
-            $mbid,
+        Plugins::ListenBrainzFreshReleases::API->getTracklist(
+            $rgMbid, $mbid,
             sub {
                 my $info = shift;
 
@@ -7148,7 +7126,7 @@ sub _bcMarkerKey {
 # each plugin's own search API rather than a generic search drill-down.
 my $albumDetailFlights;
 sub _findPlayable {
-    my ($client, $callback, $artist, $album, $mbid, $force, $year, $type) = @_;
+    my ($client, $callback, $artist, $album, $mbid, $force, $year, $type, $artistMbid) = @_;
 
     my $albumNorm  = _norm($album);
     my $artistNorm = _norm($artist);
@@ -7257,112 +7235,209 @@ sub _findPlayable {
     # service has come back (matched or not). Each service has its own timeout so a
     # slow/hung one is treated as "no match" and can't stall the result. The chosen
     # service's matches (or an empty result if nothing matched) are cached.
-    my @result       = map { undef } @adapters;   # undef = pending, [] = miss, [..] = match
-    my $resolved     = 0;
-    my $servicesPending = scalar @adapters;
-    my $inconclusive = 0;   # services that couldn't be queried (no handler / timeout / error)
+    #
+    # ONE PASS of that search. $alts is undef on the first pass and the artist's
+    # OTHER names on the alias pass (see $resolve). The pass is handed itself as
+    # $self rather than capturing its own variable, which would be a reference cycle
+    # Perl never collects (the getArtistMbidByName leak fixed in 0.9.95).
+    my $runPass = sub {
+        my ($self, $alts) = @_;
+        my @result       = map { undef } @adapters;   # undef = pending, [] = miss, [..] = match
+        my $resolved     = 0;
+        my $servicesPending = scalar @adapters;
+        my $inconclusive = 0;   # services that couldn't be queried (no handler / timeout / error)
 
-    my $resolve = sub {
-        return if $resolved;
-        my $win;
-        for my $i (0 .. $#adapters) {
-            return if !defined $result[$i];     # a higher-priority service is still pending
-            if (@{ $result[$i] }) { $win = $i; last; }
-        }
-        $resolved = 1;
-        my $items = defined $win ? $result[$win] : [];
-        # A miss caused (wholly or partly) by a service we couldn't query is
-        # inconclusive → cache it briefly so it retries soon, rather than pinning a
-        # transient outage as a confirmed no-match for the day (mirrors the track path).
-        my $ttl   = @$items ? STREAM_FOUND_TTL : STREAM_NOMATCH_TTL;
-        my $extra = {};
-        my $note  = '';
-        if (!@$items && $inconclusive) {
-            my $at = _missRetryAt($tries);
-            if (defined $at) {
-                $extra = { tries => $tries + 1, retry_at => $at };
-                $note  = " ($inconclusive inconclusive — retry " . ($tries + 1) . " of "
-                       . scalar(@{ +MISS_RETRY_SCHEDULE }) . ")";
-            }
-            else {
-                $note = " ($inconclusive inconclusive — retry budget spent after $tries"
-                      . " attempt(s), accepting the no-match)";
-            }
-        }
-        _cacheStream($key, $items, $ttl, $extra);
-        $log->info("play-via '$query': "
-            . (defined $win ? "matched on $adapters[$win]{name} (" . scalar(@$items) . ")"
-                            : "no match on any service" . $note));
-        $callback->({ items => _streamResult($client, $items, \@bc), _warm_pending => \$servicesPending });
-    };
-
-    for my $i (0 .. $#adapters) {
-        my $a    = $adapters[$i];
-        my $svc  = $a->{name};
-        my $icon = $a->{icon};
-
-        my $settled = 0;
-        my $svcTimer;
-        my $settle  = sub {
-            return if $settled;
-            $settled = 1;
-            $servicesPending--;
-            Slim::Utils::Timers::killSpecific($svcTimer) if $svcTimer;   # cancel this service's timeout
-            return if $resolved; # still release the background tail counter
-            # undef arg = the service couldn't be queried (no API handler / timeout /
-            # error / broken renderer) → contributes no match, but INCONCLUSIVELY (a
-            # short-TTL retry), not a confirmed miss. Same signal as the track path.
-            if (!defined $_[0]) {
-                $inconclusive++;
-                $result[$i] = [];
-                $resolve->();
-                return;
-            }
-            my @matched = (ref $_[0] eq 'ARRAY') ? @{ $_[0] } : ();
-            # Type consistency (see the $dropSingles note above): for a non-single
-            # release, drop candidates this service classified as a single, but keep the
-            # whole set if that would leave nothing (fall back rather than lose the match).
-            if ($dropSingles && @matched) {
-                my @keep = grep { ($_->{_ctype} // '') ne 'single' } @matched;
-                if (@keep && @keep != @matched) {
-                    $log->info("play-via $svc: dropped " . (@matched - @keep) . " single(s) for non-single release");
-                    @matched = @keep;
+        my $store = sub {
+            my ($items, $win) = @_;
+            # A miss caused (wholly or partly) by a service we couldn't query is
+            # inconclusive → cache it briefly so it retries soon, rather than pinning a
+            # transient outage as a confirmed no-match for the day (mirrors the track path).
+            my $ttl   = @$items ? STREAM_FOUND_TTL : STREAM_NOMATCH_TTL;
+            my $extra = {};
+            my $note  = '';
+            if (!@$items && $inconclusive) {
+                my $at = _missRetryAt($tries);
+                if (defined $at) {
+                    $extra = { tries => $tries + 1, retry_at => $at };
+                    $note  = " ($inconclusive inconclusive — retry " . ($tries + 1) . " of "
+                           . scalar(@{ +MISS_RETRY_SCHEDULE }) . ")";
+                }
+                else {
+                    $note = " ($inconclusive inconclusive — retry budget spent after $tries"
+                          . " attempt(s), accepting the no-match)";
                 }
             }
-            for my $it (@matched) {
-                my $art = $it->{image};          # native album cover, before the logo override
-                $it->{image} = $icon if $icon;   # service logo as thumbnail (LBF detail view)
-                $it->{_svc}  = $svc;             # for cache rebuild
-                # $tnorm is the release's OWN MusicBrainz primary type (the same value
-                # the single-drop above keys on) — pass it to Listen Later as '&rt='.
-                # The album name we send is THE MATCHED SERVICE'S OWN TITLE — `_svctitle`,
-                # stashed from the RAW album hash at match time. NOT $album (the MB/LB
-                # release name; see '&al=' in _attachFavUrl) and NOT `name`/`line1`, which
-                # are the plugin's rendered LABEL with the artist baked in. No fallback: if
-                # a service ever yields no title we send nothing and LL reads Material's
-                # label, which is what happened before 0.9.144 and is merely imperfect —
-                # whereas either wrong string here is silently destructive.
-                _attachFavUrl($it, $svc, $art, $artist, $year, _llRelType($tnorm),
-                              $it->{_svctitle});  # qobuz://album:<id>?cover=<art>&a=<artist>&al=<svc title>&y=<year>&rt=<type>
+            _cacheStream($key, $items, $ttl, $extra);
+            $log->info("play-via '$query': "
+                . (defined $win ? "matched on $adapters[$win]{name} (" . scalar(@$items) . ")"
+                                : "no match on any service" . $note)
+                . ($alts ? ' [alias pass]' : ''));
+            $callback->({ items => _streamResult($client, $items, \@bc), _warm_pending => \$servicesPending });
+        };
+
+        my $resolve = sub {
+            return if $resolved;
+            my $win;
+            for my $i (0 .. $#adapters) {
+                return if !defined $result[$i];     # a higher-priority service is still pending
+                if (@{ $result[$i] }) { $win = $i; last; }
             }
-            $result[$i] = \@matched;
-            $resolve->();
+            $resolved = 1;
+            my $items = defined $win ? $result[$win] : [];
+
+            # THE ALIAS PASS (2026-09-14). Every service ANSWERED and none matched, so
+            # before settling for a no-match, ask the community API for the artist's
+            # other names and search once more with them: Qobuz credits Dexys Midnight
+            # Runners' albums to "Dexys", and an artist renamed to something sharing no
+            # word with the old name (Oh Sees -> Osees) cannot pass _artistMatch at all.
+            # ONE extra pass at most — the alias pass never triggers another — and only
+            # on a CLEAN miss: an inconclusive one already retries on its schedule. A
+            # lookup that FAILS makes the miss inconclusive, so it is retried on that
+            # schedule too rather than pinned for the day on half an answer.
+            if (!@$items && !$inconclusive && !$alts) {
+                _artistAltNames($artist, $artistMbid, sub {
+                    my ($names) = @_;
+                    if (ref $names eq 'ARRAY' && @$names) {
+                        $log->info("play-via '$query': no match; retrying with "
+                            . scalar(@$names) . " other name(s) for the artist");
+                        return $self->($self, $names);
+                    }
+                    $inconclusive++ unless defined $names;
+                    $store->($items, $win);
+                });
+                return;
+            }
+            $store->($items, $win);
         };
 
-        # Per-service timeout → inconclusive (not a confirmed miss) so a slow/hung
-        # service retries soon rather than caching a false no-match for the day.
-        $svcTimer = Slim::Utils::Timers::setTimer(undef, time() + STREAM_SVC_TIMEOUT, sub {
-            return if $settled;
-            $log->warn("play-via $svc timed out") unless $resolved;
-            $settle->(undef);
+        for my $i (0 .. $#adapters) {
+            my $a    = $adapters[$i];
+            my $svc  = $a->{name};
+            my $icon = $a->{icon};
+
+            my $settled = 0;
+            my $svcTimer;
+            my $settle  = sub {
+                return if $settled;
+                $settled = 1;
+                $servicesPending--;
+                Slim::Utils::Timers::killSpecific($svcTimer) if $svcTimer;   # cancel this service's timeout
+                return if $resolved; # still release the background tail counter
+                # undef arg = the service couldn't be queried (no API handler / timeout /
+                # error / broken renderer) → contributes no match, but INCONCLUSIVELY (a
+                # short-TTL retry), not a confirmed miss. Same signal as the track path.
+                if (!defined $_[0]) {
+                    $inconclusive++;
+                    $result[$i] = [];
+                    $resolve->();
+                    return;
+                }
+                my @matched = (ref $_[0] eq 'ARRAY') ? @{ $_[0] } : ();
+                # Type consistency (see the $dropSingles note above): for a non-single
+                # release, drop candidates this service classified as a single, but keep the
+                # whole set if that would leave nothing (fall back rather than lose the match).
+                if ($dropSingles && @matched) {
+                    my @keep = grep { ($_->{_ctype} // '') ne 'single' } @matched;
+                    if (@keep && @keep != @matched) {
+                        $log->info("play-via $svc: dropped " . (@matched - @keep) . " single(s) for non-single release");
+                        @matched = @keep;
+                    }
+                }
+                for my $it (@matched) {
+                    my $art = $it->{image};          # native album cover, before the logo override
+                    $it->{image} = $icon if $icon;   # service logo as thumbnail (LBF detail view)
+                    $it->{_svc}  = $svc;             # for cache rebuild
+                    # $tnorm is the release's OWN MusicBrainz primary type (the same value
+                    # the single-drop above keys on) — pass it to Listen Later as '&rt='.
+                    # The album name we send is THE MATCHED SERVICE'S OWN TITLE — `_svctitle`,
+                    # stashed from the RAW album hash at match time. NOT $album (the MB/LB
+                    # release name; see '&al=' in _attachFavUrl) and NOT `name`/`line1`, which
+                    # are the plugin's rendered LABEL with the artist baked in. No fallback: if
+                    # a service ever yields no title we send nothing and LL reads Material's
+                    # label, which is what happened before 0.9.144 and is merely imperfect —
+                    # whereas either wrong string here is silently destructive.
+                    _attachFavUrl($it, $svc, $art, $artist, $year, _llRelType($tnorm),
+                                  $it->{_svctitle});  # qobuz://album:<id>?cover=<art>&a=<artist>&al=<svc title>&y=<year>&rt=<type>
+                }
+                $result[$i] = \@matched;
+                $resolve->();
+            };
+
+            # Per-service timeout → inconclusive (not a confirmed miss) so a slow/hung
+            # service retries soon rather than caching a false no-match for the day.
+            $svcTimer = Slim::Utils::Timers::setTimer(undef, time() + STREAM_SVC_TIMEOUT, sub {
+                return if $settled;
+                $log->warn("play-via $svc timed out") unless $resolved;
+                $settle->(undef);
+            });
+
+            my $queryEnc = ($a->{query_enc} || 'bytes') eq 'chars' ? $qChars : $qBytes;
+            eval { $a->{run}->($client, $queryEnc, $artistNorm, $albumNorm, $svc, $settle, $album, $alts); 1 } or do {
+                $log->warn("play-via $svc failed: $@");
+                $settle->(undef);
+            };
+        }
+    };
+    $runPass->($runPass, undef);
+}
+
+# The artist's OTHER names, normalised, for _findPlayable's alias pass: the community
+# API's canonical name and aliases (API::getArtistAliases), minus the name already
+# searched with. Calls back with an arrayref — possibly empty: no other names, an
+# artist the service does not know, or a Various Artists credit, whose "aliases"
+# would let any compilation through — or with undef when the lookup FAILED, which
+# the caller treats as inconclusive rather than as a clean miss.
+sub _artistAltNames {
+    my ($artist, $artistMbid, $cb) = @_;
+    my $mine = _norm($artist // '');
+    return $cb->([]) unless length $mine;
+    return $cb->([]) if lc($artistMbid // '') eq VA_MBID;
+
+    my $asked = eval {
+        Plugins::ListenBrainzFreshReleases::API->getArtistAliases($artist, $artistMbid, sub {
+            my ($entry) = @_;
+            return $cb->(undef) unless ref $entry eq 'HASH';
+            my %seen = ($mine => 1);
+            my @names;
+            for my $n ($entry->{name}, @{ $entry->{aliases} || [] }) {
+                my $k = _norm($n // '');
+                push @names, $k if length $k && !$seen{$k}++;
+            }
+            $cb->(\@names);
         });
-
-        my $queryEnc = ($a->{query_enc} || 'bytes') eq 'chars' ? $qChars : $qBytes;
-        eval { $a->{run}->($client, $queryEnc, $artistNorm, $albumNorm, $svc, $settle, $album); 1 } or do {
-            $log->warn("play-via $svc failed: $@");
-            $settle->(undef);
-        };
+        1;
+    };
+    unless ($asked) {
+        $log->warn("artist alias lookup failed for '$artist': $@");
+        $cb->(undef);
     }
+}
+
+# _albumMatches, retried for an artist credited under another name. LBF-ONLY and
+# deliberately OUTSIDE the shared matcher: it CALLS _albumMatches and never changes
+# it, so matcher_sync_check.py has nothing to say and no other repo owes a port.
+#
+# Tried in order, stopping at the first match, and the title must match every time:
+#   1. the shared matcher as-is;
+#   2. each PART of a joint credit on the service side (API::splitArtistCredits):
+#      Qobuz credits several Dexys releases "Dexys, Kevin Rowland", and "kevin" and
+#      "rowland" are not in "dexys midnight runners", so the word-subset rule rejects
+#      the whole credit although "Dexys" alone passes;
+#   3. each of the artist's OTHER names ($alts, normalised — only on the alias pass),
+#      against the full credit and each part: Osees shares no word with Oh Sees.
+sub _albumMatchesAlt {
+    my ($artistNorm, $albumNorm, $candArtist, $candTitle, $albumRaw, $alts) = @_;
+    return 1 if _albumMatches($artistNorm, $albumNorm, $candArtist, $candTitle, $albumRaw);
+    return 0 unless length($artistNorm // '') && length($candArtist // '');
+
+    my @parts = Plugins::ListenBrainzFreshReleases::API::splitArtistCredits($candArtist);
+    for my $ours ($artistNorm, grep { defined $_ && length $_ && $_ ne $artistNorm } @{ $alts || [] }) {
+        for my $theirs (@parts) {
+            next if $ours eq $artistNorm && $theirs eq $candArtist;   # step 1 already asked this
+            return 1 if _albumMatches($ours, $albumNorm, $theirs, $candTitle, $albumRaw);
+        }
+    }
+    return 0;
 }
 
 # Cache the matched items for a play-via key (url coderef stripped — it's
@@ -7843,7 +7918,7 @@ sub _emptyResultIsError {
 }
 
 sub _searchQobuz {
-    my ($client, $query, $artistNorm, $albumNorm, $svc, $collect, $albumRaw) = @_;
+    my ($client, $query, $artistNorm, $albumNorm, $svc, $collect, $albumRaw, $alts) = @_;
 
     my $api = Plugins::Qobuz::Plugin::getAPIHandler($client);
     # undef (not []) → "couldn't query" → inconclusive, so a transient missing
@@ -7865,7 +7940,7 @@ sub _searchQobuz {
         my $rendererFailed = 0;
         for my $album (@$items) {
             my $candArtist = ref $album->{artist} eq 'HASH' ? $album->{artist}{name} : '';
-            next unless _albumMatches($artistNorm, $albumNorm, $candArtist, $album->{title}, $albumRaw);
+            next unless _albumMatchesAlt($artistNorm, $albumNorm, $candArtist, $album->{title}, $albumRaw, $alts);
             # Qobuz's catalogue sometimes carries a bogus partial/orphaned duplicate of a
             # release that isn't actually playable (e.g. Beth Orton – The Ground Above lists
             # two, only one playable). The duplicate is flagged NON-STREAMABLE, so dropping a
@@ -7914,7 +7989,7 @@ sub _searchQobuz {
 # Bandcamp: run the plugin's combined search, keep the album results (identified
 # by an album_id in their passthrough — they're already playable album nodes).
 sub _searchBandcamp {
-    my ($client, $query, $artistNorm, $albumNorm, $svc, $collect, $albumRaw) = @_;
+    my ($client, $query, $artistNorm, $albumNorm, $svc, $collect, $albumRaw, $alts) = @_;
 
     eval { require Plugins::Bandcamp::Search; 1 } or do {
         $collect->([]);
@@ -7928,7 +8003,7 @@ sub _searchBandcamp {
             next unless ref $it eq 'HASH';
             my $pt = ref $it->{passthrough} eq 'ARRAY' ? $it->{passthrough}[0] : undef;
             next unless $pt && $pt->{album_id};
-            next unless _albumMatches($artistNorm, $albumNorm, $pt->{artist}, $pt->{title}, $albumRaw);
+            next unless _albumMatchesAlt($artistNorm, $albumNorm, $pt->{artist}, $pt->{title}, $albumRaw, $alts);
             $it->{_albumid}  = $pt->{album_id};               # native id → ListenLater favurl (album:<id>)
             $it->{_albumurl} = $pt->{album_url} || $pt->{url}; # album PAGE url → packed into the favurl ?b= blob (exact Bandcamp replay key)
             # Bandcamp's own ALBUM TITLE for '&al=' — from the PASSTHROUGH, not the rendered
@@ -8131,7 +8206,7 @@ sub _searchBandcampOnly {
 # and reuse the plugin's _renderAlbum so each result is a native, playable album
 # node (url => getAlbum, plus play/add/insert itemActions keyed by album id).
 sub _searchTidal {
-    my ($client, $query, $artistNorm, $albumNorm, $svc, $collect, $albumRaw) = @_;
+    my ($client, $query, $artistNorm, $albumNorm, $svc, $collect, $albumRaw, $alts) = @_;
 
     my $api = Plugins::TIDAL::Plugin::getAPIHandler($client);
     # undef (not []) → inconclusive (see _findPlayable / _searchQobuz).
@@ -8150,7 +8225,7 @@ sub _searchTidal {
             next unless ref $album eq 'HASH';
             my $artistRef  = $album->{artist} || ($album->{artists} && $album->{artists}[0]) || {};
             my $candArtist = ref $artistRef eq 'HASH' ? $artistRef->{name} : '';
-            next unless _albumMatches($artistNorm, $albumNorm, $candArtist, $album->{title}, $albumRaw);
+            next unless _albumMatchesAlt($artistNorm, $albumNorm, $candArtist, $album->{title}, $albumRaw, $alts);
             # Guard the foreign renderer: a die here runs INSIDE this async search
             # callback (not under _findPlayable's invocation-time eval), so an
             # unguarded throw would leave the service un-settled until its 8s
@@ -8194,7 +8269,7 @@ sub _searchTidal {
 # title/artist locally and render each hit via the plugin's own _renderAlbum
 # (which sets play => deezer://album:<id>). Type is SINGULAR ('album') for Deezer.
 sub _searchDeezer {
-    my ($client, $query, $artistNorm, $albumNorm, $svc, $collect, $albumRaw) = @_;
+    my ($client, $query, $artistNorm, $albumNorm, $svc, $collect, $albumRaw, $alts) = @_;
 
     my $api = Plugins::Deezer::Plugin::getAPIHandler($client);
     # undef (not []) → inconclusive (see _findPlayable / _searchTidal).
@@ -8219,7 +8294,7 @@ sub _searchDeezer {
             next unless ref $album eq 'HASH';
             my $artistRef  = $album->{artist} || ($album->{artists} && $album->{artists}[0]) || {};
             my $candArtist = ref $artistRef eq 'HASH' ? $artistRef->{name} : '';
-            next unless _albumMatches($artistNorm, $albumNorm, $candArtist, $album->{title}, $albumRaw);
+            next unless _albumMatchesAlt($artistNorm, $albumNorm, $candArtist, $album->{title}, $albumRaw, $alts);
             # Guard the foreign renderer (dies here run inside this async callback,
             # not under _findPlayable's eval) — skip a bad item (mirrors _searchTidal).
             my $item = eval { Plugins::Deezer::Plugin::_renderAlbum($album) };
@@ -8268,7 +8343,7 @@ sub _searchDeezer {
 # distinguishes the two. Rendering reuses OPML::_albumItem (url => \&OPML::album
 # coderef + uri in passthrough — reattached by _rebuildStreamItems).
 sub _searchSpotify {
-    my ($client, $query, $artistNorm, $albumNorm, $svc, $collect, $albumRaw) = @_;
+    my ($client, $query, $artistNorm, $albumNorm, $svc, $collect, $albumRaw, $alts) = @_;
 
     my $api = Plugins::Spotty::Plugin->getAPIHandler($client);
     # A missing handler is only INCONCLUSIVE (undef → 1h TTL) when Spotty COULD
@@ -8298,7 +8373,7 @@ sub _searchSpotify {
                 ? $album->{artist}
                 : (ref $album->{artists} eq 'ARRAY' && ref $album->{artists}[0] eq 'HASH')
                     ? $album->{artists}[0]{name} : '';
-            next unless _albumMatches($artistNorm, $albumNorm, $candArtist, $album->{name}, $albumRaw);
+            next unless _albumMatchesAlt($artistNorm, $albumNorm, $candArtist, $album->{name}, $albumRaw, $alts);
             # Guard the foreign renderer (dies here run inside this async callback,
             # not under _findPlayable's eval) — skip a bad item (mirrors _searchTidal).
             my $item = eval { Plugins::Spotty::OPML::_albumItem($client, $album) };

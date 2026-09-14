@@ -428,6 +428,13 @@ print "\n6. A silent host cannot hold the report open\n";
     ok($r->{listenbrainz}{status} eq 'fail', 'silent host -> fail');
     ok(scalar($r->{listenbrainz}{note} =~ /timed out/i), '...noted as a timeout');
     ok($r->{musicbrainz}{status} eq 'ok', 'the hosts that did answer keep their results');
+    # The community-API row probes the route the plugin calls (2026-09-14: `/aliases`,
+    # not `/mbid`), and no longer promises a MusicBrainz fallback it does not have.
+    ok(scalar(($r->{hosted_api}{url} // '') =~ m{/artist/[^/]+/aliases$}),
+       'community-API probe hits /aliases');
+    my $diagSrc = do { open(my $fh, '<:encoding(UTF-8)', $DIAG) or die "$DIAG: $!"; local $/; <$fh> };
+    ok(scalar($diagSrc !~ /MusicBrainz fallback still applies/),
+       'community-API amber note no longer promises a MusicBrainz fallback');
 
     # A late deadline must not deliver a second report to the settings page.
     routes(healthy());
@@ -538,6 +545,59 @@ print "\n8. TWO PROBES OF THE SAME REMOTE HOST ARE STAGGERED\n";
     my $r = byKey((runDiagFired())[0]);
     ok($r->{musicbrainz}{status} eq 'ok', 'identity row still settles ok');
     ok($r->{mb_search}{status}   eq 'ok', 'search row still settles ok');
+}
+
+print "\n9. PUBLIC MUSICBRAINZ PROBES GO THROUGH THE PLUGIN'S ONE QUEUE (2026-09-14)\n";
+{
+    # Section 8's stagger kept our two probes apart from EACH OTHER, not from a warm
+    # already sending to MusicBrainz — and the limit is on the sum. With the plugin's
+    # queue available (API::mbGet), the probes are handed to it and Diag adds no
+    # stagger of its own. The stub queue here answers straight away; the queue's own
+    # pacing is pinned in tools/t_mbqueue.pl.
+    no warnings qw(redefine once);
+    local $Plugins::ListenBrainzFreshReleases::API::MB_BASE   = 'https://musicbrainz.org/ws/2/';
+    local $Plugins::ListenBrainzFreshReleases::API::MB_PUBLIC = 1;
+    my (@queued, $hold);
+    local *Plugins::ListenBrainzFreshReleases::API::mbGet = sub {
+        my ($class, $url, $okcb, $errcb, %o) = @_;
+        push @queued, $url;
+        $o{onSend}->() if ref $o{onSend} eq 'CODE';
+        Slim::Networking::SimpleAsyncHTTP->new($okcb, $errcb)->get($url);
+    };
+    local *Plugins::ListenBrainzFreshReleases::API::mbQueueWait = sub { $hold };
+
+    setPrefs(username => 'simon', token => 'x' x 36);
+    routes(healthy_public());
+
+    $hold = 0;
+    runDiag();
+    ok(scalar(@queued) == 2, 'both MusicBrainz probes are handed to the plugin\'s queue');
+    # Counted BEFORE any timer fires: a Diag stagger would still be holding one back.
+    ok(scalar(grep { m{^https://musicbrainz\.org/} } @Slim::Networking::SimpleAsyncHTTP::REQUESTS) == 2,
+       '...with no Diag stagger timer layered on top');
+    # (healthy_public leaves Last.fm and MuSpy silent, so the report itself only
+    # completes at its deadline — read the rows once the timers have fired.)
+    my ($rows) = runDiagFired();
+    my $r = byKey($rows);
+    ok($r->{musicbrainz}{status} eq 'ok' && $r->{mb_search}{status} eq 'ok',
+       'both rows settle ok through the queue');
+
+    # MusicBrainz backing off: say so, send nothing.
+    @queued = (); $hold = 20;
+    ($rows) = runDiagFired();
+    $r = byKey($rows);
+    ok(!@queued && !scalar(grep { m{musicbrainz\.org} } @Slim::Networking::SimpleAsyncHTTP::REQUESTS),
+       'during a MusicBrainz backoff no probe is sent');
+    ok($r->{musicbrainz}{status} eq 'warn' && scalar($r->{musicbrainz}{note} =~ /backing off/),
+       '...and the row reports the backoff instead of a misleading "timed out"');
+
+    # A mirror is not the plugin's public queue.
+    @queued = (); $hold = 0;
+    local $Plugins::ListenBrainzFreshReleases::API::MB_BASE   = 'http://localhost:5000/ws/2/';
+    local $Plugins::ListenBrainzFreshReleases::API::MB_PUBLIC = 0;
+    routes(healthy());
+    runDiagFired();
+    ok(!@queued, 'a local mirror is probed directly, not through the public queue');
 }
 
 printf("\n%d passed, %d failed\n", $pass, $fail);

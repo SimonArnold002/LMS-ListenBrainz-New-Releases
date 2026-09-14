@@ -104,10 +104,15 @@ my $bounds = $1;
                    muspy  => ['2026-09-01','2026-09-30'],
                    all    => ['2026-09-01','2026-09-30']);
     sub sectionWindow { my $w = $WINDOW{$_[1] // ''} or return (); @$w }
-    sub getReleaseDetails {
-        my ($class,$id,$ok,$err)=@_; push @R::calls,'mb';
+    # The tracklist boundary is API::getTracklist / peekTracklist (ListenBrainz by
+    # release group, MusicBrainz as the fallback). The call is still recorded as
+    # 'mb' so the expected sequences below read as they always did. $failMb makes
+    # the tracklist fetch fail, whichever source it would have used.
+    sub peekTracklist { my ($class,$rg,$id)=@_; $R::values{'tracks:'.$id} }
+    sub getTracklist {
+        my ($class,$rg,$id,$ok,$err)=@_; push @R::calls,'mb';
         if ($R::failMb) { $err->('offline'); return }
-        $R::values{'lbf:mb:'.$id}={media=>[]}; $ok->({media=>[]});
+        $R::values{'tracks:'.$id}={media=>[]}; $ok->({media=>[]});
     }
 }
 eval "package R; no strict 'vars'; $runner $bounds"; die $@ if $@;
@@ -156,7 +161,7 @@ is($retry, 0, 'obsolete job leaves the queue instead of retrying');
 # The stub still answers a WIDER window for a 'muspy' prefix on purpose: if anything
 # went back to asking for one, the bounds below would widen and this section fails.
 {
-    local $R::values{'lbf:mb:id'} = undef;
+    local $R::values{'tracks:id'} = undef;
     %R::values = (); @R::calls = (); $R::player = 1;
     local $Plugins::ListenBrainzFreshReleases::API::WINDOW{foryou}
         = ['2026-09-01','2026-09-14'];    # this week + one upcoming

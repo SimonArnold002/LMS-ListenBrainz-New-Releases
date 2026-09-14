@@ -59,6 +59,11 @@ sub advance {
     sub from_json { {} }
     sub _parseReleaseDetails { {media=>[]} }
     sub _handleError { $_[1]->('offline') }
+    # The one MusicBrainz queue, as a pass-through: pacing and the 503 backoff are
+    # the queue's job now and are pinned in tools/t_mbqueue.pl. This file pins that
+    # getReleaseDetails coalesces and HANDS its request to the queue.
+    our @queued;
+    sub _mbGet { my ($url,$ok,$err)=@_; push @queued,$url; my $h=Slim::Networking::SimpleAsyncHTTP->new($ok,$err); $h->get($url) }
 }
 eval 'package A; no strict "vars"; '.grab('API','getReleaseDetails');die $@ if $@;
 my (@answers,@errors);
@@ -70,19 +75,13 @@ is_deeply(\@answers,['warm','browse'],'both tracklist callers receive the result
 A->getReleaseDetails('same',sub{push @answers,'cached'},sub{});
 is(scalar @http,1,'subsequent tracklist open reads the durable cache');
 A->getReleaseDetails('second',sub{},sub{push @errors,shift});
-is(scalar @http,1,'different public tracklist waits for courtesy spacing');
-advance(101.1);
-is(scalar @http,2,'next public request dispatches after spacing');
-$http[1]{err}->(bless {code=>429},'Response');
+is(scalar @A::queued,2,'every tracklist request goes through the one MusicBrainz queue');
+is(scalar @http,2,'...with no private courtesy gap of its own layered on top');
+unlike(grab('API','getReleaseDetails'), qr/releaseDetailNextAt|SimpleAsyncHTTP->new/,
+       'getReleaseDetails builds no HTTP request and keeps no pacing clock of its own');
+$http[1]{err}->(bless {code=>503},'Response');
+is(scalar @errors,1,'a refused request still reaches the caller\'s error path');
 A->getReleaseDetails('third',sub{},sub{});
-advance(106);
-is(scalar @http,2,'shared MusicBrainz backoff delays the next miss');
-advance(106.2);
-is(scalar @http,3,'tracklist resumes after shared backoff');
-$A::mirror=1;
-A->getReleaseDetails('mirror',sub{},sub{});
-is(scalar @http,4,'configured mirror bypasses public courtesy/backoff');
-$A::mirror=0;
 # Watchdog followed by a new identical flight: late callbacks must not settle it.
 advance(227);
 A->getReleaseDetails('third',sub{push @answers,'new'},sub{});
@@ -109,6 +108,7 @@ is($answers[-1],'new','replacement flight answers from its own response');
     sub _attachFavUrl {}
     sub _llRelType { '' }
     sub _missRetryAt { $main::now+60 }
+    sub _artistAltNames { $_[2]->([]) }   # the alias pass has nothing to add here
 }
 eval 'package B; no strict "vars"; '.grab('Browse','_findPlayable');die $@ if $@;
 my @results;

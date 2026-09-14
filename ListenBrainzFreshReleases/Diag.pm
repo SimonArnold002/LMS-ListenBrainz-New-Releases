@@ -95,6 +95,11 @@ sub run {
             $rows[$i] = _row($t, 'skip', 0, undef, $t->{skip});
             next;
         }
+        # A finding known without sending anything (MusicBrainz backing off).
+        if ($t->{preset}) {
+            $rows[$i] = _row($t, $t->{preset}[0], 0, undef, $t->{preset}[1]);
+            next;
+        }
 
         # Pre-fill, so a probe that never calls back still has a row when the
         # deadline fires. Overwritten by whichever callback lands first.
@@ -122,12 +127,18 @@ sub run {
 
     for my $i (0 .. $#targets) {
         my $t = $targets[$i];
-        next if $t->{skip};
+        next if $t->{skip} || $t->{preset};
+
+        # PUBLIC MUSICBRAINZ GOES THROUGH THE PLUGIN'S ONE MUSICBRAINZ QUEUE, not
+        # beside it. Staggering our own two probes kept THEM apart but not apart
+        # from a warm that was already sending — and the limit is on the sum of
+        # everything this server sends. The queue does the pacing, so no stagger.
+        my $queued = ($t->{mb_queue} && API_PKG->can('mbGet')) ? 1 : 0;
 
         my ($host) = ($t->{url} // '') =~ m{^\w+://([^/:]+)};
         $host = lc($host // '');
         my $local = $host =~ /^(?:localhost|127\.|\[?::1\]?$)/ ? 1 : 0;
-        my $delay = $local ? 0 : ($hostSeen{$host}++ * SAME_HOST_GAP);
+        my $delay = ($local || $queued) ? 0 : ($hostSeen{$host}++ * SAME_HOST_GAP);
 
         my $started;
 
@@ -141,8 +152,7 @@ sub run {
             $finish->() unless --$pending;
         };
 
-        my $http = Slim::Networking::SimpleAsyncHTTP->new(
-            sub {
+        my $okcb = sub {
                 my $resp = shift;
                 my $code = _httpCode($resp);
                 my ($status, $note) = eval { $t->{check}->($resp->content, $code) };
@@ -150,8 +160,8 @@ sub run {
                 # — say so rather than reporting the host as broken.
                 ($status, $note) = ('warn', "check failed: $@") if $@;
                 $settle->($status // 'ok', $code, $note);
-            },
-            sub {
+            };
+        my $errcb = sub {
                 my $resp = shift;
                 my $code = _httpCode($resp);
                 my $err  = eval { $resp->error } // 'no response';
@@ -169,12 +179,19 @@ sub run {
                 else {
                     $settle->('fail', 0, $err);
                 }
-            },
-            { timeout => PROBE_TIMEOUT },
-        );
+            };
+        my $http = $queued ? undef
+                 : Slim::Networking::SimpleAsyncHTTP->new($okcb, $errcb, { timeout => PROBE_TIMEOUT });
 
         my $fire = sub {
             return if $done;             # the deadline already closed the report
+            if ($queued) {
+                # $started is set when the queue actually sends, so the row reports
+                # its round trip rather than its wait in the queue.
+                API_PKG->mbGet($t->{url}, $okcb, $errcb, timeout => PROBE_TIMEOUT,
+                               onSend => sub { $started = Time::HiRes::time() });
+                return;
+            }
             $started = Time::HiRes::time();
             # A target with a body is POSTed — the credential stays out of the URL,
             # which LMS core writes to server.log when a request fails.
@@ -206,6 +223,15 @@ sub _targets {
     my $mbPublic = API_PKG->mbIsPublic;
     my $mbWhat   = $mbPublic ? 'public MusicBrainz' : 'local mirror';
     my $ua       = { 'User-Agent' => API_PKG->USER_AGENT, 'Accept' => 'application/json' };
+
+    # MusicBrainz is backing off after refusing this server (503). A probe sent now
+    # would only wait in the queue past this report's deadline and read "timed out",
+    # which hides the actual finding — so say it instead. Past the normal 1.1s gap.
+    my $mbHold = ($mbPublic && API_PKG->can('mbQueueWait')) ? API_PKG->mbQueueWait : 0;
+    my $mbPreset = $mbHold > 2
+        ? [ 'warn', sprintf('MusicBrainz is refusing this server right now (503); the plugin is '
+                          . 'backing off for %ds - not probed', int($mbHold + 0.5)) ]
+        : undef;
     my $json     = { 'Accept' => 'application/json' };
 
     my @t;
@@ -270,6 +296,8 @@ sub _targets {
         name    => "MusicBrainz ($mbWhat)",
         url     => $mbBase . 'artist/' . API_PKG->mbProbeMbid . '?fmt=json',
         headers => $ua,
+        mb_queue => $mbPublic,
+        ($mbPreset ? (preset => $mbPreset) : ()),
         check   => sub {
             my ($content) = @_;
             my $d = eval { from_json($content) };
@@ -290,6 +318,8 @@ sub _targets {
         name    => 'MusicBrainz search index',
         url     => $mbBase . 'artist/?query=' . API_PKG->mbProbeName . '&fmt=json',
         headers => $ua,
+        mb_queue => $mbPublic,
+        ($mbPreset ? (preset => $mbPreset) : ()),
         check   => sub {
             my ($content) = @_;
             my $d = eval { from_json($content) };
@@ -303,18 +333,19 @@ sub _targets {
     };
 
     # --- Hosted LMS-community API ------------------------------------------
-    # Fronts artist name->MBID resolution and the radio's similar artists. Every
-    # call falls back to MusicBrainz, so this row going amber means "slower than
-    # it should be", NOT "broken" — the message says so, because a red-looking row
-    # on an optional accelerator sends people hunting a fault that isn't there.
+    # The radio's artist name->MBID lookup, the streaming alias pass, Trending's
+    # album search and genres. Since 2026-09-14 the radio lookup and Trending have
+    # NO MusicBrainz fallback, so amber here means those features are degraded —
+    # the message says what still works rather than promising a fallback.
     #
-    # Asserts the MBID, not just that something answered: the same reasoning as
-    # the MusicBrainz identity row above. Sends the real plugin-id header via
-    # API::hostedHeaders so this probe cannot drift from what _hostedGet sends.
+    # Probes `/aliases`, the route the plugin actually calls. Asserts the MBID, not
+    # just that something answered: the same reasoning as the MusicBrainz identity
+    # row above. Sends the real plugin-id header via API::hostedHeaders so this
+    # probe cannot drift from what _hostedGet sends.
     push @t, {
         key     => 'hosted_api',
         name    => 'LMS-community API',
-        url     => API_PKG->hostedUrl . 'artist/' . API_PKG->mbProbeName . '/mbid',
+        url     => API_PKG->hostedUrl . 'artist/' . API_PKG->mbProbeName . '/aliases',
         headers => { %{ API_PKG->hostedHeaders }, 'Accept' => 'application/json' },
         check   => sub {
             my ($content) = @_;
@@ -327,7 +358,7 @@ sub _targets {
             return ('warn', length $mbid
                 ? "answered, but returned an unexpected artist ($mbid)"
                 : 'answered, but knows no MBID for ' . API_PKG->mbProbeName
-                  . ' - MusicBrainz fallback still applies');
+                  . ' - the radio may fall back to generic recommendations');
         },
     };
 

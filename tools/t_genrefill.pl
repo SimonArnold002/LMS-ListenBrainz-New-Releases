@@ -318,16 +318,21 @@ print "-" x 74, "\n";
     my $accepted = (length($unknown->{mbid} // '') && $nameFolds) ? 1 : 0;
     ok(!$accepted, 'the length check rejects it anyway');
 
-    # And the gate as SHIPPED must contain that check.
-    my ($body) = $api_src =~ /(sub getArtistMbidByName\b.*?\n\}\n)/s;
-    ok(scalar($body =~ /unless \(length \$mbid\)/),
-        'getArtistMbidByName still guards on length $mbid');
-    ok(scalar($body =~ /_foldEq\(/),
-        'getArtistMbidByName still applies the fold gate');
-    # The MusicBrainz fallback must stay UNCONDITIONAL: an outage of a third-party
-    # accelerator has to degrade to the previous behaviour, never to breakage.
-    ok(scalar($body =~ /\$mbFallback/),
-        'the MusicBrainz fallback is still wired for every reject path');
+    # And the gate as SHIPPED must contain that check. Since 2026-09-14 the gate lives
+    # in getArtistAliases, which getArtistMbidByName goes through (the behaviour is
+    # driven in tools/t_aliasmatch.pl; this pins the two load-bearing terms).
+    my ($body)   = $api_src =~ /(sub getArtistAliases\b.*?\n\}\n)/s;
+    my ($byName) = $api_src =~ /(sub getArtistMbidByName\b.*?\n\}\n)/s;
+    ok(scalar(($body // '') =~ /length \$mbid && \$about/),
+        'getArtistAliases still requires a non-empty mbid');
+    ok(scalar(($body // '') =~ /_foldEq\(\$got, \$name\)/),
+        'getArtistAliases still applies the fold gate');
+    # COMMUNITY API ONLY (Simon, 2026-09-14). The MusicBrainz name search that sat
+    # behind it is gone: the community API is built from MusicBrainz, so its miss is
+    # MusicBrainz's miss. Pinned so the fallback does not creep back.
+    ok(scalar(($byName // '') =~ /getArtistAliases\(/)
+       && scalar(($byName // '') !~ /_mbGet|mbFallback|MB_DEFAULT_BASE_URL/),
+        'getArtistMbidByName asks the community API only — no MusicBrainz fallback');
 }
 
 # ===========================================================================
@@ -1024,7 +1029,12 @@ CODE
     # The call site: a 429 must be a RETRY, never a miss. Cached as a miss it would
     # be a lie ("this artist has no genres") AND would let the caller march on at
     # full speed, which is what makes an uncapped run dangerous.
-    my $get = grab($api_src, '_hostedGet');
+    # Since 2026-09-14 the helper is a QUEUE in three subs (_hostedGet enqueues,
+    # _hostedPump sends one at a time and waits out the deadline, _hostedSend owns
+    # the callbacks), so these source checks read all three. The BEHAVIOUR — one in
+    # flight, the retry at the front, both budgets, the watchdog — is driven for
+    # real in tools/t_mbqueue.pl §5-6; what stays here is the shape of the rules.
+    my $get = join "\n", map { grab($api_src, $_) } qw(_hostedGet _hostedPump _hostedSend);
     ok(scalar($get =~ /_hostedIsRateLimited\(\$resp\)/), 'the error path tests for a rate limit');
     ok(scalar($get =~ /if \(\(my \$wait = _hostedWait\(\)\) > 0\)/),
        'and every caller checks the SHARED deadline BEFORE issuing');
@@ -1048,29 +1058,30 @@ CODE
     ok($beforeMiss && $beforeMiss =~ /HOSTED_RETRY_MAX/,
        '...so the only $onMiss in the branch is the one the cap guards');
     my ($afterCap) = $get =~ /HOSTED_RETRY_MAX\b(.*)/s;
-    ok($afterCap && $afterCap =~ /setTimer/,
-       '...and an unspent budget still retries on the deadline rather than missing');
+    ok($afterCap && $afterCap =~ /unshift \@hostedQueue, \$job/,
+       '...and an unspent budget still retries rather than missing');
 
-    # THE BUDGET MUST BE THREADED THROUGH THE RETRY. `$st` is what carries the
-    # count across reschedules; if the timer re-entered _hostedGet without it, the
-    # counter would reset to 0 on every retry and the cap above would be inert —
-    # the bug would read as fixed while behaving exactly as before.
-    ok(scalar($get =~ /_hostedGet\(\$path, \$onFound, \$onMiss, \$st\)/),
+    # THE BUDGET MUST BE THREADED THROUGH THE RETRY. `$st` rides on the JOB, and the
+    # retry requeues that same job; a retry that built a fresh job would reset the
+    # count to 0 every time and the cap above would be inert — the bug would read
+    # as fixed while behaving exactly as before.
+    ok(scalar($get =~ /push \@hostedQueue, \{ path => \$path, found => \$onFound, miss => \$onMiss, st => \$st \}/)
+       && scalar($get =~ /unshift \@hostedQueue, \$job/),
        'the retry carries the budget with it, so the cap cannot reset itself');
 
-    # The OTHER way back into this sub. Standing down on somebody else's deadline
-    # is not this caller's 429, so it gets its own looser budget — but it needs a
-    # bound too, or a permanently-busy deadline is the same hang by another route.
-    my ($waitBlock) = $get =~ /if \(\(my \$wait = _hostedWait\(\)\) > 0\)\s*\{(.*?)\n    \}/s;
-    ok($waitBlock && $waitBlock =~ /\$st->\{waits\}\+\+ >= HOSTED_WAIT_MAX/
-                  && $waitBlock =~ /\$onMiss->\(/,
-       'the shared-deadline wait is bounded separately, and falls back when spent');
+    # The OTHER way to wait. Standing down on somebody else's deadline is not this
+    # caller's 429, so it gets its own looser budget — but it needs a bound too, or
+    # a permanently-busy deadline is the same hang by another route.
+    ok(scalar($get =~ /\$head->\{st\}\{waits\}\+\+ >= HOSTED_WAIT_MAX/)
+       && scalar($get =~ /\$head->\{miss\}->\(/),
+       'the shared-deadline wait is bounded separately, and gives up when spent');
     ok(scalar($get =~ /_hostedNoteOk\(\)/), 'and a success clears the backoff');
 
-    # AND THE RETRY IS SCHEDULED OFF THE DEADLINE IN FORCE, not off this caller's
-    # own fresh backoff — which may be shorter than one another caller is holding,
-    # in which case waking early only spends a wait slot rediscovering it.
-    ok(scalar($get =~ /_hostedNoteLimit\(\);/) && scalar($get =~ /my \$wait = _hostedWait\(\);/),
+    # AND THE RETRY WAITS OUT THE DEADLINE IN FORCE, not its own fresh backoff —
+    # it goes back to the front BEFORE the slot is freed, so the pump finds the
+    # shared deadline and waits it out rather than sending anything else first.
+    ok(scalar($get =~ /_hostedNoteLimit\(\);/)
+       && scalar($get =~ /unshift \@hostedQueue, \$job unless \$already;\s*\$release->\(\);/),
        'the 429 retry waits out the shared deadline, not its own backoff');
 
     # HAGEN_CONCURRENCY went with the hosted ARTIST rung in 0.9.173. The pacing
@@ -1133,7 +1144,7 @@ print "-" x 74, "\n";
     ok(scalar($wg =~ /LFM_WARM_ALL/),    '...and so does Last.fm');
 }
 
-print "\n13. MUSICBRAINZ RATE LIMITING — the sort warm defers instead of burning\n";
+print "\n13. MUSICBRAINZ RATE LIMITING — the shared backoff curve\n";
 print "-" x 74, "\n";
 {
     # The third network path finally gets what the other two always had. MEASURED
@@ -1189,22 +1200,11 @@ print "-" x 74, "\n";
     G13::_mbNoteLimit();
     ok($G13::mbBusyUntil >= $far, 'a fresh limit never SHORTENS a window already running');
 
-    # THE SILENT-HOLE GUARD. The reservation is what stops a second pass
-    # re-fetching a queued MBID, so a pass that abandons its queue must hand every
-    # unfetched MBID back. Miss this and they stay marked in flight for the life of
-    # the process, the in-flight guard excludes them from EVERY later pass, and the
-    # result is indistinguishable from "MusicBrainz has no sort-name for these".
-    my $warm = grab($api_src, 'warmArtistSorts');
-    ok(scalar($warm =~ /\$release\s*=\s*sub\s*\{[^}]*delete\s+\$sortInFlight\{\$_\}\s+for\s+\@todo/s),
-       'the abandon path releases the WHOLE reservation, not just the current MBID');
-    ok(scalar($warm =~ /_mbIsRateLimited/), 'the error handler tells a rate limit from a real failure');
-    ok(scalar($warm =~ /_mbNoteOk/),        'and a success clears the curve');
-
-    # Don't start a pass into a limit that is already in force — otherwise the warm
-    # re-enters on every artist-sorted open and rediscovers it one request at a time.
-    my ($guard) = $warm =~ /(if \(\(my \$wait = _mbWait\(\)\).*?\n    \})/s;
-    ok($guard && $guard =~ /\$release->\(\)/ && $guard =~ /return/,
-       'a pass that starts inside the deadline stands down and releases its claim');
+    # THE SORT WARM THAT WAS PINNED HERE IS GONE (2026-09-14, Simon): the Artist sort
+    # is A-Z on the display name, so nothing fetches MusicBrainz sort-names any more.
+    # Pinned so neither the warm nor its store read comes back by accident.
+    ok(!scalar($api_src =~ /\nsub (?:warmArtistSorts|peekArtistSorts?) \{/),
+       'no MusicBrainz sort-name warm or peek remains in API.pm');
 }
 
 # ===========================================================================

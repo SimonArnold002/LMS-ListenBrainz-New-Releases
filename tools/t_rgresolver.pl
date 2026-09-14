@@ -1,8 +1,11 @@
 #!/usr/bin/env perl
 #
 # t_rgresolver.pl — getReleaseGroupByName resolves through the HOSTED
-# /discography tier first, and falls back to MusicBrainz on anything less than a
-# confident hit.
+# /discography tier ONLY. The MusicBrainz fallback was removed on 2026-09-14
+# (Simon): it was unpaced, pushed the server over MusicBrainz's per-IP limit after
+# every restart, and could only find what the MusicBrainz-derived community API
+# already lists. Sections 5 and 5b pin that it is gone and that collaborations are
+# split on the community API instead. The history below is kept for its reasons.
 #
 # WHY THIS SUITE EXISTS.
 #
@@ -27,7 +30,9 @@
 #   would look like a coverage regression with no error anywhere.
 #
 # ANTI-TEST: point LBF_API / LBF_BROWSE at mutated copies.
-#   - delete the `return $mbFallback->()` on "not in discography"  -> section 5 red
+#   - restore a MusicBrainz search on "not in discography"          -> section 5 red
+#   - send artist_mbid with every collaborator term                  -> section 5b red
+#   - cache "not found" when a request FAILED                        -> section 5 red
 #   - reverse _hostedDiscoPick's sort (pick the remaster)          -> section 4 red
 #   - drop the `?mbid=` from the discography path                  -> section 3 red
 #   - cache the unknown artist at MB_FOUND_TTL instead of EMPTY    -> section 6 red
@@ -389,37 +394,67 @@ section '4. FOLD MATCHING, AND WHICH OF SEVERAL SAME-TITLED GROUPS WINS';
 }
 
 # ---------------------------------------------------------------------------
-section '5. EVERY NON-HIT FALLS BACK TO MUSICBRAINZ — the fallback is the safety';
+section '5. NOTHING FALLS BACK TO MUSICBRAINZ — the community API is the only source';
 {
-    # (a) the artist is not in the hosted snapshot at all
+    # Simon, 2026-09-14. The community API is built from MusicBrainz, so an album it
+    # does not list is one a MusicBrainz search will not find either — and the
+    # unpaced fallback searches were what pushed the server over MusicBrainz's
+    # per-IP limit after every restart. Every route below ANSWERS musicbrainz, so a
+    # fallback that came back would be seen, not merely fail to resolve.
+
+    # (a) the artist is not in the community API at all
     reset_all();
     %ROUTES = ('/discography' => $UNKNOWN, 'musicbrainz' => $MB_HIT);
     my $a = resolve(artist => 'Timon Verbeeck', title => 'Operatie T.O.I.L.E.T.');
-    ok(scalar(urls_matching($a, 'musicbrainz') > 0), 'an UNKNOWN ARTIST falls back to MusicBrainz');
-    is($a->{got}{mbid}, 'deadbeef-0000-1111-2222-333344445555', 'and the MB answer is returned');
+    is(scalar(urls_matching($a, 'musicbrainz')), 0, 'an UNKNOWN ARTIST does not ask MusicBrainz');
+    is($a->{n}, 1, '...onDone fires exactly once');
+    is($a->{got}, undef, '...with undef, not a fabricated id');
 
-    # (b) the artist is known but this title is not in the list — the case a
-    #     "the hosted API is authoritative" mistake would swallow
+    # (b) the artist is known but this title is not in the list
     reset_all();
     %ROUTES = ('/discography' => $RADIOHEAD, 'musicbrainz' => $MB_HIT);
     my $b = resolve(artist => 'Radiohead', title => 'A Moon Shaped Pool');
-    ok(scalar(urls_matching($b, 'musicbrainz') > 0), 'a TITLE ABSENT from the discography falls back');
-    is($b->{got}{mbid}, 'deadbeef-0000-1111-2222-333344445555', 'and returns the MB answer');
+    is(scalar(urls_matching($b, 'musicbrainz')), 0, 'a TITLE ABSENT from the discography does not ask MusicBrainz');
+    is($b->{got}, undef, '...and answers undef');
+    my ($bk) = grep { /^lbf:rgbyname:/ } keys %CACHE;
+    ok(defined $bk && $CACHE{$bk} eq '', 'an ANSWERED miss is cached as "not found"');
+    ok(scalar(($CACHE_TTL{$bk} // 0) > 0 && ($CACHE_TTL{$bk} // 0) <= 86400 * 2),
+       '...for a short time, so an album added upstream is picked up within a day');
 
-    # (c) the service is down
+    # (c) the service is down — no answer, and NOT cached as "not found"
     reset_all();
     %ROUTES = ('/discography' => { error => 'Service Unavailable', code => 503 },
                'musicbrainz'  => $MB_HIT);
     my $c = resolve(artist => 'Radiohead', title => 'Kid A');
-    ok(scalar(urls_matching($c, 'musicbrainz') > 0), 'a hosted 503 falls back rather than failing');
-    is($c->{got}{mbid}, 'deadbeef-0000-1111-2222-333344445555', 'and still resolves');
+    is(scalar(urls_matching($c, 'musicbrainz')), 0, 'a failed community API request does not ask MusicBrainz');
+    is($c->{got}, undef, '...answers undef');
+    ok(!scalar(grep { /^lbf:rgbyname:/ } keys %CACHE),
+       '...and caches NOTHING for the album, so the next build asks again');
+}
 
-    # (d) both tiers miss — undef, and NOT an exception
+# ---------------------------------------------------------------------------
+section '5b. A COLLABORATION IS SPLIT ON THE COMMUNITY API — the MusicBrainz leg used to do it';
+{
+    # VERIFIED LIVE 2026-09-14: "Panda Bear & Sonic Boom" matches a duo entry with
+    # ZERO albums, while their album "Reset" is listed under Panda Bear.
+    my $DUO   = '{"name":"Panda Bear & Sonic Boom","mbid":"x","discography":[]}';
+    my $PANDA = '{"discography":[{"mbid":"5e2c3b6c-0000-4000-8000-00000000reset","title":"Reset","primary_type":"Album","release_date":"2022-08-12"}]}';
+
     reset_all();
-    %ROUTES = ('/discography' => $UNKNOWN, 'musicbrainz' => '{"release-groups":[]}');
-    my $d = resolve(artist => 'Pieter Koolwijk', title => 'Missie afbreken');
-    is($d->{n}, 1, 'onDone still fires exactly once when both tiers miss');
-    is($d->{got}, undef, 'and the answer is undef, not a fabricated id');
+    %ROUTES = ('/Panda%20Bear%20%26%20Sonic%20Boom/discography' => $DUO,
+               '/Panda%20Bear/discography'                    => $PANDA,
+               'musicbrainz'                                  => $MB_HIT);
+    my $r = resolve(artist => 'Panda Bear & Sonic Boom', title => 'Reset',
+                    artist_mbid => 'fd3c3f9f-a471-498e-ab3a-940ac20b6bbd');
+    is($r->{got}{mbid}, '5e2c3b6c-0000-4000-8000-00000000reset',
+       'the album is found under the first collaborator');
+    is(scalar(urls_matching($r, 'musicbrainz')), 0, '...without asking MusicBrainz');
+    my @disc = urls_matching($r, '/discography');
+    is(scalar(@disc), 2, '...after the full credit, then ONE collaborator');
+    ok(scalar(($disc[0]{url} // '') =~ /\?mbid=fd3c3f9f/),
+       'the artist MBID rides with the FULL credit');
+    ok(scalar(($disc[1]{url} // '') !~ /\?mbid=/),
+       '...and NOT with a collaborator\'s name, where it would override that name');
 }
 
 # ---------------------------------------------------------------------------

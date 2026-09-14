@@ -7,6 +7,19 @@ original plan.** In short: the resolver (§1) and `relatedArtists` shipped as de
 of §2 only the *genres* half was taken, detail-page only; the hosted ARTIST genre tier
 was built, measured at ~2% on the population that reached it, and removed.
 
+**UPDATE 2026-09-14 (built as 0.9.219, not installed, unproven live) — two of the settlements below are REVERSED.**
+Diag's community-API row now probes `/aliases` (was `/mbid`) and no longer claims a MusicBrainz fallback.
+(1) `getReleaseGroupByName` is community-API ONLY — its MusicBrainz fallback is gone (§6 addendum).
+(2) The detail tracklist comes from ListenBrainz `/1/metadata/release_group/?inc=recording` first,
+MusicBrainz only when ListenBrainz has none (the edition may differ, accepted). Every hosted call is
+now one request at a time (MAI's precedent), every public-MusicBrainz call goes through one queue.
+Reasons in CLAUDE.md Ledger §A2 `ONE MUSICBRAINZ QUEUE, ONE COMMUNITY-API QUEUE`.
+(3) **Later the same day: artist sort names are OFF MusicBrainz** — not migrated, dropped. The Artist
+sort is A–Z on the display name (LMS's article list); `warmArtistSorts` is deleted. Ledger §A2
+`ARTIST SORT IS A–Z ON THE DISPLAY NAME`. (4) `getArtistMbidByName` is community API ONLY, on
+`/artist/<name>/aliases` (canonical name OR alias accepted), and the new `getArtistAliases` feeds a
+one-pass streaming alias retry. Ledger §A2 `STREAMING ALIAS PASS`.
+
 **Then 0.9.179 added the release-group resolver (§6), and §7 SETTLED the rest: the
 remaining MusicBrainz features STAY on MusicBrainz.** No local mirror is assumed
 anywhere — Simon's was for development only and is not going forward, so every
@@ -241,6 +254,15 @@ from this week's snapshot does not mean absent from next week's.
 The matching reuses `Browse::_norm` through `->can` at runtime but adds nothing to
 the shared matcher, so **the four-repo sync rule is not triggered** by this change.
 
+**ADDENDUM 2026-09-14 — THE MUSICBRAINZ FALLBACK IS REMOVED.** It searched public MusicBrainz
+back-to-back with no pacing and no backoff whenever `/discography` lacked a title (up to 25 albums a
+Trending Tracks build, three searches per collaboration), and after every LMS restart that put the
+server over MusicBrainz's per-IP limit (log, 06:33 then 80 refusals by 06:45). It could only find
+what this MusicBrainz-derived API already lists — "It buys speed, not coverage" above, measured the
+other way round. Collaborations are now split HERE: full credit (with `?mbid=`), then each
+collaborator without it — verified live, "Panda Bear & Sonic Boom" is a 0-album entry while "Reset"
+is under Panda Bear. An answered miss caches 1 day; a failed request caches nothing.
+
 ---
 
 ## 7. SETTLED — what stays on MusicBrainz, and why
@@ -254,8 +276,8 @@ judgement below is made against the PUBLIC MusicBrainz API at its ~1 req/s throt
 
 | sub | now |
 |---|---|
-| `getArtistMbidByName` | hosted `/artist/<name>/mbid` first (0.9.162), MB fallback only |
-| `getReleaseGroupByName` | hosted `/discography` first (0.9.179), MB fallback only — §6 |
+| `getArtistMbidByName` | hosted `/artist/<name>/aliases` ONLY since 2026-09-14 (was `/mbid` + MB fallback, 0.9.162) |
+| `getReleaseGroupByName` | hosted `/discography` ONLY since 2026-09-14 (MB fallback removed) — §6 addendum |
 | `getAlbumGenresHosted` | **DELETED 0.9.185** — with `getReleaseGroupGenres` behind it |
 
 Those first two were the whole of the measured cost: 22,880ms of a cold People You Follow
@@ -281,6 +303,8 @@ is the better route, and `genre_lookup => 'always'` already means "use it even i
 mirror exists".
 
 ### STAYING ON MUSICBRAINZ — deliberate, with the alternatives ruled out
+
+> **DELETED 2026-09-14 — the Artist sort is A–Z on the display name; no sort-name is fetched. Kept as history.**
 
 **`warmArtistSorts`** (`artist/<mbid>?fmt=json`) — artist **sort names**
 ("Beatles, The"). No alternative exists:
@@ -335,7 +359,7 @@ store and fetches no genres at all; see `genre-ladder-current.md` §6.
 
 ### The one thing worth asking upstream
 
-`sort-name` on the hosted `/artist/<name>`. It is the only field blocking
+*(Moot since 2026-09-14 — the plugin no longer uses a sort-name.)* `sort-name` on the hosted `/artist/<name>`. It is the only field blocking
 `warmArtistSorts`, and with it MusicBrainz would be reduced to fallback legs alone.
 Not urgent — the call is non-blocking and artist-sort-only.
 

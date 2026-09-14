@@ -369,10 +369,10 @@ section '6. THE DEV-BUILD WIPE — kv goes, the durable tables do not';
     $h->do('INSERT OR REPLACE INTO release (rel_id, base_version, payload, rel_date, week_start, seen_at)
             VALUES (?,?,?,?,?,?)', undef, 'mbid-1', 1,
            Storable::nfreeze({ v => { artist_credit_name => 'X' } }), '2026-08-24', '2026-08-24', $now);
-    $h->do("INSERT OR REPLACE INTO artist (artist_key, name, sort_name, sort_src, sort_at,
+    $h->do("INSERT OR REPLACE INTO artist (artist_key, name,
             artist_type, hosted_genres, n_hosted_genres, hosted_genres_at, fetched_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?)",
-           undef, 'mbid-a', 'Jack White', 'White, Jack', 'mb', $now, 'Person',
+            VALUES (?,?,?,?,?,?,?)",
+           undef, 'mbid-a', 'Jack White', 'Person',
            Storable::nfreeze({ v => ['garage rock'] }), 1, $now, $now);
     $h->do("INSERT OR REPLACE INTO release_group (rg_mbid, year, type, genres, n_genres,
             genres_at, fetched_at) VALUES (?,?,?,?,?,?,?)", undef, 'rg-1', '2026', 'Album',
@@ -404,8 +404,8 @@ section '6. THE DEV-BUILD WIPE — kv goes, the durable tables do not';
     ok($preN >= 1, 'the artist row carried genres before the genre wipe');
     $NS->can('wipeGenres')->();
 
-    my ($n, $at, $sortName, $sortAt, $type) = $h->selectrow_array(
-        'SELECT n_hosted_genres, hosted_genres_at, sort_name, sort_at, artist_type
+    my ($n, $at, $name, $type) = $h->selectrow_array(
+        'SELECT n_hosted_genres, hosted_genres_at, name, artist_type
            FROM artist WHERE artist_key = ?', undef, 'mbid-a');
     is($n,  -1, 'wipeGenres returns the artist genre answer to NEVER ASKED');
     # THE ONE THAT MATTERS. Clearing an answer and leaving its clock running is what
@@ -413,9 +413,7 @@ section '6. THE DEV-BUILD WIPE — kv goes, the durable tables do not';
     # nothing ever asked again. The answer and its stamp move together or the wipe
     # is not a wipe, it is a deletion with no way back.
     is($at,  0, '...AND ZEROES ITS STAMP, so it is re-askable immediately');
-    is($sortName, 'White, Jack',
-       '...but the SORT-NAME survives (a genre change must not re-inflict an artist-sort reconvergence)');
-    is($sortAt, $now, '...and so does the sort-name STAMP — a different answer, untouched');
+    is($name, 'Jack White', '...but the NAME survives — a genre reset clears genres only');
     is($type, 'Person', '...and so does the artist type');
 
     my ($rgN, $rgAt, $rgYear, $rgFetched) = $h->selectrow_array(
@@ -456,10 +454,10 @@ section '6g. NOTHING OVERWRITES ITSELF — one column per tier, one stamp per an
     my ($g0) = $h->selectrow_array("SELECT hosted_genres_at FROM artist WHERE artist_key = 'own:1'");
     $h->do("UPDATE artist SET hosted_genres_at = ? WHERE artist_key = 'own:1'", undef, 1000);
 
-    $put->('own:1', sort_name => 'Shoegaze, A');
+    $put->('own:1', lastfm_genres => ['shoegaze']);
     my ($gAfter, $sAfter) = $h->selectrow_array(
-        "SELECT hosted_genres_at, sort_at FROM artist WHERE artist_key = 'own:1'");
-    is($gAfter, 1000, 'a sort-name write does NOT re-age the genre answer beside it');
+        "SELECT hosted_genres_at, lastfm_genres_at FROM artist WHERE artist_key = 'own:1'");
+    is($gAfter, 1000, 'a Last.fm genre write does NOT re-age the hosted genre answer beside it');
     ok($sAfter > 1000, '...while stamping its own answer');
     ok($g0 > 0, '(and a genre write does stamp the genre answer)');
 
@@ -625,23 +623,23 @@ section '6b. THE artist FACTS TIER — merge, never blank';
 
     # THE MERGE RULE, and it is the one that matters: different tiers fill
     # different columns and arrive in either order. The hosted tier writes genres;
-    # the sort tier writes a sort-name. Neither may erase the other.
+    # the artist type arrives on its own. Neither may erase the other.
     $put->('n:jack white', name => 'Jack White', hosted_genres => ['garage rock', 'blues rock']);
-    $put->('n:jack white', sort_name => 'White, Jack', sort_src => 'local');
+    $put->('n:jack white', artist_type => 'Person');
 
     my $row = $get->(['n:jack white'])->{'n:jack white'};
     ok(ref $row eq 'HASH', 'the artist row reads back');
     is(join(',', @{ $row->{hosted_genres} || [] }), 'garage rock,blues rock',
        'genres survive a later write that did not mention them');
-    is($row->{sort_name},  'White, Jack', 'the sort-name landed');
-    is($row->{n_hosted_genres}, 2, 'and the genre count was not blanked by the sort write');
+    is($row->{artist_type}, 'Person', 'the artist type landed');
+    is($row->{n_hosted_genres}, 2, 'and the genre count was not blanked by the type write');
     is($row->{name},       'Jack White',  'nor was the name');
 
     # The reverse order must behave identically.
-    $put->('n:phoebe bridgers', sort_name => 'Bridgers, Phoebe', sort_src => 'local');
+    $put->('n:phoebe bridgers', artist_type => 'Person');
     $put->('n:phoebe bridgers', hosted_genres => ['indie rock']);
     my $r2 = $get->(['n:phoebe bridgers'])->{'n:phoebe bridgers'};
-    is($r2->{sort_name}, 'Bridgers, Phoebe', 'sort-name survives a later genre write');
+    is($r2->{artist_type}, 'Person', 'the artist type survives a later genre write');
     is(join(',', @{ $r2->{hosted_genres} || [] }), 'indie rock', 'and the genres landed');
 
     # AN EMPTY LIST IS AN ANSWER, NOT A MISS. The hosted API returns `[]` for an
@@ -869,33 +867,27 @@ section '6c. THE DURABLE THREE — tables, and what they guarantee';
     is(join(',', map { $_->{title} } @{ $NS->can('followList')->($u, 10) }),
        'Brand new,Newest', '...and keeps the newest');
 
-    # --- artist sort-names -------------------------------------------------
-    $NS->can('artistSortPut')->('mbid-jw', 'White, Jack', 'mb');
-    $NS->can('artistSortPut')->('mbid-none', '', 'mb');
-    my $sorts = $NS->can('artistSortGet')->(['mbid-jw', 'mbid-none', 'mbid-unknown']);
-    is($sorts->{'mbid-jw'}, 'White, Jack', 'a sort-name reads back');
-    ok(!exists $sorts->{'mbid-none'},
-       'a recorded "MB has none" is absent from the map (the caller falls back to the credit)');
-    ok(!exists $sorts->{'mbid-unknown'}, 'an unknown artist is simply absent');
+    # --- no artist sort-names (dropped 2026-09-14, Simon) --------------------
+    # The Artist sort is A-Z on the display name. Nothing stores a MusicBrainz
+    # sort-name, so neither the store API nor the columns may come back.
+    ok(!$NS->can('artistSortGet') && !$NS->can('artistSortPut') && !$NS->can('importSorts'),
+       'the sort-name store API is gone');
+    my %cols = map { $_->[1] => 1 } @{ raw()->selectall_arrayref('PRAGMA table_info(artist)') };
+    ok($cols{artist_type} && !$cols{sort_name} && !$cols{sort_src} && !$cols{sort_at},
+       'a fresh artist table has no sort-name columns (artist_type is the control that the read worked)');
+    ok(!exists $NS->can('stats')->()->{detail}{artist_sorts},
+       'cachestats no longer reports a sort-name count');
 
-    # ...but the ROW exists, which is what stops the warm re-asking MusicBrainz
-    # every pass for an artist it already established has no sort-name.
-    my $row = $NS->can('artistGet')->(['mbid-none'])->{'mbid-none'};
-    ok($row && $row->{sort_src} eq 'mb',
-       'the "none" answer IS recorded, so the warm can age-policy it instead of refetching');
-
-    # --- and all three survive the dev-build wipe --------------------------
+    # --- and both survive the dev-build wipe ---------------------------------
     kvSet('lbf:stream:27:whatever', 'disposable');
     $NS->can('wipeDerived')->();
     $NS->can('wipeGenres')->();
     ok(defined $NS->can('bcPinGet')->($id), 'the Bandcamp pin survives a dev build');
     is(scalar(@{ $NS->can('followList')->($u, 10) }), 2, 'the recommendations survive a dev build');
-    is($NS->can('artistSortGet')->(['mbid-jw'])->{'mbid-jw'}, 'White, Jack',
-       'the sort-name survives a dev build — a genre change must never cost it');
 }
 
 # ===========================================================================
-section '6d. THE LAZY LEGACY IMPORT — the durable three, carried across';
+section '6d. THE LAZY LEGACY IMPORT — the durable families, carried across';
 {
     # A stand-in for the outgoing Slim::Utils::Cache, holding what a user's box
     # would have on the morning of the upgrade. DB::_legacy `require`s the module
@@ -921,13 +913,6 @@ section '6d. THE LAZY LEGACY IMPORT — the durable three, carried across';
             { recording_mbid => 'rec-1', title => 'Carried', artist => 'A', created => 10 },
             { title => 'No mbid', artist => 'B', created => 20 },
         ] },
-        # Written through API::_setText, so hashref-wrapped...
-        'lbf:artistsort:1:mbid-x' => { t => 'Bear, Panda' },
-        # ...and a pre-0.9.141 BARE string, which _getText was written to keep reading.
-        'lbf:artistsort:1:mbid-y' => 'Beethoven, Ludwig van',
-        # An empty answer is a real recorded fact and must come across too, or the
-        # warm re-asks MusicBrainz for every artist already known to have none.
-        'lbf:artistsort:1:mbid-z' => { t => '' },
     );
 
     my $got = $NS->can('importPin')->($id);
@@ -941,15 +926,6 @@ section '6d. THE LAZY LEGACY IMPORT — the durable three, carried across';
     ok(!exists $list->[0]{recording_mbid},
        'a rec with no MBID still came across (keyed on artist|title)');
 
-    my $sorts = $NS->can('importSorts')->(['mbid-x', 'MBID-Y', 'mbid-z', 'mbid-absent']);
-    is($sorts->{'mbid-x'}, 'Bear, Panda', 'a _setText-wrapped sort-name is carried');
-    is($sorts->{'mbid-y'}, 'Beethoven, Ludwig van',
-       'a pre-0.9.141 BARE string is carried too, and the MBID is case-folded');
-    ok(exists $sorts->{'mbid-z'},
-       'the EMPTY answer is returned as well, so the caller does not queue it for a refetch');
-    ok(!exists $sorts->{'mbid-absent'}, 'an artist the old cache never knew is absent');
-    is($NS->can('artistGet')->(['mbid-z'])->{'mbid-z'}{sort_src}, 'mb',
-       '...and the empty answer was written as a real row');
 
     # THE DEADLINE, not a "done" flag: a lazy import is never finished, so what
     # bounds it is time. Past it, nothing is asked of the old cache at all — which

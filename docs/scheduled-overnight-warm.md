@@ -2,7 +2,9 @@
 
 **Status: PARTLY BUILT as 0.9.216, review fixes in 0.9.217 (INSTALLED on the rig 2026-09-14 16:54)
 and 0.9.218 (built 2026-09-14, NOT installed); both review rounds CLOSED, and the review of 0.9.218
-itself found nothing (CLAUDE.md Ledger §C `CLOSED IN THE 0.9.218 REVIEW`); pushed to `dev` 2026-09-14. PARTLY verified live:** the build-changed catch-up fired exactly `WARM_DELAY`
+itself found nothing (CLAUDE.md Ledger §C `CLOSED IN THE 0.9.218 REVIEW`); pushed to `dev` 2026-09-14.
+Carried unchanged into 0.9.219 (built 2026-09-14, NOT installed — the MusicBrainz queue and Artist
+sort A–Z build; §4G DECLINED with it). PARTLY verified live:** the build-changed catch-up fired exactly `WARM_DELAY`
 after load, stamped `warm_last_at` and completed in order. **§7 is NOT yet passed** — the skip
 branch + re-seed, the first fixed-clock tick (~05:04, 2026-09-15) and the DST fix (2026-10-25)
 are still to be observed. Record: CLAUDE.md Ledger §C (`CLOSED IN THE 0.9.216 REVIEW`).
@@ -10,7 +12,7 @@ are still to be observed. Record: CLAUDE.md Ledger §C (`CLOSED IN THE 0.9.216 R
 `warm_last_at`, `WARM_DELAY` 60->180) and **§4F** (`Browse::reseedFromStore`, plus the one
 `_fanOutFeed` carrier). **NOT BUILT: §4C** (the `$detailMainReady` watchdog), **§4D**
 (`next_tick_at`/`warm_last_at` in `warmstats`) and **§4E** (the convergence follow-up tick).
-**PARKED: §4G** — see its banner. Guards: `tools/t_warmclock.pl` (57), `t_detailwarm.pl` §9
+**DECLINED: §4G** (2026-09-14 — the MusicBrainz sort-name was dropped; see its banner). Guards: `tools/t_warmclock.pl` (57), `t_detailwarm.pl` §9
 (46), `t_coverwarm.pl` §4c re-pointed at the fan-out.
 
 **THREE MORE DEFECTS WERE FOUND BY THE 2026-09-14 REVIEW OF THE 0.9.216 WORKING TREE, and all
@@ -287,10 +289,10 @@ logged still has to be plumbed, and my first draft called two of those "already 
 | a scheduled-instant helper | **ABSENT** | — |
 | `next_tick_at` in `warmstats` | **ABSENT** | `_cliWarmStats` reports `ticks` and `tick_at` only |
 | any follow-up / convergence tick | **ABSENT** | — |
-| artist sort-name warm, bounded + browse-gated | **EXISTS** | `warmArtistSorts`, `SORT_WARM_MAX`; called only from `Browse::_warmArtistSorts`, `$mode eq 'artist'` |
-| a sorts stage in the tick | **ABSENT** | `warmstats` on the rig lists no sort stage — see §4G |
-| an "has ever artist-sorted" latch | **ABSENT** | — ; §4G adds `artist_sort_seen` |
-| a count of recorded "MB has no sort-name" | **ABSENT** | `DB::stats` counts `artist_sorts` only; §4G.1 needs `artist_sort_none` / `artist_sort_never` |
+| artist sort-name warm, bounded + browse-gated | **REMOVED 2026-09-14** | `warmArtistSorts`, `SORT_WARM_MAX`, `Browse::_warmArtistSorts` all deleted — Artist sort is A–Z on the display name |
+| a sorts stage in the tick | **MOOT** | §4G DECLINED 2026-09-14 |
+| an "has ever artist-sorted" latch | **MOOT** | §4G DECLINED 2026-09-14 |
+| a count of recorded "MB has no sort-name" | **MOOT** | §4G DECLINED; `artist_sorts` stat and the sort columns are gone |
 
 **So the build is: three ABSENT pieces, two LOGGED-ONLY signals to promote to fields, and no
 change at all to any EXISTS row.** §4C is the one exception and it is argued separately.
@@ -557,6 +559,13 @@ and the skip path call, so a future change to what gets queued cannot apply to o
 them.
 
 ### G. The artist sort-name backfill becomes a warm stage, latched on first Artist sort
+
+> **⛔ DECLINED — 2026-09-14, later the same day (Simon: "return A-Z, it will make it all work quicker").**
+> The Artist sort no longer uses a MusicBrainz sort-name at all: it is A–Z on the display name with
+> LMS's own article list skipped, and `warmArtistSorts`, the sort-name columns and `artist_sorts` are
+> gone. Nothing below is to be built; it is kept as the record of the design. The 503 rate it was
+> parked on was answered separately (one MusicBrainz queue). CLAUDE.md Ledger §A2
+> `ARTIST SORT IS A–Z ON THE DISPLAY NAME`.
 
 > **⚠️ PARKED — Simon, 2026-09-14: *"leave the artist sort for now, it feels like we need more
 > work to get this to work better, we should not be hitting 503's."*** The design below stands

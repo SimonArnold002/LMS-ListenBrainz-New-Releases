@@ -306,7 +306,6 @@ sub _weekLabel { 'W/C ' . \$_[1] }
 sub _weekBadgeImage { 'badge.png' }
 sub _weekAction { +{ fixedParams => { lbf_week => \$_[0] } } }
 sub _effectiveView { ('singles_eps', 1, 1) } # user is on Singles & EPs, both families ticked
-sub _warmArtistSorts { }
 sub _noteBrowse { }                          # 0.9.196: the week drill marks the browse
                                              # so the cover warm can yield to it
 sub _focusReleaseCovers { }                  # 0.9.199: requested rows promote existing cover jobs

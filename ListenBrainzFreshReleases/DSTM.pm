@@ -57,13 +57,14 @@ use constant ARTIST_COOLDOWN => 24;
 # Last.fm similar-artist fallback (used when ListenBrainz has no similar artists
 # for the seed AND the built-in Last.fm key is in use). Capped lower than ARTIST_FANOUT
 # because Last.fm gives artist NAMES — each one without an inline MBID costs a
-# MusicBrainz name->MBID lookup to become fannable.
+# community-API name->MBID lookup to become fannable.
 use constant LFM_FANOUT => 12;
 
-# Cap simultaneous MusicBrainz name->MBID lookups when resolving Last.fm artists.
-# MusicBrainz's anonymous limit is ~1 req/s, so firing all LFM_FANOUT at once gets
-# the bulk throttled (503) and silently dropped — defeating the fallback on a cold
-# cache. A small bound drips them out; cached after the first run.
+# Cap simultaneous name->MBID lookups when resolving Last.fm artists. The lookup is
+# the community API alone since 2026-09-14 (API::getArtistMbidByName — no MusicBrainz
+# fallback), and API::_hostedGet sends to it one request at a time, so this no longer
+# governs the request rate — it bounds how many lookups sit waiting at once, and
+# stops one radio seed monopolising that queue. Cached after the first run.
 use constant MBID_RESOLVE_CONCURRENCY => 4;
 
 # Library-FIRST resolution: if the user owns the track, play their copy (better
