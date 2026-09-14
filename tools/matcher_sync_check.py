@@ -82,6 +82,20 @@ SUBS = [
     # never compared against anything, so it earns its alarm from a PIN, not from being
     # listed here.
     '_punctPass',
+    # LL-ONLY, and added 2026-09-10 for the SAME reason _punctPass was — the note above
+    # closed only half of that hole. LL's FOLD is not in either _norm body either: both
+    # normalisers reach DB::foldLatin, the matcher through Sources::_fold and the dedupe
+    # key by calling it directly. %FOLD (the TABLE) is compared above; the code that
+    # APPLIES it was watched by nothing, and the apostrophe elision - fleet rule 1, the
+    # Jane's Addiction fix (DSC 0.44.26) - lives there too, not in either _norm.
+    #
+    # MEASURED, not suspected: deleting `$s =~ s/$apos//g;` from foldLatin moved NONE of
+    # the four pins that could plausibly have caught it (LLDB::_norm 8d9d8309707d,
+    # %FOLD 3b0d43f368e9, LL::_norm abbfcf31c6fc, LL::_punctPass 19c99f86dd6c - all
+    # byte-identical before and after). The check exited 0 against an LL that had lost a
+    # fleet rule. Both are single copies, so both earn their alarm from a PIN below.
+    'foldLatin',
+    '_fold',
 ]
 
 # (sub, repo) -> (sha1-of-normalised-body, reason). A pinned copy passing its
@@ -118,6 +132,20 @@ VARIANTS = {
     # separately, and running the non-word pass first leaves '_' out of the separator run
     # beside it (0.1.144). Carries the fleet's stylised-letter rules verbatim since 0.1.145.
     ('_punctPass', 'LL'):    ('19c99f86dd6c', 'LL-only shared punctuation pass for _norm and _normStrict: stylised letters (fleet, PFR 0.7.8) + underscore-first ordering (0.1.144) + an all-marks fallback so a name of unmapped symbols does not read as ABSENT to LL lenient gates'),
+
+    # THE FOLD ITSELF, and it sits behind BOTH LL normalisers - so neither _norm pin moves
+    # when it changes. It carries the UTF-8 decode, the lc, the NFD diacritic strip, the
+    # loop that applies %FOLD, and BOTH apostrophe rules (elision + the 'n' contraction
+    # guard). The fleet keeps all of that inline in _norm, which is why only LL needs this
+    # pin. See the note on SUBS above for the measurement that put it here.
+    ('foldLatin', 'LLDB'):   ('7c6b0067cbcc', 'LL-only shared fold behind BOTH LL normalisers - the matcher via Sources::_fold and the dedupe key directly. Carries the UTF-8 decode, lc, the NFD diacritic strip, the %FOLD application loop and BOTH apostrophe rules (fleet rule 1, DSC 0.44.26). %FOLD is compared above; without this pin nothing watched the code that APPLIES it'),
+
+    # Three lines, and the same class rather than belt-and-braces: the ->can miss branch
+    # degrades to a bare lc(), so a change here drops every diacritic fold AND both
+    # apostrophe rules at once, silently. It is a ->can rather than a use because the
+    # package name matches the INSTALLED layout and a top-level use of a sibling dies at
+    # BEGIN in a checkout - so the miss branch is reachable by construction, not theory.
+    ('_fold', 'LL'):         ('127b007fab02', 'LL-only ->can delegate from Sources to DB::foldLatin (the authority sits with the irreversible consumer, LL 0.1.112). Pinned because its MISS branch degrades to a bare lc(), which would drop the whole fold and both apostrophe rules without moving any _norm pin'),
 
     ('_norm', 'LLDB'):       ('8d9d8309707d', 'LL dedupe-key normaliser (not the matcher): folds like the fleet, KEEPS bracketed qualifiers. Keeps \\w of EVERY script + an all-punctuation fallback (minus | % _) - it had ERASED non-Latin names into a shared key in a UNIQUE column, silent data loss shipped since 0.1.93. Re-pinned at 0.1.144, which fixed the ORDER of its two substitutions (_+ must run BEFORE [^\\w]+ or 01_-_Intro keys with a doubled separator) and moved the refold to rung 9. The stylised-letter rules are NOT here: the matcher took them at 0.1.145, the key owes a rung and has not'),
 

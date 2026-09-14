@@ -43,7 +43,7 @@ because line numbers rot on the next edit.
 
 | already decided | § | find it with |
 |---|---|---|
-| THE FLEET FOLD IS DELIBERATELY NOT LEVEL, 2026-09-10 to the completion of item 1 in | A2 | `THE FLEET FOLD IS DELIBERATELY NOT LEVEL,` |
+| THE FLEET FOLD ROLLOUT IS CLOSED — 2026-09-10. NO WORK IS OUTSTANDING IN THIS REPO | A2 | `THE FLEET FOLD ROLLOUT IS CLOSED —` |
 | The zip is not rebuilt and `repo.xml <sha>` is not recomputed in the working | A2 | `The zip is not rebuilt and `repo.xml <sha>`` |
 | `CHANGELOG.md` and `README` are written at the MERGE TO MAIN, not on dev | A2 | ``CHANGELOG.md` and `README` are written at` |
 | The working tree's commit state is never a finding, in EITHER direction | A2 | `The working tree's commit state is never a` |
@@ -82,25 +82,52 @@ invites the next round to find one counter-example and reopen the whole entry.
 
 ### A. NOT FINDINGS — deliberate, fleet-wide
 
-- **THE FLEET FOLD IS DELIBERATELY NOT LEVEL, 2026-09-10 to the completion of item 1 in
-  LL's `docs/fleet-fold-rollout.md`.** Listen to Later 0.1.143 fixed a fold that ERASED
-  non-Latin names, and the obvious next step looked like porting it here. **It is not.**
-  THIS REPO WAS ALREADY CORRECT — measured by extracting the shipped `_norm` and running it:
-  米津玄師, 아이유 and Кино all survive, and two different CJK artists correctly fail to match.
-  LL was the only repo with the defect.
+- **THE FLEET FOLD ROLLOUT IS CLOSED — 2026-09-10. NO WORK IS OUTSTANDING IN THIS REPO.**
+  Listen to Later 0.1.143 fixed a fold that ERASED non-Latin names, and the obvious next step
+  looked like porting it here. **It was not.** THIS REPO WAS ALREADY CORRECT — measured by
+  extracting the shipped `_norm` and running it: 米津玄師, 아이유 and Кино all survive, and two
+  different CJK artists correctly fail to match. LL was the only repo with the defect, and the
+  fix brought LL UP to this repo rather than the reverse. The plan and every measurement behind
+  it are in LL's `docs/fleet-fold-rollout.md`, now a RECORD rather than a work order.
   - **`_asciiNorm`'s `s/[^a-z0-9]+/ /g` is NOT that bug and must not be "fixed".** Being
     ASCII-only is its job. The real `_norm` uses `\p{Alnum}` on a DECODED string. A grep for
     the old pattern hits `_asciiNorm` in every repo and produced exactly this false finding
     once already.
-  - **LL's matcher is out of sync in the OTHER direction and that is known.** It is AHEAD on
-    script preservation and BEHIND on the stylised-letter fold (`P!nk` → `p nk` there against
-    `pink` here), and its punctuation fallback keeps raw marks (`!!!` → `!!!`) where this repo
-    folds to `iii`. DSC and Search Hub are ON HOLD, so the fleet cannot be levelled in one
-    pass. **Do not report the divergence, in either direction, as drift.**
-  - **Still open fleet-wide, and small:** an all-symbol name with no fold mapping (`†††`,
-    Crosses) still normalises to `''` here, because `!!!` and `+/-` survive only through their
-    leetspeak mappings. The strict artist gate then rejects everything, so it is a MISS, not a
-    wrong answer. Optional work; re-raise only with a real failing case.
+  - **LL's matcher came INTO line at 0.1.145 and the old divergence note here is withdrawn.**
+    It took the stylised-letter fold (`P!nk` → `pink`) and `_punctNorm` verbatim, so nothing is
+    behind any more. Two differences remain and BOTH are deliberate: LL keeps an all-marks
+    fallback this repo does not have (see the next bullet, where LL is the better one), and
+    LL's dedupe KEY carries none of these rules at all, which is a DECLINED scope decision in
+    that repo and not a gap. **Do not report either, in either direction, as drift.**
+  - **CHANGING `_norm` IS DECLINED — Simon, 2026-09-10 — but the TRACK PATH WAS BUILT, and
+    the two halves must not be confused.** This entry originally closed the whole `†††` residue
+    unbuilt on the grounds that it is "a MISS, not a wrong answer". **That is true of the ALBUM
+    path and false of the TRACK path**, which the same session then measured; both verdicts are
+    recorded here so neither is rediscovered as the other.
+    - **DECLINED, and do not re-propose it: the all-marks fallback in `_norm`.** LL has one in
+      `_punctPass`; porting it here was prototyped and MEASURED. On the normaliser it is a
+      clean split (67 names byte-identical, 10 rescued from empty, 0 moved) and all 32 suites
+      stay green — but through `_albumMatches` it flips four cases and only one flip is
+      wanted, because it moves an all-marks artist OUT of the lenient empty-artist branch and
+      INTO the strict artist gate. A release MusicBrainz credits to `†††` that Qobuz spells
+      "Crosses" goes MATCH → **reject**. **The asymmetry is the gates, and it runs the OTHER
+      WAY in LL**: LL's `_artistMatch` returns 1 on an empty side, so an erased name there is a
+      total free pass and the fallback can only tighten it; ours returns 0, and our empty-artist
+      branch already demands an exact title. LL also replays a saved item to the SAME source, so
+      both spellings agree by construction, where this plugin exists to match a MusicBrainz
+      credit against a differently-spelled catalogue. **LL having it is not evidence we should.**
+    - **BUILT: `_trackMatches` gained the short-title `_punctNorm` hatch** that `_albumMatches`
+      has carried since 0.9.83, plus the two sites it is dead code without — `_findPlayableTrack`
+      no longer refuses an all-marks title, and `_findLocalTrack` no longer refuses to look. It
+      was NOT merely a miss there: the refusal answered `undef`, which this plugin reads as
+      INCONCLUSIVE, so the track burned all three rungs of `MISS_RETRY_SCHEDULE` **without one
+      request ever being made** and then settled as a durable no-match — reaching the
+      Created-for-You playlists, the follow feed, Trending Tracks and both DSTM mixers. The
+      per-track cache key and `_relKey` also collapsed every such name onto one shared string.
+      **No fleet obligation**: `_trackMatches` and `_findPlayableTrack` are single-copy LBF, so
+      `matcher_sync_check.py` says nothing about them and PFR carries no `_trackMatches` at all.
+    - **Re-raise the `_norm` half ONLY with a real artist that actually failed**, naming it —
+      not with the `†††` example, which is this entry.
 
 - **The zip is not rebuilt and `repo.xml <sha>` is not recomputed in the working
   tree.** Both happen at build time, together with the version bump. A stale zip
@@ -423,6 +450,46 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
+
+**0.9.212** — built 2026-09-10. `_trackMatches` gains the short-title `_punctNorm` escape
+hatch `_albumMatches` has carried since 0.9.83 (ported from Discography 0.10.3): a track
+TITLE made entirely of marks (`\x{2020}\x{2020}\x{2020}`, `\x{2665}`, `"( )"`) normalises to
+nothing under `_norm`, and the `<2` gate then rejected it against every source rather than
+falling back to the punctuation-preserving form the way `_albumMatches` already does. The
+artist gate stays mandatory — a match this thin cannot stand on the title alone. A trailing
+`$titleRaw` argument threads the raw string through all five call sites
+(`_titlesSearch` × 2 via `_localByText`, `_trackMatches` itself, and the two runTrack
+adapter calls in `_findPlayableTrack`) because `_norm` has already discarded the marks by
+the time `_trackMatches` runs. `_findPlayableTrack`'s and `_findLocalTrack`'s pre-filters no
+longer bail outright on an empty `_norm` form when a `_punctNorm` form exists — the old
+refusal answered `undef` (inconclusive), so an all-marks track burned all three rungs of
+`MISS_RETRY_SCHEDULE` without a single request ever being sent. `_relKey` falls back to
+`_punctNorm` per field, so two all-symbol releases stop sharing one order-freeze slot and one
+release-target token. **The per-track cache key is now `_trackKeyName`, with a per-FIELD
+fallback on the title** — REVIEW FIX 2026-09-14: the first cut fell back only when
+`_norm($query)` was empty, i.e. when artist AND title were BOTH all-marks. With a real artist
+the key was just the artist, so "Crosses – †††", "– ♥" and "– ( )" all keyed `crosses` and
+served each other's decision (wrong track / false no-match / exclude-mode drop) — reachable
+from Trending Tracks, the follow feed and Created-for-You tracks with no recording MBID (DSTM
+always has one). Its 4c pin was a source regex that passed with the collision live; 4c now
+DRIVES `_trackKeyName`, with a control proving the old form collides. Every title `_norm` leaves
+non-empty keys byte-for-byte as before (pinned in 4c; also 582,904 suite-string pairs, 0
+moved), so the no-bump reasoning below holds. **`_dedupeReleases` was NOT given the fallback**:
+two all-marks albums by one artist on one date still fold there — main's behaviour, uncached,
+left alone at that review; do not report it as a missed half of this fix.
+
+**No schema change. No cache-family bump — deliberate, not an oversight.** Nothing in
+`DB::KEY_VERSIONS` answers a wrong NON-EMPTY result today: the bug was a false MISS (the old
+shared-empty-key entries simply orphan and age out), not a false HIT, so no existing lookup
+can be served a stale wrong answer. `_relKey` is per-render and `%ORDER_FREEZE` is
+in-process, so neither is cached at all. Bumping `lbf:track:` here would only cost every warm
+cache its next cold rebuild for no correctness gain — same reasoning as the 0.9.57 fold.
+
+**Tooling kept in step.** `tools/matcher_sync_check.py` pins `foldLatin` and `_fold` in
+VARIANTS, closing a blind spot where Listen Later's apostrophe rule could be deleted with the
+check still exiting 0 (see [[shared-matcher-sync]]). `tools/t_matchersync.pl` grew from 46 to
+76 assertions (62 at build; +14 net at the 2026-09-14 review fix), new sections 4b and 4c
+covering the `_trackMatches` short-title fallback and the driven `_trackKeyName` key.
 
 **0.9.211** — built 2026-09-10, **installed and verified the same day** (see the live check at the
 end of this entry — and read its caveat, because the run did NOT exercise the fix). **AN UNFINISHED PASS IS NOT AN
@@ -4755,7 +4822,24 @@ change is called done:
 
 It diffs the comment-stripped CODE of every copy across all four repos. Deliberate variants
 are sha1-pinned inside the script with a reason, and FAIL the check if they change without a
-conscious re-pin (`--print-hashes` prints current hashes). After aligning: bump every touched
+conscious re-pin (`--print-hashes` prints current hashes).
+
+> **THE CHECK ONLY SEES SUBS THAT ARE IN ITS `SUBS` LIST, AND A DELEGATE IS INVISIBLE — this
+> cost two separate holes and the second was found on 2026-09-10.** LL's normalisers are
+> assembled from parts, so its `_norm` BODY can stay byte-identical while its actual fold
+> changes completely. `_punctPass` was added at LL 0.1.145 for exactly that reason; **the same
+> pass left `foldLatin` unwatched**, which is where LL keeps the UTF-8 decode, the `lc`, the NFD
+> diacritic strip, the loop that APPLIES `%FOLD`, and **both apostrophe rules — fleet rule 1**.
+> `%FOLD` (the table) was compared; the code applying it was not.
+> **MEASURED, not suspected:** deleting the apostrophe elision from `foldLatin` moved NONE of
+> the four pins that could plausibly have caught it (`LLDB::_norm`, `%FOLD`, `LL::_norm`,
+> `LL::_punctPass` — all byte-identical before and after) and the check **exited 0**. Both
+> `foldLatin` and `Sources::_fold` are now in `SUBS` **and pinned**, because a single copy is
+> never compared and so earns its alarm from the PIN, not from being listed. Anti-tested both
+> ways: deleting the apostrophe rule → 1 red on `foldLatin`; degrading `_fold`'s `->can` miss
+> branch to a bare `lc()` → 1 red on `_fold`; each mutant failing only its own pin.
+> **The general rule: if a watched sub DELEGATES, the delegate needs its own entry, or the
+> check reports "in sync" about a body that no longer decides anything.** After aligning: bump every touched
 repo's plugin version AND its match/decision cache versions (LBF: `lbf:stream` + `lbf:track` +
 `lbf:pl:resolved` — ALL layers; PFR: `pfr:stream`; DSC: `dsc:cand` only if the cached candidate
 shape changed — matching runs live there; LL: none — matching is live), rebuild zips + repo.xml

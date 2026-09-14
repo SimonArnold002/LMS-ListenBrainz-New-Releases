@@ -71,7 +71,7 @@ sub ok { my($d,$c)=@_; my $b = $c ? 1 : 0; $b?$p++:$f++; printf "%s %s\n",($b?'o
 sub n_ { my $s = shift; utf8::upgrade($s); return X::_norm($s) }
 
 # _albumMatches($artistNorm, $albumNorm, $candArtist, $candTitle, $albumRaw)
-# _trackMatches($artistNorm, $titleNorm, $candArtist, $candTitle) — LBF only
+# _trackMatches($artistNorm, $titleNorm, $candArtist, $candTitle, $titleRaw) — LBF only
 sub m_ { my ($artist,$album,$candArtist,$candTitle)=@_;
     return X::_albumMatches(n_($artist), n_($album), $candArtist, $candTitle, $album) }
 
@@ -148,8 +148,10 @@ print "\n== 4. LBF ONLY: the rules reach the TRACK path too (_trackMatches)\n";
 # drifted. NOTE it deliberately has NO compound-word tier: that rule is album-only in every
 # repo, and track titles are short enough that a >=6-char collapsed key would be far likelier
 # to collide.
+# $titleRaw is passed positionally, exactly as m_ passes $album as $albumRaw —
+# _punctNorm works on the RAW string, since _norm has already discarded the marks.
 sub t_ { my ($artist,$title,$candArtist,$candTitle)=@_;
-    return X::_trackMatches(n_($artist), n_($title), $candArtist, $candTitle) }
+    return X::_trackMatches(n_($artist), n_($title), $candArtist, $candTitle, $title) }
 
 ok('apostrophe rule reaches tracks: elided vs spelled',
    t_("Jane's Addiction", "Been Caught Stealin'", "Janes Addiction", 'Been Caught Stealin'));
@@ -161,6 +163,100 @@ ok('the mandatory artist gate still applies to tracks',
    !t_("Jane's Addiction", 'Jane Says', 'The Beatles', 'Jane Says'));
 ok('NO compound tier on the track path — album-only, deliberately',
    !t_('Some Band', 'Hit Makers', 'Some Band', 'Hitmakers'));
+
+print "\n== 4b. LBF ONLY: an ALL-MARKS TRACK TITLE reaches the escape hatch\n";
+# WHY THIS SECTION EXISTS. `_albumMatches` has had a short-title `_punctNorm` hatch
+# since LBF 0.9.83 (Discography 0.10.3); `_trackMatches` never got one, because it is
+# single-copy LBF and no fleet sync could drag it along. So a title of nothing but
+# marks normalised to '' and the `length $titleNorm < 2` gate rejected it against every
+# source — while `!!!` and `+/-` sailed through on their leetspeak fold, which is
+# exactly what made the hole look like it wasn't there.
+#
+# THE ARTIST GATE IS THE REASON THE HATCH IS SAFE and is asserted in BOTH directions
+# below: a title carrying this little information cannot stand on its own, so an empty
+# artist must REJECT here even though an ordinary title may take the lenient branch.
+# Assert only the matches and you are testing a hatch that accepts everything.
+ok('all-marks title (three daggers) matches with the right artist',
+   t_('Crosses', "\x{2020}\x{2020}\x{2020}", 'Crosses', "\x{2020}\x{2020}\x{2020}"));
+ok('single-symbol title matches with the right artist',
+   t_('Crosses', "\x{2665}", 'Crosses', "\x{2665}"));
+# "( )" is the case a fallback bolted onto _norm could NOT have reached: _norm strips
+# bracketed spans BEFORE its punctuation pass, so the marks are already gone. _punctNorm
+# strips only case and whitespace, so it survives as "()".
+ok('bracket-only title "( )" matches — _punctNorm does not strip brackets',
+   t_('Crosses', '( )', 'Crosses', '( )'));
+ok('MANDATORY artist gate: a WRONG artist rejects an all-marks title',
+   !t_('Crosses', "\x{2020}\x{2020}\x{2020}", 'Deftones', "\x{2020}\x{2020}\x{2020}"));
+ok('MANDATORY artist gate: an EMPTY artist rejects (no lenient branch here)',
+   !t_('', "\x{2020}\x{2020}\x{2020}", 'Crosses', "\x{2020}\x{2020}\x{2020}"));
+ok('EXACT equality, not a prefix: two daggers do not satisfy three',
+   !t_('Crosses', "\x{2020}\x{2020}\x{2020}", 'Crosses', "\x{2020}\x{2020}"));
+# CONTROLS. The ordinary _norm route must be untouched — a hatch that swallowed these
+# would be a far worse bug than the one it fixes, and both of these normalise NON-empty
+# so they must never reach the hatch at all.
+is('control: !!! still folds the old way', n_('!!!'), 'iii');
+is('control: +/- still folds the old way', n_('+/-'), 'and');
+ok('control: an ordinary title still matches through the normal path',
+   t_('Jane\'s Addiction', 'Jane Says', 'Janes Addiction', 'Jane Says'));
+ok('control: an ordinary title with a WRONG artist still rejects',
+   !t_('Jane\'s Addiction', 'Jane Says', 'The Beatles', 'Jane Says'));
+
+print "\n== 4c. LBF ONLY: the sites the hatch is USELESS without (source-level + the key, driven)\n";
+# These are not matcher properties, so they cannot be driven through the grabbed subs —
+# but the hatch above is DEAD CODE without both of them, which is why they are pinned
+# here rather than left to a reader to notice.
+#
+# 1. _findPlayableTrack refused any title with no NORMALISED form, so an all-marks track
+#    never reached a single service. It answered `undef`, which this plugin reads as
+#    INCONCLUSIVE, so the track then burned all three rungs of MISS_RETRY_SCHEDULE
+#    without one request ever being made and settled as a durable no-match.
+# 2. The per-track cache key's name component was _norm output, which is '' for every
+#    all-marks TITLE. That one is DRIVEN below through the real _trackKeyName, not matched
+#    as source text: the first cut of this fix was pinned by a regex that passed 62/62
+#    while the key still collided — its fallback fired only when artist AND title were
+#    both empty, and with a real artist _norm($query) is simply the artist.
+ok('_findPlayableTrack bails only when BOTH forms are empty',
+   scalar($SRC =~ /unless \s*\(length \$titleNorm \|\| length _punctNorm\(\$title\)\)/));
+ok('...and the pre-fix bare `unless (length $titleNorm)` guard is GONE',
+   scalar($SRC !~ /unless \s*\(length \$titleNorm\)\s*\{/));
+
+eval "package X; use strict; use warnings; use utf8;\n" . grab('_trackKeyName') . "1;" or die $@;
+sub k_ { my ($ar,$ti,$m)=@_; for ($ar,$ti) { utf8::upgrade($_) if defined } return X::_trackKeyName($ar,$ti,$m) }
+# The joined-query form every released build keys with (main 0.9.149), MBID aside.
+sub kOld_ { my ($ar,$ti)=@_; utf8::upgrade($_) for $ar,$ti;
+    return X::_norm(join(' ', grep { length } X::_norm($ar), X::_norm($ti))) }
+
+my @marks = ("\x{2020}\x{2020}\x{2020}", "\x{2665}", '( )');
+# CONTROL FIRST: prove the old form really does collide on these, or the next assertion
+# could pass against a fix that changed nothing.
+ok('CONTROL: the joined-query key collapses three all-marks titles onto ONE key',
+   scalar(keys %{{ map { (kOld_('Crosses', $_) => 1) } @marks }}) == 1);
+ok('three all-marks titles by ONE artist key apart',
+   scalar(keys %{{ map { (k_('Crosses', $_) => 1) } @marks }}) == 3);
+is('an all-marks title keys as artist + punctuation form',
+   k_('Crosses', "\x{2020}\x{2020}\x{2020}"), "crosses \x{2020}\x{2020}\x{2020}");
+is('"( )" keeps its brackets in the key', k_('Crosses', '( )'), 'crosses ()');
+ok('artist AND title both all-marks still key apart by artist',
+   k_("\x{2020}\x{2020}\x{2020}", "\x{2665}") ne k_("\x{2665}", "\x{2665}"));
+is('a recording MBID wins over the names', k_('Crosses', "\x{2665}", 'abc-123'), 'abc-123');
+# UNMOVED: every title _norm leaves non-empty must key byte-for-byte as released builds
+# do, or warm caches orphan and the no-bump reasoning in the ledger is false.
+for my $pr (['Crosses', 'Telepathy'], ["Jane's Addiction", "Been Caught Stealin'"],
+            ['!!!', 'Heart of Hearts'], ['', 'Jane Says'], ["\x{2020}\x{2020}\x{2020}", 'Telepathy'],
+            ["Sigur R\x{f3}s", 'Hoppipolla'], ['P!nk', 'So What'],
+            ['The Beatles', 'Hey Jude (Remastered 2015)']) {
+    is("UNMOVED: '$pr->[0]' / '$pr->[1]'", k_(@$pr), kOld_(@$pr));
+}
+ok('_findPlayableTrack builds its key through _trackKeyName',
+   scalar($SRC =~ /my \$keyName = _trackKeyName\(\$artist, \$title, \$recMbid\);/));
+ok('_findLocalTrack does not refuse an all-marks title before searching',
+   scalar($SRC =~ /return undef if length \$titleNorm < 2 && !length _punctNorm\(\$title\);/));
+# The LIBRARY path shares _trackMatches, so the raw title has to reach it there too or
+# the hatch is live for streaming and dead for owned tracks.
+ok('the raw title is threaded to the library matcher via _titlesSearch',
+   scalar($SRC =~ /sub _titlesSearch \{\s*\n\s*my \(\$term, \$artistNorm, \$titleNorm, \$limit, \$titleRaw\) = \@_;/));
+ok('every _trackMatches call site passes a raw title (5 args)',
+   scalar(() = $SRC =~ /_trackMatches\(\$artistNorm, \$titleNorm, [^)]*, \$titleRaw\)/g) == 5);
 
 printf "\n%d passed, %d failed\n", $p, $f;
 exit($f ? 1 : 0);

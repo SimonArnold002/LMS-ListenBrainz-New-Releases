@@ -4907,10 +4907,21 @@ sub _relKey {
     my ($rel) = @_;
     my $m = $rel->{release_mbid};
     return "m:$m" if defined $m && length $m;
-    return 't:' . join('|',
-        _norm(_pickValue($rel, 'artist_credit_name', 'artist_name', 'artist')),
-        _norm(_pickValue($rel, 'release_name', 'title', 'name')),
-        ($rel->{release_date} // ''));
+    my $ar = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist');
+    my $al = _pickValue($rel, 'release_name', 'title', 'name');
+    my ($an, $ln) = (_norm($ar), _norm($al));
+    # An all-marks name normalises to nothing, so two unrelated symbol-named
+    # releases sharing a date collapsed onto one key - the order freeze replayed
+    # whichever it saw last into both slots, and both tiles minted the SAME
+    # release-target token. Fall back to the punctuation-preserving form, the same
+    # one _trackMatches and _albumMatches use, so they key apart.
+    # NOT the dedupe: _dedupeReleases builds its own _norm key with no fallback, so
+    # two such albums by one artist on one date still fold there. That is main's
+    # behaviour too, uncached, and was left alone at review (2026-09-14).
+    # Not cached anywhere (%ORDER_FREEZE and %releaseTargets are in-process), so no bump.
+    $an = _punctNorm($ar) unless length $an;
+    $ln = _punctNorm($al) unless length $ln;
+    return 't:' . join('|', $an, $ln, ($rel->{release_date} // ''));
 }
 
 # ---------------------------------------------------------------------------
@@ -8239,6 +8250,29 @@ sub _searchSpotify {
 # Storable can't serialise and that would drop out of a cached list on revisit.
 # ===========================================================================
 
+# The name component of the per-track cache key (`lbf:track:`): the recording MBID
+# when there is one, else the normalised "artist title". That second form is
+# UNCHANGED for every title _norm leaves non-empty - which is every key a released
+# build can have written, because main gives up on an empty _norm title before it
+# ever builds one. So nothing on the ordinary path moves and no cache bump is owed.
+#
+# An all-marks TITLE ("\x{2020}\x{2020}\x{2020}", "\x{2665}", "( )") normalises to
+# nothing. 0.9.212 first keyed it as _norm($query) - which is then just the ARTIST -
+# with a _punctNorm fallback that only fired when the artist was empty too. So every
+# all-marks title by one artist shared ONE key and answered with each other's
+# decision: the wrong track played, a false no-match, or (exclude mode) a real track
+# dropped as owned. Hence the fallback is per FIELD, on the title, never on the
+# joined query. The artist keeps _norm unless it is empty as well.
+sub _trackKeyName {
+    my ($artist, $title, $recMbid) = @_;
+    return $recMbid if $recMbid;
+    my $titleNorm  = _norm($title);
+    my $artistNorm = _norm($artist);
+    return _norm(join(' ', grep { length } $artistNorm, $titleNorm)) if length $titleNorm;
+    return join(' ', grep { length }
+        (length $artistNorm ? $artistNorm : _punctNorm($artist)), _punctNorm($title));
+}
+
 # Resolve one playlist track to a single playable streaming-track item (or undef).
 # Same ordered-adapter / per-service-timeout / first-priority-wins / versioned-cache
 # shape as _findPlayable, but returns one item and enforces a string url.
@@ -8261,7 +8295,6 @@ sub _findPlayableTrack {
     my @adapters   = grep { $_->{runTrack} } _orderedAdapters();
     my $titleNorm  = _norm($title);
     my $artistNorm = _norm($artist);
-    my $query      = join(' ', grep { length } $artistNorm, $titleNorm);   # for the cache key only
     # Search the services with the RAW artist+title, NOT the normalised form. The
     # normaliser turns punctuation into spaces ("L.U.C.K.Y" -> "l u c k y"), which
     # mangles stylised titles so the service's OWN search returns nothing —
@@ -8279,7 +8312,14 @@ sub _findPlayableTrack {
     # A title is the one thing we always need; missing streaming adapters is NOT
     # fatal — the library may still satisfy the track (handled below), so don't
     # bail on an empty @adapters here.
-    unless (length $titleNorm) {
+    # A title with no normalised form AND no punctuation form is genuinely
+    # unsearchable. One made ENTIRELY of marks is not: _norm erases it, but
+    # _punctNorm keeps it and _trackMatches' hatch can match on it, and the
+    # outgoing query is the RAW title regardless (see the note above). Refusing
+    # here was worse than a miss - it answers `undef`, i.e. INCONCLUSIVE, so the
+    # track burned all three rungs of MISS_RETRY_SCHEDULE without a single request
+    # ever being made and then settled as a durable no-match.
+    unless (length $titleNorm || length _punctNorm($title)) {
         $callback->(undef);
         return;
     }
@@ -8303,7 +8343,10 @@ sub _findPlayableTrack {
     # $tr->{year}` gate now distinguishes enriched lists (playlists/follow/trending,
     # which render years) from un-enriched pools (DSTM), not "playlists never render
     # years" as the earlier note here claimed.
-    my $key = Plugins::ListenBrainzFreshReleases::DB::kver("lbf:track:") . $svcOrder . ':' . ($recMbid || _norm($query));
+    # The name component is per FIELD, not the normalised joined "artist title" -
+    # see _trackKeyName for why the joined form collided, and why no bump is owed.
+    my $keyName = _trackKeyName($artist, $title, $recMbid);
+    my $key = Plugins::ListenBrainzFreshReleases::DB::kver("lbf:track:") . $svcOrder . ':' . $keyName;
     $key .= ":$libMode" unless $libMode eq 'first';
     utf8::encode($key) if utf8::is_utf8($key);
     # How many times this miss has already been re-searched. A retryable entry is
@@ -8359,7 +8402,7 @@ sub _findPlayableTrack {
                 $retryable = 1;
             }
             else {
-                $log->info("track-match '$query': retry budget spent after $tries attempt(s)"
+                $log->info("track-match '$keyName': retry budget spent after $tries attempt(s)"
                          . " — accepting the no-match");
             }
         }
@@ -8453,7 +8496,7 @@ sub _findPlayableTrack {
             });
 
             my $queryEnc = ($a->{query_enc} || 'bytes') eq 'chars' ? $qChars : $qBytes;
-            eval { $a->{runTrack}->($client, $queryEnc, $artistNorm, $titleNorm, $album, $settle); 1 } or do {
+            eval { $a->{runTrack}->($client, $queryEnc, $artistNorm, $titleNorm, $album, $settle, $title); 1 } or do {
                 $log->warn("track-match $svc failed: $@");
                 $settle->(undef);   # inconclusive, not a confirmed miss
             };
@@ -8523,7 +8566,12 @@ sub _findLocalTrack {
     my ($artist, $title, $recMbid) = @_;
 
     my $titleNorm = _norm($title);
-    return undef if length $titleNorm < 2;
+    # An all-marks title normalises to nothing, so this gate refused to even LOOK
+    # in the library for it. _trackMatches has a punctuation-preserving hatch for
+    # exactly that case, and a gate that never calls it makes the hatch dead code
+    # on this path. The LMS `titles` search below is handed the RAW title anyway,
+    # so nothing downstream needs the normalised form to be non-empty.
+    return undef if length $titleNorm < 2 && !length _punctNorm($title);
     my $artistNorm = _norm($artist);
 
     # Tier 1 — MBID exact.
@@ -8556,7 +8604,7 @@ sub _localByText {
     # full-text search index is present (FTS spans artist/album/title). We re-verify
     # every candidate with _trackMatches ourselves, so this only needs to surface it.
     my $combined = join(' ', grep { length } $artist, $title);
-    my ($item, $n1) = _titlesSearch($combined, $artistNorm, $titleNorm, 20);
+    my ($item, $n1) = _titlesSearch($combined, $artistNorm, $titleNorm, 20, $title);
     return $item if $item;
 
     # Pass 2 — title only. The bare title hits the title index regardless of FTS
@@ -8576,7 +8624,7 @@ sub _localByText {
     # background), not on every open. Wider window (100) since a bare title is less
     # selective than "artist title" — enough to cover same-title tracks in a big library.
     return undef unless length $title && length($artist // '');
-    my ($item2, $n2) = _titlesSearch($title, $artistNorm, $titleNorm, 100);
+    my ($item2, $n2) = _titlesSearch($title, $artistNorm, $titleNorm, 100, $title);
     _dbg("local text: combined '$combined' ($n1) miss -> title-only '$title' "
         . "$n2 candidate(s), " . ($item2 ? 'matched' : 'no match'));
     return $item2;
@@ -8585,7 +8633,7 @@ sub _localByText {
 # Run one LMS `titles` search and return (first _trackMatches-accepted item, candidate
 # count). Shared by both _localByText passes so they search/verify identically.
 sub _titlesSearch {
-    my ($term, $artistNorm, $titleNorm, $limit) = @_;
+    my ($term, $artistNorm, $titleNorm, $limit, $titleRaw) = @_;
     return (undef, 0) unless length $term;
 
     my $req = Slim::Control::Request::executeRequest(undef,
@@ -8594,7 +8642,7 @@ sub _titlesSearch {
 
     my $loop = $req->getResult('titles_loop') || [];
     for my $e (@$loop) {
-        next unless _trackMatches($artistNorm, $titleNorm, $e->{artist}, $e->{title});
+        next unless _trackMatches($artistNorm, $titleNorm, $e->{artist}, $e->{title}, $titleRaw);
         my $item = _localItemFromLoop($e);
         return ($item, scalar @$loop) if $item;
     }
@@ -8643,9 +8691,38 @@ sub _localItemHash {
 # prefix-matches ours (word boundary — tolerates " (Remastered)" etc. after
 # _norm) AND the artist matches. Mirrors _albumMatches but for track titles.
 sub _trackMatches {
-    my ($artistNorm, $titleNorm, $candArtist, $candTitle) = @_;
+    my ($artistNorm, $titleNorm, $candArtist, $candTitle, $titleRaw) = @_;
 
-    return 0 if length $titleNorm < 2;
+    # An all-marks TITLE ("\x{2020}\x{2020}\x{2020}", "\x{2665}") normalises to nothing, and the <2 gate
+    # below then rejected it against every source. This is the SAME escape hatch
+    # _albumMatches has carried since 0.9.83 (ported from Discography 0.10.3),
+    # arriving on the track path seven months later - `_trackMatches` is
+    # single-copy LBF, so no fleet sync ever dragged it along and PFR's copy of
+    # t_matchersync.pl could not have exercised it.
+    #
+    # THE ARTIST GATE IS MANDATORY, and it is what makes a match this thin safe:
+    # the title is carrying almost no information, so it cannot stand alone. That
+    # is deliberately the OPPOSITE of the lenient empty-artist branch at the foot
+    # of this sub, which an ordinary title may take.
+    #
+    # `$titleRaw` is a trailing positional argument, mirroring `$albumRaw` on
+    # _albumMatches, because _punctNorm works on the raw string - _norm has already
+    # thrown the marks away by the time we get here.
+    #
+    # "( )" IS rescued here, and that is worth stating because it is the one case
+    # a fallback bolted onto _norm could NOT reach: _norm strips bracketed spans
+    # before its punctuation pass, so the marks are gone by then. _punctNorm does
+    # not strip brackets, only case and whitespace, so "( )" survives as "()".
+    # Measured: \x{2020}\x{2020}\x{2020}, \x{2665} and "( )" all match through here with a real
+    # artist; a wrong artist, an empty artist and a different mark run all reject.
+    if (length $titleNorm < 2) {
+        my $tp = _punctNorm($titleRaw);
+        return 0 unless length $tp;
+        return 0 unless _punctNorm($candTitle) eq $tp;
+        return 0 if $artistNorm eq '';
+        return _artistMatch($artistNorm, _norm($candArtist));
+    }
+
     my $t = _norm($candTitle);
     return 0 if $t eq '';
     return 0 unless $t eq $titleNorm || index($t, "$titleNorm ") == 0;
@@ -8658,7 +8735,7 @@ sub _trackMatches {
 # playable audio item using the Qobuz protocol url (qobuz://<id>.flac). A string
 # url => the item is Storable and survives the resolved-playlist cache intact.
 sub _searchQobuzTrack {
-    my ($client, $query, $artistNorm, $titleNorm, $album, $collect) = @_;
+    my ($client, $query, $artistNorm, $titleNorm, $album, $collect, $titleRaw) = @_;
 
     my $api = Plugins::Qobuz::Plugin::getAPIHandler($client);
     # undef (not []) → "couldn't query", treated as inconclusive so a transient
@@ -8686,7 +8763,7 @@ sub _searchQobuzTrack {
                 (ref $tr->{artist}    eq 'HASH') ? $tr->{artist}{name}    : undef,
                 (ref $tr->{album} eq 'HASH' && ref $tr->{album}{artist} eq 'HASH') ? $tr->{album}{artist}{name} : undef,
             );
-            next unless grep { _trackMatches($artistNorm, $titleNorm, $_, $tr->{title}) } @artists;
+            next unless grep { _trackMatches($artistNorm, $titleNorm, $_, $tr->{title}, $titleRaw) } @artists;
             my $id = $tr->{id} or next;
 
             my $albumName = ref $tr->{album} eq 'HASH' ? $tr->{album}{title} : '';
@@ -8715,7 +8792,7 @@ sub _searchQobuzTrack {
 # if the plugin's track renderer yields a plain string play url (kept for cache
 # stability); otherwise treat as no match. (Renderer/protocol confirmed on server.)
 sub _searchTidalTrack {
-    my ($client, $query, $artistNorm, $titleNorm, $album, $collect) = @_;
+    my ($client, $query, $artistNorm, $titleNorm, $album, $collect, $titleRaw) = @_;
 
     my $api = Plugins::TIDAL::Plugin::getAPIHandler($client);
     # undef (not []) → inconclusive, so a transient missing handler isn't cached
@@ -8731,7 +8808,7 @@ sub _searchTidalTrack {
             next unless ref $tr eq 'HASH';
             my $artistRef  = $tr->{artist} || ($tr->{artists} && $tr->{artists}[0]) || {};
             my $candArtist = ref $artistRef eq 'HASH' ? $artistRef->{name} : '';
-            next unless _trackMatches($artistNorm, $titleNorm, $candArtist, $tr->{title});
+            next unless _trackMatches($artistNorm, $titleNorm, $candArtist, $tr->{title}, $titleRaw);
 
             my $item = Plugins::TIDAL::Plugin->can('_renderTrack')
                 ? eval { Plugins::TIDAL::Plugin::_renderTrack($tr) } : undef;
@@ -8752,7 +8829,7 @@ sub _searchTidalTrack {
 # the cache-stability rule. Deezer's renderer sets `play` (and usually `url`); we
 # normalise whichever string is present onto url/play and force type=>audio.
 sub _searchDeezerTrack {
-    my ($client, $query, $artistNorm, $titleNorm, $album, $collect) = @_;
+    my ($client, $query, $artistNorm, $titleNorm, $album, $collect, $titleRaw) = @_;
 
     my $api = Plugins::Deezer::Plugin::getAPIHandler($client);
     unless ($api) { $log->info("Deezer track-match: no API handler"); $collect->(undef); return; }
@@ -8770,7 +8847,7 @@ sub _searchDeezerTrack {
             next unless ref $tr eq 'HASH';
             my $artistRef  = $tr->{artist} || ($tr->{artists} && $tr->{artists}[0]) || {};
             my $candArtist = ref $artistRef eq 'HASH' ? $artistRef->{name} : '';
-            next unless _trackMatches($artistNorm, $titleNorm, $candArtist, $tr->{title});
+            next unless _trackMatches($artistNorm, $titleNorm, $candArtist, $tr->{title}, $titleRaw);
 
             my $item = eval { Plugins::Deezer::Plugin::_renderTrack($tr) };
             next unless ref $item eq 'HASH';
@@ -8802,7 +8879,7 @@ sub _searchDeezerTrack {
 # renderer withholds a url from (explicit-content filtering) fails the
 # string-url rule and simply doesn't match.
 sub _searchSpotifyTrack {
-    my ($client, $query, $artistNorm, $titleNorm, $album, $collect) = @_;
+    my ($client, $query, $artistNorm, $titleNorm, $album, $collect, $titleRaw) = @_;
 
     my $api = Plugins::Spotty::Plugin->getAPIHandler($client);
     # See _searchSpotify: signed-out is PERMANENT, so report it as a real no-match
@@ -8827,7 +8904,7 @@ sub _searchSpotifyTrack {
             my @artists = grep { defined && length }
                 map { ref $_ eq 'HASH' ? $_->{name} : undef }
                 @{ (ref $tr->{artists} eq 'ARRAY') ? $tr->{artists} : [] };
-            next unless grep { _trackMatches($artistNorm, $titleNorm, $_, $tr->{name}) } @artists;
+            next unless grep { _trackMatches($artistNorm, $titleNorm, $_, $tr->{name}, $titleRaw) } @artists;
 
             # Guard the foreign renderer (async callback — see _searchDeezerTrack).
             my ($item) = eval { @{ Plugins::Spotty::OPML::trackList($client, [$tr]) || [] } };
@@ -8853,7 +8930,7 @@ sub _searchSpotifyTrack {
 # stable string-url path, so track matching is a no-op for now (album matching is
 # unaffected). Left as a clearly-marked hook to fill in once confirmed on server.
 sub _searchBandcampTrack {
-    my ($client, $query, $artistNorm, $titleNorm, $album, $collect) = @_;
+    my ($client, $query, $artistNorm, $titleNorm, $album, $collect, $titleRaw) = @_;
     $collect->([]);
 }
 
