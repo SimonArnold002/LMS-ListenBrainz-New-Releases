@@ -1,9 +1,54 @@
-# Bundling a Last.fm API key — PROPOSAL, not built
+# Bundling a Last.fm API key — BUILT (working tree, 2026-09-14)
 
-**Status: PROPOSED 2026-09-03. Nothing implemented.** Written after establishing that
-every *upstream* route to Last.fm artist tags is closed (§3), which leaves shipping a key
-inside the plugin as the only way to remove the setup step. Decide §4 before anyone writes
-code; the key itself does not exist yet.
+**Status: BUILT 2026-09-14 on Simon's go-ahead, unversioned and uncommitted.** §4 was
+decided as proposed, with three hardening changes found while building it (below). The
+rest of this doc is the original proposal, kept for its §2/§3 reasoning.
+
+## As built — read this first
+
+- **NO MANUAL OPTION — removed the same day on Simon's call ("not needed").** The
+  settings field, its Check-key button, the three strings and the `lastfm_api_key`
+  pref are gone; `Plugin.pm` deletes any stored value at startup. The built-in key is
+  the only key. This supersedes §4's "keep the pref as an override" and the §4.5
+  settings bullet below; a revoked key is fixed by shipping a new constant in a build.
+- **One accessor.** `API::lastfmKey` (the key in use, honouring the latch),
+  `lastfmKeySource` (`builtin` / `none` / `latched`), `lastfmConfigured`
+  (latch-independent; the render path uses it so stored tags stay visible) and
+  `lastfmLatchState` (`builtin: ok` or the reason, never a value). No plugin code reads
+  the old pref — pinned by `t_lastfmkey.pl` §7.
+- **Storage: XOR-masked + hex-packed** (`LFM_BUILTIN_HEX` / `LFM_BUILTIN_PAD`), not base64
+  — a `base64 -d` recovers MAI's key in one command; this needs the pad as well. Still
+  obfuscation, not a cipher (§2 stands). A clipped constant decodes to NO key.
+- **CHANGE 1 — every Last.fm call is a POST with the key in the BODY** (`_lastfmPost`,
+  the one funnel). Not in the proposal, and the most important protection in the build:
+  LMS core's `SimpleAsyncHTTP::onError` logs `Failed to connect to <uri>` **at WARN**
+  (read from slimserver public/9.0), so under GET a timeout or a 403 wrote the key into
+  every user's `server.log`. Last.fm serves read methods over POST — verified live for
+  `artist.gettoptags`, `artist.getsimilar` and `auth.gettoken`. Diag's probe POSTs too.
+- **§4.3 latch, extended.** Error 10 (invalid) / 26 (suspended) stop that key for the
+  process, logged once; **29 (rate limited) backs off `LFM_RATE_BACKOFF` (1h) and
+  recovers**. Detected on BOTH paths: an invalid key is really **HTTP 403** carrying
+  `{"error":10}` (captured live), which LMS routes to the error callback with the
+  response as its third argument.
+- ~~**CHANGE 2 — a rejected USER key falls back to the built-in key.**~~ Moot: there is
+  no user key any more. A stopped built-in key simply pauses the tier until restart.
+- **CHANGE 3 — a failure is not an empty answer.** `getLastfmTags`' artist step used to
+  call `$finish->([])` on any failure, filing an empty checkpoint; with a latch that would
+  have poisoned the artist whose request tripped it, and a keyless call mid-pass would
+  have filed one for every remaining artist. Both now reach `onError` (the warm counts
+  `failed`, stores nothing). `getSimilarArtistsLastfm` no longer caches a Last.fm error
+  body as "no similar artists".
+- **§4.4 pacing unchanged.** **§4.5**: settings field keeps the override, shows a
+  "Using the built-in key" placeholder and never echoes the built-in value; Diag names
+  the key source and probes it (`lastfm` in the context, `lastfm_key` / `lastfm_keys` in
+  `["lbf","warmstats"]`).
+- **§5 open questions:** 1 — the key was supplied by Simon (whether it sits on a
+  dedicated account is his to confirm); 2/3 not re-measured; 4 unchanged (LBF-only).
+- **Tests:** new `tools/t_lastfmkey.pl` (58, after the manual option was removed),
+  anti-tested five ways — latch removed 9 red, scrub removed 1, failure storing empty 3,
+  GET transport 8, a pref override reinstated 1. `t_diag.pl` 67 → 71 (built-in probed, no-key skip, key in body not URL,
+  context names the source). `t_lastfm_priority.pl` gained a `lastfmKey` stub. All 33
+  `tools/t_*.pl` exit 0. **Not yet verified live** — needs a build installed.
 
 ---
 

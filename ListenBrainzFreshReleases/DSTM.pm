@@ -225,8 +225,9 @@ sub _radioSeedOnly {
 #   'hosted' — the hosted LMS-community API. NO KEY NEEDED, and every entry it
 #              returns carries an MBID, so _resolveArtistMbids below short-
 #              circuits on the inline id and makes ZERO MusicBrainz lookups.
-#   'lastfm' — Last.fm, gated on lastfm_api_key. Names with spotty mbids, so the
-#              misses cost one throttled MB lookup each.
+#   'lastfm' — Last.fm, gated on a key being in use (the built-in one unless the
+#              user set their own — API::lastfmKey). Names with spotty mbids, so
+#              the misses cost one throttled MB lookup each.
 # Split out from the old Last.fm-only _radioViaLastfm; everything after the fetch
 # is shared, because both sources deliberately return the same
 # { name, artist_mbid, score } shape.
@@ -235,7 +236,7 @@ sub _radioViaNames {
     $src ||= 'lastfm';
 
     unless (length($seedName // '')) { $orig->(); return; }
-    if ($src eq 'lastfm' && !length($prefs->get('lastfm_api_key') // '')) {
+    if ($src eq 'lastfm' && !length($API->lastfmKey)) {
         $orig->();
         return;
     }

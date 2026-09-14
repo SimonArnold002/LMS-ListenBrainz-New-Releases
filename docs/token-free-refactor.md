@@ -254,6 +254,10 @@ the cover (`tools/make_covers.py` → `menu-follow.png`), and the strings.
 
 ## 4. The Last.fm key
 
+> **REVERSED (Simon, 2026-09-14) — the plugin-owned key IS now built**, with the pref as
+> an override. See `docs/lastfm-key-bundling.md` "As built". The note below is kept as the
+> record of the earlier decision; the hosted API never grew a Last.fm tags route.
+>
 > **SUPERSEDED (Simon, 2026-08-12) — do NOT ship the plugin-owned key recommended below.**
 > The plugin is moving to the hosted LMS-community API as its metadata backend
 > (`docs/hosted-lms-community-api.md`), which removes the need for a Last.fm key rather than

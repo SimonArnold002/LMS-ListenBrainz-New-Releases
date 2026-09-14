@@ -176,11 +176,15 @@ my $log = Slim::Utils::Log->addLogCategory({
 
 my $prefs = preferences('plugin.listenbrainzfreshreleases');
 
+# The manual Last.fm key field was REMOVED 2026-09-14 — the built-in key
+# (API::lastfmKey) is the only one used. Drop any stored value so a user's old key
+# does not sit unused in prefs.yaml. Idempotent; a no-op once it is gone.
+eval { $prefs->remove('lastfm_api_key') if defined $prefs->get('lastfm_api_key'); 1 };
+
 $prefs->init({
     # General
     username             => '',
     token                => '',
-    lastfm_api_key       => '',
     muspy_userid         => '',
     muspy_future         => 1,
     # THE RELEASE WINDOW IS WHOLE MONDAY-TO-SUNDAY WEEKS (0.9.185), replacing the
@@ -482,6 +486,12 @@ sub _cliWarmStats {
     $request->addResult('ticks',   $rep->{ticks}   // 0);
     $request->addResult('tick_at', int($rep->{tick_at} // 0));
     $request->addResult('dev_build', DEV_BUILD ? 1 : 0);
+    # Which Last.fm key the warm is using, and whether either has been stopped. The
+    # SOURCE only — this report is meant to be pasted, so never the value.
+    $request->addResult('lastfm_key',
+        eval { Plugins::ListenBrainzFreshReleases::API->lastfmKeySource } // '');
+    $request->addResult('lastfm_keys',
+        eval { Plugins::ListenBrainzFreshReleases::API->lastfmLatchState } // '');
     my $details = Plugins::ListenBrainzFreshReleases::Browse::detailWarmStats();
     $request->addResult('detail_' . $_, $details->{$_}) for sort keys %$details;
 
@@ -610,6 +620,7 @@ sub _cliDiag {
             # meant to be pasted into a support thread.
             $request->addResult('username', $ctx->{username});
             $request->addResult('token',    $ctx->{token});
+            $request->addResult('lastfm',   $ctx->{lastfm});
             $request->addResult('proxy',    $ctx->{proxy});
 
             my $j = 0;

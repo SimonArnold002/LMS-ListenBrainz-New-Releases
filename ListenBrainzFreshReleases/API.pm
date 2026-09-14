@@ -4315,7 +4315,7 @@ sub _cleanBio {
 # payload's release_tags are both empty (common for brand-new releases). Tries
 # the album's top tags, then the artist's (the artist almost always has tags
 # even when a new album doesn't yet). Requires a free Last.fm API key in the
-# lastfm_api_key pref; with no key this is a graceful no-op. Detail page only.
+# built-in key (API::lastfmKey); with no key in use this is a graceful no-op.
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Cache-ONLY read of the Last.fm tags for an artist/album — never makes a request.
@@ -4382,12 +4382,187 @@ sub peekLastfmTags {
     return $tags;
 }
 
+# ---------------------------------------------------------------------------
+# THE LAST.FM KEY — a BUILT-IN key, and the ONLY one. There is no user override:
+# the settings field was removed on Simon's call (2026-09-14, "not needed").
+#
+# Decided by Simon 2026-09-14, overriding token-free-refactor.md §4's "superseded"
+# note; the design is docs/lastfm-key-bundling.md §4. Tier 5 of the genre ladder is
+# the only rung not derived from MusicBrainz, and gating it on a key most users
+# never create cost them roughly a third of their genre labels.
+#
+# WHAT "AS SECURE AS WE CAN" MEANS, stated plainly so nobody spends a session trying
+# to do better: a key the plugin can use at runtime is a key anyone holding the zip
+# can recover. No encoding changes that. What CAN be controlled is where the key
+# travels and what happens when it dies:
+#
+#  1. NOT PLAINTEXT IN THE REPO. XOR-masked and hex-packed, so it is not found by a
+#     grep for the key, by GitHub secret scanning, or by a `base64 -d` (MAI's
+#     approach). Obfuscation, not a cipher — that is the whole of its protection.
+#  2. NEVER IN A URL. Every call is a POST with the key in the BODY. LMS core logs a
+#     failed request's full URI at WARN ("Failed to connect to <uri>" in
+#     SimpleAsyncHTTP::onError, read from slimserver public/9.0), so a GET put the
+#     key into every user's server.log on any timeout or 403. Last.fm serves read
+#     methods over POST — verified live 2026-09-14 for artist.gettoptags,
+#     artist.getsimilar and auth.gettoken.
+#  3. NEVER LOGGED OR DISPLAYED. _lfmScrub runs over every Last.fm error we log;
+#     Diag and warmstats report the key's STATE, never its value, and there is no
+#     settings field that could echo it.
+#  4. ONLY TO LAST.FM, and only over HTTPS (LASTFM_BASE_URL).
+#  5. A REJECTED KEY LATCHES OFF (_lfmNoteError). Error 10 (invalid) and 26
+#     (suspended) stop the key for the life of the process, logged ONCE, so a
+#     revoked key costs one request rather than one per artist every night — the
+#     tier then behaves exactly like a keyless install. Error 29 (rate limited)
+#     backs off for LFM_RATE_BACKOFF instead. A revoked key is fixed by shipping a
+#     new LFM_BUILTIN_HEX in a build.
+#  6. PACING UNCHANGED. Under a shared key all traffic is attributable to one key,
+#     even though it arrives from many IPs; the one-request-per-second lane in
+#     Browse::_warmLastfm is what keeps that looking like a well-behaved app. Do
+#     not loosen it because the key is now free to the user.
+# ---------------------------------------------------------------------------
+use constant LFM_BUILTIN_HEX  => '680f17520c0b4a0d5c740a4345535c2114520c5d49234255420937000f040342';
+use constant LFM_BUILTIN_PAD  => 'Plugins::ListenBrainzFreshReleases';
+use constant LFM_RATE_BACKOFF => 3600;
+
+my %LFM_LATCH;          # key => { reason, until } — until 0 = for this process
+my %LFM_LATCH_LOGGED;   # key => { reason => 1 }, so each stop is logged once
+
+sub _lfmBuiltin {
+    my $raw  = pack('H*', LFM_BUILTIN_HEX);
+    my $pad  = LFM_BUILTIN_PAD;
+    my $mask = substr($pad x (1 + int(length($raw) / length($pad))), 0, length $raw);
+    my $key  = $raw ^ $mask;
+    # A mangled constant must read as "no built-in key", never as a garbage key
+    # sent upstream on every request.
+    return $key =~ /^[0-9a-f]{32}$/ ? $key : '';
+}
+
+sub _lfmLatched {
+    my ($key) = @_;
+    my $l = $LFM_LATCH{$key // ''} or return '';
+    if ($l->{until} && $l->{until} <= time()) {
+        delete $LFM_LATCH{$key};
+        delete $LFM_LATCH_LOGGED{$key};
+        return '';
+    }
+    return $l->{reason};
+}
+
+# (key, source). Source is 'builtin', 'none' (the constant did not decode) or
+# 'latched' (the key has been stopped). ignore_latch answers "which key WOULD be
+# used" — what Diag probes, so a stopped key can still be re-checked.
+sub _lfmResolve {
+    my (%o) = @_;
+    my $key = _lfmBuiltin();
+    return ('', 'none')    unless length $key;
+    return ($key, 'builtin') if $o{ignore_latch} || !_lfmLatched($key);
+    return ('', 'latched');
+}
+
+sub lastfmKey        { my ($class, %o) = @_; return (_lfmResolve(%o))[0] }
+sub lastfmKeySource  { my ($class, %o) = @_; return (_lfmResolve(%o))[1] }
+# Whether Last.fm is part of this install at all, latched or not. The render path
+# gates on this, not on lastfmKey: tags already stored stay displayable while a key
+# is stopped.
+sub lastfmConfigured { return length((_lfmResolve(ignore_latch => 1))[0]) ? 1 : 0 }
+
+# "builtin: ok" / "builtin: invalid key (Last.fm error 10)" / "no key" — never a value.
+sub lastfmLatchState {
+    my $key = _lfmBuiltin();
+    return 'no key' unless length $key;
+    return 'builtin: ' . (_lfmLatched($key) || 'ok');
+}
+
+sub _lfmNoteError {
+    my ($key, $code) = @_;
+    return unless length($key // '') && defined $code && $code =~ /^\d+$/;
+    my ($reason, $until);
+    if    ($code == 10) { ($reason, $until) = ('invalid key (Last.fm error 10)',   0) }
+    elsif ($code == 26) { ($reason, $until) = ('key suspended (Last.fm error 26)', 0) }
+    elsif ($code == 29) { ($reason, $until) = ('rate limited (Last.fm error 29)',  time() + LFM_RATE_BACKOFF) }
+    else                { return }
+    $LFM_LATCH{$key} = { reason => $reason, until => $until };
+    return if $LFM_LATCH_LOGGED{$key}{$reason}++;
+    $log->warn("Last.fm: stopped using the built-in Last.fm API key — $reason; "
+        . ($until ? 'retrying in ' . int(LFM_RATE_BACKOFF / 60) . ' minutes'
+                  : 'not used again until LMS restarts; Last.fm genres pause until then'));
+}
+
+# Any api_key=… and any literal key value, whichever form a message carries.
+sub _lfmScrub {
+    my ($s) = @_;
+    return '' unless defined $s;
+    $s =~ s/(api_key=)[^&\s"']*/$1***/gi;
+    my $k = _lfmBuiltin();
+    $s =~ s/\Q$k\E/***/g if length $k;
+    return $s;
+}
+
+# THE ONE WAY A REQUEST REACHES LAST.FM. $onDone gets the decoded response hash;
+# $onError gets a SCRUBBED message. A Last.fm error body counts as an error whether
+# it arrives with HTTP 200 or 4xx — an invalid key is a 403 carrying error 10.
+sub _lastfmPost {
+    my ($class, $params, $onDone, $onError) = @_;
+    $onError ||= sub {};
+    my $key = $params->{api_key} // '';
+    unless (length $key) { $onError->('no Last.fm key'); return; }
+    if (my $why = _lfmLatched($key)) { $onError->("Last.fm key not in use: $why"); return; }
+
+    my %p = (format => 'json', %$params);
+    my $body = join('&', map {
+        (my $v = defined $p{$_} ? $p{$_} : '')
+            =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X", ord($1))/ge;
+        "$_=$v";
+    } sort keys %p);
+
+    my $http = Slim::Networking::SimpleAsyncHTTP->new(
+        sub {
+            my $resp = shift;
+            my $data = eval { from_json($resp->content) };
+            if ($@ || ref $data ne 'HASH') {
+                $onError->('Last.fm: unreadable response');
+                return;
+            }
+            if (defined $data->{error}) {
+                _lfmNoteError($key, $data->{error});
+                $onError->("Last.fm error $data->{error}");
+                return;
+            }
+            $onDone->($data);
+        },
+        sub {
+            # LMS calls the error callback as (self, error, HTTP::Response) — read
+            # from slimserver public/9.0 SimpleAsyncHTTP::onError — so a 403's JSON
+            # body, and with it the Last.fm error code, is available here.
+            my ($self, $err, $res) = @_;
+            my $data = $res ? eval { from_json($res->content) } : undef;
+            _lfmNoteError($key, $data->{error}) if ref $data eq 'HASH' && defined $data->{error};
+            my $msg = _lfmScrub($err // eval { $self->error } // 'unknown error');
+            $log->error("Last.fm API error: $msg");
+            $onError->($msg);
+        },
+        { timeout => 15 }
+    );
+    $http->post(LASTFM_BASE_URL,
+        'Content-Type' => 'application/x-www-form-urlencoded',
+        'User-Agent'   => USER_AGENT(),
+        $body);
+}
+
 sub getLastfmTags {
     my ($class, $artist, $album, $onDone, $onError, $force) = @_;
 
-    my $key = $prefs->get('lastfm_api_key');
-    unless ($key && length($artist // '')) {
+    unless (length($artist // '')) {
         $onDone->([]);
+        return;
+    }
+    my $key = $class->lastfmKey;
+    unless (length $key) {
+        # NO KEY IN USE is not an answer about this artist. Report it as a failure
+        # when the caller can take one, so the warm counts it and stores nothing —
+        # otherwise a key latching off mid-pass would file an empty checkpoint for
+        # every remaining artist in the queue.
+        $onError ? $onError->('no Last.fm key in use') : $onDone->([]);
         return;
     }
 
@@ -4425,7 +4600,11 @@ sub getLastfmTags {
         $class->_lastfmCall('artist.gettoptags',
             { artist => $artist, api_key => $key },
             sub { $finish->(shift) },
-            sub { $finish->([]) },   # any failure -> empty; never break the page
+            # A FAILURE is not an empty answer. With a caller that takes errors (the
+            # warm) nothing is stored, so the artist is asked again next pass rather
+            # than filed as "no tags" — which a stopped key would otherwise do to
+            # the artist whose request tripped it.
+            sub { $onError ? $onError->(shift) : $finish->([]) },
         );
     };
 
@@ -4448,29 +4627,9 @@ sub getLastfmTags {
 # One Last.fm getTopTags call -> cleaned tag-name arrayref via $onDone.
 sub _lastfmCall {
     my ($class, $method, $args, $onDone, $onError) = @_;
-
-    my %p = (method => $method, format => 'json', autocorrect => 1, %$args);
-    my $qs = join('&', map {
-        (my $v = defined $p{$_} ? $p{$_} : '')
-            =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X", ord($1))/ge;
-        "$_=$v";
-    } sort keys %p);
-    my $url = LASTFM_BASE_URL . '?' . $qs;
-
-    my $http = Slim::Networking::SimpleAsyncHTTP->new(
-        sub {
-            my $resp = shift;
-            my $data = eval { from_json($resp->content) };
-            if ($@) {
-                $onError->("JSON error: $@") if ref $onError eq 'CODE';
-                return;
-            }
-            $onDone->(_parseLastfmTags($data));
-        },
-        sub { _handleError(shift, $onError) },
-        { timeout => 15 }
-    );
-    $http->get($url, 'User-Agent' => USER_AGENT);
+    $class->_lastfmPost({ method => $method, autocorrect => 1, %$args },
+        sub { $onDone->(_parseLastfmTags(shift)) },
+        $onError);
 }
 
 # Top tag names (weight-sorted, max 5) from a Last.fm getTopTags response.
@@ -4564,7 +4723,7 @@ sub getSimilarArtistsHosted {
 # ---------------------------------------------------------------------------
 # Similar artists from Last.fm (artist.getsimilar) — the FALLBACK for the radio
 # propagator when ListenBrainz's similar-artists dataset has nothing for the seed.
-# Needs lastfm_api_key (graceful empty list otherwise). Returns an arrayref of
+# Needs the built-in key in use (graceful empty list otherwise). Returns an arrayref of
 # { name, artist_mbid (may be ''), score }, match-desc. Last.fm gives artist NAMES
 # (its mbids are spotty), so the caller resolves names to MBIDs before fanning out.
 # Cached lbf:lfmsimilar:* (found = SIMILAR_TTL, empty = LFM_EMPTY_TTL).
@@ -4576,30 +4735,25 @@ sub getSimilarArtistsLastfm {
     $onDone  ||= sub {};
     $onError ||= sub { $onDone->([]) };
 
-    my $key = $prefs->get('lastfm_api_key');
-    unless ($key && length($artist // '')) { $onDone->([]); return; }
+    my $key = $class->lastfmKey;
+    unless (length($key) && length($artist // '')) { $onDone->([]); return; }
 
-    # Octets — safe md5 cache key and per-byte URL encoding for CJK/emoji names.
+    # Octets — safe md5 cache key and per-byte body encoding for CJK/emoji names.
     utf8::encode($artist) if utf8::is_utf8($artist);
 
     my $cacheKey = 'lbf:lfmsimilar:' . lc $artist;
     if (my $cached = $cache->get($cacheKey)) { $onDone->($cached); return; }
 
-    my %p = (method => 'artist.getsimilar', artist => $artist, autocorrect => 1,
-             limit => LFM_SIMILAR_LIMIT, api_key => $key, format => 'json');
-    my $qs = join('&', map {
-        (my $v = defined $p{$_} ? $p{$_} : '')
-            =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X", ord($1))/ge;
-        "$_=$v";
-    } sort keys %p);
-    my $url = LASTFM_BASE_URL . '?' . $qs;
-
-    my $http = Slim::Networking::SimpleAsyncHTTP->new(
+    # Through _lastfmPost like every Last.fm call: key in the body, error codes
+    # latched, messages scrubbed. A Last.fm error body now reaches $onError and is
+    # NOT cached as "no similar artists", which the old GET path did for a 200.
+    $class->_lastfmPost(
+        { method => 'artist.getsimilar', artist => $artist, autocorrect => 1,
+          limit => LFM_SIMILAR_LIMIT, api_key => $key },
         sub {
-            my $resp = shift;
-            my $data = eval { from_json($resp->content) };
+            my $data = shift;
             my @out;
-            if (!$@ && ref $data eq 'HASH' && ref $data->{similarartists} eq 'HASH') {
+            if (ref $data->{similarartists} eq 'HASH') {
                 my $a = $data->{similarartists}{artist};
                 my @arts = ref $a eq 'ARRAY' ? @$a : ($a ? ($a) : ());
                 for my $r (@arts) {
@@ -4618,10 +4772,8 @@ sub getSimilarArtistsLastfm {
             $log->info("Last.fm similar artists for '$artist': " . scalar(@out));
             $onDone->(\@out);
         },
-        sub { _handleError(shift, $onError) },
-        { timeout => 15 }
+        $onError,
     );
-    $http->get($url, 'User-Agent' => USER_AGENT);
 }
 
 # Normalise a MusicBrainz release lookup into { media => [...] }. Genres are NOT

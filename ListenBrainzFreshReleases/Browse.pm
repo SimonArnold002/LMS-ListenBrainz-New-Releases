@@ -9751,7 +9751,9 @@ sub _warmLastfm {
     my ($releases, $meta, $done, $max) = @_;   # $max: the warm passes the whole-feed bound
     $done ||= sub {};
     $max ||= LFM_WARM_MAX;
-    unless (($prefs->get('lastfm_api_key') // '') ne '') {
+    # The built-in key makes this on for everyone. It is off only when no key is in
+    # use at all — none configured, or every key stopped (API::_lfmNoteError).
+    unless (length(Plugins::ListenBrainzFreshReleases::API->lastfmKey)) {
         $done->({ enabled => 0 });
         return;
     }
@@ -10288,7 +10290,9 @@ sub _mergeHostedGenres {
 # whatever landed; an artist not yet warmed simply has no genre this time round.
 sub _lastfmGenres {
     my ($rel) = @_;
-    return () unless ($prefs->get('lastfm_api_key') // '') ne '';
+    # lastfmConfigured, NOT lastfmKey: tags already stored stay displayable while a
+    # key is stopped. Only the fetching side (_warmLastfm) cares about the latch.
+    return () unless Plugins::ListenBrainzFreshReleases::API->lastfmConfigured;
     my $artist = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist') or return ();
     my $album  = _pickValue($rel, 'release_name', 'title', 'name') // '';
     my $tags   = Plugins::ListenBrainzFreshReleases::API->peekLastfmTags($artist, $album);

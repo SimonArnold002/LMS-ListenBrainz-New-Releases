@@ -67,9 +67,6 @@ PLUGIN_LBF_TOKEN_CHECK_FAILED
 PLUGIN_LBF_TOKEN_CHECK
 	EN	Check token
 
-PLUGIN_LBF_LASTFM_CHECK
-	EN	Check key
-
 PLUGIN_LBF_SECTION_DIAG
 	EN	Connection Check
 
@@ -120,12 +117,6 @@ PLUGIN_LBF_DIAG_FAIL
 
 PLUGIN_LBF_DIAG_SKIP
 	EN	Not set
-
-PLUGIN_LBF_LASTFM_KEY
-	EN	Last.fm API Key (optional)
-
-PLUGIN_LBF_LASTFM_KEY_HINT
-	EN	Fills in genres that MusicBrainz and ListenBrainz have none for, which is common for brand-new releases — it is the only genre source independent of those two, and it is used on the release lists as well as the detail page. Also gives the ListenBrainz Radio mixer a second source of similar artists. Get a free key at last.fm/api/account/create. Leave blank to disable.
 
 PLUGIN_LBF_MUSPY_USERID
 	EN	MuSpy user ID (optional)

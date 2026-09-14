@@ -39,7 +39,7 @@ sub page {
 
 sub prefs {
     return ($prefs, qw(
-        username token lastfm_api_key muspy_userid muspy_future weeks_past weeks_future play_via people_follow prefer_library mb_base_url genre_lookup debug_log warm_covers
+        username token muspy_userid muspy_future weeks_past weeks_future play_via people_follow prefer_library mb_base_url genre_lookup debug_log warm_covers
         svc_priority_qobuz svc_priority_bandcamp svc_priority_tidal svc_priority_deezer svc_priority_spotify
         foryou_past foryou_future foryou_artwork_only foryou_various
         foryou_type_album foryou_type_single foryou_type_ep foryou_type_broadcast foryou_type_other

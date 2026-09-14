@@ -13,12 +13,6 @@
 <div id="lbf_token_status" style="margin-top:6px;font-weight:bold;"></div>
 [% END %]
 
-[% WRAPPER setting title="PLUGIN_LBF_LASTFM_KEY" desc="PLUGIN_LBF_LASTFM_KEY_HINT" %]
-<input type="password" name="pref_lastfm_api_key" id="lbf_lastfm" value="[% prefs.lastfm_api_key %]" size="45" autocomplete="off">
-<button type="button" id="lbf_lastfm_check" style="margin-left:6px;">[% 'PLUGIN_LBF_LASTFM_CHECK' | string %]</button>
-<div id="lbf_lastfm_status" style="margin-top:6px;font-weight:bold;"></div>
-[% END %]
-
 [%# The week window. pref_weeks_past is ALSO the sentinel Settings::handler uses %]
 [%# to recognise a real form POST before coercing the checkboxes — if this field %]
 [%# ever moves or is renamed, move the `exists $params->{pref_weeks_past}` check %]
@@ -247,7 +241,7 @@
     // STORED, so a field edited but not yet saved would be checked as its old
     // value — say so rather than reporting a stale result as current.
     var saved = {};
-    ['lbf_token', 'lbf_lastfm'].forEach(function(id) {
+    ['lbf_token'].forEach(function(id) {
         var f = el(id);
         saved[id] = f ? f.value : '';
     });
@@ -304,7 +298,6 @@
         // Feed the two per-credential rows back into their own fields, so the
         // answer appears where the question was asked.
         fieldStatus('lbf_token_status',  'lbf_token',  pick(rows, 'listenbrainz'));
-        fieldStatus('lbf_lastfm_status', 'lbf_lastfm', pick(rows, 'lastfm'));
     }
 
     function pick(rows, key) {
@@ -382,7 +375,7 @@
 
         // The per-credential buttons run the same server-side check; they differ
         // only in where the answer is shown.
-        ['lbf_token_check', 'lbf_lastfm_check'].forEach(function(id) {
+        ['lbf_token_check'].forEach(function(id) {
             var x = el(id);
             if (x) { x.addEventListener('click', run); }
         });

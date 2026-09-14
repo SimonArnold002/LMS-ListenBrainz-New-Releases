@@ -61,6 +61,7 @@ because line numbers rot on the next edit.
 | The 45s `PLAYLIST_TIMEOUT` default is NOT an oversight left behind by | A2 | `The 45s `PLAYLIST_TIMEOUT` default is NOT an` |
 | The two unmatched-tracks diagnostic views over-reporting on a cold, cut-short | A2 | `The two unmatched-tracks diagnostic views` |
 | `_playlistTtl`'s `$timedOut` ranking ABOVE the partial/found split is the point | A2 | ``_playlistTtl`'s `$timedOut` ranking ABOVE` |
+| The BUILT-IN Last.fm API key in `API.pm` is DELIBERATE, not a leaked secret | A2 | `The BUILT-IN Last.fm API key in `API.pm` is` |
 | `GENRE_FACT_VERSION` is NOT bumped for the 0.9.194 `_norm` change — deliberate | B | ``GENRE_FACT_VERSION` is NOT bumped for the` |
 | TWO 0.9.207 FIXES ARE STILL UNPROVEN LIVE, and that is known, not missed | B | `TWO 0.9.207 FIXES ARE STILL UNPROVEN LIVE,` |
 
@@ -186,6 +187,18 @@ invites the next round to find one counter-example and reopen the whole entry.
   the 0.9.210 fix. They were not asked for, they still display their own names, and
   deciding them silently is how the darkwave split got in. Raising them is fine;
   raising them as an *oversight* is not.
+- **The BUILT-IN Last.fm API key in `API.pm` is DELIBERATE, not a leaked secret.**
+  Simon, 2026-09-14: ship a key so every user gets the genre ladder's tier 5 (the only
+  rung not derived from MusicBrainz). `LFM_BUILTIN_HEX` is XOR-masked on purpose;
+  a key the plugin decodes at runtime cannot be secret, and **proposing encryption, a
+  remote key fetch or per-install keys is out of scope** — see
+  `docs/lastfm-key-bundling.md` §2 and "As built". What IS guarded, and is a real
+  finding if broken: the key travels ONLY in a POST body (LMS core logs a failed GET's
+  URI at WARN), is never logged/displayed, a rejected key latches off after one request,
+  and the per-second pacing is unchanged. `tools/t_lastfmkey.pl` pins all of it.
+  **There is NO manual override** — the settings field and `lastfm_api_key` pref were
+  removed the same day on Simon's call ("not needed"); do not report the missing field
+  or propose restoring it.
 - **The album→single release-type filter is deliberately LBF-only**, outside the
   shared matcher. It is not matcher drift.
 - **Artist sort names stay on MusicBrainz.** The ListenBrainz `type`-driven local
@@ -357,7 +370,7 @@ mechanism this ledger replaces.
 - **Your taste** — filter by type / artwork-only / Various Artists; **per-view sort** (a "Sorted by…" toggle in each list's Options section — Release Date / Artist / Album Title, kept within the weekly W/C headers); release-window; cached & pre-warmed (instant), **no extra server software**.
 - **Plays nicely with Listen Later** — adding a release passes the real MusicBrainz release type (album / EP / single) across, which the streaming services mostly don't expose, so the saved row is labelled and play-tracked correctly rather than guessed from a track count.
 
-**Requirements:** LMS 9.0.0+ (Material Skin); a ListenBrainz **username** for the personalised features — no API token (All Releases needs nothing). A token is **optional** and adds only the *Recommended* list under People You Follow, whose feed is genuinely private. Optional Qobuz/Tidal/Bandcamp/Deezer/Spotify-via-Spotty (playback), MAI plugin (artist photos+bios — **the only bio source since 0.9.186**), free Last.fm key (the genre ladder's tier 5, and DSTM similar artists). Every optional add-on degrades gracefully.
+**Requirements:** LMS 9.0.0+ (Material Skin); a ListenBrainz **username** for the personalised features — no API token (All Releases needs nothing). A token is **optional** and adds only the *Recommended* list under People You Follow, whose feed is genuinely private. Optional Qobuz/Tidal/Bandcamp/Deezer/Spotify-via-Spotty (playback), MAI plugin (artist photos+bios — **the only bio source since 0.9.186**), Last.fm is **built in** (the genre ladder's tier 5, and DSTM similar artists — no key to set, and no settings field for one). Every optional add-on degrades gracefully.
 
 **Install:** add `https://simonarnold002.github.io/LMS-ListenBrainz-New-Releases/repo.xml` in LMS → Settings → Plugins.
 
@@ -450,6 +463,45 @@ script as a `<meta refresh>` redirect to `README.html`. **Don't hand-edit `READM
 part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
+
+**0.9.213** — built 2026-09-14, **NOT installed and NOT tested live.** **LAST.FM IS BUILT IN
+FOR EVERY USER — and there is no manual key any more.** No schema change, no cache-family
+bump, and caches are preserved as usual.
+
+**WHY.** Last.fm is the genre ladder's tier 5 and the only rung not derived from
+MusicBrainz; gating it on a key most users never created cost them roughly a third of their
+genre labels. Simon reversed the 2026-08-12 "superseded" call and supplied a key. Full record:
+`docs/lastfm-key-bundling.md` "As built"; the review verdict is in Ledger §A2 (`The BUILT-IN
+Last.fm API key in `API.pm` is`).
+
+**WHAT SHIPS.**
+- **The key is XOR-masked + hex-packed** (`LFM_BUILTIN_HEX`/`LFM_BUILTIN_PAD`), not base64 —
+  obfuscation only, stated plainly in the code; a clipped constant decodes to NO key.
+- **Every Last.fm request is a POST with the key in the BODY** (`API::_lastfmPost`, the one
+  funnel for tags, similar artists and Diag's probe). LMS core's `SimpleAsyncHTTP::onError`
+  logs a failed request's URI at WARN, so the old GET put the key into `server.log` on any
+  timeout or 403. Last.fm serves the read methods over POST — verified live.
+- **A rejected key latches off** (`_lfmNoteError`): error 10/26 stop it for the process,
+  logged once; 29 backs off 1h and recovers. An invalid key is really HTTP 403 +
+  `{"error":10}`, read from the error callback's response argument.
+- **A failure is no longer stored as an empty answer.** `getLastfmTags`' artist step used to
+  file `[]` on any failure; it now reaches `onError`, so the warm counts `failed` and asks
+  again next pass. `getSimilarArtistsLastfm` no longer caches a Last.fm error body.
+- **The manual option is GONE** (Simon: "not needed"): the settings field, Check-key button,
+  three strings and the `lastfm_api_key` pref. `Plugin.pm` deletes a stored value at startup.
+  Every gate reads `API::lastfmKey`; the render path reads `lastfmConfigured`, so stored tags
+  stay visible while a key is stopped. `warmstats` reports `lastfm_key`/`lastfm_keys` and Diag
+  reports the key's STATE — never its value.
+
+**TESTS.** New `tools/t_lastfmkey.pl` (58) — storage, transport, latch, failures, scrubbing,
+wiring — with the HTTP stub modelled on slimserver 9.0's own callback shape. Anti-tested five
+ways: latch removed 9 red, scrub removed 1, failure storing empty 3, GET transport 8, a pref
+override reinstated 1. `t_diag.pl` 67 → 71. All 33 `tools/t_*.pl` exit 0; `t_loads.pl` 20
+passes against the BUILT ZIP, which was extracted and diffed against the working tree.
+
+**FIRST THING TO CHECK AFTER INSTALLING:** `lbf warmstats` → `plugin_version 0.9.213`,
+`lastfm_key builtin`, `lastfm_keys builtin: ok`; the Connection Check's Last.fm row reads
+"The built-in API key is valid".
 
 **0.9.212** — built 2026-09-10. `_trackMatches` gains the short-title `_punctNorm` escape
 hatch `_albumMatches` has carried since 0.9.83 (ported from Discography 0.10.3): a track
@@ -3110,8 +3162,10 @@ candidates, not as one suspect:
 - **`docs/year-in-music.md`**, **`docs/recommended-listening-row.md`** — both untouched.
 - **`docs/token-free-refactor.md` §3.2/§3.3** — rebuilding Recommended on public
   loved-tracks/pins, and the volume decision it depends on.
-- **`docs/lastfm-key-bundling.md`** — proposed 2026-09-03, nothing implemented, and §4
-  needs a decision before any code.
+- ~~**`docs/lastfm-key-bundling.md`**~~ — **BUILT 2026-09-14 in the working tree**, on
+  Simon's go-ahead; unversioned, not installed, not live-verified. Read its "As built"
+  section: POST-only transport, the rejected-key latch, user→built-in fallback, and
+  failures no longer stored as empty answers. Guard: `tools/t_lastfmkey.pl`.
 
 **Merge-gate debt.** `main` is at 0.9.149 and `dev` at 0.9.210. The CHANGELOG and README
 are owed for that whole gap, plus **a credit line for honzup** (PR #17's own CHANGELOG
@@ -4566,7 +4620,7 @@ belongs in `handler`, before `SUPER::handler`. Fleet-wide rule — LBF, PFR and 
 ### General Settings
 - `username` — ListenBrainz username. **This is the only required credential** (0.9.160)
 - `token` — ListenBrainz API token, **OPTIONAL since 0.9.160**. It gates exactly one feature: the *Recommended* list under People You Follow (`/1/user/<u>/feed/events` is the only endpoint in the plugin that 401s anonymously). Every other LB endpoint returns a byte-identical payload with or without it — verified live, see `docs/token-free-refactor.md` §0. Still SENT on `fresh_releases` when set; `Settings::handler` still validates it on save
-- `lastfm_api_key` — optional Last.fm API key. **Two roles as of 0.9.186** (it had three): the genre ladder's **tier 5** — filled by `_warmLastfm`, and the ONLY rung not derived from MusicBrainz ([[lbf-genre-sources-one-well]]), so it is what fills the lists and the detail page for brand-new releases; and **similar artists for the DSTM radio** when ListenBrainz's dataset has none. The third — the artist biography when MAI isn't installed — was removed in 0.9.186, as was the detail page's own second Last.fm tag call (tier 5 had already answered by then). Default empty = disabled
+- ~~`lastfm_api_key`~~ — **REMOVED 2026-09-14 (working tree).** The field, its Check-key button, its strings and the pref are gone; the plugin uses ONLY its built-in key (`API::lastfmKey`, see `docs/lastfm-key-bundling.md` "As built"), and `Plugin.pm` deletes any stored value at startup. What the key does — **two roles as of 0.9.186** (it had three): the genre ladder's **tier 5** — filled by `_warmLastfm`, and the ONLY rung not derived from MusicBrainz ([[lbf-genre-sources-one-well]]), so it is what fills the lists and the detail page for brand-new releases; and **similar artists for the DSTM radio** when ListenBrainz's dataset has none. The third — the artist biography when MAI isn't installed — was removed in 0.9.186, as was the detail page's own second Last.fm tag call (tier 5 had already answered by then). Default empty = disabled
 - **The release window is WHOLE MONDAY-TO-SUNDAY WEEKS (0.9.185).** It replaced a rolling `days`
   count (1-90, default 14) measured from today, which cut the current week in half: the UI renders
   `W/C <Monday>` rows, but the window's edges landed on arbitrary days, so with *Include earlier

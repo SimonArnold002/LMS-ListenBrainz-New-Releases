@@ -116,6 +116,15 @@ BEGIN {
         }
         return;   # silent host
     }
+    # POST routes exactly like GET (REQUESTS records the URL), and records the
+    # body separately — section 5 needs to tell "the key is sent" apart from "the
+    # key is in the URL". Body is the trailing odd argument, as LMS takes it.
+    our @BODIES;
+    sub post {
+        my ($self, $url, @rest) = @_;
+        push @BODIES, (@rest % 2 ? pop @rest : '');
+        return $self->get($url);
+    }
     $INC{'Slim/Networking/SimpleAsyncHTTP.pm'} = 1;
 
     package T::Resp;
@@ -129,6 +138,13 @@ BEGIN {
     sub labsUrl     { 'https://labs.api.listenbrainz.org' }
     sub caaBaseUrl  { 'https://coverartarchive.org/release/' }
     sub lastfmUrl   { 'https://ws.audioscrobbler.com/2.0/' }
+    # The key accessors. The built-in key is the ONLY key (no user override since
+    # 2026-09-14). $BUILTIN is driveable so sections can model a specific key, or
+    # an install with no key at all (a mangled constant).
+    our $BUILTIN = 'BUILTINLASTFMKEY';
+    sub lastfmKey        { $BUILTIN }
+    sub lastfmKeySource  { length $BUILTIN ? 'builtin' : 'none' }
+    sub lastfmLatchState { length $BUILTIN ? 'builtin: ok' : 'no key' }
     sub muspyUrl    { 'https://muspy.com/api/1' }
     sub similarAlgo { 'algo' }
     sub mbProbeMbid { 'a74b1b7f-06a0-4672-a641-eb3353aa608d' }
@@ -181,6 +197,7 @@ our ($ROWS, $CTX, $CALLS);
 sub runDiag {
     Slim::Utils::Timers::reset();
     @Slim::Networking::SimpleAsyncHTTP::REQUESTS = ();
+    @Slim::Networking::SimpleAsyncHTTP::BODIES   = ();
 
     ($ROWS, $CTX, $CALLS) = (undef, undef, 0);
     $DIAGPKG->run(sub { ($ROWS, $CTX) = @_; $CALLS++ });
@@ -238,10 +255,22 @@ print "\n1. Probe coverage\n";
 
     # Unconfigured optional services are NOT failures. Reporting them as failures
     # is how a report full of red noise trains people to ignore it.
-    ok($r->{lastfm}{status} eq 'skip', 'no Last.fm key -> skip, not fail');
+    # No user key is no longer "no key": the built-in one is probed.
+    ok($r->{lastfm}{status} eq 'ok', 'no user Last.fm key -> the built-in key is probed, ok');
+    ok(scalar($r->{lastfm}{note} =~ /built-in/i), '...and the row says it was the built-in key');
     ok($r->{muspy}{status}  eq 'skip', 'no MuSpy id -> skip, not fail');
-    ok(!grep({ $_ =~ /audioscrobbler|muspy/ } @Slim::Networking::SimpleAsyncHTTP::REQUESTS),
+    ok(!grep({ $_ =~ /muspy/ } @Slim::Networking::SimpleAsyncHTTP::REQUESTS),
        'a skipped target issues no request');
+
+    # An install with no key AT ALL (a mangled built-in constant) still skips cleanly.
+    {
+        local $Plugins::ListenBrainzFreshReleases::API::BUILTIN = '';
+        routes(healthy());
+        my $n = byKey((runDiag())[0]);
+        ok($n->{lastfm}{status} eq 'skip', 'no key at all -> skip, not fail');
+        ok(!grep({ $_ =~ /audioscrobbler/ } @Slim::Networking::SimpleAsyncHTTP::REQUESTS),
+           '...and issues no Last.fm request');
+    }
 }
 
 # =========================================================== 2. answered/not ==
@@ -346,7 +375,8 @@ print "\n5. A report must be safe to paste\n";
     my $tok = 'ZZTOPSECRETTOKEN';
     my $key = 'YYLASTFMSECRET';
     my $usr = 'XXMUSPYUSERID';
-    setPrefs(token => $tok, username => 'simon', lastfm_api_key => $key, muspy_userid => $usr);
+    setPrefs(token => $tok, username => 'simon', muspy_userid => $usr);
+    local $Plugins::ListenBrainzFreshReleases::API::BUILTIN = $key;
     routes(healthy());
     my ($rows, $ctx) = runDiag();
 
@@ -365,6 +395,15 @@ print "\n5. A report must be safe to paste\n";
     # The credential must still reach the wire, or the check is testing nothing.
     ok(scalar(grep { index($_, $tok) >= 0 } @Slim::Networking::SimpleAsyncHTTP::REQUESTS),
        'the real token IS sent to ListenBrainz');
+
+    # The Last.fm key must never be in a URL — LMS core logs a failed request's URI
+    # at WARN — but it must still be SENT, or this is testing nothing.
+    ok(index(join('|', @Slim::Networking::SimpleAsyncHTTP::REQUESTS), $key) < 0,
+       'the Last.fm key is in NO request URL');
+    ok(scalar(grep { index($_, $key) >= 0 } @Slim::Networking::SimpleAsyncHTTP::BODIES),
+       '...while it IS sent, in the POST body');
+    ok(index(join('|', map { $_ // '' } values %$ctx), $key) < 0, 'Last.fm key not in the context');
+    ok(($ctx->{lastfm} // '') eq 'builtin: ok', 'context names the key STATE only');
     ok(ref $ctx->{services} eq 'ARRAY' && @{ $ctx->{services} }, 'streaming services reported');
 }
 

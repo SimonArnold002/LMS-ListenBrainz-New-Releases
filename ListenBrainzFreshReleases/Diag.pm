@@ -176,7 +176,11 @@ sub run {
         my $fire = sub {
             return if $done;             # the deadline already closed the report
             $started = Time::HiRes::time();
-            $http->get($t->{url}, %{ $t->{headers} || {} });
+            # A target with a body is POSTed — the credential stays out of the URL,
+            # which LMS core writes to server.log when a request fails.
+            defined $t->{body}
+                ? $http->post($t->{url}, %{ $t->{headers} || {} }, $t->{body})
+                : $http->get($t->{url}, %{ $t->{headers} || {} });
         };
 
         # Launch now unless this host has already been probed in this run. A queued
@@ -196,7 +200,6 @@ sub run {
 # ---------------------------------------------------------------------------
 sub _targets {
     my $token   = $prefs->get('token')          // '';
-    my $lastfm  = $prefs->get('lastfm_api_key') // '';
     my $muspy   = $prefs->get('muspy_userid')   // '';
 
     my $mbBase   = API_PKG->mbBase;
@@ -347,20 +350,27 @@ sub _targets {
         check         => sub { ('ok', 'reachable') },
     };
 
-    # --- Last.fm (optional) -------------------------------------------------
-    if (length $lastfm) {
-        (my $safe = $lastfm) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
+    # --- Last.fm ------------------------------------------------------------
+    # Probed with the built-in key — the only one the plugin has — ignoring any
+    # latch, so a stopped key can be re-checked here. POSTed with the key in the
+    # body like every real call (API::_lastfmPost): a URL carrying it would be
+    # logged by LMS core on any failure. The row never shows the value.
+    my $lfmKey = API_PKG->lastfmKey(ignore_latch => 1);
+    if (length $lfmKey) {
+        (my $safe = $lfmKey) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
         push @t, {
             key     => 'lastfm',
             name    => 'Last.fm',
-            url     => API_PKG->lastfmUrl . '?method=auth.gettoken&format=json&api_key=' . $safe,
-            display => API_PKG->lastfmUrl . '?method=auth.gettoken&format=json&api_key=***',
+            url     => API_PKG->lastfmUrl,
+            body    => 'method=auth.gettoken&format=json&api_key=' . $safe,
+            display => API_PKG->lastfmUrl . ' (auth.gettoken, built-in key)',
+            headers => { 'Content-Type' => 'application/x-www-form-urlencoded' },
             check   => sub {
                 my ($content) = @_;
                 my $d = eval { from_json($content) };
                 return ('warn', 'answered, but not JSON') if $@ || ref $d ne 'HASH';
-                return ('ok', 'API key valid') if !$d->{error} && $d->{token};
-                return ('warn', 'Last.fm rejected this API key');
+                return ('ok', 'The built-in API key is valid') if !$d->{error} && $d->{token};
+                return ('warn', 'Last.fm rejected the built-in API key');
             },
         };
     }
@@ -418,6 +428,10 @@ sub _context {
 
     $c{username} = length $user  ? $user                          : '(not set)';
     $c{token}    = length $token ? 'set (' . length($token) . ' chars)' : '(not set)';
+
+    # WHICH Last.fm key is in use and whether it has been stopped — per source
+    # ("builtin: ok"), never the value.
+    $c{lastfm} = eval { API_PKG->lastfmLatchState } // '(unknown)';
 
     $c{proxy} = eval { preferences('server')->get('webproxy') } || '(none)';
 

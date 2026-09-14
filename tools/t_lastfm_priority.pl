@@ -22,7 +22,8 @@ sub grab {
     our (@requests, @timers, @follow, @trending, @metadata, @lastfm, @stages, @stored,
          $listingError, %freshLfm, $apiRows);
     $lastfmNextAt = 0;
-    our $prefs = bless { username => 'user', people_follow => 1, lastfm_api_key => 'key' }, 'Prefs';
+    our $prefs = bless { username => 'user', people_follow => 1 }, 'Prefs';
+    our $lastfmKey = 'key';   # the built-in key in use; '' models a stopped key
     our $log = bless {}, 'Logger';
     use constant LASTFM_CORE_MAX => 3600;
     use constant LASTFM_SETTLED_TTL => 86400;
@@ -57,6 +58,8 @@ sub grab {
     sub setTimer { my $t = [ @_ ]; push @T::timers, $t; return $t }
     sub killSpecific { $_[0][4] = 1 }
     package Plugins::ListenBrainzFreshReleases::API;
+    # The warm gates on the key IN USE (the built-in key; there is no pref).
+    sub lastfmKey { $T::lastfmKey // '' }
     sub getLastfmTags { push @T::requests, [ @_[1..5] ] }
     sub artistKeyForName { 'n:' . lc($_[1] // '') }
     sub peekLastfmArtistGenresBulk {
