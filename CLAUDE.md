@@ -64,6 +64,7 @@ because line numbers rot on the next edit.
 | The BUILT-IN Last.fm API key in `API.pm` is DELIBERATE, not a leaked secret | A2 | `The BUILT-IN Last.fm API key in `API.pm` is` |
 | `GENRE_FACT_VERSION` is NOT bumped for the 0.9.194 `_norm` change — deliberate | B | ``GENRE_FACT_VERSION` is NOT bumped for the` |
 | TWO 0.9.207 FIXES ARE STILL UNPROVEN LIVE, and that is known, not missed | B | `TWO 0.9.207 FIXES ARE STILL UNPROVEN LIVE,` |
+| Last.fm error 6 is an ANSWER; latched key ends the warm pass; error-6 + latch UNPROVEN LIVE | C | `CLOSED IN 0.9.214 —` |
 
 **Two standing rules that kill most repeat findings:**
 
@@ -313,6 +314,23 @@ Do not re-report:**
   a third place, found by sweeping the carriers rather than reported. Now routed through
   `_sectionBounds` with `_sectionSig`.
 
+**CLOSED IN 0.9.214 — the 2026-09-14 review of 0.9.213 (built-in Last.fm key), and its
+follow-up sweep. Both rounds closed by Simon 2026-09-14. Do not re-report:**
+- **`_lastfmPost` / `getLastfmTags` / `getSimilarArtistsLastfm` treating Last.fm error 6 as
+  a failure.** Error 6 is HTTP 200 + `{"error":6}` for an artist Last.fm does not know —
+  an ANSWER, ~20% of a sampled week's feed artists (named in the 0.9.214 entry). Fixed:
+  `_lastfmPost` hands `onError` the code; both call sites store/cache 6 as empty; every other
+  error still stores nothing. `t_lastfmkey.pl` §5, anti-tested 4 red, controls on error 8.
+- **`_warmLastfm` spinning the queue after the key latches mid-pass** (10/26/29) — found by
+  the sweep, not the review. Fixed: the pass ends with the rest `deferred`, releasing
+  `$lastfmWarmPending`. `t_lastfm_priority.pl`, anti-tested 4 red, 2 controls.
+- **Stale manual-key prose** in DSTM, Plugin, Diag, API, Browse, Diag's skip note, the warm
+  note and `PLUGIN_LBF_DIAG_DESC`. Prose only; nothing guards it beyond `t_lastfmkey.pl` §7.
+- **UNPROVEN LIVE, and that is known, not missed:** the error-6 path (0.9.214's first pass
+  found 220/220 fresh checkpoints and requested nothing) and the latch (no rejection has
+  happened). Proven live: the built-in key and the POST transport (Connection Check ok).
+  Evidence to look for: `lbf warmstats` Last.fm note with `requested` > 0 and `failed` near 0.
+
 **A closed finding is not a closed MECHANISM.** Both 0.9.192 findings were
 second-order consequences of the 0.9.191 fixes — not regressions of old code, and
 not re-reports either. A fix that changes WHO participates in a mechanism (which
@@ -464,7 +482,52 @@ part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
 
-**0.9.213** — built 2026-09-14, **NOT installed and NOT tested live.** **LAST.FM IS BUILT IN
+**0.9.214** — built 2026-09-14, **INSTALLED on the test rig 2026-09-14 12:34; review CLOSED —
+see Ledger §C (`CLOSED IN 0.9.214`).** The 2026-09-14 review fix on top of 0.9.213's built-in
+Last.fm key: **error 6 is now an ANSWER everywhere it can arrive, and a mid-pass latch stops
+the warm cleanly instead of spinning it.** No schema change, no cache-family bump — see below
+for why.
+
+**FIX 1 — error 6 is an answer, not a failure. 0.9.213 got this wrong at BOTH call sites.**
+Last.fm answers an artist it does not know with HTTP 200 + `{"error":6}` (verified live for
+`artist.gettoptags`, `album.gettoptags` and `artist.getsimilar`). Before 0.9.213 the GET path
+parsed that body into `[]`, which was stored — correct by accident. 0.9.213 routed every
+error body through `_lastfmPost` → `$onError`, so `getLastfmTags`' artist step (`$tryArtist`)
+made the warm count it `failed` and store nothing, and `getSimilarArtistsLastfm` stopped
+caching it. 12 of 60 artists sampled from that week's sitewide feed got error 6 (ZELUATI,
+Doll Face Killah, multi-credit classical lines), so ~20% of the queue would have been
+re-asked on every pass indefinitely, and the radio on every top-up. `_lastfmPost` now passes
+`($msg, $code)` to `onError`; the artist step files code 6 as an empty checkpoint via
+`$finish`, and `getSimilarArtistsLastfm` caches it empty at `LFM_EMPTY_TTL`. Every other
+error is still not stored.
+
+**FIX 2 — `Browse::_warmLastfm` ends the pass instead of spinning it once the key latches
+off.** A rejected/stopped key (error 10/26, or 29's hour backoff) makes every remaining
+request in the queue fail identically. The pass used to keep iterating at 1s per artist,
+each one failing, incrementing fake `requested`/`failed` counters while `$lastfmWarmPending`
+stayed true — which held the detail-prep phase behind it for no reason, since nothing left in
+the queue can possibly succeed. It now checks the latch before each request and ends the pass
+with the remainder marked `deferred`, releasing `$lastfmWarmPending` immediately.
+
+**NOT A CACHE-SHAPE CHANGE, and nothing to clear.** 0.9.213's bug was that it stored
+NOTHING for error 6 — no wrong answer was ever written to `lastfm_tags`, the artist row's
+`lastfm_genres`, or `lbf:lfmsimilar:`. The fix only makes a previously-unstored answer get
+stored, with the same empty shape and TTL every other empty answer already uses. No family
+in `DB::KEY_VERSIONS` is involved; `lbf:lfmsimilar:` is not a versioned family.
+
+**Also fixed:** stale "user key" wording in comments across DSTM, Plugin, Diag, API and
+Browse, Diag's Last.fm skip note, the warm note (now "disabled (no Last.fm key in use)") and
+`PLUGIN_LBF_DIAG_DESC` in `strings.txt` — all left over from the manual-key era the 0.9.213
+built-in key replaced.
+
+**TESTS.** `tools/t_lastfmkey.pl` 58 → 64; `tools/t_lastfm_priority.pl` +6 (67 → 73). All 33
+`tools/t_*.pl` suites exit 0 (`t_diag.pl` reports 70, with its MusicBrainz network check
+skipped on a live 503 — not a regression). Both new test groups anti-tested, 4 red each.
+`t_loads.pl` 20/20 against the BUILT ZIP, which was extracted and diffed byte-identical
+against the working tree.
+
+**0.9.213** — built 2026-09-14, superseded the same day by 0.9.214 (its review fixes); review
+CLOSED — Ledger §C (`CLOSED IN 0.9.214`). **LAST.FM IS BUILT IN
 FOR EVERY USER — and there is no manual key any more.** No schema change, no cache-family
 bump, and caches are preserved as usual.
 
@@ -487,6 +550,14 @@ Last.fm API key in `API.pm` is`).
 - **A failure is no longer stored as an empty answer.** `getLastfmTags`' artist step used to
   file `[]` on any failure; it now reaches `onError`, so the warm counts `failed` and asks
   again next pass. `getSimilarArtistsLastfm` no longer caches a Last.fm error body.
+  **EXCEPT error 6** ("could not be found", HTTP 200) — Last.fm's ANSWER for an artist it
+  does not know, not a failure. Review 2026-09-14 caught the first build routing it to
+  `onError` too: 12 of 60 artists sampled from that week's sitewide feed (ZELUATI, Doll
+  Face Killah, multi-credit classical lines) got it, so ~20% of the queue would have been
+  re-asked every pass forever. `_lastfmPost` now hands `onError` the code; the tag artist
+  step and the similar-artists call store/cache 6 as empty. Same review: a key stopped
+  MID-PASS now ends the pass (`deferred`) instead of spinning the queue at 1/s with no
+  requests while `$lastfmWarmPending` held detail prep back.
 - **The manual option is GONE** (Simon: "not needed"): the settings field, Check-key button,
   three strings and the `lastfm_api_key` pref. `Plugin.pm` deletes a stored value at startup.
   Every gate reads `API::lastfmKey`; the render path reads `lastfmConfigured`, so stored tags
@@ -499,9 +570,9 @@ ways: latch removed 9 red, scrub removed 1, failure storing empty 3, GET transpo
 override reinstated 1. `t_diag.pl` 67 → 71. All 33 `tools/t_*.pl` exit 0; `t_loads.pl` 20
 passes against the BUILT ZIP, which was extracted and diffed against the working tree.
 
-**FIRST THING TO CHECK AFTER INSTALLING:** `lbf warmstats` → `plugin_version 0.9.213`,
-`lastfm_key builtin`, `lastfm_keys builtin: ok`; the Connection Check's Last.fm row reads
-"The built-in API key is valid".
+**CHECKED LIVE on 0.9.214, 2026-09-14:** `lbf warmstats` → `lastfm_key builtin`,
+`lastfm_keys builtin: ok`; the Connection Check's Last.fm row is ok, HTTP 200, "The built-in
+API key is valid". The POST transport and the key are proven; see §C for what is not.
 
 **0.9.212** — built 2026-09-10. `_trackMatches` gains the short-title `_punctNorm` escape
 hatch `_albumMatches` has carried since 0.9.83 (ported from Discography 0.10.3): a track
@@ -3162,10 +3233,11 @@ candidates, not as one suspect:
 - **`docs/year-in-music.md`**, **`docs/recommended-listening-row.md`** — both untouched.
 - **`docs/token-free-refactor.md` §3.2/§3.3** — rebuilding Recommended on public
   loved-tracks/pins, and the volume decision it depends on.
-- ~~**`docs/lastfm-key-bundling.md`**~~ — **BUILT 2026-09-14 in the working tree**, on
-  Simon's go-ahead; unversioned, not installed, not live-verified. Read its "As built"
-  section: POST-only transport, the rejected-key latch, user→built-in fallback, and
-  failures no longer stored as empty answers. Guard: `tools/t_lastfmkey.pl`.
+- ~~**`docs/lastfm-key-bundling.md`**~~ — **BUILT 2026-09-14** on Simon's go-ahead as
+  0.9.213, review fixes in 0.9.214 (installed; key + POST proven live, error 6 and the latch
+  not yet exercised live — Ledger §C `CLOSED IN 0.9.214`). Read its "As built"
+  section: POST-only transport, the rejected-key latch, no manual key, and failures
+  (but not error 6) no longer stored as empty answers. Guard: `tools/t_lastfmkey.pl`.
 
 **Merge-gate debt.** `main` is at 0.9.149 and `dev` at 0.9.210. The CHANGELOG and README
 are owed for that whole gap, plus **a credit line for honzup** (PR #17's own CHANGELOG

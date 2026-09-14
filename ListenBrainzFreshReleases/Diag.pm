@@ -379,7 +379,7 @@ sub _targets {
             key  => 'lastfm',
             name => 'Last.fm',
             url  => API_PKG->lastfmUrl,
-            skip => 'no API key set (optional)',
+            skip => 'the built-in API key did not decode',
         };
     }
 
@@ -429,7 +429,7 @@ sub _context {
     $c{username} = length $user  ? $user                          : '(not set)';
     $c{token}    = length $token ? 'set (' . length($token) . ' chars)' : '(not set)';
 
-    # WHICH Last.fm key is in use and whether it has been stopped — per source
+    # Whether the built-in Last.fm key is in use or has been stopped, and why
     # ("builtin: ok"), never the value.
     $c{lastfm} = eval { API_PKG->lastfmLatchState } // '(unknown)';
 

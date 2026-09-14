@@ -4499,8 +4499,11 @@ sub _lfmScrub {
 }
 
 # THE ONE WAY A REQUEST REACHES LAST.FM. $onDone gets the decoded response hash;
-# $onError gets a SCRUBBED message. A Last.fm error body counts as an error whether
-# it arrives with HTTP 200 or 4xx — an invalid key is a 403 carrying error 10.
+# $onError gets a SCRUBBED message and, when Last.fm sent an error body, its code.
+# A Last.fm error body counts as an error whether it arrives with HTTP 200 or 4xx —
+# an invalid key is a 403 carrying error 10. The code is passed on because one of
+# them is not a failure: error 6 ("could not be found", HTTP 200) is Last.fm's
+# ANSWER for an artist it does not know, and the callers store it as empty.
 sub _lastfmPost {
     my ($class, $params, $onDone, $onError) = @_;
     $onError ||= sub {};
@@ -4525,7 +4528,7 @@ sub _lastfmPost {
             }
             if (defined $data->{error}) {
                 _lfmNoteError($key, $data->{error});
-                $onError->("Last.fm error $data->{error}");
+                $onError->("Last.fm error $data->{error}", $data->{error});
                 return;
             }
             $onDone->($data);
@@ -4536,10 +4539,11 @@ sub _lastfmPost {
             # body, and with it the Last.fm error code, is available here.
             my ($self, $err, $res) = @_;
             my $data = $res ? eval { from_json($res->content) } : undef;
-            _lfmNoteError($key, $data->{error}) if ref $data eq 'HASH' && defined $data->{error};
+            my $code = ref $data eq 'HASH' ? $data->{error} : undef;
+            _lfmNoteError($key, $code) if defined $code;
             my $msg = _lfmScrub($err // eval { $self->error } // 'unknown error');
             $log->error("Last.fm API error: $msg");
-            $onError->($msg);
+            $onError->($msg, $code);
         },
         { timeout => 15 }
     );
@@ -4604,7 +4608,17 @@ sub getLastfmTags {
             # warm) nothing is stored, so the artist is asked again next pass rather
             # than filed as "no tags" — which a stopped key would otherwise do to
             # the artist whose request tripped it.
-            sub { $onError ? $onError->(shift) : $finish->([]) },
+            #
+            # EXCEPT ERROR 6, which is not a failure: it is Last.fm saying it does
+            # not know this artist (HTTP 200, verified live). Brand-new releases are
+            # full of those — 12 of 60 artists sampled from a week's feed — and an
+            # unstored answer is re-asked on every pass, which is exactly what the
+            # empty checkpoint in $finish exists to prevent.
+            sub {
+                my ($msg, $code) = @_;
+                return $finish->([]) if ($code // '') eq '6';
+                $onError ? $onError->($msg) : $finish->([]);
+            },
         );
     };
 
@@ -4666,10 +4680,10 @@ sub _parseLastfmTags {
 #
 # THIS IS THE BIGGEST WIN of the hosted-API work, for two reasons:
 #
-#  1. NO API KEY. The Last.fm rung below needs a user-supplied key, which most
-#     installs do not have — so today, when ListenBrainz has nothing for a seed
-#     (a known gap), the radio simply falls through to generic recommendations
-#     for those users. This rung works everywhere.
+#  1. NO API KEY. When this was written the Last.fm rung below needed a
+#     user-supplied key most installs did not have. It uses the built-in key now
+#     (0.9.213), but that key can be stopped (API::_lfmNoteError), and this rung
+#     cannot.
 #  2. EVERY ENTRY CARRIES AN MBID. Measured live 2026-08-12: 25 similar artists
 #     for Radiohead, 25 of them with an MBID. Last.fm returns NAMES with spotty
 #     mbids, so DSTM::_resolveArtistMbids has to resolve the misses one by one —
@@ -4746,7 +4760,9 @@ sub getSimilarArtistsLastfm {
 
     # Through _lastfmPost like every Last.fm call: key in the body, error codes
     # latched, messages scrubbed. A Last.fm error body now reaches $onError and is
-    # NOT cached as "no similar artists", which the old GET path did for a 200.
+    # NOT cached as "no similar artists", which the old GET path did for a 200 —
+    # except error 6, Last.fm's answer for an artist it does not know, which IS
+    # cached as empty so the radio does not re-ask it on every top-up.
     $class->_lastfmPost(
         { method => 'artist.getsimilar', artist => $artist, autocorrect => 1,
           limit => LFM_SIMILAR_LIMIT, api_key => $key },
@@ -4772,7 +4788,16 @@ sub getSimilarArtistsLastfm {
             $log->info("Last.fm similar artists for '$artist': " . scalar(@out));
             $onDone->(\@out);
         },
-        $onError,
+        sub {
+            my ($msg, $code) = @_;
+            if (($code // '') eq '6') {
+                eval { $cache->set($cacheKey, [], LFM_EMPTY_TTL); 1 }
+                    or $log->warn("lfm-similar cache set failed: $@");
+                $onDone->([]);
+                return;
+            }
+            $onError->($msg);
+        },
     );
 }
 

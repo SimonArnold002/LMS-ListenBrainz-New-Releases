@@ -55,7 +55,7 @@ use constant MAX_PER_ARTIST => 1;
 use constant ARTIST_COOLDOWN => 24;
 
 # Last.fm similar-artist fallback (used when ListenBrainz has no similar artists
-# for the seed AND the user has a Last.fm API key). Capped lower than ARTIST_FANOUT
+# for the seed AND the built-in Last.fm key is in use). Capped lower than ARTIST_FANOUT
 # because Last.fm gives artist NAMES — each one without an inline MBID costs a
 # MusicBrainz name->MBID lookup to become fannable.
 use constant LFM_FANOUT => 12;
@@ -225,9 +225,9 @@ sub _radioSeedOnly {
 #   'hosted' — the hosted LMS-community API. NO KEY NEEDED, and every entry it
 #              returns carries an MBID, so _resolveArtistMbids below short-
 #              circuits on the inline id and makes ZERO MusicBrainz lookups.
-#   'lastfm' — Last.fm, gated on a key being in use (the built-in one unless the
-#              user set their own — API::lastfmKey). Names with spotty mbids, so
-#              the misses cost one throttled MB lookup each.
+#   'lastfm' — Last.fm, gated on the built-in key being in use (API::lastfmKey;
+#              off only if it has been stopped). Names with spotty mbids, so the
+#              misses cost one throttled MB lookup each.
 # Split out from the old Last.fm-only _radioViaLastfm; everything after the fetch
 # is shared, because both sources deliberately return the same
 # { name, artist_mbid, score } shape.

@@ -486,7 +486,7 @@ sub _cliWarmStats {
     $request->addResult('ticks',   $rep->{ticks}   // 0);
     $request->addResult('tick_at', int($rep->{tick_at} // 0));
     $request->addResult('dev_build', DEV_BUILD ? 1 : 0);
-    # Which Last.fm key the warm is using, and whether either has been stopped. The
+    # Whether the warm has the built-in Last.fm key, and whether it has been stopped. The
     # SOURCE only — this report is meant to be pasted, so never the value.
     $request->addResult('lastfm_key',
         eval { Plugins::ListenBrainzFreshReleases::API->lastfmKeySource } // '');

@@ -1,6 +1,7 @@
-# Bundling a Last.fm API key — BUILT (working tree, 2026-09-14)
+# Bundling a Last.fm API key — SHIPPED on dev (0.9.213, fixed in 0.9.214)
 
-**Status: BUILT 2026-09-14 on Simon's go-ahead, unversioned and uncommitted.** §4 was
+**Status: BUILT 2026-09-14 on Simon's go-ahead as 0.9.213; the review's fixes are 0.9.214,
+installed on the test rig the same day. Both review rounds are CLOSED — Ledger §C.** §4 was
 decided as proposed, with three hardening changes found while building it (below). The
 rest of this doc is the original proposal, kept for its §2/§3 reasoning.
 
@@ -37,10 +38,13 @@ rest of this doc is the original proposal, kept for its §2/§3 reasoning.
   have poisoned the artist whose request tripped it, and a keyless call mid-pass would
   have filed one for every remaining artist. Both now reach `onError` (the warm counts
   `failed`, stores nothing). `getSimilarArtistsLastfm` no longer caches a Last.fm error
-  body as "no similar artists".
-- **§4.4 pacing unchanged.** **§4.5**: settings field keeps the override, shows a
-  "Using the built-in key" placeholder and never echoes the built-in value; Diag names
-  the key source and probes it (`lastfm` in the context, `lastfm_key` / `lastfm_keys` in
+  body as "no similar artists". **Except error 6** — Last.fm answers an unknown artist
+  with HTTP 200 + `{"error":6}` (verified live for `artist.gettoptags`,
+  `album.gettoptags` and `artist.getsimilar`), which is an answer, so it is stored /
+  cached as empty; ~20% of a sampled week's feed artists get it. A key that stops
+  mid-pass ends the warm pass with the rest `deferred`.
+- **§4.4 pacing unchanged.** **§4.5**: no settings field (see the first bullet); Diag
+  names the key's state and probes it (`lastfm` in the context, `lastfm_key` / `lastfm_keys` in
   `["lbf","warmstats"]`).
 - **§5 open questions:** 1 — the key was supplied by Simon (whether it sits on a
   dedicated account is his to confirm); 2/3 not re-measured; 4 unchanged (LBF-only).
@@ -48,7 +52,12 @@ rest of this doc is the original proposal, kept for its §2/§3 reasoning.
   anti-tested five ways — latch removed 9 red, scrub removed 1, failure storing empty 3,
   GET transport 8, a pref override reinstated 1. `t_diag.pl` 67 → 71 (built-in probed, no-key skip, key in body not URL,
   context names the source). `t_lastfm_priority.pl` gained a `lastfmKey` stub. All 33
-  `tools/t_*.pl` exit 0. **Not yet verified live** — needs a build installed.
+  `tools/t_*.pl` exit 0. 0.9.214 added 6 + 6 (`t_lastfmkey.pl` 64, `t_lastfm_priority.pl` 73).
+- **Live, 0.9.214 on the test rig (2026-09-14):** `lastfm_key builtin`, `lastfm_keys builtin:
+  ok`; the Connection Check's Last.fm row is ok, HTTP 200, "The built-in API key is valid" — so
+  the POST transport and the built-in key are PROVEN live. **Still UNPROVEN live:** the error-6
+  path (the first pass found 220/220 fresh checkpoints and requested nothing) and the latch
+  (no rejection has occurred).
 
 ---
 

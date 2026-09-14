@@ -9837,6 +9837,16 @@ sub _warmLastfm {
             $finishPass->();
             return;
         }
+        # THE KEY STOPPED MID-PASS (API::_lfmNoteError — 10/26 for the process, 29
+        # for an hour). Every remaining job would fail at once without a request,
+        # but still take its one-second turn: up to LFM_WARM_ALL seconds of fake
+        # `requested`/`failed`, with $lastfmWarmPending holding detail preparation
+        # back the whole time. Leave the rest for the next pass instead.
+        if (@queue && !length(Plugins::ListenBrainzFreshReleases::API->lastfmKey)) {
+            $stats->{deferred} = scalar @queue;
+            $finishPass->();
+            return;
+        }
         if (@queue && (_lastfmPriorityBusy() || $lastfmRequestBusy || time() < $lastfmNextAt)) {
             Slim::Utils::Timers::setTimer(undef, time() + 1, $self, $self);
             return;
@@ -9923,7 +9933,7 @@ sub _warmLastfm {
 
 sub _lastfmWarmNote {
     my ($s) = @_;
-    return 'disabled (no API key)' unless ref $s eq 'HASH' && $s->{enabled};
+    return 'disabled (no Last.fm key in use)' unless ref $s eq 'HASH' && $s->{enabled};
     return sprintf('%d candidate(s), %d fresh checkpoint(s), %d requested: '
                  . '%d genre(s), %d empty, %d rejected, %d failed; %d deferred',
         map { int($s->{$_} // 0) }
@@ -10503,7 +10513,7 @@ sub genrePicker {
             # ONE bucketing pass (0.9.139). The counts and the apply row's "Show N
             # releases" both need each release's family, and this used to work it out
             # twice — once here, once inside _genreSelectFilter below. _bucketFor walks
-            # the whole genre tier ladder per release (and, with a Last.fm key set,
+            # the whole genre tier ladder per release (and, with Last.fm in use,
             # reads the tag cache), so on a busy week that was hundreds of lookups
             # done for a second time, on every tick of the picker.
             my (%count, @bucket);

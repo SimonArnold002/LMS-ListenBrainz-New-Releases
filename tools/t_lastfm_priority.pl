@@ -159,6 +159,37 @@ sub advance {
     is($done, 2, 'failure and retry both settle their original passes');
 }
 
+# The key latches off on the request in flight (error 10/26/29). The rest of the
+# queue cannot make a request, so the pass must end with it deferred — not spin one
+# second per artist counting fake requests while holding detail preparation back.
+{
+    local $T::now = 500;
+    local @T::requests;
+    local @T::timers;
+    local %T::freshLfm;
+    local %T::lastfmSettledArtists;
+    local $T::lastfmRequestBusy = 0;
+    local $T::lastfmNextAt = 0;
+    local $T::lastfmWarmPending = 0;
+    local $T::lastfmKey = 'key';
+    my ($done, $stats) = (0, undef);
+    T::_warmLastfm([{ artist => 'Trips Latch' }, { artist => 'Left One' }, { artist => 'Left Two' }],
+        {}, sub { $done++; $stats = shift }, 400);
+    advance(500);
+    is(scalar @T::requests, 1, 'control: the first artist was dispatched');
+    is($T::lastfmWarmPending, 1, 'control: the pass holds the warm-pending gate while it runs');
+    $T::lastfmKey = '';                 # the request in flight tripped the latch
+    $T::requests[0][3]->('Last.fm error 29');
+    advance(510);
+    is(scalar @T::requests, 1, 'a stopped key dispatches nothing further');
+    is($done, 1, '...and the pass ends');
+    is($T::lastfmWarmPending, 0, '...releasing detail preparation');
+    is_deeply($stats,
+        { enabled => 1, candidates => 3, fresh => 0, requested => 1,
+          filled => 0, empty => 0, rejected => 0, failed => 1, deferred => 2 },
+        '...reporting the rest as deferred, not as failed requests');
+}
+
 my $release = T::_holdLastfm();
 my $finished = 0;
 T::_warmLastfm([{artist => 'one'}], {}, sub { $finished++ });

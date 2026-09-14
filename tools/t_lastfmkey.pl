@@ -17,7 +17,8 @@
 #                    URL is a key in server.log.
 #   4. Latch       — error 10/26 stop the key for the process, logged ONCE; 29
 #                    backs off and recovers; unrelated errors latch nothing.
-#   5. Failures    — a failed or keyless request stores NO empty checkpoint.
+#   5. Failures    — a failed or keyless request stores NO empty checkpoint; error 6
+#                    (artist not found) is an ANSWER and IS stored as empty.
 #   6. Scrubbing   — no log line carries the key.
 #   7. Wiring      — every gate goes through the accessor; the manual option is
 #                    gone from code, settings page and strings; a stored value is
@@ -304,6 +305,37 @@ print "\n5. A failure is not an empty answer\n";
     ($d, $e) = (0, undef);
     T->getLastfmTags('A', '', sub { $d++ }, sub { $e = shift }, 1);
     ok(!@T::PUT && !@T::HTTP && !$d && defined $e, 'with the key stopped: no request, no store, a failure');
+
+    # ERROR 6 IS AN ANSWER. Captured live 2026-09-14: an artist Last.fm does not
+    # know is HTTP 200 + this body, and ~20% of a sampled week's feed artists get it.
+    my $ERR6 = '{"error":6,"message":"The artist you supplied could not be found","links":[]}';
+    reset_world();
+    answer(200, $ERR6);
+    ($d, $e) = (0, undef);
+    my $got;
+    T->getLastfmTags('Doll Face Killah', '', sub { $got = shift; $d++ }, sub { $e = shift }, 1);
+    ok(@T::PUT == 1 && ref $T::PUT[0][1] eq 'ARRAY' && !@{ $T::PUT[0][1] },
+       'error 6 (artist not found) IS stored, as an empty answer');
+    ok($d && !defined $e && ref $got eq 'ARRAY' && !@$got, '...and reported as "no tags", not as a failure');
+
+    reset_world();
+    answer(200, '{"error":8,"message":"Operation failed - Most likely the backend service failed"}');
+    ($d, $e) = (0, undef);
+    T->getLastfmTags('A', '', sub { $d++ }, sub { $e = shift }, 1);
+    ok(!@T::PUT && !$d && defined $e, 'control: a transient error body (8) still stores nothing');
+
+    reset_world();
+    answer(200, $ERR6);
+    my ($sim, $simErr);
+    T->getSimilarArtistsLastfm('Doll Face Killah', sub { $sim = shift }, sub { $simErr = 1 });
+    ok(ref $sim eq 'ARRAY' && !@$sim && !$simErr, 'similar artists: error 6 answers an empty list');
+    ok(ref $T::CACHE{'lbf:lfmsimilar:doll face killah'} eq 'ARRAY', '...and caches it, so the radio does not re-ask');
+
+    reset_world();
+    answer(200, '{"error":8,"message":"Operation failed"}');
+    ($sim, $simErr) = (undef, 0);
+    T->getSimilarArtistsLastfm('A', sub { $sim = shift }, sub { $simErr = 1 });
+    ok($simErr && !keys %T::CACHE, 'control: similar artists caches no transient error body');
 }
 
 # =========================================================== 6. scrubbing ====
