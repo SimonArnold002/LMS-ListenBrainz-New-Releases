@@ -84,6 +84,7 @@ because line numbers rot on the next edit.
 | TWO 0.9.207 FIXES ARE STILL UNPROVEN LIVE, and that is known, not missed | B | `TWO 0.9.207 FIXES ARE STILL UNPROVEN LIVE,` |
 | Last.fm error 6 is an ANSWER; latched key ends the warm pass; error-6 + latch UNPROVEN LIVE | C | `CLOSED IN 0.9.214 —` |
 | Diag's Last.fm row says "HTTP 403", not "rejected the built-in API key" — cosmetic, pre-0.9.213 | B | `Diag's Last.fm row shows "HTTP 403"` |
+| The 0.9.215 week-window review: both findings were PROSE, the code was clean | C | `CLOSED IN 0.9.215 —` |
 
 **Two standing rules that kill most repeat findings:**
 
@@ -369,6 +370,40 @@ follow-up sweep. Both rounds closed by Simon 2026-09-14. Do not re-report:**
   `_warmLastfm` latch check runs before each request; `getSimilarArtistsLastfm` error bodies fall
   back through DSTM and a cached empty list is a hit; the Connection Check POST argument order.
   Its one out-of-diff observation is logged in §B (`Diag's Last.fm row shows "HTTP 403"`).
+
+**CLOSED IN 0.9.215 — the 2026-09-14 review of the per-section release window. Closed by
+Simon 2026-09-14. Two findings, BOTH PROSE; the code was clean. Do not re-report:**
+- **`_sectionSig`'s header comment still called `_sectionBounds` "the For You window unioned
+  with MuSpy's".** The union was removed in this same change and every other copy of that
+  comment was rewritten; this one was missed. Fixed: it now reads "one window per section;
+  MuSpy rows are For You rows and answer to For You's weeks", matching the sibling comments
+  at `_warmReleaseDetails` and `_windowSpan`. A comment is not the contract — the comment was
+  the defect, per the standing rule.
+- **This file and `docs/week-based-release-window.md` both claimed the work was "not built,
+  not versioned, not installed" / "working tree, unbuilt"** while `install.xml` and `repo.xml`
+  sat at 0.9.215 with a matching sha and the zip unpacked byte-identical to the tree. Fixed:
+  both now say built and versioned as 0.9.215, not yet installed. This is the stale-document
+  failure the 2026-09-10 hygiene pass closed once already — a doc that describes an earlier
+  moment of the same session.
+- **The rest of the round was CLEAN, and these are the checks, so a later round need not
+  redo them.** `clampSectionWeeks` holds `weeks` 1..4 and `upcoming` 0..weeks-1 and the digit
+  regex drops negatives and garbage to the section default, so the derived
+  `(weeks-1-upcoming, upcoming)` can never exceed `_clampWeeks`' `WEEKS_MAX_SIDE` budget of 3
+  and the backstop never fires against a legal pair. Defaults reproduce 0.9.185 exactly —
+  For You (1,2), All Releases (1,0) — with `%WEEK_PREFS` and `Plugin.pm`'s `$prefs->init` in
+  agreement. No reader of `weeks_past`, `weeks_future`, `muspy_future` or the four
+  `*_past`/`*_future` gates survives in any `.pm`/`.pl`/`.html`/`.txt` outside comments, and
+  there is no orphan template field or `strings.txt` key in either direction. The checkbox
+  sentinel still works: `pref_foryou_weeks` is a number input the full form always posts (it
+  sits in a collapsible div, which still submits), and the sentinel test runs BEFORE the week
+  block injects its four params, so a partial POST skips coercion. `_feedRequestDays` walked
+  over every legal pair across all seven weekdays peaks at 27, is never 0, and its range
+  always contains the window. `_mergeMuSpy`, `_sectionBounds` and `_warmReleaseDetails`'
+  source-0 eligibility all answer to the one `sectionWindow('foryou')`, so no path shows a row
+  the warm would refuse, and `_mergeMuSpy([], undef)` in `warmFeeds` degrades to `[]`.
+- **Two ledger entries were correctly NOT re-reported and must stay that way:** `_padDate`
+  dating a year-only MuSpy release 1 January (pre-existing, out of scope) and `bench_walk.pl`
+  exiting 255 on a missing `lastfmConfigured` stub (proven not this build).
 
 **A closed finding is not a closed MECHANISM.** Both 0.9.192 findings were
 second-order consequences of the 0.9.191 fixes — not regressions of old code, and
