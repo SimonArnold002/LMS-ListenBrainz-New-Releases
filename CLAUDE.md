@@ -944,7 +944,9 @@ part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
 
-**0.9.220** — built 2026-09-15, **NOT installed, NOT reviewed, not committed.** The "Round of
+**1.0.0** — version-only bump 2026-09-15, code identical to 0.9.220 (committed as 76c1030). Major version for submission to the Lyrion official repo. **NOT installed, NOT reviewed.**
+
+**0.9.220** — built 2026-09-15. The "Round of
 2026-09-15" section at the top of this file:
 - **Week window defaults `2`/`1` for both sections** (this week + next week) — `API::%WEEK_PREFS` and
   `Plugin.pm` `$prefs->init`, agreeing as `t_weekwindow.pl` §5 requires. No migration; an install
@@ -3971,7 +3973,9 @@ candidates, not as one suspect:
 
 **Merge-gate debt.** `main` is at 0.9.149 and `dev` at 0.9.210. The CHANGELOG and README
 are owed for that whole gap, plus **a credit line for honzup** (PR #17's own CHANGELOG
-hunk was deliberately not taken), and **`GENRE_FACT_VERSION` is deliberately NOT bumped
+hunk was deliberately not taken) — **README half DONE 2026-09-15** (Credits section, linking
+honzup and PR #17, ahead of the 1.0.0 Lyrion submission); the CHANGELOG line is still owed and
+goes in the 1.0.0 entry when it is written — and **`GENRE_FACT_VERSION` is deliberately NOT bumped
 for the 0.9.194 `_norm` change** — an explicit parser-version decision, recorded in
 Review Ledger section B, that must not be hidden behind a plugin-version bump.
 

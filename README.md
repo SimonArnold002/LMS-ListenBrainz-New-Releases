@@ -206,6 +206,7 @@ The last section on the page. It holds no settings — just the **Run connection
 - Release data from [ListenBrainz](https://listenbrainz.org) / [MusicBrainz](https://musicbrainz.org); cover art from the [Cover Art Archive](https://coverartarchive.org). All part of the [MetaBrainz](https://metabrainz.org) project.
 - Artist name lookups and aliases via the [LMS-community API](https://api.lms-community.org).
 - Streaming via the community **Qobuz**, **Tidal**, **Bandcamp**, **Deezer** and **Spotty** LMS plugins.
+- Spotify support contributed by [honzup](https://github.com/honzup) ([PR #17](https://github.com/SimonArnold002/LMS-ListenBrainz-New-Releases/pull/17)).
 - Artist biographies and photos via the **Music & Artist Information (MAI)** plugin; genre tags and similar artists from **Last.fm**.
 
 See [LICENSE](LICENSE) for licensing.
