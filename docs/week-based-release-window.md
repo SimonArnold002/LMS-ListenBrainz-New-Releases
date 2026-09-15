@@ -237,13 +237,12 @@ invalidates nothing; the version bump alone triggers `_buildChanged`, which is t
 good, because ListenBrainz only re-serves releases inside the window it is asked for, and this change
 NARROWS that window.
 
-**Still not done, deliberately:** `CHANGELOG.md` and `README.md` are merge-to-main items per the repo
-convention. README documents *Days window* (`1–90 days`) and *MuSpy upcoming — how far ahead*, and the
-MuSpy paragraph claims the past side "can't reach back further than the Days window, max 90 days" —
-all three need rewriting at that point, along with a `make_readme_html.py` regen so the Pages hero
-badge picks up the new version.
+**README DONE 2026-09-15 (Simon asked for it ahead of the merge).** `README.md` now documents Weeks to
+show / Upcoming weeks per section with the `2`/`1` defaults, MuSpy following For You's weeks, and an
+upgrade note that the Days window, Include Past/Upcoming and MuSpy's own settings are not carried
+over; `README.html` is regenerated. **`CHANGELOG.md` is still a merge-to-main item.**
 
-## As changed — per-section weeks, counted from 1 (2026-09-14, 0.9.215, built, not yet installed)
+## As changed — per-section weeks, counted from 1 (2026-09-14, 0.9.215; installed as part of 0.9.217; defaults changed to `2`/`1` in 0.9.220)
 
 Simon: *"overly complicated and has too many boxes. It also doesn't allow for All Releases to be
 configured differently to For You … starting at week 0 feels wrong. Current week should always be 1."*
@@ -254,8 +253,9 @@ configured differently to For You … starting at week 0 feels wrong. Current we
     <section>_weeks     (1-4)            weeks shown IN TOTAL — the current week is week 1
     <section>_upcoming  (0 .. weeks-1)   how many of those are after the current week
 
-Defaults reproduce what 0.9.185 shipped — For You `4`/`2` (1 back + this + 2 ahead), All Releases
-`2`/`0` (1 back + this). No migration, by the 0.9.185 precedent: the old prefs simply stop being read.
+Defaults are `2`/`1` for both sections — this week + next week (Simon, 2026-09-15). As first built
+they reproduced 0.9.185 — For You `4`/`2` (1 back + this + 2 ahead), All Releases `2`/`0` (1 back +
+this). No migration, by the 0.9.185 precedent: the old prefs simply stop being read.
 `main` (0.9.149) never shipped `weeks_*`, so only the four gates and `days` are orphaned for real users.
 
 **Why a total rather than "this week + earlier".** The four-week budget becomes a property of the

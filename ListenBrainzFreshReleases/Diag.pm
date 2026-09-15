@@ -50,11 +50,17 @@ use constant PROBE_TIMEOUT => 8;
 # fires keeps its pre-filled 'timed out' row, so the report is always complete.
 use constant OVERALL_DEADLINE => 12;
 
-# Gap between two probes of the SAME remote host. MusicBrainz allows roughly one
-# anonymous request per second and this module sends it two (identity + search
-# index, both built from the same _mbBase), so the second waits. Sized to clear
-# that limit while staying well inside OVERALL_DEADLINE even if the delayed probe
-# then burns a full PROBE_TIMEOUT: 1.1 + 8 = 9.1s.
+# Gap between two probes of the SAME remote host that do NOT go through the
+# plugin's MusicBrainz queue — today, only the fallback when API::mbGet is missing.
+# Public MusicBrainz probes are paced by that queue instead (see run), and a local
+# mirror is never paced.
+#
+# THE QUEUE CHANGED THE WORST CASE. It sends one request at a time, so the search
+# probe goes out only once the identity probe has SETTLED: up to PROBE_TIMEOUT + gap
+# + PROBE_TIMEOUT = 8 + 1.1 + 8 = 17.1s, past OVERALL_DEADLINE — longer still if a
+# warm's request is already in flight. The probes join at the FRONT of the queue so
+# queued warm work cannot add to that, and a probe the deadline catches unsent is
+# reported as "not probed" (warn), never as a timeout (see $finish).
 use constant SAME_HOST_GAP => 1.1;
 
 # ---------------------------------------------------------------------------
@@ -72,11 +78,23 @@ sub run {
     my $pending = 0;
     my $done    = 0;
     my $timer;
+    # Per row: handed to the MusicBrainz queue, actually sent, settled by a callback.
+    my (@viaQueue, @sent, @settled);
 
     my $finish = sub {
         return if $done;
         $done = 1;
         Slim::Utils::Timers::killSpecific($timer) if $timer;
+
+        # A QUEUED PROBE THE DEADLINE CAUGHT UNSENT DID NOT TIME OUT — it never had a
+        # turn, because the request ahead of it was slow. Its pre-filled "fail / timed
+        # out" row would report a fault in a host nobody asked. A probe that WAS sent
+        # and got no answer keeps its fail: that one is a real finding.
+        for my $i (0 .. $#targets) {
+            next unless $viaQueue[$i] && !$sent[$i] && !$settled[$i];
+            $rows[$i] = _row($targets[$i], 'warn', 0, undef,
+                'not probed - still queued behind a slow MusicBrainz request');
+        }
 
         # Log the whole report too, so a user who can reach log.txt but not the
         # settings page (or who reports this after the fact) still has it.
@@ -133,7 +151,10 @@ sub run {
         # beside it. Staggering our own two probes kept THEM apart but not apart
         # from a warm that was already sending — and the limit is on the sum of
         # everything this server sends. The queue does the pacing, so no stagger.
+        # The probes ask for the FRONT, so a warm's queued lookups wait ~2s for
+        # them instead of the user's check waiting behind all of those.
         my $queued = ($t->{mb_queue} && API_PKG->can('mbGet')) ? 1 : 0;
+        $viaQueue[$i] = $queued;
 
         my ($host) = ($t->{url} // '') =~ m{^\w+://([^/:]+)};
         $host = lc($host // '');
@@ -145,6 +166,7 @@ sub run {
         my $settle = sub {
             my ($status, $code, $note) = @_;
             return if $done;
+            $settled[$i] = 1;
             # $started is set when the request actually goes out, so a staggered
             # probe reports its own round trip, not its queue wait.
             my $ms = int((Time::HiRes::time() - ($started // Time::HiRes::time())) * 1000);
@@ -188,11 +210,12 @@ sub run {
             if ($queued) {
                 # $started is set when the queue actually sends, so the row reports
                 # its round trip rather than its wait in the queue.
-                API_PKG->mbGet($t->{url}, $okcb, $errcb, timeout => PROBE_TIMEOUT,
-                               onSend => sub { $started = Time::HiRes::time() });
+                API_PKG->mbGet($t->{url}, $okcb, $errcb, timeout => PROBE_TIMEOUT, front => 1,
+                               onSend => sub { $started = Time::HiRes::time(); $sent[$i] = 1 });
                 return;
             }
             $started = Time::HiRes::time();
+            $sent[$i] = 1;
             # A target with a body is POSTed — the credential stays out of the URL,
             # which LMS core writes to server.log when a request fails.
             defined $t->{body}

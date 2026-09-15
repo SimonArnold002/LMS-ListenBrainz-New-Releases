@@ -600,5 +600,39 @@ print "\n9. PUBLIC MUSICBRAINZ PROBES GO THROUGH THE PLUGIN'S ONE QUEUE (2026-09
     ok(!@queued, 'a local mirror is probed directly, not through the public queue');
 }
 
+print "\n10. A PROBE THE QUEUE NEVER REACHED IS 'NOT PROBED', NOT A TIMEOUT (2026-09-15)\n";
+{
+    # Seen live 2026-09-14: the identity probe took 11s, so the search probe queued
+    # behind it was never sent before the 12s deadline and read "fail / 0 ms / timed
+    # out" — a fault reported against a host nobody asked. This stub is the real
+    # queue's shape: ONE in flight; the first probe is sent and never answers, the
+    # second waits behind it.
+    no warnings qw(redefine once);
+    local $Plugins::ListenBrainzFreshReleases::API::MB_BASE   = 'https://musicbrainz.org/ws/2/';
+    local $Plugins::ListenBrainzFreshReleases::API::MB_PUBLIC = 1;
+    my (@front, $busy);
+    local *Plugins::ListenBrainzFreshReleases::API::mbGet = sub {
+        my ($class, $url, $okcb, $errcb, %o) = @_;
+        push @front, $o{front} ? 1 : 0;
+        return if $busy++;                              # queued behind the one in flight
+        $o{onSend}->() if ref $o{onSend} eq 'CODE';     # sent; never answers
+    };
+    local *Plugins::ListenBrainzFreshReleases::API::mbQueueWait = sub { 0 };
+
+    setPrefs(username => 'simon', token => 'x' x 36);
+    routes(healthy_public());
+    my ($rows) = runDiagFired();
+    my $r = byKey($rows);
+
+    ok(@front == 2 && !scalar(grep { !$_ } @front), 'both MusicBrainz probes ask the queue for the front');
+    ok($r->{mb_search}{status} eq 'warn' && scalar(($r->{mb_search}{note} // '') =~ /not probed/),
+       'the probe the queue never sent reads warn / "not probed"');
+    ok($r->{musicbrainz}{status} eq 'fail' && scalar(($r->{musicbrainz}{note} // '') =~ /timed out/),
+       'the probe that WAS sent and never answered is still fail / "timed out"');
+    ok($r->{listenbrainz}{status} eq 'ok', 'rows that answered are untouched');
+    ok($r->{lastfm}{status} eq 'fail' && scalar(($r->{lastfm}{note} // '') =~ /timed out/),
+       'a silent host outside the queue is still fail / "timed out"');
+}
+
 printf("\n%d passed, %d failed\n", $pass, $fail);
 exit($fail ? 1 : 0);

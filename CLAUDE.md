@@ -23,7 +23,9 @@ tick), §4B (the startup gate) and §4F (the store re-seed) are in; §4C-§4E ar
 for `foryou` and `all` independently. It replaces seven controls — `weeks_past`, `weeks_future`
 and the `foryou_past`/`foryou_future`/`all_past`/`all_future`/`muspy_future` gates — none of which
 are migrated (they stop being read; only the four gates and `days` were ever on `main`).
-Defaults keep 0.9.185's behaviour: For You `4`/`2`, All Releases `2`/`0`.
+Defaults are `2`/`1` for BOTH sections — this week + next week (Simon, 2026-09-15; it was For You
+`4`/`2`, All Releases `2`/`0`, reproducing 0.9.185). Not migrated, so every user updating from
+`main` lands on `2`/`1`; an install that already stored the dev values keeps them (`$prefs->init`).
 
 **MuSpy has no window of its own** — Simon's call: it must never show past four weeks and must
 roll over like the LB feed. `_mergeMuSpy` windows on `sectionWindow('foryou')`, the `'muspy'`
@@ -34,7 +36,7 @@ Read `docs/week-based-release-window.md` "As changed" before touching any of it.
 `t_weekwindow.pl` (71, incl. §8 which RUNS `Settings::handler`), `t_detailwarm.pl` §8; both
 anti-tested. Built and versioned as 0.9.215; not yet installed.
 
-## MusicBrainz 503s — built 0.9.219, 2026-09-14 (not installed; review CLOSED, pushed to dev)
+## MusicBrainz 503s — built 0.9.219, 2026-09-14 (review CLOSED, pushed to dev; installed 2026-09-14; no refusals live 2026-09-15)
 
 **Diagnosed on the rig from `log.txt`:** ~80 MusicBrainz 503s in ten minutes after the 06:31
 restart, smaller bursts after every restart. MusicBrainz refuses EVERY request from an IP whose
@@ -53,7 +55,7 @@ Guards: new `tools/t_mbqueue.pl` (67), `t_rgresolver.pl` §5/5b, `t_diag.pl` §9
 `t_detailwarm.pl`, `t_genrefill.pl` §11B/§13 re-pointed. 35 suites exit 0; 11 anti-test mutants each
 red. The artist sort was decided later the same day — next section.
 
-## Artist sort A–Z, radio lookup, streaming aliases — built 0.9.219, 2026-09-14 (not installed; review CLOSED, pushed to dev)
+## Artist sort A–Z, radio lookup, streaming aliases — built 0.9.219, 2026-09-14 (review CLOSED, pushed to dev; installed 2026-09-14)
 
 Three more changes, all Simon's call the same day — Ledger §A2 `ARTIST SORT IS A–Z ON THE DISPLAY
 NAME` and `STREAMING ALIAS PASS`:
@@ -73,6 +75,38 @@ Guards: new `tools/t_aliasmatch.pl` (61), `t_orderfreeze.pl` rewritten (32; §9 
 `t_diag.pl` §6 (79 — the community-API probe is on `/aliases` and its amber note no longer promises a
 MusicBrainz fallback). 36 suites exit 0, both sync checks 0; 11 mutants each red, plus 2 on the Diag
 row. **UNPROVEN LIVE.**
+
+## Round of 2026-09-15 — built 0.9.220, 2026-09-15 (NOT installed, NOT reviewed)
+
+Four changes on top of 0.9.219, all Simon's call the same day:
+1. **Week window defaults are `2`/`1` for BOTH sections** — this week + next week (`API::%WEEK_PREFS`,
+   `Plugin.pm` `$prefs->init`). Not migrated, so every user updating from `main` lands on them.
+   Guard: `t_weekwindow.pl` §5 (71).
+2. **Diag's MusicBrainz probes join the FRONT of the one MusicBrainz queue** — `API::_mbGet(...,
+   front => 1)`: ahead of ordinary jobs, FIFO among front jobs, and still behind the request in
+   flight, `MB_GAP` and the 503 backoff. Simon asked whether other queries should be PAUSED during
+   the check; front-of-queue was chosen because the queue already makes an overlap unable to cause
+   a 503, so the only cost is waiting. A queued probe the 12s deadline catches UNSENT now reads
+   `warn` / "not probed", never `fail` / "timed out" (it was seen live 2026-09-14: `mb_search`
+   "0 ms, timed out" behind an 11s identity probe). Guards: `t_mbqueue.pl` §4b, `t_diag.pl` §10;
+   six mutants, each red.
+3. **`PLUGIN_LBF_DIAG_DESC`** names ListenBrainz Labs, the MusicBrainz search index and the
+   LMS-community API.
+4. **README.md / README.html** rewritten for the current settings page (Simon asked for it before the
+   main merge). `tools/make_readme_html.py` keeps only the FIRST intro paragraph (for the page
+   header), gives anchors to H2 sections only, and ends a numbered list at an indented follow-on
+   line — so keep the intro to one paragraph, link only to H2s, and keep each step on one line.
+
+**Live checks of 0.9.219 on 2026-09-15:** Artist sort A–Z PROVEN (132 releases, 0 out of order,
+all nine "The …" artists filed under the next word; sort and paging restored afterwards). No
+MusicBrainz refusal in the whole log since its midnight rotation (10,735 lines; the refusal line is
+WARN) and 175 detail fetches / 0 failed after the 08:09 restart. **SETTLED: the 05:00 overnight warm ran
+on 0.9.219 inside that log.** Proof: after the 08:09 restart (build unchanged) `warmstats` showed
+`ticks=0`, and `_armWarm` arms a catch-up tick at boot+`WARM_DELAY` whenever `warm_last_at` is older
+than `_lastWarmInstant` (05:00 today) — so `warm_last_at` was already past 05:00. A full warm plus the
+post-restart detail work, zero refusals. Waiting for another 05:00 warm adds nothing: it is the same
+traffic. The one thing not measured is HOW MANY of those requests reached MusicBrainz. Radio lookup and the streaming alias pass remain UNPROVEN
+LIVE: their only traces are INFO lines and the plugin does not log at INFO on the rig.
 
 ## Review Ledger — READ THIS BEFORE REPORTING ANY FINDING
 
@@ -135,6 +169,7 @@ because line numbers rot on the next edit.
 | `WARM_HOUR` stays 05:00 local — 03:30 (and "N hours after restart") asked for, costed, declined | A2 | `WARM_HOUR STAYS AT 05:00 LOCAL` |
 | One MusicBrainz queue + one community-API queue; Trending album search community-API ONLY; tracklists ListenBrainz-first (edition may differ ~1 in 10, accepted) | A2 | `ONE MUSICBRAINZ QUEUE, ONE COMMUNITY-API QUEUE` |
 | Streaming album match retries joint-credit parts and community-API aliases (ONE pass, clean misses only, tracks not covered); radio name lookup community API only, no MB fallback | A2 | `STREAMING ALIAS PASS` |
+| Connection Check failing ~3 min after a restart, and the server being slow then — NOT reproduced; the slowdown is server-wide and NOT attributable to LBF | B | `CONNECTION CHECK RIGHT AFTER A RESTART` |
 
 **Two standing rules that kill most repeat findings:**
 
@@ -466,6 +501,20 @@ always with its reason, and those stay suppressed. The code a fix added is new a
     `SORT_NONE_AGE` — one day is the 0.9.186 `fetched_at` fix and is still right for the
     browse path; §4G.1 splits it per caller instead.
 
+- **CONNECTION CHECK RIGHT AFTER A RESTART — `Diag::run`, `OVERALL_DEADLINE`, `WARM_DELAY`. Closed
+  as NOT REPRODUCED, Simon 2026-09-15.** On 2026-09-14 at ~boot+3min the check showed Labs, Cover
+  Art Archive and Last.fm `fail` at ~8.2s each and `mb_search` "0 ms, timed out", while every
+  streaming track-match timed out in the same millisecond (the same burst sat at 16:58:07 on
+  0.9.217). ListenBrainz had known upstream problems that day. Re-run 2026-09-15 idle AND at
+  boot+185s: every row green both times. The one row that could falsely read "timed out" is fixed
+  (`mb_search` "not probed", round of 2026-09-15 above).
+  - **The post-boot slowdown is server-wide, not an LBF finding.** Measured 2026-09-15 with a 0.5s
+    `serverstatus` poller through a restart: ~35ms until exactly boot+180s, then 0.25-1.8s for
+    between 2.5 and 5 minutes, longest single stall ~2s, nothing timed out. The onset coincides with
+    `WARM_DELAY`, but the rig runs other server plugins that do their own start-up work, so the
+    load cannot be pinned on LBF without per-plugin evidence. Re-raise ONLY with that evidence, or
+    with a Connection Check that fails again on a healthy upstream day.
+
 ### C. CLOSED FINDINGS
 
 Fixed findings are recorded per review in `docs/code-review-<version>.md`, each
@@ -788,7 +837,7 @@ mechanism this ledger replaces.
 
 > **ListenBrainz Fresh Releases — for Lyrion Music Server.** Turn your ListenBrainz listening into a living, playable music feed inside LMS.
 
-- **New Releases for You** — personalised feed of fresh releases from artists in your ListenBrainz history (needs a username; **no token** since 0.9.160). Newest-first, grouped by week, tap-through detail pages. **Optional MuSpy** — add a MuSpy user ID (public, no password) to fold in releases from the artists you follow there; more tailored since you pick the artists, and overlaps with ListenBrainz are shown once. MuSpy is upcoming-heavy, so it has its own **upcoming** switch (on by default, independent of the feed's Include-Upcoming) and a **how-far-ahead** limit (default 12 months).
+- **New Releases for You** — personalised feed of fresh releases from artists in your ListenBrainz history (needs a username; **no token** since 0.9.160). Newest-first, grouped by week, tap-through detail pages. **Optional MuSpy** — add a MuSpy user ID (public, no password) to fold in releases from the artists you follow there; more tailored since you pick the artists, and overlaps with ListenBrainz are shown once. MuSpy has no window of its own: its releases follow New Releases for You's **Weeks to show / Upcoming weeks**, and anything announced further ahead appears as the weeks roll forward each Monday.
 - **All Releases** — the global ListenBrainz fresh-releases feed (no account). By-week landing page to jump to any week.
 - **Created-for-You Playlists** — your **Weekly Jams / Weekly Exploration / Daily Jams** as fully-streaming **Play-all** lists; every track matched **library-first**, then streaming.
 - **People You Follow** *(optional; toggle in Settings → General, default on)* — a whole section built from what the people you follow **actually play** (public listen-stats — username only; **one-vote-per-follower** breadth ranking). **Trending Tracks** (weekly, Play-all, owned-excluded, album-level so a full-album play can't flood it) + **Trending Albums · This Month / · This Year** (tap-through album pages with art/date/type). Plus **Recommended** — the tracks they **recommend/pin** (needs a token; the feed is private), one newest-first **new-music-only** Play-all list with **day dividers**, accumulating so recs aren't lost as the feed rolls. Off = nothing here is fetched, cached or warmed.
@@ -798,7 +847,7 @@ mechanism this ledger replaces.
 - **Block artists** — one tap hides an artist from every feed.
 - **Material home shelves** — optional New Releases for You / Playlists / All Releases home rows.
 - **Albums or Singles & EPs, from the list** — a "Showing Albums (tap for Singles & EPs)" row flips either feed between the two and back, with the icon changing to match, so singles and EPs can stay switched on without burying the albums. Sticks across visits and restarts; only appears when a section has both kinds ticked.
-- **Your taste** — filter by type / artwork-only / Various Artists; **per-view sort** (a "Sorted by…" toggle in each list's Options section — Release Date / Artist / Album Title, kept within the weekly W/C headers); release-window; cached & pre-warmed (instant), **no extra server software**.
+- **Your taste** — filter by type / artwork-only / Various Artists; **per-view sort** (a "Sorted by…" toggle in each list's Options section — Release Date / Artist / Album Title, kept within the weekly W/C headers); a **per-section release window** (Weeks to show + Upcoming weeks, the current week counted as week 1; default this week + next week in both sections); the **Artist** sort is A–Z on the name shown, skipping a leading article; cached & pre-warmed (instant), **no extra server software**.
 - **Plays nicely with Listen Later** — adding a release passes the real MusicBrainz release type (album / EP / single) across, which the streaming services mostly don't expose, so the saved row is labelled and play-tracked correctly rather than guessed from a track count.
 
 **Requirements:** LMS 9.0.0+ (Material Skin); a ListenBrainz **username** for the personalised features — no API token (All Releases needs nothing). A token is **optional** and adds only the *Recommended* list under People You Follow, whose feed is genuinely private. Optional Qobuz/Tidal/Bandcamp/Deezer/Spotify-via-Spotty (playback), MAI plugin (artist photos+bios — **the only bio source since 0.9.186**), Last.fm is **built in** (the genre ladder's tier 5, and DSTM similar artists — no key to set, and no settings field for one). Every optional add-on degrades gracefully.
@@ -895,7 +944,28 @@ part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 
 ## Current Version
 
-**0.9.219** — built 2026-09-14, **NOT installed, not committed, UNPROVEN LIVE.** The two working-tree
+**0.9.220** — built 2026-09-15, **NOT installed, NOT reviewed, not committed.** The "Round of
+2026-09-15" section at the top of this file:
+- **Week window defaults `2`/`1` for both sections** (this week + next week) — `API::%WEEK_PREFS` and
+  `Plugin.pm` `$prefs->init`, agreeing as `t_weekwindow.pl` §5 requires. No migration; an install
+  that already stored week values keeps them.
+- **`API::_mbGet(..., front => 1)`** — joins ahead of ordinary jobs (FIFO among front jobs), still
+  behind the request in flight, `MB_GAP` and the 503 backoff. Used ONLY by `Diag`'s two MusicBrainz
+  probes. A queued probe the 12s deadline catches unsent reads `warn` / "not probed".
+- **`PLUGIN_LBF_DIAG_DESC`** lists Labs, the search index and the LMS-community API.
+- **No schema rung, no cache family bumped** — nothing cached changed shape; the window already
+  feeds `_sectionSig` and the feed memo keys, so a changed default re-derives on its own.
+  `DEV_BUILD => 1`, `RESET_CACHE_ON_BUILD => 0`.
+- Guards: `t_mbqueue.pl` §4b (75), `t_diag.pl` §10 (83-84: §7 is a live MusicBrainz call that SKIPs
+  when rate-limited), `t_weekwindow.pl` (71). All 36 suites exit 0; `bench_walk.pl` still exits 255
+  on its stale `lastfmConfigured` stub (pre-existing, 0.9.213). Six mutants on the queue/Diag fix,
+  each red.
+
+**0.9.219** — built 2026-09-14, **INSTALLED on the test rig 2026-09-14 23:05; review CLOSED and pushed
+to `dev` (b9f9a69); superseded by 0.9.220.** Artist sort A–Z PROVEN live 2026-09-15; the MusicBrainz
+queue PROVEN live 2026-09-15 (no refusal across the 05:00 overnight warm and a restart — see the
+"Round of 2026-09-15" section); radio lookup and the streaming alias pass UNPROVEN LIVE (INFO-only
+traces). The two working-tree
 sections at the top of this file, built together: **MusicBrainz 503s** (one MusicBrainz queue, one
 community-API queue, Trending album search community-API only, tracklists ListenBrainz-first) and
 **Artist sort A–Z, radio lookup, streaming aliases** (no MusicBrainz sort-name, the sort columns and
@@ -1100,7 +1170,8 @@ unwindowed and appear as the edge rolls forward; they are simply never displayed
 MuSpy row, months-out announcements included; it now prepares only the rows inside the window.
 
 **NO MIGRATION**, the 0.9.185 precedent: the retired prefs stop being read and everyone lands on
-defaults that reproduce 0.9.185's behaviour (For You 4/2, All Releases 2/0). `main` (0.9.149) never
+the defaults — since 2026-09-15 `2`/`1` for both sections, this week + next week (it was For You 4/2,
+All Releases 2/0, reproducing 0.9.185). `main` (0.9.149) never
 shipped `weeks_*`, so only the four gates and `days` are orphaned for real users.
 
 **OBSERVED, NOT CHANGED:** `API::_padDate` fills a year-only or month-only MuSpy date with the 1st,

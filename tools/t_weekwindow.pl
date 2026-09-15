@@ -313,10 +313,10 @@ print "-" x 74, "\n";
     # foryou_future came to be read as `// 0` in four places and `// 1` in warmFeeds.
     my %init = $plugin_src =~ /^\s{4}(foryou_weeks|foryou_upcoming|all_weeks|all_upcoming)\s*=>\s*(\d+)/mg;
     ok(keys(%init) == 4, 'all four window prefs are initialised in Plugin.pm');
-    ok(($init{foryou_weeks} // -1) == 4 && ($init{foryou_upcoming} // -1) == 2,
-       'For You ships 4 weeks with 2 upcoming — 1 back + this + 2 ahead');
-    ok(($init{all_weeks} // -1) == 2 && ($init{all_upcoming} // -1) == 0,
-       'All Releases ships 2 weeks with none upcoming — last week + this week');
+    ok(($init{foryou_weeks} // -1) == 2 && ($init{foryou_upcoming} // -1) == 1,
+       'For You ships 2 weeks with 1 upcoming — this week + next week');
+    ok(($init{all_weeks} // -1) == 2 && ($init{all_upcoming} // -1) == 1,
+       'All Releases ships 2 weeks with 1 upcoming — this week + next week');
 
     my ($rows, $agree) = (0, 1);
     while ($api_src =~ /^\s{4}(foryou|all)\s*=>\s*\[\s*'(\w+)',\s*(\d),\s*'(\w+)',\s*(\d)\s*\],/mg) {
@@ -327,8 +327,8 @@ print "-" x 74, "\n";
     ok($rows == 2 && $agree, 'every default in %WEEK_PREFS matches the pref default in Plugin.pm');
 
     %PREF = ();   # everything UNSET -> the table's defaults
-    ok("@{[ secw('2026-08-22', 'foryou') ]}" eq '1 2', 'For You unset reads as 1 back / 2 ahead');
-    ok("@{[ secw('2026-08-22', 'all') ]}" eq '1 0', 'All Releases unset reads as 1 back / 0 ahead');
+    ok("@{[ secw('2026-08-22', 'foryou') ]}" eq '0 1', 'For You unset reads as 0 back / 1 ahead');
+    ok("@{[ secw('2026-08-22', 'all') ]}" eq '0 1', 'All Releases unset reads as 0 back / 1 ahead');
 
     # THE POINT OF THE CHANGE: the sections are independent.
     %PREF = (foryou_weeks => 4, foryou_upcoming => 3, all_weeks => 3, all_upcoming => 0);
@@ -339,8 +339,9 @@ print "-" x 74, "\n";
     # The retired prefs are inert, whatever a pre-change prefs.yaml still holds.
     %PREF = (weeks_past => 3, weeks_future => 0, foryou_past => 0, foryou_future => 0,
              all_past => 0, all_future => 1, muspy_future => 1);
-    ok("@{[ secw('2026-08-22', 'foryou') ]}" eq '1 2'
-       && "@{[ secw('2026-08-22', 'all') ]}" eq '1 0',
+    # Read, they would give For You '3 0' and All Releases '0 0' — both differ from the defaults.
+    ok("@{[ secw('2026-08-22', 'foryou') ]}" eq '0 1'
+       && "@{[ secw('2026-08-22', 'all') ]}" eq '0 1',
        'the retired weeks_*/*_past/*_future/muspy_future prefs no longer move the window');
 
     # MuSpy is not a section: it has no window to diverge with.

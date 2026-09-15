@@ -217,12 +217,12 @@ use constant WEEKS_FUTURE_DEFAULT => 2;
 # MuSpy's API still returns announcements months ahead (newest-first, no date
 # bound) and those are still stored — they are just never SHOWN past four weeks.
 #
-# The defaults are what 0.9.185 shipped: For You 1 back + this + 2 ahead, All
-# Releases 1 back + this. Old prefs are not migrated (the 0.9.185 precedent); they
-# simply stop being read.
+# The defaults are this week + next week for BOTH sections (Simon, 2026-09-15).
+# Old prefs are not migrated (the 0.9.185 precedent); they simply stop being read,
+# so every user updating from main lands on these.
 my %WEEK_PREFS = (
-    foryou => [ 'foryou_weeks', 4, 'foryou_upcoming', 2 ],
-    all    => [ 'all_weeks',    2, 'all_upcoming',    0 ],
+    foryou => [ 'foryou_weeks', 2, 'foryou_upcoming', 1 ],
+    all    => [ 'all_weeks',    2, 'all_upcoming',    1 ],
 );
 
 # ($weeksPref, $weeksDefault, $upcomingPref, $upcomingDefault) for a section, or ()
@@ -3401,7 +3401,13 @@ sub _mbNoteOk { $mbDelay = 0; return }
 # $onOk / $onErr receive exactly what SimpleAsyncHTTP hands its callbacks, so a
 # call site converts by replacing `->new(...)->get(...)` and nothing else.
 # %opt: timeout (seconds), onSend (called when the request actually goes out —
-# the connection check times its own round trip from there, not from the queue).
+# the connection check times its own round trip from there, not from the queue),
+# front (join AHEAD of every ordinary job, behind any earlier front job).
+#
+# FRONT JUMPS THE LINE, NOT THE RULES. It exists for the connection check: a user
+# pressing the button must not wait behind a warm's thirty queued lookups and read
+# "timed out". A front job still waits for the request in flight, MB_GAP and the 503
+# backoff, so it adds no load and no refusal risk — it only reorders what is waiting.
 use constant MB_GAP          => 1.1;
 use constant MB_WATCHDOG_PAD => 5;    # past the request timeout, a lost callback frees the slot
 our @mbQueue;
@@ -3419,9 +3425,18 @@ sub _mbIsPublicUrl {
 sub _mbGet {
     my ($url, $onOk, $onErr, %opt) = @_;
     my $job = { url => $url, ok => ($onOk || sub {}), err => ($onErr || sub {}),
-                timeout => ($opt{timeout} || 15), onSend => $opt{onSend} };
+                timeout => ($opt{timeout} || 15), onSend => $opt{onSend},
+                front => ($opt{front} ? 1 : 0) };
     unless (_mbIsPublicUrl($url)) { _mbSend($job, 0); return }
-    push @mbQueue, $job;
+    if ($job->{front}) {
+        # After the front jobs already waiting, so two probes keep their own order.
+        my $at = 0;
+        $at++ while $at < @mbQueue && $mbQueue[$at]{front};
+        splice @mbQueue, $at, 0, $job;
+    }
+    else {
+        push @mbQueue, $job;
+    }
     _mbPump();
     return;
 }

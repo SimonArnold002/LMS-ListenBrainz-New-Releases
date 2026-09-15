@@ -279,6 +279,41 @@ section '4. MUSICBRAINZ: THE QUEUE CANNOT BE WEDGED';
 }
 
 # ===========================================================================
+section '4b. MUSICBRAINZ: A FRONT JOB (THE CONNECTION CHECK) JUMPS THE LINE, NOT THE RULES';
+{
+    # A warm has a, b, c waiting (a in flight); the connection check then asks for
+    # the front twice. It must go ahead of b and c — and still never beside a,
+    # never inside MB_GAP, never during a backoff.
+    reset_all();
+    Q::_mbGet("${PUB}$_", sub {}) for qw(a b c);
+    Q::_mbGet("${PUB}f1", sub {}, undef, front => 1);
+    Q::_mbGet("${PUB}f2", sub {}, undef, front => 1);
+    is(scalar @HTTP, 1, 'a front job does not go out beside the request already in flight');
+
+    $HTTP[0]->answer('{}'); mark($HTTP[0]);       # a lands at t=100, inside the gap
+    is(scalar @HTTP, 1, '...nor before MB_GAP has passed');
+    advance(100 + Q::MB_GAP());
+    ok(scalar(($HTTP[1]{url} // '') =~ m{/f1$}), 'the first front job goes before the earlier-queued b and c');
+
+    $HTTP[1]->answer('{}'); advance(100 + 2 * Q::MB_GAP());
+    ok(scalar(($HTTP[2]{url} // '') =~ m{/f2$}), 'two front jobs keep their own order');
+
+    $HTTP[2]->answer('{}'); advance(100 + 3 * Q::MB_GAP());
+    ok(scalar(($HTTP[3]{url} // '') =~ m{/b$}), '...and the ordinary queue resumes where it left off');
+    is(scalar @HTTP, 4, 'one request per turn throughout');
+
+    # A 503 backoff holds a front job like anything else.
+    reset_all();
+    Q::_mbGet("${PUB}a", sub {}, sub {});
+    Q::_mbGet("${PUB}f", sub {}, undef, front => 1);
+    $HTTP[0]->fail(error => '503 Service Temporarily Unavailable');
+    advance(104.9);
+    is(scalar @HTTP, 1, 'a front job waits out a 503 backoff');
+    advance(105.1);
+    ok(@HTTP == 2 && scalar(($HTTP[1]{url} // '') =~ m{/f$}), '...and is the first thing sent after it');
+}
+
+# ===========================================================================
 section '5. COMMUNITY API: ONE REQUEST IN FLIGHT, 429 RETRIES AT THE FRONT';
 {
     reset_all();

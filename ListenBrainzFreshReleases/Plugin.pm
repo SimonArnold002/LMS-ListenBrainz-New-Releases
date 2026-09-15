@@ -315,8 +315,8 @@ $prefs->init({
     dstm_batch => 15,
 
     # For You section
-    foryou_weeks            => 4,   # this week counts as 1; total, max 4 (API::WEEKS_MAX)
-    foryou_upcoming         => 2,   # of those, how many are ahead — 1 back + this + 2 ahead
+    foryou_weeks            => 2,   # this week counts as 1; total, max 4 (API::WEEKS_MAX)
+    foryou_upcoming         => 1,   # of those, how many are ahead — this week + next week
     foryou_artwork_only     => 1,
     foryou_various          => 1,
     foryou_type_album       => 1,
@@ -331,8 +331,8 @@ $prefs->init({
     foryou_type_demo        => 0,
 
     # All Releases section
-    all_weeks            => 2,   # last week + this week
-    all_upcoming         => 0,
+    all_weeks            => 2,   # this week + next week
+    all_upcoming         => 1,
     all_artwork_only     => 1,
     all_various          => 1,
     all_type_album       => 1,
