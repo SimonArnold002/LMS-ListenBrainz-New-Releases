@@ -173,7 +173,7 @@ sub warmStages {
 # version changes preserve every cache on both branches. Cache families invalidate
 # themselves with their own key/schema/parser versions; a plugin version is not a
 # reason to download the same upstream data again.
-use constant DEV_BUILD => 1;
+use constant DEV_BUILD => 0;
 
 # Set to 1 only for a deliberately built clean-load test. The next version change
 # then clears both derived rows and genre answers, reproducing the populated-store

@@ -945,6 +945,10 @@ part of the plugin zip, so no zip rebuild / sha bump is needed when they change.
 ## Current Version
 
 **1.0.0** — version-only bump 2026-09-15, code identical to 0.9.220 (committed as 76c1030). Major version for submission to the Lyrion official repo. **NOT installed, NOT reviewed.**
+`DEV_BUILD` set to **0 on `dev`** (2026-09-15, Simon) so this zip is the one `main` ships — it is
+telemetry only (the `dev_build` stats field) and wipes nothing either way; zip rebuilt and sha
+recomputed, version kept at 1.0.0. `RESET_CACHE_ON_BUILD` still 0. The only line still to reconcile
+at the merge is `repo.xml` `<url>`.
 
 **0.9.220** — built 2026-09-15. The "Round of
 2026-09-15" section at the top of this file:
