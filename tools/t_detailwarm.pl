@@ -227,6 +227,7 @@ is($retry, 0, 'obsolete job leaves the queue instead of retrying');
     sub _mergeMuSpy         { $_[1] // [] }
     sub _dbg                {}
     sub _lastfmPriorityBusy { 0 }
+    sub _spotifyBackingOff  { 0 }   # not this suite's subject — never refusing here
 
     package Plugins::ListenBrainzFreshReleases::API;
     # RECORD WHETHER `force` WAS PASSED. This is the control half: a re-seed that

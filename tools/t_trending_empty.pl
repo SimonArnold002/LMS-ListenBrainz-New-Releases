@@ -172,6 +172,7 @@ my $PREFS = T::Prefs->new;
     use constant TREND_ALBUMS_YEAR_TTL      => 30 * 86400;
     use constant PLAYLIST_INCONCLUSIVE_TTL  => 1 * 3600;
     use constant PLAYLIST_TIMEOUT           => 45;
+    use constant PACED_TRACK_GAP            => 2;
     use constant TRENDING_MAX               => 50;
     use constant FOLLOWER_MAX               => 250;
     use constant FOLLOWER_FANOUT            => 6;
@@ -182,6 +183,12 @@ my $PREFS = T::Prefs->new;
 
     # Collaborators that aren't what's being tested.
     our @ADAPTERS   = ( { name => 'Qobuz' }, { name => 'Tidal' } );
+    # The streaming gate now narrows itself while Spotify is refusing. This suite is
+    # about the EMPTY/inconclusive TTLs, not the back-off (t_spotifybackoff.pl §4c owns
+    # that), so the knob stays off and the gate behaves exactly as it did before —
+    # which is the point: pacing must not change what an empty build caches.
+    our $BACKING_OFF = 0;
+    sub _spotifyBackingOff { return $BACKING_OFF ? 1 : 0 }
     our $FIND_MATCH = 1;                      # does the streaming gate keep an album?
     sub _orderedAdapters { return @ADAPTERS }
     sub _findPlayable {

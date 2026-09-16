@@ -220,6 +220,52 @@ use constant TRACK_NOMATCH_TTL =>  7 * 86400;
 # answer can change within a day, so retrying it would be pure waste.
 use constant MISS_RETRY_SCHEDULE => [ 1 * 3600, 6 * 3600, 24 * 3600 ];
 
+# BACKING THE WARM OFF WHILE SPOTIFY IS REFUSING US.
+#
+# Spotify's Web API limit is per APP (client id) over a rolling 30-second window, and
+# Spotty ships ONE built-in client id that every install shares unless the user sets
+# their own — so the quota a warm burns is not even this server's alone. Over the limit
+# Spotify answers 429 with a Retry-After (2-7s observed live on plex, 2026-09-15: 20
+# error429 lines and 191 502s in one day). Spotty then sets `spotty_rate_limit_exceeded`
+# for that long and refuses EVERY call server-wide before any request is sent, the user's
+# own Spotify browsing included — so a wide warm can lock the user out of their own
+# library for as long as it keeps pushing.
+#
+# THE WARM ONLY, and only WHILE REFUSED. A view has somebody waiting on it, and the
+# sibling Pitchfork plugin measured always-on pacing as far too slow (its 0.9.36, rejected
+# — do not propose it here either). A healthy run pays nothing.
+#
+# OUR OWN CLOCK, deliberately not Spotty's flag: `hasError429` is cleared by the next
+# SUCCESSFUL response, and with Spotify at its default priority 5 it can be many albums
+# before one is even sent, so the flag would read false while we are still being refused.
+use constant SPOTIFY_BACKOFF_WINDOW => 30;   # seconds after a refusal that we stay narrow
+use constant PACED_TRACK_GAP        => 2;    # seconds between live resolves while backing off
+
+# A refusal is only ever ADDITIONAL evidence, never the absence of it: three free passes
+# (below) still converge, because the fourth refusal spends a real attempt like any other.
+use constant SPOTIFY_FREE_PASSES => 3;
+
+# When Spotify last refused us. `our` so a suite can place the stamp, and declared HERE,
+# above every sub that reads it — `our` is LEXICALLY scoped, so a declaration sitting
+# below its first use silently gives that use a different variable (the sibling plugin
+# lost nine suites to exactly that).
+our $SPOTIFY_REFUSED_AT = 0;
+
+# Is Spotty refusing calls right now? The one signal its API exposes. `can`- and
+# eval-guarded: Spotty may not be installed, and this must never be the thing that dies.
+sub _spottyRateLimited {
+    return 0 unless Plugins::Spotty::API->can('hasError429');
+    return eval { Plugins::Spotty::API->hasError429() } ? 1 : 0;
+}
+
+# Stamped by the Spotify adapters when an EMPTY answer arrives while Spotty is
+# rate-limiting — i.e. a search that was never sent, not a catalogue that has nothing.
+sub _noteSpotifyRefusal { $SPOTIFY_REFUSED_AT = time(); return 1 }
+
+sub _spotifyBackingOff {
+    return $SPOTIFY_REFUSED_AT && (time() - $SPOTIFY_REFUSED_AT) < SPOTIFY_BACKOFF_WINDOW ? 1 : 0;
+}
+
 # When should this miss be re-searched, given how many times it already has been?
 # undef = never again on this schedule — accept it as a real no-match.
 sub _missRetryAt {
@@ -1454,6 +1500,10 @@ sub resolveFollowFeed {
 sub _resolveFollow {
     my ($client, $store, $callback, $force, $feat, $onDone) = @_;
     $onDone ||= sub {};
+    # WHO CALLED, read before the detach below clears $callback: the warm passes no
+    # render callback, a view always does. Past the detach both look alike, so this is
+    # the only point that can tell the warm (paced while Spotify refuses) from a view.
+    my $warm = !$callback;
 
     my $tracks = $store->{tracks} || [];
     unless (@$tracks) {
@@ -1524,7 +1574,7 @@ sub _resolveFollow {
         # row and completes into cache, and on the warm path there is no $callback at
         # all — so cutting the pass at 45s saves nobody time and only files an
         # unfinished answer.
-    }, 'exclude', $force, timeout => PLAYLIST_RESOLVE_TIMEOUT);
+    }, 'exclude', $force, timeout => PLAYLIST_RESOLVE_TIMEOUT, paced => $warm);
     });
 }
 
@@ -2087,6 +2137,9 @@ sub resolveTrending {
 # context; on the open path with no player _resolveTracks still reports (empty).
 sub _resolveTrending {
     my ($client, $callback, $force, $feat, $onDone) = @_;
+    # WHO CALLED, read before the cold build detaches $callback: the warm passes none,
+    # a view always does. It decides whether the resolve is paced while Spotify refuses.
+    my $warm = !$callback;
 
     # $onDone signals COMPLETION to the warm chain, which is a different thing from
     # $callback (which renders). It must fire at EVERY terminal point or the chain
@@ -2281,7 +2334,7 @@ sub _resolveTrending {
                             # early-stop at TRENDING_MAX matches (ranked pool — we only need the
                             # first N), higher parallelism (the resolve is the cold build's cost).
                             }, 'exclude', $force, limit => TRENDING_MAX, concurrency => TREND_RESOLVE_CONC,
-                               timeout => PLAYLIST_RESOLVE_TIMEOUT);
+                               timeout => PLAYLIST_RESOLVE_TIMEOUT, paced => $warm);
                         };
 
                         # TARGETED metadata fill: the pre-grouping map is capped at
@@ -2498,6 +2551,22 @@ sub _buildAlbumsData {
     my ($client, $range, $onDone, $force, $onPending) = @_;
     $force ||= 0;
 
+    # IS THIS THE WARM? Read at ENTRY, like the two track resolves, and off
+    # $onPending rather than $onDone: only the VIEW passes a pending hook (it needs
+    # the building row), and the warm chain passes four args. Unlike _resolveTrending's
+    # $callback — which a cold view DETACHES before resolving, so a test at the call
+    # site would pace the view too — $onPending is never reassigned in this sub, so the
+    # read is stable wherever it happens. It is taken here anyway, because the next
+    # person to add a detach here should not have to rediscover that.
+    #
+    # The gate below is the THIRD Spotify pump, and the one both back-off rounds
+    # missed: it calls _findPlayable directly rather than through _resolveTracks, so
+    # it never saw `paced`, and `_detailPriorityBusy` — which the ledger called "the
+    # album side" — only ever gated the DetailWarm QUEUE, not this. It is a WRITER of
+    # $SPOTIFY_REFUSED_AT (via _searchSpotify) that never read it: 60 albums per range,
+    # two ranges per warm, five wide, straight back into a quota it had just closed.
+    my $warm = ref $onPending eq 'CODE' ? 0 : 1;
+
     # THE FLAG IS CLEARED BY WRAPPING $onDone, not by hand at each exit. This sub
     # has a dozen scattered `$onDone->([])` returns across four nested fan-out
     # callbacks; clearing at each one would work today and leak the first time a
@@ -2633,8 +2702,16 @@ sub _buildAlbumsData {
 
                         my (@slots, $finished, $timedOut);
                         my ($idx, $active, $completed, $kept) = (0, 0, 0, 0);
+                        # $pumping / $gapTimer: the track pump's re-entrancy guard, ported
+                        # rather than reinvented — see the note over the width read below
+                        # for why a width-only change would have been a 1.0.1 regression.
+                        my $pumping = 0;
+                        my $gapTimer;
                         my $finish = sub {
                             return if $finished; $finished = 1;
+                            # A pending paced wakeup outlives the pass it belonged to unless
+                            # this runs — the watchdog finishes ahead of it by construction.
+                            if ($gapTimer) { Slim::Utils::Timers::killSpecific($gapTimer); $gapTimer = undef; }
                             my @keep = grep { ref $_ } @slots;
                             if (!@keep) {   # nothing survived → streaming likely unavailable
                                 _dbg("trending albums ($range): gate kept 0/$total — serving ungated (short TTL)");
@@ -2653,11 +2730,26 @@ sub _buildAlbumsData {
                             # cut-short fan-out is not this month's ranking.
                             $settle->(\@keep, ($timedOut || $fanCut) ? 1 : 0);
                         };
+                        # ACCEPTED, NOT OVERLOOKED: this watchdog is PLAYLIST_TIMEOUT (45s),
+                        # a third of the track path's 150s, and a paced gate cannot finish
+                        # under it — 60 pooled albums one at a time with PACED_TRACK_GAP is
+                        # ~120s. So a warm gate held narrow for its whole run times out,
+                        # files SHORT (PLAYLIST_INCONCLUSIVE_TTL, 1h) and rebuilds an hour
+                        # later, by which time the storm is almost always over. That is the
+                        # trade Simon chose over exempting the gate after N launches: a
+                        # stale-by-an-hour trending list costs nobody anything, and pushing
+                        # 60 more searches into a closed quota locks the user out of their
+                        # own Spotify. The 30s window means the common case never gets here.
                         my $watchdog = Slim::Utils::Timers::setTimer(undef, time() + PLAYLIST_TIMEOUT, sub { $timedOut = 1; $finish->() });
                         my $pump;
                         $pump = sub {
-                            return if $finished;
-                            while ($active < 5 && $idx < $total) {
+                            return if $finished || $pumping;
+                            $pumping = 1;
+                            # Width read FRESH on every iteration (the rule _coverLimit and
+                            # _resolveTracks both follow), so a refusal arriving mid-gate bites
+                            # at the next slot rather than the next build. A dropping width
+                            # never cancels anything already in flight.
+                            while ($active < (($warm && _spotifyBackingOff()) ? 1 : 5) && $idx < $total) {
                                 last if $kept >= TRENDING_MAX;
                                 my $i = $idx++;
                                 my $a = $data->[$i];
@@ -2682,9 +2774,30 @@ sub _buildAlbumsData {
                                         Slim::Utils::Timers::killSpecific($watchdog) if $watchdog;
                                         $finish->();
                                     }
-                                    elsif ($kept < TRENDING_MAX) { $pump->(); }
+                                    elsif ($kept < TRENDING_MAX) {
+                                        # THE SAME THREE-WAY THE TRACK PUMP USES, and it is the
+                                        # whole reason this is not a one-line width change:
+                                        # _findPlayable answers SYNCHRONOUSLY on a cache hit, from
+                                        # inside the loop that launched it, with $pumping still
+                                        # set. Without this arm every cached album in a backing-off
+                                        # gate would arm its own timer and those strays would later
+                                        # fire live searches back-to-back — the exact 1.0.1 defect,
+                                        # rebuilt on the album side. A warm gate over an
+                                        # already-resolved list is therefore never slowed.
+                                        if ($pumping) {
+                                            # synchronous — the loop that launched this continues
+                                        }
+                                        elsif ($warm && _spotifyBackingOff()) {
+                                            Slim::Utils::Timers::killSpecific($gapTimer) if $gapTimer;
+                                            $gapTimer = Slim::Utils::Timers::setTimer(undef,
+                                                Time::HiRes::time() + PACED_TRACK_GAP,
+                                                sub { $gapTimer = undef; $pump->() unless $finished });
+                                        }
+                                        else { $pump->(); }
+                                    }
                                 }, $a->{artist}, $a->{title}, '', $force, $a->{year}, $a->{type}, $a->{artist_mbid});
                             }
+                            $pumping = 0;
                         };
                         $pump->();
                     };
@@ -3296,7 +3409,7 @@ sub _resolveTracks {
     #   the first N (trending). $opt{concurrency}: parallelism (default PLAYLIST_CONCURRENCY).
     #   $opt{timeout}: overall watchdog, seconds (default PLAYLIST_TIMEOUT) — see below.
     my $limit       = $opt{limit};
-    my $concurrency = $opt{concurrency} || PLAYLIST_CONCURRENCY;
+    my $width       = $opt{concurrency} || PLAYLIST_CONCURRENCY;
     # THE WATCHDOG IS SIZED BY WHO IS WAITING, AND FOR THE PLAYLISTS NOBODY IS.
     # PLAYLIST_TIMEOUT(45s) was chosen when opening a playlist BLOCKED the user at
     # the screen. Since the building row (0.9.182) the open renders immediately and
@@ -3306,6 +3419,12 @@ sub _resolveTracks {
     # there does not save anyone time; it just files an unfinished pass as an answer.
     # The default is unchanged, so trending / DSTM / follow keep the old ceiling.
     my $timeout     = $opt{timeout} || PLAYLIST_TIMEOUT;
+    # $opt{paced}: this is a WARM pass, so it may narrow itself while Spotify is refusing
+    # searches (see SPOTIFY_BACKOFF_WINDOW). The three warm resolves set it — the playlist
+    # warm, and _resolveFollow / _resolveTrending when called with no render callback.
+    # Views never set it — somebody is waiting on
+    # those, and a refused Spotify still leaves every other service answering at full width.
+    my $paced       = $opt{paced} ? 1 : 0;
 
     my $total        = scalar @$tracks;
     my @slots        = (undef) x $total;   # per-index: hashref (match) / 0 (miss) / 'owned' (excluded) / undef (pending)
@@ -3347,10 +3466,27 @@ sub _resolveTracks {
 
     $watchdog = Slim::Utils::Timers::setTimer(undef, time() + $timeout, sub { $timedOut = 1; $finish->() });
 
+    # $pumping is the RE-ENTRANCY guard: a cache hit answers SYNCHRONOUSLY, from inside
+    # the loop below, and must neither recurse into the pump nor arm a paced timer —
+    # $active is already decremented, so the loop picks the next track up by itself.
+    # Only an ASYNC completion (a real search) finds it clear. Without it, every cached
+    # track in a backing-off pass armed its own timer, and those strays later launched
+    # live searches straight after one another (the Pitchfork sibling guards the same).
+    #
+    # $gapTimer is the ONE pending paced wakeup. Each live completion re-arms it rather
+    # than adding another, so the next launch is always PACED_TRACK_GAP after the LAST
+    # completion — including when several were in flight as the back-off began.
+    my $pumping = 0;
+    my $gapTimer;
     my $pump;
     $pump = sub {
-        return if $finished;
-        while ($active < $concurrency && $next < $total) {
+        return if $finished || $pumping;
+        $pumping = 1;
+        # Read the width FRESH on every iteration rather than capturing it, so a refusal
+        # that arrives mid-pass takes effect at the next slot instead of at the end of
+        # it — the same rule _coverLimit follows. A DROPPING width never cancels anything
+        # in flight; the loop simply stops launching.
+        while ($active < (($paced && _spotifyBackingOff()) ? 1 : $width) && $next < $total) {
             last if $limit && $matched >= $limit;   # got enough — stop launching new
             my $i  = $next++;
             my $tr = $tracks->[$i];
@@ -3397,10 +3533,27 @@ sub _resolveTracks {
                     $finish->();
                 }
                 elsif (!($limit && $matched >= $limit)) {
-                    $pump->();
+                    # While Spotify is refusing, leave PACED_TRACK_GAP between LIVE resolves
+                    # so the pass stops pushing into a closed quota (and stops holding the
+                    # user's own Spotify shut). A cache hit answers synchronously with
+                    # $pumping still set, so the loop simply carries on and a warm pass over
+                    # an already-resolved playlist is not slowed. The watchdog still bounds
+                    # the whole pass.
+                    if ($pumping) {
+                        # synchronous — the loop that launched this continues
+                    }
+                    elsif ($paced && _spotifyBackingOff()) {
+                        Slim::Utils::Timers::killSpecific($gapTimer) if $gapTimer;
+                        $gapTimer = Slim::Utils::Timers::setTimer(undef, Time::HiRes::time() + PACED_TRACK_GAP,
+                            sub { $gapTimer = undef; $pump->() unless $finished });
+                    }
+                    else {
+                        $pump->();
+                    }
                 }
             }, $tr->{artist}, $tr->{title}, $tr->{album}, $tr->{recording_mbid}, $force, $libMode);
         }
+        $pumping = 0;
     };
 
     $total ? $pump->() : $finish->();
@@ -4172,6 +4325,17 @@ sub _detailPriorityBusy {
     # General detail preparation is the remainder phase.  It begins only after
     # every Last.fm warm pass (and its final courtesy interval) has drained.
     return 1 unless $detailMainReady;
+    # Spotify is refusing searches — hold the queue rather than spend its jobs on
+    # searches that are never sent (the queue re-arms every 5s, so it resumes on its
+    # own well inside SPOTIFY_BACKOFF_WINDOW). This gates THIS QUEUE ONLY — it is the
+    # DetailWarm queue's `pause` hook and nothing else consults it.
+    #
+    # IT IS NOT "THE ALBUM SIDE", and saying that it was is what hid a whole pump for
+    # two review rounds: the trending-albums streaming gate in _buildAlbumsData runs its
+    # own five-wide _findPlayable pass that never passes through this queue. It now
+    # paces itself. Three pumps touch Spotify, not two — _resolveTracks (`paced`), this
+    # queue, and that gate — and a fourth would need its own read of _spotifyBackingOff.
+    return 1 if _spotifyBackingOff();
     return 1 if _lastfmPriorityBusy();
     return 1 if $lastfmWarmPending || $lastfmRequestBusy;
     return 0;
@@ -4552,7 +4716,7 @@ sub warmCache {
                                 . ($inconclusive ? " ($inconclusive inconclusive)" : "")
                                 . ($timedOut ? " (WATCHDOG cut the pass — short TTL)" : ""));
                             $next->();
-                        }, undef, $force, timeout => PLAYLIST_RESOLVE_TIMEOUT);
+                        }, undef, $force, timeout => PLAYLIST_RESOLVE_TIMEOUT, paced => 1);
                         });
                     },
                     sub { $next->() },
@@ -7208,10 +7372,12 @@ sub _findPlayable {
     # See the track path: a retryable miss is stored for the full no-match TTL with
     # its own retry_at, so the count survives to be spent.
     my $tries = 0;
+    my $free  = 0;   # attempts given back because Spotify refused — see the track path
     if (!$force && (my $c = $cache->get($key))) {
         my $miss = !@{ $c->{items} || [] };
         if ($miss && $c->{retry_at} && time() >= $c->{retry_at}) {
             $tries = $c->{tries} || 0;   # window open — search again, carrying the count
+            $free  = $c->{free}  || 0;
         }
         else {
             $log->info("play-via cache hit: $key (" . scalar(@{ $c->{items} || [] }) . " match(es))");
@@ -7246,6 +7412,7 @@ sub _findPlayable {
         my $resolved     = 0;
         my $servicesPending = scalar @adapters;
         my $inconclusive = 0;   # services that couldn't be queried (no handler / timeout / error)
+        my $refused      = 0;   # of those, searches Spotify refused unsent (the 'refused' tag)
 
         my $store = sub {
             my ($items, $win) = @_;
@@ -7256,9 +7423,17 @@ sub _findPlayable {
             my $extra = {};
             my $note  = '';
             if (!@$items && $inconclusive) {
-                my $at = _missRetryAt($tries);
-                if (defined $at) {
+                # A search Spotify refused was never made — give the attempt back rather
+                # than retire the album, capped at SPOTIFY_FREE_PASSES (see the track path).
+                if ($refused && $free < SPOTIFY_FREE_PASSES) {
+                    my $at = _missRetryAt($tries) // (time() + MISS_RETRY_SCHEDULE->[-1]);
+                    $extra = { tries => $tries, free => $free + 1, retry_at => $at };
+                    $note  = " (Spotify refused the search — attempt not counted, free pass "
+                           . ($free + 1) . " of " . SPOTIFY_FREE_PASSES . ")";
+                }
+                elsif (defined(my $at = _missRetryAt($tries))) {
                     $extra = { tries => $tries + 1, retry_at => $at };
+                    $extra->{free} = $free if $free;
                     $note  = " ($inconclusive inconclusive — retry " . ($tries + 1) . " of "
                            . scalar(@{ +MISS_RETRY_SCHEDULE }) . ")";
                 }
@@ -7328,6 +7503,7 @@ sub _findPlayable {
                 # short-TTL retry), not a confirmed miss. Same signal as the track path.
                 if (!defined $_[0]) {
                     $inconclusive++;
+                    $refused++ if ($_[1] // '') eq 'refused';
                     $result[$i] = [];
                     $resolve->();
                     return;
@@ -8394,6 +8570,20 @@ sub _searchSpotify {
             $item->{_year}     = _svcYear($album);          # service release year (trending date fallback)
             push @out, $item;
         }
+        # EMPTY WHILE SPOTTY IS RATE-LIMITING IS A REFUSAL, NOT AN ANSWER. During the
+        # lockout Spotty returns before sending anything and logs nothing, and that
+        # refusal reaches us as the same empty arrayref as a genuine zero-hit —
+        # `_emptyResultIsError` already calls both inconclusive, so the TTL is unchanged.
+        # What the stamp adds is the WARM knowing to narrow (see _spotifyBackingOff) and
+        # the miss not spending a retry attempt on a search that was never made.
+        # Only an EMPTY list is doubted; a list with albums in it is an answer whatever
+        # the flag says. The 'refused' tag rides with THIS answer: the free pass must go
+        # to the search that was refused, not to any miss inside the back-off window.
+        if (!@out && !@$albums && _spottyRateLimited()) {
+            _noteSpotifyRefusal();
+            $log->info("Spotify search refused (Spotify is rate-limiting): '$query'");
+            return $collect->(undef, 'refused');
+        }
         # Matched but the renderer produced nothing usable → inconclusive (see _searchTidal).
         return $collect->(undef)
             if !@out && ($rendererFailed || _emptyResultIsError('Spotify', $query, scalar @$albums));
@@ -8514,6 +8704,9 @@ sub _findPlayableTrack {
     # on a short TTL — an expiring entry would take the count with it and the budget
     # could never be spent, which is the loop this exists to bound.
     my $tries = 0;
+    # How many of those attempts were given back because Spotify REFUSED the search
+    # rather than answering it — capped, so the budget still converges. See $cacheItem.
+    my $free  = 0;
     if (!$force && (my $c = $cache->get($key))) {
         # 'exclude' mode caches an owned-track decision so the caller drops it
         # without a re-probe. Owned → excluded (not a stream miss).
@@ -8527,6 +8720,7 @@ sub _findPlayableTrack {
         if (!$item && $c->{retry_at}) {
             if (time() < $c->{retry_at}) { $callback->(undef, 1); return; }
             $tries = $c->{tries} || 0;
+            $free  = $c->{free}  || 0;
         }
         else {
         # The service set is in the key, so a cached entry already matches the
@@ -8542,6 +8736,10 @@ sub _findPlayableTrack {
     # Set when a streaming service couldn't be queried (no API handler / timeout /
     # error) — makes a resulting no-match INCONCLUSIVE (short TTL, see cacheItem).
     my $inconclusive = 0;
+    # Of those, services that REFUSED the search unsent (Spotify's 'refused' tag). The
+    # free pass keys on THIS, not on the back-off window: a miss that was really
+    # searched inside the window is an ordinary attempt and must spend one.
+    my $refused = 0;
 
     # Cache TTL for a resolved item: library hits can go stale on a rescan/delete,
     # so they get the short LIBRARY_TTL; a streaming match is durable. A no-match is
@@ -8556,9 +8754,26 @@ sub _findPlayableTrack {
                 : (($item->{_svc} // '') eq 'Library') ? LIBRARY_TTL
                 : TRACK_FOUND_TTL;
         if (!$item && $inconclusive) {
-            my $at = _missRetryAt($tries);
-            if (defined $at) {
+            # A REFUSAL IS NOT AN ATTEMPT. While Spotify is rate-limiting, the search was
+            # never sent, so spending a retry on it would retire a track Spotify carries —
+            # and for a Spotify-ONLY user there is no other service to answer instead, so
+            # every attempt in a storm is a refusal and the track becomes a durable
+            # no-match for TRACK_NOMATCH_TTL. The attempt is given back instead, at the
+            # SAME rung. Capped at SPOTIFY_FREE_PASSES so it still converges: a permanent
+            # rate limit spends the budget in the end rather than re-searching for ever,
+            # which is the loop MISS_RETRY_SCHEDULE exists to bound.
+            if ($refused && $free < SPOTIFY_FREE_PASSES) {
+                # The budget may already be on its last rung (or spent) when a refusal
+                # lands — fall back to the longest wait rather than retiring the track.
+                my $at = _missRetryAt($tries) // (time() + MISS_RETRY_SCHEDULE->[-1]);
+                @entry{qw(tries free retry_at)} = ($tries, $free + 1, $at);
+                $retryable = 1;
+                $log->info("track-match '$keyName': Spotify refused the search — attempt not"
+                         . " counted (free pass " . ($free + 1) . " of " . SPOTIFY_FREE_PASSES . ")");
+            }
+            elsif (defined(my $at = _missRetryAt($tries))) {
                 @entry{qw(tries retry_at)} = ($tries + 1, $at);
+                $entry{free} = $free if $free;
                 $retryable = 1;
             }
             else {
@@ -8637,6 +8852,7 @@ sub _findPlayableTrack {
                 # / error) → contributes no match, but INCONCLUSIVELY (not a real miss).
                 if (!defined $_[0]) {
                     $inconclusive++;
+                    $refused++ if ($_[1] // '') eq 'refused';
                     $result[$i] = [];
                     $resolve->();
                     return;
@@ -9081,6 +9297,12 @@ sub _searchSpotifyTrack {
             push @out, $item;
         }
         $log->info("Spotify track-match '$query': " . scalar(@$tracks) . " results, " . scalar(@out) . " matched");
+        # A refusal, not a verdict — see _searchSpotify for the whole reasoning.
+        if (!@out && !@$tracks && _spottyRateLimited()) {
+            _noteSpotifyRefusal();
+            $log->info("Spotify track-match refused (Spotify is rate-limiting): '$query'");
+            return $collect->(undef, 'refused');
+        }
         return $collect->(undef) if !@out && _emptyResultIsError('Spotify', $query, scalar @$tracks);
         $collect->(\@out);
     }, { query => $query, type => 'track', limit => 20 });

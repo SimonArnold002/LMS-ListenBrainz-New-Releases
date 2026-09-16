@@ -212,6 +212,7 @@ our %PL_TRACKS;
     use constant PLAYLIST_CONCURRENCY      => 6;
     use constant PLAYLIST_TIMEOUT          => 45;
     use constant PLAYLIST_RESOLVE_TIMEOUT  => 150;
+    use constant PACED_TRACK_GAP           => 2;
     use constant FANOUT_DEADLINE           => 30;
     use constant FOLLOWER_FANOUT           => 6;
     use constant BUILDING_MAX              => 180;
@@ -225,6 +226,10 @@ our %PL_TRACKS;
     sub _warmGenres { 1 }
     sub _holdLastfm { return sub { 1 } }
     sub _noteBrowse { 1 }
+    # Overridden per-block where the paced pump IS the subject; 0 here so every
+    # existing assertion still measures the full-width behaviour it was written for.
+    our $BACKING_OFF = 0;
+    sub _spotifyBackingOff { $BACKING_OFF }
     sub cstring { return $_[1] }
     sub _checkAgainItem { return { name => 'CHECKAGAIN' } }
     sub _buildingRow { return { items => [ { name => 'BUILDING' } ], cachetime => 0 } }

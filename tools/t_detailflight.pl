@@ -96,6 +96,9 @@ is($answers[-1],'new','replacement flight answers from its own response');
     our $cache=bless {},'Cache'; our $log=bless {},'Log';
     use constant STREAM_SVC_TIMEOUT=>8; use constant STREAM_FOUND_TTL=>7*86400;
     use constant STREAM_NOMATCH_TTL=>86400; use constant MISS_RETRY_SCHEDULE=>[60,300];
+    # Not what this suite is about: Spotify is never refusing here, so the retry
+    # budget behaves exactly as it did before the back-off existed.
+    use constant SPOTIFY_FREE_PASSES=>3; sub _spotifyBackingOff { 0 }
     sub _norm { lc($_[0] // '') }
     sub _cid { $_[0] }
     sub _streamId { $_[2] }

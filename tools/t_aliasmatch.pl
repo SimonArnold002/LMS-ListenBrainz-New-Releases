@@ -97,7 +97,9 @@ my $FOLD = $1;
 eval "package $BR;\nuse strict; use warnings; use utf8;\n"
    . "our \$cache = T::Cache->new; our \$log = bless {}, 'T::Log'; our \$albumDetailFlights;\n"
    . join('', map { constant_line($BSRC, $BROWSE, $_) }
-                  qw(STREAM_FOUND_TTL STREAM_NOMATCH_TTL STREAM_SVC_TIMEOUT MISS_RETRY_SCHEDULE VA_MBID))
+                  qw(STREAM_FOUND_TTL STREAM_NOMATCH_TTL STREAM_SVC_TIMEOUT MISS_RETRY_SCHEDULE
+                     SPOTIFY_FREE_PASSES VA_MBID))
+   . "sub _spotifyBackingOff { 0 }\n"
    . $FOLD . "\n"
    . "our \@ADAPTERS; sub _orderedAdapters { \@ADAPTERS }\n"
    . "sub _bcMatchItems { () } sub _streamKey { 'stream:' . \$_[0] } sub _cid { 'player' }\n"

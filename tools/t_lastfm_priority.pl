@@ -36,6 +36,7 @@ sub grab {
     # t_playlistresolve.pl owns the assertions about it.
     use constant PLAYLIST_RESOLVE_TIMEOUT => 150;
     sub _dbg {}
+    sub _spotifyBackingOff { 0 }   # not this suite's subject — never refusing here
     sub _stage { push @stages, [@_] }
     sub _genresFor { () }
     sub _pickValue { $_[0]{artist} }
