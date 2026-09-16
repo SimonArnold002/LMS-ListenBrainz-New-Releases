@@ -32,6 +32,9 @@
 #   - clear the flag unconditionally (ignore $owns)          -> section 4 red
 #   - return [] instead of undef on the already-building path-> section 5 red
 #   - delete the `_isBuilding` check in _resolveTrending     -> section 1 red
+#   - _buildingEnd ignores its token                         -> section 1 (the race) red
+#   - the expiry ignores its token                           -> section 1 (the race) red
+#   - a caller releases without its token                    -> sections 2 / 7 red
 
 use strict;
 use warnings;
@@ -112,8 +115,34 @@ section '1. THE REGISTRY: set, observe, release';
     T::_buildingEnd('k');
     is(T::_isBuilding('k'), 0, 'ending an already-ended key is harmless');
 
-    is(T::_buildingStart('r'), 1, '_buildingStart returns true, so `$owns = _buildingStart(...)` takes ownership');
-    T::_buildingEnd('r');
+    my $tok = T::_buildingStart('r');
+    ok($tok, '_buildingStart returns a true TOKEN, so `$owns = _buildingStart(...)` takes ownership');
+    ok(T::_buildingStart('r2') != $tok, 'and every take gets a DIFFERENT token');
+    T::_buildingEnd('r', $tok);
+    is(T::_isBuilding('r'), 0, 'releasing with its own token frees the flag');
+    T::_buildingEnd('r2');
+    is(T::_isBuilding('r2'), 0, 'a release with NO token still frees it (the old contract)');
+
+    # THE 1.0.3 REVIEW'S FINDING 2 (fixed 1.0.5). The backstop frees a flag that is still in use;
+    # a view takes a fresh one; then the ORIGINAL pass finishes late. Its release must
+    # not free the NEW pass's flag, or a third opener starts a third fan-out.
+    @T::TIMERS = ();
+    my $a = T::_buildingStart('race');
+    my $aExpiry = $T::TIMERS[-1];
+    $aExpiry->{cb}->();                                   # t+180: backstop frees A
+    is(T::_isBuilding('race'), 0, 'the backstop frees a flag its pass never released');
+    my $b = T::_buildingStart('race');                    # t+181: a view starts pass B
+    is(T::_isBuilding('race'), 1, 'a later pass takes the key again');
+    T::_buildingEnd('race', $a);                          # t+200: A finishes late
+    is(T::_isBuilding('race'), 1,
+       "A's LATE release does not free B's flag (the stale-release clobber)");
+    my $bExpiry = $T::TIMERS[-1];
+    is($bExpiry->{dead}, 0, "and B's own expiry timer is left armed");
+    $aExpiry->{cb}->();                                   # A's timer, re-entered
+    is(T::_isBuilding('race'), 1, "A's expiry cannot free B's flag either");
+    T::_buildingEnd('race', $b);
+    is(T::_isBuilding('race'), 0, 'B releases its own flag normally');
+    is($bExpiry->{dead}, 1, 'and cancels its own expiry');
 
     # THE EXPIRY IS THE POINT OF THE TIMER. Every caller releases its own flag, but a
     # resolve whose async chain never calls back at all releases nothing — and an
@@ -159,7 +188,7 @@ section '2. _resolveTrending TAKES the flag, and RELEASES it on every exit';
     # empty, resolved) — releasing anywhere else would miss one.
     my ($fin) = $b =~ /my \$finish = sub \{(.*?)\n    \};/s;
     ok(defined $fin, 'the $finish wrapper is still there');
-    ok(scalar(defined $fin && $fin =~ /_buildingEnd\(\$bkey\) if \$owns/),
+    ok(scalar(defined $fin && $fin =~ /_buildingEnd\(\$bkey, \$owns\) if \$owns/),
        'and it releases the flag — so every exit that calls $finish releases it');
 
     # The guard's own exit must NOT be counted as an exit that started a build.
@@ -173,7 +202,7 @@ section '3. _buildAlbumsData RELEASES via a WRAPPER, not at each exit';
 
     ok(scalar($b =~ /my \$raw\s*=\s*\$onDone;/ && $b =~ /\$onDone = sub \{/),
        '$onDone is wrapped once at the top');
-    ok(scalar($b =~ /_buildingEnd\(\$bkey\) if \$owns/),
+    ok(scalar($b =~ /_buildingEnd\(\$bkey, \$owns\) if \$owns/),
        'and the wrapper releases the flag');
 
     # This is the property that makes the wrapper worth having: there are many
@@ -371,7 +400,7 @@ section '8. EVERY UNREADY VIEW, AND THE "CHECK AGAIN" ROW';
         my $b = sub_body($name);
         ok(scalar($b =~ /_isBuilding\(\$bkey\)/),   "$name guards on _isBuilding");
         ok(scalar($b =~ /_buildingStart\(\$bkey\)/), "$name takes the flag");
-        ok(scalar($b =~ /_buildingEnd\(\$bkey\)/),   "$name releases it");
+        ok(scalar($b =~ /_buildingEnd\(\$bkey, \$owns\)/),   "$name releases it WITH its token");
     }
 
     # The two track-resolving views render to the first opener directly (the album

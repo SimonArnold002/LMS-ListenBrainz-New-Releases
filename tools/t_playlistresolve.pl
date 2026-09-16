@@ -280,7 +280,10 @@ for my $name (qw(_trackLayerTag _plResolvedKey _playlistTtl _resolveTracks
     # leaks its flag into the next one, which then early-returns and reads as a
     # failure of the code rather than of the suite.
     $reg .= "\nsub _buildingReset { %BUILDING = (); %BUILDING_TIMER = (); return }\n";
-    my $ok = eval "$DECL my (%BUILDING, %BUILDING_TIMER); $reg 1;";
+    # $BUILDING_SEQ is the registry's token counter (1.0.5) — a file-scoped lexical
+    # beside the two hashes, so it has to be declared in the same scope for the same
+    # reason they do.
+    my $ok = eval "$DECL my (%BUILDING, %BUILDING_TIMER); my \$BUILDING_SEQ = 0; $reg 1;";
     die "lifting building registry failed: $@" unless $ok;
 }
 

@@ -124,23 +124,57 @@ use constant BUILDING_MAX => 180;
 my %BUILDING;
 my %BUILDING_TIMER;
 
+# THE FLAG IS A TOKEN, NOT A BOOLEAN, AND THE RELEASE IS OWNERSHIP-CHECKED.
+#
+# BUILDING_MAX is a backstop, so the expiry and a late release CAN both happen to the
+# same key — and when they do, the release must not free a flag it does not own:
+#
+#   t+0    pass A takes the flag (token 7)
+#   t+180  A is still running; the backstop frees token 7 "so the view can rebuild"
+#   t+181  a view opens, sees no flag, starts pass B and takes token 8 — correct,
+#          that is exactly what the backstop is for
+#   t+200  A finally finishes and calls _buildingEnd — and with an unconditional
+#          delete it frees B's flag. A THIRD opener then starts a third fan-out
+#          against the same services, which is the load the flag exists to prevent.
+#
+# Comparing tokens makes A's late release a no-op. Every caller already keeps
+# _buildingStart's return in $owns and tests it, so the token threads through with no
+# new bookkeeping — $owns stops meaning "did I take it" and starts meaning "which one
+# did I take", which is the thing that actually has to be true to release it.
+#
+# REACHABLE, not theoretical: _resolveTrending takes its flag BEFORE a 30s follower
+# fan-out and a metadata fill, then runs a resolve bounded at PLAYLIST_RESOLVE_TIMEOUT
+# (150s) — 30+150 is already past 180 before the network is counted. The playlist warm
+# at the other end of this file takes its flag immediately before the resolve, so for
+# THAT caller the comment claiming "PLAYLIST_RESOLVE_TIMEOUT is deliberately under
+# BUILDING_MAX, so the normal path always releases first" does hold. It was read as a
+# whole-file invariant; it is a statement about one call site.
+my $BUILDING_SEQ = 0;
+
 sub _buildingStart {
-    my $key = $_[0] // '';
-    $BUILDING{$key} = 1;
+    my $key   = $_[0] // '';
+    my $token = ++$BUILDING_SEQ;
+    $BUILDING{$key} = $token;
     eval {
         Slim::Utils::Timers::killSpecific($BUILDING_TIMER{$key}) if $BUILDING_TIMER{$key};
         $BUILDING_TIMER{$key} = Slim::Utils::Timers::setTimer(undef, time() + BUILDING_MAX, sub {
-            return unless delete $BUILDING{$key};
+            # Only free OUR flag: a later pass may already hold this key.
+            return unless ($BUILDING{$key} // 0) == $token;
+            delete $BUILDING{$key};
             delete $BUILDING_TIMER{$key};
             $log->warn("build flag '$key' expired after " . BUILDING_MAX . "s without a release"
                      . " — freeing it so the view can rebuild");
         });
         1;
     };
-    return 1;
+    return $token;
 }
 sub _buildingEnd {
-    my $key = $_[0] // '';
+    my ($key, $token) = @_;
+    $key //= '';
+    # No token = release whatever is there (the pre-1.0.5 contract, kept so a caller
+    # added without one still frees its own flag in the common case).
+    return if defined $token && ($BUILDING{$key} // 0) != $token;
     delete $BUILDING{$key};
     eval { Slim::Utils::Timers::killSpecific(delete $BUILDING_TIMER{$key}) if $BUILDING_TIMER{$key}; 1 };
     return;
@@ -1324,7 +1358,7 @@ sub resolvePlaylist {
     my $raw   = $callback;
     $callback = sub {
         return if $fired++;
-        _buildingEnd($bkey) if $owns;
+        _buildingEnd($bkey, $owns) if $owns;
         $raw->(@_) if ref $raw eq 'CODE';
     };
     _dbg("playlist $mbid: cold resolve started — rendering the building row, completing into cache");
@@ -1536,7 +1570,7 @@ sub _resolveFollow {
     }
     my $owns     = _buildingStart($bkey);
     my $released = 0;
-    my $release  = sub { return if $released++; _buildingEnd($bkey) if $owns };
+    my $release  = sub { return if $released++; _buildingEnd($bkey, $owns) if $owns };
 
     # NOT wrapped into $callback here, unlike the album build. $callback being UNDEF
     # is load-bearing on the warm path — the single terminal below reads
@@ -2154,7 +2188,7 @@ sub _resolveTrending {
     my $fired = 0;
     my $finish = sub {
         return if $fired++;
-        _buildingEnd($bkey) if $owns;
+        _buildingEnd($bkey, $owns) if $owns;
         $onDone->() if ref $onDone eq 'CODE';
     };
 
@@ -2579,7 +2613,7 @@ sub _buildAlbumsData {
     my $raw   = $onDone;
     $onDone = sub {
         return if $fired++;
-        _buildingEnd($bkey) if $owns;
+        _buildingEnd($bkey, $owns) if $owns;
         $raw->(@_) if ref $raw eq 'CODE';
     };
 
@@ -2706,6 +2740,7 @@ sub _buildAlbumsData {
                         # rather than reinvented — see the note over the width read below
                         # for why a width-only change would have been a 1.0.1 regression.
                         my $pumping = 0;
+                        my $holding = 0;   # a paced wakeup is pending — see the track pump
                         my $gapTimer;
                         my $finish = sub {
                             return if $finished; $finished = 1;
@@ -2749,7 +2784,7 @@ sub _buildAlbumsData {
                             # _resolveTracks both follow), so a refusal arriving mid-gate bites
                             # at the next slot rather than the next build. A dropping width
                             # never cancels anything already in flight.
-                            while ($active < (($warm && _spotifyBackingOff()) ? 1 : 5) && $idx < $total) {
+                            while (!$holding && $active < (($warm && _spotifyBackingOff()) ? 1 : 5) && $idx < $total) {
                                 last if $kept >= TRENDING_MAX;
                                 my $i = $idx++;
                                 my $a = $data->[$i];
@@ -2784,14 +2819,22 @@ sub _buildAlbumsData {
                                         # fire live searches back-to-back — the exact 1.0.1 defect,
                                         # rebuilt on the album side. A warm gate over an
                                         # already-resolved list is therefore never slowed.
-                                        if ($pumping) {
-                                            # synchronous — the loop that launched this continues
-                                        }
-                                        elsif ($warm && _spotifyBackingOff()) {
+                                        #
+                                        # But a synchronous REFUSAL must wait — see the track
+                                        # pump; Spotty refuses in the same call stack, and a
+                                        # Spotify-only gate would otherwise run all 60 albums
+                                        # through a lockout in one turn. `_refused` rides on
+                                        # the result hash for exactly this read.
+                                        my $refusedNow = ref $res eq 'HASH' && $res->{_refused};
+                                        if ($warm && _spotifyBackingOff() && (!$pumping || $refusedNow)) {
+                                            $holding = 1;
                                             Slim::Utils::Timers::killSpecific($gapTimer) if $gapTimer;
                                             $gapTimer = Slim::Utils::Timers::setTimer(undef,
                                                 Time::HiRes::time() + PACED_TRACK_GAP,
-                                                sub { $gapTimer = undef; $pump->() unless $finished });
+                                                sub { $gapTimer = undef; $holding = 0; $pump->() unless $finished });
+                                        }
+                                        elsif ($pumping) {
+                                            # synchronous cache hit — the loop that launched this continues
                                         }
                                         else { $pump->(); }
                                     }
@@ -3476,7 +3519,13 @@ sub _resolveTracks {
     # $gapTimer is the ONE pending paced wakeup. Each live completion re-arms it rather
     # than adding another, so the next launch is always PACED_TRACK_GAP after the LAST
     # completion — including when several were in flight as the back-off began.
+    #
+    # $holding is set while a paced wakeup is PENDING and stops the loop launching.
+    # Arming a timer alone is not enough once the arm can fire from INSIDE the loop (a
+    # synchronous refusal, below): the loop would simply carry on past it at width 1,
+    # which is no gap at all. Only the wakeup clears it.
     my $pumping = 0;
+    my $holding = 0;
     my $gapTimer;
     my $pump;
     $pump = sub {
@@ -3486,13 +3535,13 @@ sub _resolveTracks {
         # that arrives mid-pass takes effect at the next slot instead of at the end of
         # it — the same rule _coverLimit follows. A DROPPING width never cancels anything
         # in flight; the loop simply stops launching.
-        while ($active < (($paced && _spotifyBackingOff()) ? 1 : $width) && $next < $total) {
+        while (!$holding && $active < (($paced && _spotifyBackingOff()) ? 1 : $width) && $next < $total) {
             last if $limit && $matched >= $limit;   # got enough — stop launching new
             my $i  = $next++;
             my $tr = $tracks->[$i];
             $active++;
             _findPlayableTrack($client, sub {
-                my ($item, $inc, $own) = @_;
+                my ($item, $inc, $own, $refusedNow) = @_;
                 if (ref $item eq 'HASH') {
                     # Tag the matched item with its source rec's timestamp AND the
                     # follower who recommended it (both only present on the follow
@@ -3539,13 +3588,22 @@ sub _resolveTracks {
                     # $pumping still set, so the loop simply carries on and a warm pass over
                     # an already-resolved playlist is not slowed. The watchdog still bounds
                     # the whole pass.
-                    if ($pumping) {
-                        # synchronous — the loop that launched this continues
-                    }
-                    elsif ($paced && _spotifyBackingOff()) {
+                    #
+                    # SYNCHRONOUS IS NOT ALWAYS "CACHED". A Spotify refusal also answers in
+                    # the same call stack (see the 4th arg in _findPlayableTrack), and it is
+                    # the one synchronous answer the gap exists FOR: without this, a
+                    # Spotify-only user with prefer_library off (libMode 'never', no
+                    # $deferLocal tick) burned the whole pass in one turn during a storm —
+                    # every unresolved track spending a free pass on a search never sent,
+                    # where pacing would have let Spotty's 2-7s lockout lapse after a few.
+                    if ($paced && _spotifyBackingOff() && (!$pumping || $refusedNow)) {
+                        $holding = 1;
                         Slim::Utils::Timers::killSpecific($gapTimer) if $gapTimer;
                         $gapTimer = Slim::Utils::Timers::setTimer(undef, Time::HiRes::time() + PACED_TRACK_GAP,
-                            sub { $gapTimer = undef; $pump->() unless $finished });
+                            sub { $gapTimer = undef; $holding = 0; $pump->() unless $finished });
+                    }
+                    elsif ($pumping) {
+                        # synchronous cache hit — the loop that launched this continues
                     }
                     else {
                         $pump->();
@@ -4694,8 +4752,11 @@ sub warmCache {
                         # _resolveFollow; the playlist warm inlined its resolve and missed
                         # it. Released at the single terminal below, and _buildingStart's
                         # own BUILDING_MAX(180s) expiry backstops a chain that never calls
-                        # back — PLAYLIST_RESOLVE_TIMEOUT is deliberately under that, so
-                        # the normal path always releases first.
+                        # back. HERE the flag is taken immediately before the resolve, so
+                        # PLAYLIST_RESOLVE_TIMEOUT (150s) keeps this path under that and it
+                        # releases first. That is a fact about THIS call site, not the file:
+                        # _resolveTrending takes its flag before a 30s fan-out and can outrun
+                        # it, which is why the release is token-checked (_buildingStart).
                         my $bkey = "playlist:$pl->{mbid}";
                         my $owns = _isBuilding($bkey) ? 0 : _buildingStart($bkey);
 
@@ -4705,7 +4766,7 @@ sub warmCache {
                         _resolveTracks($client, $tracks, sub {
                             my ($items, $inconclusive, undef, undef, $timedOut) = @_;
                             $items //= [];
-                            _buildingEnd($bkey) if $owns;
+                            _buildingEnd($bkey, $owns) if $owns;
                             my $payload = { items => $items, matched => scalar(@$items), total => scalar(@$tracks) };
                             my $ttl = _playlistTtl($items, scalar @$tracks, $inconclusive, $timedOut);
                             eval { $cache->set($rkey, $payload, $ttl); 1 }
@@ -7447,7 +7508,7 @@ sub _findPlayable {
                 . (defined $win ? "matched on $adapters[$win]{name} (" . scalar(@$items) . ")"
                                 : "no match on any service" . $note)
                 . ($alts ? ' [alias pass]' : ''));
-            $callback->({ items => _streamResult($client, $items, \@bc), _warm_pending => \$servicesPending });
+            $callback->({ items => _streamResult($client, $items, \@bc), _warm_pending => \$servicesPending, _refused => ($refused ? 1 : 0) });
         };
 
         my $resolve = sub {
@@ -8827,7 +8888,7 @@ sub _findPlayableTrack {
                     my $local = shift;
                     $item = $local if $local;
                     $cacheItem->($item);
-                    $callback->($item, (!$item && $retryable) ? 1 : 0);
+                    $callback->($item, (!$item && $retryable) ? 1 : 0, 0, $refused ? 1 : 0);
                 });
                 return;
             }
@@ -8835,7 +8896,15 @@ sub _findPlayableTrack {
             # Tell the caller this no-match is still RETRYABLE (a service couldn't be
             # queried, and the budget is not spent) so it keeps the resolved-playlist
             # cache short too — and stops doing so once the miss is accepted.
-            $callback->($item, (!$item && $retryable) ? 1 : 0);
+            #
+            # 4TH ARG: SPOTIFY REFUSED THIS SEARCH. Spotty refuses in the SAME call stack
+            # (getToken does `return $cb->(-429)`, and _call hands that straight to its
+            # caller — checked against Spotty's API.pm, 2026-09-16), so on the 'never'
+            # libMode, which has no $deferLocal tick, a Spotify-only refusal answers
+            # _resolveTracks SYNCHRONOUSLY — indistinguishable from a cache hit unless it
+            # is said. The paced pump needs to tell the two apart: a cache hit must not
+            # wait, a refusal must.
+            $callback->($item, (!$item && $retryable) ? 1 : 0, 0, $refused ? 1 : 0);
         };
 
         for my $i (0 .. $#adapters) {

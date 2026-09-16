@@ -1,6 +1,6 @@
 # Spotify rate limits, and what LBF does about them
 
-**Status: built 1.0.1, 2026-09-16. Not installed, not verified live.**
+**Status: built 1.0.1 → 1.0.5, 2026-09-16; 1.0.3 installed; no refusal yet seen live, so UNVERIFIED LIVE.**
 Record of what Spotify's limit actually is, what it looked like on the live server, and the
 design that came out of it. The decisions are also in the ledger (`CLAUDE.md`, "Spotify
 back-off"); this is the working it shows.
@@ -89,6 +89,16 @@ last) that can be many albums away — so the flag reads false while we are stil
   at width 10 over 80 candidates, the widest resolve in the plugin (second review, 2026-09-16).
 - While paced AND backing off: **one resolve at a time**, with **`PACED_TRACK_GAP` (2s)** after
   each LIVE one. A cache hit answers synchronously from inside the pump and is never slowed.
+- **A synchronous answer is not always a cache hit (1.0.5).** Spotty refuses in the SAME call
+  stack — `getToken` does `return $cb->(-429)` and `_call` hands that straight to its caller
+  (checked against Spotty's `API.pm`, 2026-09-16). On libMode `never` (`prefer_library` off)
+  there is no `$deferLocal` tick, so for a Spotify-only user a refusal reached the pump looking
+  exactly like a cache hit, and the pass ran every track through the lockout in one turn — each
+  spending a free pass on a search never sent. Both resolvers now SAY so (`_findPlayableTrack`'s
+  4th callback arg, `_refused` on `_findPlayable`'s result), both pumps hold on it, and both
+  gained `$holding`: arming a wakeup from inside the loop does not stop the loop, which at
+  width 1 would simply launch the next search. The `DetailWarm` queue needed nothing — it
+  re-reads `_detailPriorityBusy` before every job.
 - **Two guards make "after each LIVE one" true (review, 2026-09-16).** `$pumping` is a
   re-entrancy guard: a synchronous (cached) completion neither recurses into the pump nor arms a
   timer — the loop that launched it carries on. `$gapTimer` is the ONE pending paced wakeup, and
@@ -101,11 +111,11 @@ last) that can be many albums away — so the flag reads false while we are stil
   arriving mid-pass bites at the next slot rather than the next pass. A dropping width never
   cancels anything in flight.
 - **THREE pumps touch Spotify, not two.** This said "the album side is `_detailPriorityBusy`"
-  until 1.0.3, and that sentence hid a whole pump for two review rounds:
+  until 1.0.4, and that sentence hid a whole pump for two review rounds:
   - `_resolveTracks` — the track side, via its `paced` option.
   - `_detailPriorityBusy` — the **`DetailWarm` queue's `pause` hook and nothing else**. It
     re-arms every 5s, well inside the window. It is one album-side consumer, not "the" one.
-  - **`_buildAlbumsData`'s streaming gate** — the trending-albums pump, paced since 1.0.3. It
+  - **`_buildAlbumsData`'s streaming gate** — the trending-albums pump, paced since 1.0.4. It
     calls `_findPlayable` directly rather than through `_resolveTracks`, so it never saw
     `paced`, and it never passes through the `DetailWarm` queue, so `_detailPriorityBusy`
     never gated it. It was a **writer** of `$SPOTIFY_REFUSED_AT` (through `_searchSpotify`)

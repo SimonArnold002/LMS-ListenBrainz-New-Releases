@@ -144,12 +144,16 @@ Spotty IS installed on the rig; any doc here still saying otherwise is stale.
    `_coverLimit` already follows), so a refusal mid-pass bites at the next slot. A cache hit
    answers synchronously and is never slowed — and, since the 2026-09-16 review, arms nothing:
    `$pumping` guards re-entry, and `$gapTimer` is ONE wakeup re-armed by each live completion.
-   **THREE PUMPS TOUCH SPOTIFY, NOT TWO** (corrected 1.0.3 — this entry said "the album side is
+   **THREE PUMPS TOUCH SPOTIFY, NOT TWO** (corrected in 1.0.4 — this entry said "the album side is
    `_detailPriorityBusy`", and that sentence hid a pump for two rounds): `_resolveTracks`'s
    `paced` option; `_detailPriorityBusy`, which is the **DetailWarm queue's `pause` hook and
    nothing else consults it**; and **`_buildAlbumsData`'s trending-albums streaming gate**, paced
-   since 1.0.3 off `$warm` (`ref $onPending eq 'CODE' ? 0 : 1`, read at entry). A fourth pump
+   since 1.0.4 off `$warm` (`ref $onPending eq 'CODE' ? 0 : 1`, read at entry). A fourth pump
    would need its own read of `_spotifyBackingOff` — nothing inherits the back-off.
+   **A SYNCHRONOUS REFUSAL HOLDS THE PUMP (1.0.5).** Spotty refuses in the same call stack, so on
+   libMode `never` a Spotify-only refusal looked like a cache hit and the pass ran straight
+   through the lockout. The resolvers now say so (`_findPlayableTrack` 4th arg, `_refused` on
+   `_findPlayable`'s result); both pumps arm the gap on it and stop launching via `$holding`.
    **ALWAYS-ON PACING IS NOT ON THE TABLE** — PFR built it, Simon rejected it as far too slow
    (its 0.9.36), and it is not proposed here either.
 3. **OUR OWN CLOCK, not Spotty's flag** — `hasError429` clears on the next SUCCESSFUL response,
@@ -290,8 +294,8 @@ because line numbers rot on the next edit.
 | 1.0.1 review: cached tracks arming paced timers, and the free pass keyed on the window instead of the refusal — both fixed in 1.0.2, installed. Closes those two defects only; `$pumping`, `$gapTimer` and the `'refused'` tag are open to review | C | `CLOSED IN THE 1.0.1 REVIEW —` |
 | 1.0.2 review: the follow-feed and trending warms were unpaced — `paced => $warm` (read at entry, before the detach), built and INSTALLED 1.0.3. Closes that defect only; the `$warm` reads are open to review | C | `CLOSED IN THE 1.0.2 REVIEW —` |
 | Spotify back-off: the WARM narrows only while Spotify refuses (always-on pacing rejected in PFR, not proposed here); a refused search does not spend a retry attempt, capped at 3 | A2 | `## Spotify back-off —` |
-| THREE pumps touch Spotify — `_resolveTracks`(`paced`), `_detailPriorityBusy` (DetailWarm queue ONLY), and `_buildAlbumsData`'s trending-albums gate (paced 1.0.3). "The album side is `_detailPriorityBusy`" was WRONG and hid the third for two rounds | A2 | `THREE PUMPS TOUCH SPOTIFY, NOT TWO` |
-| 1.0.3 review: the trending-albums streaming gate was unpaced — `$warm` off `$onPending`, plus `$pumping`/`$gapTimer`. A paced gate times out into the 1h TTL: ACCEPTED, Simon's call. Closes that defect only; the gate's paced code is open to review | C | `CLOSED IN THE 1.0.3 REVIEW —` |
+| THREE pumps touch Spotify — `_resolveTracks`(`paced`), `_detailPriorityBusy` (DetailWarm queue ONLY), and `_buildAlbumsData`'s trending-albums gate (paced 1.0.4). "The album side is `_detailPriorityBusy`" was WRONG and hid the third for two rounds | A2 | `THREE PUMPS TOUCH SPOTIFY, NOT TWO` |
+| 1.0.3 review — THREE findings. (1) the trending-albums streaming gate was unpaced — `$warm` off `$onPending`, plus `$pumping`/`$gapTimer`, built 1.0.4; a paced gate times out into the 1h TTL: ACCEPTED, Simon's call. (2) `_buildingEnd` freed a NEWER pass's flag after the backstop expired — the flag is now a token. (3) a synchronous Spotify refusal skipped the paced gap — the resolvers signal it, `$holding` stops the loop. (2)+(3) built 1.0.5. Closes those defects only; the gate, token and `$holding` code are open to review | C | `CLOSED IN THE 1.0.3 REVIEW —` |
 
 **Two standing rules that kill most repeat findings:**
 
@@ -940,8 +944,73 @@ Closes the two defects as described. **The fix code is new and open to review** 
   close. Evidence to look for is in the section at the top (`## Spotify back-off —`).
 
 **CLOSED IN THE 1.0.3 REVIEW — the third 2026-09-16 review of the Spotify back-off (the 1.0.3
-working tree). One finding, fixed and BUILT AS 1.0.4; NOT INSTALLED at close.** Closes the
-defect as described. **The gate's paced code is open to review.**
+working tree). THREE findings, all fixed: finding 1 BUILT AS 1.0.4, findings 2 and 3 BUILT AS
+1.0.5; NEITHER INSTALLED at close.** Closes the defects as described. **The gate's paced code,
+the flag token and `$holding` are open to review.**
+
+**Findings 2 and 3 were reported with finding 1 and left out of the 1.0.4 build — that was a
+scoping miss, not a decision; nothing about them was declined.**
+
+**BUILT AS 1.0.5, 2026-09-16; NOT YET INSTALLED.** `install.xml` / `repo.xml` 1.0.5, zip rebuilt
+(54 entries, 710,519 bytes), `repo.xml <sha>` `23c93020147233a0a7b265fcb9260416e5924339`. `diff -r`
+of the unzipped archive against the tree is IDENTICAL; the extracted `Browse.pm` carries the token
+counter, all five token releases, both `$holding` loops and both refusal signals; and
+`t_spotifybackoff` (100), `t_buildingstate` (87), `t_playlistresolve` (58) and `t_trending_empty`
+(27) pass with `LBF_BROWSE` on the EXTRACTED copy, `t_loads` (20) with `LBF_PLUGIN` on it. **All 37
+suites exit 0; both sync checks 0.** `DEV_BUILD` 0, `RESET_CACHE_ON_BUILD` 0, no key version
+bumped (the result hash gains an in-memory `_refused` key; nothing stores it). `README.html` /
+`index.html` regenerated; `CHANGELOG.md` untouched.
+
+- **FINDING 2 — a late release freed a NEWER pass's flag.** `_buildingEnd` deleted
+  unconditionally, and `BUILDING_MAX`(180s) is a backstop, so both can hit one key: pass A
+  outlives its flag, the backstop frees it, a view starts pass B, then A finishes and frees B's
+  flag — and a third opener starts a third fan-out. **Reachable:** `_resolveTrending` takes its
+  flag BEFORE a 30s fan-out and a metadata fill, then resolves under `PLAYLIST_RESOLVE_TIMEOUT`
+  (150s); 30+150 is past 180 before the network counts, and a paced pass in a sustained refusal
+  runs to that watchdog. **The comment "PLAYLIST_RESOLVE_TIMEOUT is deliberately under
+  BUILDING_MAX, so the normal path always releases first" is TRUE for the playlist warm only**
+  (it takes the flag right before the resolve) — it was read as a file-wide invariant; both it and
+  the §`FIX 2` note now say which call site. **Fix:** `_buildingStart` returns a token
+  (`$BUILDING_SEQ`), every caller already kept the return in `$owns`, and releases as
+  `_buildingEnd($bkey, $owns)`; a stale token is a no-op, and the expiry timer checks its own
+  token too. A release with NO token keeps the old free-whatever-is-there contract.
+  **Not chosen:** raising `BUILDING_MAX` (moves the edge, does not remove it) or taking the flag
+  later in `_resolveTrending` (reopens the duplicate fan-out window it closes).
+- **FINDING 3 — a SYNCHRONOUS Spotify refusal skipped the paced gap. PLAUSIBLE at review, now
+  VERIFIED against Spotty's `API.pm` (master, 2026-09-16):** `getToken` does
+  `return $cb->(-429)` while `spotty_rate_limit_exceeded` stands, and `_call` hands that straight
+  to its caller — same stack, no timer. On libMode `never` (`prefer_library` off) there is no
+  `$deferLocal` tick, so for a Spotify-ONLY user the whole resolve answered synchronously and hit
+  the `$pumping` (cache-hit) arm: the pass ran every track through the lockout in one turn, each
+  spending a free pass on a search never sent — where pacing would let Spotty's 2-7s lockout
+  lapse after a few. `first` and `exclude` always tick through `$deferLocal` and were never
+  exposed; a user with a second service gets an async completion and was never exposed either.
+  **The album gate built in 1.0.4 had the same shape.** **Fix:** the resolvers SAY so —
+  `_findPlayableTrack`'s 4th callback arg, `_refused` on `_findPlayable`'s result hash (it rides
+  through SingleFlight like `_warm_pending`) — and both pumps arm the gap on
+  `!$pumping || $refusedNow`. **And both gained `$holding`**, which the arm alone could not
+  replace: a wakeup armed from INSIDE the loop does not stop the loop, which at width 1 launches
+  the next search straight away. The DetailWarm queue needed nothing — it re-reads
+  `_detailPriorityBusy` before every job.
+- **Guards.** `t_buildingstate.pl` 77 -> **87**: the race driven step by step (A's late release
+  and A's re-entered expiry both leave B's flag and timer alone). `t_spotifybackoff.pl` 81 ->
+  **100**: §4d drives a synchronous refusal through BOTH pumps (window closed at start and
+  opened by the refusal; cached-then-refused; views never held), and §3b checks the REAL
+  resolvers send the signal — 4d's stubs manufacture it, so without 3b a resolver that stopped
+  sending it passed. `t_playlistresolve.pl` declares `$BUILDING_SEQ` beside the two hashes it
+  lifts. **ANTI-TESTED NINE WAYS, each failing only its own checks:** release ignores token 3;
+  expiry ignores token 2; `_resolveTrending` releases without token 2; track pump ignores the
+  refusal 6; gate ignores it 5; track loop ignores `$holding` 4; gate loop ignores it 4 (incl.
+  its source check); album resolver stops sending `_refused` 2; track resolver stops sending the
+  4th arg 2. **The first version of the signal check did not exist and r5 passed against it —
+  that is why §3b gained its two loops.**
+- **STILL NOT TOUCHED:** `docs/streaming-adapter-spec.md` §6 ("two consumers") — fleet copy,
+  cross-repo re-copy, Simon's call.
+- **UNPROVEN LIVE.**
+
+**CORRECTION to the 1.0.4 build note below:** `t_loads.pl` reads `LBF_PLUGIN`, not `LBF_BROWSE`,
+so the 1.0.4 run said to be "against the EXTRACTED copy" ran against the tree. The `diff -r` was
+identical, so the verdict stands; the 1.0.5 run above set `LBF_PLUGIN` and did test the zip.
 
 **BUILT AS 1.0.4, 2026-09-16; NOT YET INSTALLED.** `install.xml` / `repo.xml` 1.0.4, zip rebuilt
 (54 entries, 708,749 bytes), `repo.xml <sha>` recomputed to
@@ -1610,6 +1679,9 @@ open renders at once and completes into cache, the warm never had a watcher, and
 for the playlist, follow and trending resolves; **the 45s default is unchanged** for DSTM and the
 two unmatched-tracks views, which do have someone waiting. 150 < `BUILDING_MAX`(180) is
 load-bearing: the normal path must release the in-flight flag before the expiry backstop does.
+**That holds for the PLAYLIST warm only** (it takes the flag right before the resolve).
+`_resolveTrending` takes its flag before a 30s fan-out and can outrun 180s — since 1.0.5 the flag
+is a TOKEN and a late release cannot free a newer pass's flag (§C `CLOSED IN THE 1.0.3 REVIEW —`, finding 2).
 
 **FIX 3 — THE WARM REVISITS AN INCOMPLETE LIST INSTEAD OF SKIPPING IT.** It skipped on a present
 key, so an under-matched list was revisited only when its entry EXPIRED — up to a fortnight. The
@@ -3346,6 +3418,9 @@ wrapping would make that always true and render rows the warm never uses.
 
 **`BUILDING_MAX` (180s) now expires any flag whose release path never runs.** A leaked
 flag is worse than no guard — in-process registry, no TTL, view stuck for ever.
+**Since 1.0.5 the flag is a TOKEN** (`_buildingStart` returns it, every caller keeps it in `$owns`
+and releases with `_buildingEnd($bkey, $owns)`): the expiry and a late release can both hit one
+key, and an unconditional delete let a pass that outlived its flag free the NEXT pass's flag.
 
 **0.9.182** — field-verified building row; superseded. The building row appears
 immediately on a cold open, repeat opens start no second build, and the real list

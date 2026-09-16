@@ -35,6 +35,13 @@
 #   the detail-warm pause removed            -> section 5
 #   follow/trending $warm read after detach  -> section 4b (view assertion / source order)
 #   follow/trending paced => $warm dropped   -> section 4b (warm assertion / source)
+#   albums gate: width read reverted         -> section 4c (+ its source check)
+#   albums gate: synchronous arm removed     -> section 4c (a MIXED pass; all-cached absorbs it)
+#   albums gate: $warm forced to 1           -> section 4c (view assertion + source)
+#   albums gate: finish-time timer kill gone -> section 4c (watchdog fired directly)
+#   either pump ignores a sync refusal       -> section 4d, that pump's checks
+#   either pump's loop ignores $holding      -> section 4d, that pump's checks
+#   either resolver stops sending the signal -> section 3b (4d's stubs manufacture it)
 #
 # Exit 0 = all good. Exit 1 = at least one assertion failed.
 use strict;
@@ -419,6 +426,28 @@ is($t->{free}  // 'undef', 1, 'it records a free pass');
 $t = one_track_miss(0);
 is($t->{tries} // 'undef', 1, 'inside the window, an UNREFUSED track miss spends an attempt');
 ok(!$t->{free}, 'and takes no free pass');
+
+# THE RESOLVERS MUST TELL THEIR CALLER (1.0.5). The pumps' synchronous-refusal arm (4d)
+# reads a signal only these two subs can send; 4d's stubs manufacture it, so without
+# these checks a resolver that stopped sending it would pass 4d untouched.
+for my $case ([1, 1, 'a REFUSED track miss says so in its 4th callback arg'],
+              [0, 0, 'an unrefused one does not']) {
+    my ($refused, $want, $what) = @$case;
+    %T::KCache::D = (); @K::searches = ();
+    my @args;
+    K::_findPlayableTrack('player', sub { @args = @_ }, 'Artist', 'Title', undef, undef, 0, 'never');
+    $_->(undef, $refused ? ('refused') : ()) for @K::searches;
+    is($args[3] // 'undef', $want, $what);
+}
+for my $case ([1, 1, 'a REFUSED album miss carries _refused on its result'],
+              [0, 0, 'an unrefused one does not']) {
+    my ($refused, $want, $what) = @$case;
+    %T::Cache::D = (); @B::searches = ();
+    my $res;
+    B::_findPlayable('player', sub { $res = shift }, 'Artist', 'Album', 'id');
+    $_->(undef, $refused ? ('refused') : ()) for @B::searches;
+    is((ref $res eq 'HASH' ? ($res->{_refused} // 'undef') : 'no result'), $want, $what);
+}
 $K::BACKING_OFF = 0;
 
 # =============================================================================
@@ -426,7 +455,7 @@ section("4. the WARM narrows and waits; a view never does");
 # =============================================================================
 {
     package R;
-    our (@inflight, @launched, @liveAt, %CACHED, $BACKING_OFF);
+    our (@inflight, @launched, @liveAt, %CACHED, %REFUSED, $BACKING_OFF);
     our $log = bless {}, 'T::Log';
     use constant PLAYLIST_CONCURRENCY => 6;
     use constant PLAYLIST_TIMEOUT     => 45;
@@ -441,6 +470,10 @@ section("4. the WARM narrows and waits; a view never does");
         my ($client, $cb, $artist, $title) = @_;
         push @launched, $cb;
         if ($CACHED{$title}) { $cb->(undef, 1, 0); return; }
+        # A REFUSED title also answers synchronously — Spotty's getToken does
+        # `return $cb->(-429)` — but says so in the 4th arg, and the adapter has just
+        # stamped the refusal, so the window is open.
+        if ($REFUSED{$title}) { $BACKING_OFF = 1; $cb->(undef, 1, 0, 1); return; }
         push @liveAt, $main::NOW;
         push @inflight, $cb;
         return;
@@ -455,6 +488,8 @@ sub run_resolve {
     $R::BACKING_OFF = delete $opt{backing_off} ? 1 : 0;
     my $cached = delete $opt{cached} || 0;
     %R::CACHED = map { ("t$_" => 1) } 1 .. $cached;
+    my $refused = delete $opt{refused} || 0;
+    %R::REFUSED = map { ("t$_" => 1) } ($cached + 1) .. ($cached + $refused);
     my @tracks = map { { artist => 'a', title => "t$_" } } 1 .. ($opt{total} ? delete $opt{total} : 10);
     my $done = 0;
     R::_resolveTracks('player', \@tracks, sub { $done = 1 }, undef, 0, %opt);
@@ -617,11 +652,20 @@ section("4c. the trending-ALBUMS streaming gate — the third pump");
     # The FIRST $CACHED searches answer synchronously (a play-via cache hit, which
     # _findPlayable really does answer in-loop); the rest are live and queue up.
     our $CACHED = 0;
+    # The next $REFUSED searches after those answer synchronously as REFUSALS: an empty
+    # result carrying `_refused`, with the window stamped open, as _searchSpotify does.
+    our $REFUSED = 0;
     sub _findPlayable {
         my ($client, $cb, $artist, $title) = @_;
         push @launched, { at => $main::NOW, what => "$artist - $title" };
+        my $n = scalar @launched;
+        if ($n > $CACHED && $n <= $CACHED + $REFUSED) {
+            $BACKING_OFF = 1;
+            $cb->({ items => [], _refused => 1 });
+            return;
+        }
         my $answer = sub { $cb->({ items => [ { name => "$artist - $title" } ] }) };
-        scalar(@launched) <= $CACHED ? $answer->() : push @inflight, $answer;
+        $n <= $CACHED ? $answer->() : push @inflight, $answer;
         return;
     }
 
@@ -668,6 +712,7 @@ sub run_gate {
     $G::cache->{d} = {}; %G::BUILDING = ();
     $G::BACKING_OFF = $o{backing_off} ? 1 : 0;
     $G::CACHED      = $o{cached} || 0;
+    $G::REFUSED     = $o{refused} || 0;
     @G_ROWS = map { { release_group_mbid => sprintf('mb-%02d', $_), title => "Album $_",
                       artist => "Artist $_", artist_mbid => '', listen_count => 100 - $_ } }
               1 .. ($o{albums} || 20);
@@ -731,11 +776,55 @@ is(gap_timers(), 0, 'and arms no paced wakeup');
     my $b = grab($src, '_buildAlbumsData');
     my ($warmAt) = $b =~ /(my \$warm = ref \$onPending eq 'CODE' \? 0 : 1;)/ ? $-[0] : -1;
     ok($warmAt >= 0, '_buildAlbumsData reads $warm from $onPending at entry');
-    ok(scalar($b =~ /while \(\$active < \(\(\$warm && _spotifyBackingOff\(\)\) \? 1 : 5\)/),
+    ok(scalar($b =~ /while \(!\$holding && \$active < \(\(\$warm && _spotifyBackingOff\(\)\) \? 1 : 5\)/),
        'the gate reads the width FRESH on every iteration, off $warm');
     ok(scalar($b =~ /return if \$finished \|\| \$pumping;/),
        'the gate carries the re-entrancy guard, not just the width');
 }
+
+# =============================================================================
+section("4d. a SYNCHRONOUS refusal waits — it is not a cache hit");
+# =============================================================================
+# The 1.0.3 review's finding 3 (fixed 1.0.5), verified against Spotty's own API.pm: getToken does
+# `return $cb->(-429)` and _call hands that straight to its caller, so a refusal answers
+# in the SAME call stack. On libMode 'never' (prefer_library off) there is no
+# $deferLocal tick, so for a Spotify-only user the refusal reached the pump with
+# $pumping still set — the cache-hit arm — and the pass ran every track through the
+# lockout in one turn, each spending a free pass on a search never sent. Before the fix
+# both pumps also needed $holding: arming a wakeup from INSIDE the loop does not stop the
+# loop, which at width 1 simply launches the next search anyway.
+
+# TRACK PUMP. The window is CLOSED when the pass starts; the first refusal opens it.
+run_resolve(paced => 1, backing_off => 0, refused => 5);
+is(scalar @R::launched, 1, 'a synchronous refusal stops the paced pass at ONE search');
+is(gap_timers(), 1, 'and arms the paced wakeup, like a live completion');
+advance($GAP - 0.5);
+is(scalar @R::launched, 1, 'nothing launches inside the gap');
+advance(1);
+is(scalar @R::launched, 2, 'the next search goes out once the gap has passed');
+
+run_resolve(paced => 1, backing_off => 1, cached => 3, refused => 2);
+is(scalar @R::launched, 4, 'cached tracks still run straight through; the refusal after them holds');
+is(gap_timers(), 1, 'with exactly ONE wakeup');
+
+run_resolve(backing_off => 0, refused => 5);
+is(gap_timers(), 0, 'a VIEW is never held, refusal or not');
+is(scalar @R::launched, 10, 'and keeps going at full width');
+
+# ALBUM GATE — the same shape, carried on the result hash.
+run_gate(backing_off => 0, albums => 20, refused => 3);
+is(scalar @G::launched, 1, 'a synchronous refusal stops the warm gate at ONE album');
+is(gap_timers(), 1, 'and arms its paced wakeup');
+advance($GAP + 0.5);
+is(scalar @G::launched, 2, 'the next album goes out once the gap has passed');
+
+run_gate(backing_off => 1, albums => 20, cached => 4, refused => 1);
+is(scalar @G::launched, 5, 'cached albums run through; the refusal after them holds');
+is(gap_timers(), 1, 'with exactly ONE wakeup');
+
+run_gate(backing_off => 0, albums => 20, refused => 3, view => 1);
+is(gap_timers(), 0, 'a trending-albums VIEW is never held');
+ok(scalar @G::launched > 1, 'and carries on past the refusal');
 
 # =============================================================================
 section("5. the album prewarm queue holds while Spotify refuses");
