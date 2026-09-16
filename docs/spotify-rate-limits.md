@@ -1,6 +1,9 @@
 # Spotify rate limits, and what LBF does about them
 
-**Status: built 1.0.1 → 1.0.5, 2026-09-16; 1.0.3 installed; no refusal yet seen live, so UNVERIFIED LIVE.**
+**Status: built 1.0.1 → 1.0.5, 2026-09-16; 1.0.5 installed 2026-09-16; no refusal yet seen live, so UNVERIFIED LIVE.**
+The synchronous-refusal hold and the single re-armed wakeup were ported to PFR as its 0.9.39
+(working tree, 2026-09-16; PFR ledger `SYNCHRONOUS SPOTIFY REFUSAL AND ONE`). The free pass (§4.4)
+has no PFR equivalent and was not ported.
 Record of what Spotify's limit actually is, what it looked like on the live server, and the
 design that came out of it. The decisions are also in the ledger (`CLAUDE.md`, "Spotify
 back-off"); this is the working it shows.
@@ -222,8 +225,8 @@ resolver not sending the signal (2, 2). The build-flag token is guarded separate
 
 ## 7. Verifying it live (owed)
 
-Nothing here has been seen running. 1.0.3 is installed on the rig; 1.0.4 and 1.0.5 are built,
-not installed. Once 1.0.5 is:
+Nothing here has been seen running. 1.0.5 is installed on the rig (2026-09-16, confirmed over
+HTTP: `["lbf","warmstats"]` reports `plugin_version 1.0.5`). What to check:
 
 1. Watch `curl -s 'http://plex:9000/log.txt?lines=20000'` during a cold warm — the bare
    `log.txt` returns a tiny window.

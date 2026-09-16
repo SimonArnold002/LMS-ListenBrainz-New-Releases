@@ -108,13 +108,13 @@ post-restart detail work, zero refusals. Waiting for another 05:00 warm adds not
 traffic. The one thing not measured is HOW MANY of those requests reached MusicBrainz. Radio lookup and the streaming alias pass remain UNPROVEN
 LIVE: their only traces are INFO lines and the plugin does not log at INFO on the rig.
 
-## Spotify back-off — built 1.0.1, review fixes built 1.0.2 and INSTALLED 2026-09-16; second review's fix built 1.0.3 and INSTALLED 2026-09-16; third review's three fixes built 1.0.4 + 1.0.5, NOT installed
+## Spotify back-off — built 1.0.1, review fixes built 1.0.2 and INSTALLED 2026-09-16; second review's fix built 1.0.3 and INSTALLED 2026-09-16; third review's three fixes built 1.0.4 + 1.0.5, 1.0.5 INSTALLED 2026-09-16
 
 **Full working, measurements and the live evidence: `docs/spotify-rate-limits.md`.** The
 adapter-level rule went into the canonical `docs/streaming-adapter-spec.md` (§6) and was
 re-copied to PFR and LL in the same session, per that file's own rule — all three checksums
 agree. (2026-09-16: §4 gained the handshake-carrier and playback-title notes, re-copied the same
-way; later that day §4 was updated for LL's Spotify release-id Played door and display title (and §8's `_backfillStreamingArtist` condition), sha1 `b3597f82…`. **Later still, after the third back-off review, §6's rate-limit rules gained three points — tag the refusal on the answer, every search loop checks the back-off itself (LBF has THREE consumers, not the "two" §6 used to list), and a refusal can answer SYNCHRONOUSLY — and its pointer to `docs/spotify-rate-limits.md` now says that file lives in LBF only; §7 gained the matching line. Re-copied to PFR and LL; sha1 now `504f722a…` in all three.**)
+way; later that day §4 was updated for LL's Spotify release-id Played door and display title (and §8's `_backfillStreamingArtist` condition), sha1 `b3597f82…`. **Later still, after the third back-off review, §6's rate-limit rules gained three points — tag the refusal on the answer, every search loop checks the back-off itself (LBF has THREE consumers, not the "two" §6 used to list), and a refusal can answer SYNCHRONOUSLY — and its pointer to `docs/spotify-rate-limits.md` now says that file lives in LBF only; §7 gained the matching line. Re-copied to PFR and LL; sha1 now `504f722a…` in all three.** **Then, with the PFR port (0.9.39), §6 named PFR's implementation — the 6th `_svcCantAnswer` argument, `_refused` forwarded by the review wrappers and to joined callers, ONE consumer (home shelves resolve on request) — and gained "keep the gap to ONE wakeup, re-armed". Re-copied; sha1 `f43421aa…` in all three.** **Then, the same day, every `Browse.pm:NNNN` / `Settings.pm:NN` / `Sources.pm:NN` line reference was replaced by the sub or variable it points at (they had drifted — e.g. LBF's adapter table cited at 5688, now ~7069), §8's sites re-checked against current code, and §3's reference shape gained LBF's optional `ready` probe. Re-copied; sha1 `fccba6c4…` in all three.**)
 
 **Spotify rate-limits a warm, and the limit is not this server's alone.** Spotify's Web API
 counts calls per APP over a rolling 30-second window
@@ -198,7 +198,7 @@ user who ranks Spotify above another service**, not as a symmetry argument with 
 **THIRD REVIEW OF 2026-09-16 (the 1.0.3 tree) — three findings, all fixed; built as 1.0.4 (finding 1)
 and 1.0.5 (findings 2 and 3), committed on `dev` as `7e5bf4e`, `189ee58` and `199b6b9`; a fourth
 review of those builds found NOTHING (§C `CLOSED IN THE 1.0.5 REVIEW —`). ROUND CLOSED BY SIMON AND
-PUSHED TO `dev`, 2026-09-16. NOT INSTALLED (Ledger §C `CLOSED IN THE 1.0.3 REVIEW —`, which carries
+PUSHED TO `dev`, 2026-09-16. 1.0.5 INSTALLED 2026-09-16, not yet seen refusing live (Ledger §C `CLOSED IN THE 1.0.3 REVIEW —`, which carries
 the mechanisms, anti-tests and both build notes).** (1) The trending-albums streaming gate is a THIRD Spotify pump and was unpaced — now
 paced off `$onPending`, with the re-entrancy guard ported. (2) A pass that outlived its in-flight
 flag could release the NEXT pass's flag — the flag is now a token. (3) A synchronous Spotify refusal
@@ -236,7 +236,7 @@ back-off and its `install.xml` reads 1.0.1. `README.html`/`index.html` regenerat
 badge (read live from `install.xml`) is not left lying. **`CHANGELOG.md` deliberately untouched** —
 that is written at the merge to main, where the user-facing line belongs.
 
-**NOT INSTALLED, NOT VERIFIED LIVE.** What to look for once it is: Spotty's `error429` lines
+**INSTALLED (as 1.0.5, 2026-09-16), NOT VERIFIED LIVE.** What to look for: Spotty's `error429` lines
 should be followed by LBF's `Spotify search refused (Spotify is rate-limiting)` and a visibly
 slower warm for ~30s, then recovery; and a track missed during a storm should carry `free` rather
 than a spent attempt. Read the log as `log.txt?lines=20000` — the bare `log.txt` returns a tiny
@@ -976,9 +976,11 @@ what was checked — **not a suppression**: the fix code stays open to a finding
   refused gate is slow and usually times out into the 1h TTL). `_refused` on the result hash would
   now let the gate file such a list short. **Re-raise only with a real list seen missing an album
   this way.**
-- **Next:** the same synchronous-refusal and single-wakeup fixes are owed in PFR — verified there
-  2026-09-16 by driving PFR's real `_resolveSection` (10 refused albums in ONE turn, no gap; 10
-  wakeups left pending with a stray launching straight after a completion). Tracked in PFR, not here.
+- **PFR port DONE (working tree, 2026-09-16):** the same synchronous-refusal and single-wakeup
+  defects were verified in PFR by driving its real `_resolveSection` (10 refused albums in ONE turn,
+  no gap; 10 wakeups left pending with a stray launching straight after a completion), and fixed
+  there as 0.9.39 — unbuilt at the time of writing. Tracked in PFR (its ledger §C
+  `SYNCHRONOUS SPOTIFY REFUSAL AND ONE`), not here.
 
 **CLOSED IN THE 1.0.3 REVIEW — the third 2026-09-16 review of the Spotify back-off (the 1.0.3
 working tree). THREE findings, all fixed: finding 1 BUILT AS 1.0.4, findings 2 and 3 BUILT AS

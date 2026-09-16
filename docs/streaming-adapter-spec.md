@@ -60,8 +60,8 @@ per-service `if ($svc eq '…')` branch anywhere else is not an acceptable subst
 Two rules follow directly, and both matter on day one:
 
 - **MUST NOT bump any cache key.** Every stream, track, playlist and trending cache key
-  already includes the ordered list of enabled services (`_streamKey`,
-  `ListenBrainzFreshReleases/Browse.pm:5829`). Registering an adapter changes that list, so
+  already includes the ordered list of enabled services (`_streamKey` in
+  `ListenBrainzFreshReleases/Browse.pm`, and in `PitchforkReviews/Browse.pm`). Registering an adapter changes that list, so
   every affected entry is invalidated automatically. An extra bump only forces a second,
   redundant re-resolve.
 - **MUST NOT change the shared matcher.** `_albumMatches`, `_trackMatches` and `_norm` are
@@ -116,7 +116,7 @@ service: write down the literal favurl string for an album, a track and a playli
 
 ## 3. The adapter table entry
 
-Reference shape (`ListenBrainzFreshReleases/Browse.pm:5688`):
+Reference shape (LBF's Spotify entry, `_streamingAdapters` in `ListenBrainzFreshReleases/Browse.pm`):
 
 ```perl
 push @adapters, {
@@ -125,6 +125,8 @@ push @adapters, {
     run       => \&_searchSpotify,                # album leg  (section 4)
     runTrack  => \&_searchSpotifyTrack,           # track leg  (section 5) — omit if unsupported
     query_enc => 'chars',                         # 'chars' | 'bytes'  (R6)
+    ready     => sub { … },                       # LBF only, optional: is the service signed in yet?
+                                                  # (streamingNotReady holds the warm while it is false)
 } if Plugins::Spotty::Plugin->can('getAPIHandler')  # R8 — exactly the methods used, no others
   && Plugins::Spotty::OPML->can('_albumItem')
   && Plugins::Spotty::OPML->can('trackList')
@@ -142,8 +144,8 @@ Where the table lives, and the legs each plugin defines:
 
 | Plugin | Table | Legs |
 |---|---|---|
-| LBF | `ListenBrainzFreshReleases/Browse.pm:5688` | `run`, `runTrack` |
-| PFR | `PitchforkReviews/Browse.pm:2124` | `run` |
+| LBF | `_streamingAdapters` in `ListenBrainzFreshReleases/Browse.pm` | `run`, `runTrack` |
+| PFR | `our @SERVICES`, read by `_detectAdapters`, in `PitchforkReviews/Browse.pm` | `run` |
 | LL | none — recognises a source rather than searching for one; see section 9 | — |
 
 Where a plugin grows a third leg, prefer collecting them into a named sub-hash
@@ -309,8 +311,9 @@ zero-hit produces, having sent no request at all (it sets `spotty_rate_limit_exc
 - **Do not add a second backoff.** The service plugin already owns the wait. What the adapter
   owes is reading the refusal correctly and telling the WARM, so it stops pushing into a closed
   quota (LBF: `_spotifyBackingOff`, `SPOTIFY_BACKOFF_WINDOW`).
-- **Tag the refusal on the answer itself** — LBF answers `$collect->(undef, 'refused')` — rather
-  than leaving callers to infer it from a global flag. The free pass below and the pacing both
+- **Tag the refusal on the answer itself** — LBF answers `$collect->(undef, 'refused')`; PFR
+  passes a 6th `$refused` argument to `_svcCantAnswer`, which answers `$collect->(undef, $standing, 1)`
+  — rather than leaving callers to infer it from a global flag. The free pass below and the pacing both
   need to know that THIS search was refused, not merely that a refusal happened recently.
 - **Every loop that searches must check the back-off itself; nothing inherits it.** LBF has
   THREE consumers: `_resolveTracks`'s `paced` option, the prewarm queue's pause
@@ -318,14 +321,20 @@ zero-hit produces, having sent no request at all (it sets `spotty_rate_limit_exc
   the album search directly rather than through `_resolveTracks`, and for two review rounds it
   went unpaced while the ledger said "the album side is `_detailPriorityBusy`". When you add or
   review a pump, list every caller of the search functions — not the callers of the paced helper.
+  PFR has ONE consumer, `_resolveSection` in `warm` mode; its home shelves call the same pump in
+  `shelf` mode, but only when Material asks for the home page, so like a view they are never paced.
 - **A refusal can answer SYNCHRONOUSLY — do not treat "synchronous" as "cached".** Spotty
   refuses in the same call stack (`getToken` does `return $cb->(-429)` and `_call` hands that
   straight on; `API/Pipeline.pm` adds no deferral — read in Spotty's source, 2026-09-16). A pump
   that skips its gap for any in-loop completion, on the grounds that only a cache hit answers
   in-loop, will run a Spotify-only pass straight through the lockout. The resolver must pass the
-  refusal up (LBF: a 4th callback arg on the track path, `_refused` on the album result), and the
-  pump must hold on it — with a flag that stops the LAUNCH LOOP, because arming a wakeup from
-  inside the loop does not stop the loop.
+  refusal up (LBF: a 4th callback arg on the track path, `_refused` on the album result; PFR 0.9.39:
+  `_refused` on the answer, forwarded by every wrapper that makes more than one search — the
+  subtitle retry, each side of an "A / B" review — and given to callers that joined the search),
+  and the pump must hold on it — with a flag that stops the LAUNCH LOOP, because arming a wakeup
+  from inside the loop does not stop the loop. **Keep the gap to ONE wakeup, re-armed:** a timer
+  per completion leaves one per search in flight when the back-off starts, and each stray sends a
+  search the moment it fires (found in LBF 1.0.1 and in PFR 0.9.37).
 - **Back off on your OWN clock.** A flag the service plugin clears on its next SUCCESSFUL
   response reads false while you are still being refused, because at a low priority it may be
   many albums before one is sent.
@@ -365,19 +374,21 @@ Full working, measurements and the live evidence: `docs/spotify-rate-limits.md` 
 
 ## 8. Adapter-table fields still to be added
 
-These sites currently need an edit when a service is added. Each is a one-off improvement to
+These sites currently need an edit when a service is added. Sites are named by sub, not line
+number: line numbers drift with every release (the ones this table used to carry were already
+wrong when checked on 2026-09-16). Each is a one-off improvement to
 the registry, not work for an adapter author; close them as they come up.
 
 ### LBF
 
 | Site | What it does today | Field that removes it |
 |---|---|---|
-| `Browse.pm:6394` `_rebuildStreamItems` | Per-service branch chain mapping a service to its rebuild coderef | `rebuild => sub { … }` on the entry, resolved by name |
-| `Browse.pm:6244` `_attachFavUrl` | Early return for the one service whose own favourites url is already correct. The early return also drops every handshake field for that service — see "The handshake has ONE carrier" in section 4 | `native_favurl => 1` |
-| `Browse.pm:6479` `_candReleaseType` | Reads a fixed list of type and count field names | Generic by field name already; a service using a new field name needs `type_fields` / `count_field` |
-| `Browse.pm:6510` `_svcYear` | Reads a fixed list of date field names | `date_fields` |
-| `Browse.pm:5985`, `:5192`, `:5239`, `:6705` | One service is excluded from automatic search and offered as a manual action instead | `auto_search => 0` and `manual_action => 1` |
-| `Settings.pm:43` and `:121`, `Plugin.pm:262-266`, `Browse.pm:5794` | Four hand-maintained lists of service names | A single services table all four read. The settings template already iterates generically and needs no change |
+| `Browse.pm` `_rebuildStreamItems` | Per-service branch chain mapping a service to its rebuild coderef | `rebuild => sub { … }` on the entry, resolved by name |
+| `Browse.pm` `_attachFavUrl` | Early return for the one service whose own favourites url is already correct. The early return also drops every handshake field for that service — see "The handshake has ONE carrier" in section 4 | `native_favurl => 1` |
+| `Browse.pm` `_candReleaseType` | Reads a fixed list of type and count field names | Generic by field name already; a service using a new field name needs `type_fields` / `count_field` |
+| `Browse.pm` `_svcYear` | Reads a fixed list of date field names | `date_fields` |
+| `Browse.pm` `_findPlayable` and `_warmReleaseDetails` (the `ne 'Bandcamp'` filters), `_releaseDetail` (`$canBandcamp`), `_bandcampSearchRow` / `_searchBandcampOnly` | One service is excluded from automatic search and offered as a manual action instead | `auto_search => 0` and `manual_action => 1` |
+| `Settings.pm` `prefs` and the priority loop in `handler`, the `svc_priority_*` defaults in `Plugin.pm`, `Browse.pm` `serviceStatus` (`@known`) | Four hand-maintained lists of service names | A single services table all four read. The settings template already iterates generically and needs no change |
 
 ### Other plugins
 
@@ -394,7 +405,7 @@ the registry, not work for an adapter author; close them as they come up.
 |---|---|---|---|
 | **LBF** | Qobuz, Bandcamp, TIDAL, Deezer, Spotify | About 200 lines: two legs, one pref default, one settings entry, one rebuild branch | Ready |
 | **PFR** | Qobuz, TIDAL, Deezer, Spotify | About 70 lines: one album leg, one table entry (with `rebuild`), one `@SERVICES` row, one pref default | Ready — no out-of-table edits left |
-| **LL** | qobuz, bandcamp, tidal, deezer, spotify, via a url-scheme map (`Sources.pm:26`) | About 150 lines across ten per-source branches in `Sources.pm` and `Plugin.pm` | Works; refactor still owed |
+| **LL** | qobuz, bandcamp, tidal, deezer, spotify, via a url-scheme map (`%SCHEME` in `Sources.pm`) | About 150 lines across ten per-source branches in `Sources.pm` and `Plugin.pm` | Works; refactor still owed |
 
 LL works differently by design: it does not search a service, it **recognises** one from the
 url scheme of a row the user acted on, then replays it. Its contract is "recognise and
