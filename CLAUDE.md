@@ -108,13 +108,13 @@ post-restart detail work, zero refusals. Waiting for another 05:00 warm adds not
 traffic. The one thing not measured is HOW MANY of those requests reached MusicBrainz. Radio lookup and the streaming alias pass remain UNPROVEN
 LIVE: their only traces are INFO lines and the plugin does not log at INFO on the rig.
 
-## Spotify back-off — built 1.0.1, review fixes built 1.0.2 and INSTALLED 2026-09-16; second review's fix built 1.0.3 and INSTALLED 2026-09-16
+## Spotify back-off — built 1.0.1, review fixes built 1.0.2 and INSTALLED 2026-09-16; second review's fix built 1.0.3 and INSTALLED 2026-09-16; third review's three fixes built 1.0.4 + 1.0.5, NOT installed
 
 **Full working, measurements and the live evidence: `docs/spotify-rate-limits.md`.** The
 adapter-level rule went into the canonical `docs/streaming-adapter-spec.md` (§6) and was
 re-copied to PFR and LL in the same session, per that file's own rule — all three checksums
 agree. (2026-09-16: §4 gained the handshake-carrier and playback-title notes, re-copied the same
-way; later that day §4 was updated for LL's Spotify release-id Played door and display title (and §8's `_backfillStreamingArtist` condition); sha1 now `b3597f82…` in all three.)
+way; later that day §4 was updated for LL's Spotify release-id Played door and display title (and §8's `_backfillStreamingArtist` condition), sha1 `b3597f82…`. **Later still, after the third back-off review, §6's rate-limit rules gained three points — tag the refusal on the answer, every search loop checks the back-off itself (LBF has THREE consumers, not the "two" §6 used to list), and a refusal can answer SYNCHRONOUSLY — and its pointer to `docs/spotify-rate-limits.md` now says that file lives in LBF only; §7 gained the matching line. Re-copied to PFR and LL; sha1 now `504f722a…` in all three.**)
 
 **Spotify rate-limits a warm, and the limit is not this server's alone.** Spotify's Web API
 counts calls per APP over a rolling 30-second window
@@ -194,6 +194,18 @@ service; LBF's default is `svc_priority_spotify => 5`, LAST, where nothing can w
 Simon, 2026-09-16: "for me it's not a problem" — his rig leaves Spotify last, and the users this
 work is for have Spotify ONLY, where there is no lower service to pin. **Re-raise only with a
 user who ranks Spotify above another service**, not as a symmetry argument with PFR.
+
+**THIRD REVIEW OF 2026-09-16 (the 1.0.3 tree) — three findings, all fixed; built as 1.0.4 (finding 1)
+and 1.0.5 (findings 2 and 3), committed on `dev` as `7e5bf4e` and `189ee58`, NOT INSTALLED, NOT
+PUSHED (Ledger §C `CLOSED IN THE 1.0.3 REVIEW —`, which carries the mechanisms, anti-tests and both
+build notes).** (1) The trending-albums streaming gate is a THIRD Spotify pump and was unpaced — now
+paced off `$onPending`, with the re-entrancy guard ported. (2) A pass that outlived its in-flight
+flag could release the NEXT pass's flag — the flag is now a token. (3) A synchronous Spotify refusal
+looked like a cache hit and skipped the gap — the resolvers now signal it and both pumps hold on it.
+**CURRENT BUILD: 1.0.5 (rebuilt once, same version)**, `repo.xml <sha>`
+`9659e0fd21f60bcd041f83dde1287db905574995`, 54 entries, 710,605 bytes, caches preserved; the zip
+diffs identical to the tree. `t_spotifybackoff.pl` 62 -> **100**, `t_buildingstate.pl` 77 ->
+**87**; all 37 suites exit 0.
 
 **REVIEW OF 2026-09-16 — two findings, both fixed; round CLOSED by Simon (Ledger §C `CLOSED IN THE 1.0.1 REVIEW —`).** (1) Cached
 tracks each armed a paced timer, so strays launched live searches back to back — `$pumping` +
@@ -951,8 +963,14 @@ the flag token and `$holding` are open to review.**
 **Findings 2 and 3 were reported with finding 1 and left out of the 1.0.4 build — that was a
 scoping miss, not a decision; nothing about them was declined.**
 
-**BUILT AS 1.0.5, 2026-09-16; NOT YET INSTALLED.** `install.xml` / `repo.xml` 1.0.5, zip rebuilt
-(54 entries, 710,519 bytes), `repo.xml <sha>` `23c93020147233a0a7b265fcb9260416e5924339`. `diff -r`
+**BUILT AS 1.0.5, 2026-09-16; REBUILT THE SAME DAY WITHOUT A VERSION BUMP; NOT YET INSTALLED.**
+The first 1.0.5 zip (710,519 bytes, sha `23c93020…`) was followed by the post-build doc review, which
+corrected one COMMENT in `Browse.pm` (the `$pumping` note in `_resolveTracks` now says a synchronous
+refusal DOES arm the wakeup); no code changed. **Rebuilt as 1.0.5 rather than 1.0.6 on Simon's call:
+the first zip was never installed or pushed, so no rig or user can hold a different "1.0.5"** — the
+bump-every-rebuild rule exists to tell INSTALLED builds apart, and none was. Current zip:
+`install.xml` / `repo.xml` 1.0.5, 54 entries, 710,605 bytes, `repo.xml <sha>`
+`9659e0fd21f60bcd041f83dde1287db905574995`. The checks below were re-run against the REBUILT zip. `diff -r`
 of the unzipped archive against the tree is IDENTICAL; the extracted `Browse.pm` carries the token
 counter, all five token releases, both `$holding` loops and both refusal signals; and
 `t_spotifybackoff` (100), `t_buildingstate` (87), `t_playlistresolve` (58) and `t_trending_empty`
@@ -990,8 +1008,18 @@ bumped (the result hash gains an in-memory `_refused` key; nothing stores it). `
   through SingleFlight like `_warm_pending`) — and both pumps arm the gap on
   `!$pumping || $refusedNow`. **And both gained `$holding`**, which the arm alone could not
   replace: a wakeup armed from INSIDE the loop does not stop the loop, which at width 1 launches
-  the next search straight away. The DetailWarm queue needed nothing — it re-reads
-  `_detailPriorityBusy` before every job.
+  the next search straight away. The DetailWarm queue needed nothing — it runs ONE job per
+  timer tick and checks `pause` (`_detailPriorityBusy`) before each, so a job that finishes
+  synchronously still cannot start the next one inside a refusal.
+  **Stated consequence:** while a wakeup is pending, a completion arriving after the window has
+  lapsed waits for that wakeup (≤ `PACED_TRACK_GAP`) instead of launching at once. It cannot stall:
+  the wakeup always fires, and the watchdog still bounds the pass.
+  **The synchronous chain was READ, link by link, not inferred:** `_searchSpotify` /
+  `_searchSpotifyTrack` call `$api->search` directly; Spotty's `Pipeline` adds no deferral;
+  `_call` and `getToken` answer the refusal in-stack; on our side the adapters' `run` /
+  `runTrack` are called inline, the per-service timeout is killed on settle, a refusal is
+  inconclusive so the album alias pass never runs, and SingleFlight's `_land` calls its waiters
+  directly.
 - **Guards.** `t_buildingstate.pl` 77 -> **87**: the race driven step by step (A's late release
   and A's re-entered expiry both leave B's flag and timer alone). `t_spotifybackoff.pl` 81 ->
   **100**: §4d drives a synchronous refusal through BOTH pumps (window closed at start and
@@ -1054,7 +1082,7 @@ preserved.** `README.html`/`index.html` regenerated (the badge reads live from `
   the gap while refusing; a VIEW never paced; the watchdog fired DIRECTLY (advance() always fires
   the nearer timer first, so it can never observe what `$finish` leaves behind).
   **ANTI-TESTED FIVE WAYS, each failing only its own checks:** re-entry guard removed 1; the
-  synchronous arm removed (the 1.0.1 shape) 1; width read reverted to the literal 5; `$warm`
+  synchronous arm removed (the 1.0.1 shape) 1; width read reverted to the literal 5 → 7; `$warm`
   forced to 1 (view paced) 2; the finish-time timer kill removed 1.
   **An ALL-cached pass cannot see the 1.0.1 shape** — each stray re-arms the one before it and
   `$finish` kills the last, so every count looks right. It takes a MIXED pass (4 cached then a

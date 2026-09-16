@@ -308,8 +308,24 @@ zero-hit produces, having sent no request at all (it sets `spotty_rate_limit_exc
   an answer whatever the flag says.
 - **Do not add a second backoff.** The service plugin already owns the wait. What the adapter
   owes is reading the refusal correctly and telling the WARM, so it stops pushing into a closed
-  quota (LBF: `_spotifyBackingOff`, `SPOTIFY_BACKOFF_WINDOW`; `_resolveTracks`'s `paced` option
-  and `_detailPriorityBusy` are the two consumers).
+  quota (LBF: `_spotifyBackingOff`, `SPOTIFY_BACKOFF_WINDOW`).
+- **Tag the refusal on the answer itself** — LBF answers `$collect->(undef, 'refused')` — rather
+  than leaving callers to infer it from a global flag. The free pass below and the pacing both
+  need to know that THIS search was refused, not merely that a refusal happened recently.
+- **Every loop that searches must check the back-off itself; nothing inherits it.** LBF has
+  THREE consumers: `_resolveTracks`'s `paced` option, the prewarm queue's pause
+  (`_detailPriorityBusy`), and the trending-albums gate in `_buildAlbumsData`. That gate calls
+  the album search directly rather than through `_resolveTracks`, and for two review rounds it
+  went unpaced while the ledger said "the album side is `_detailPriorityBusy`". When you add or
+  review a pump, list every caller of the search functions — not the callers of the paced helper.
+- **A refusal can answer SYNCHRONOUSLY — do not treat "synchronous" as "cached".** Spotty
+  refuses in the same call stack (`getToken` does `return $cb->(-429)` and `_call` hands that
+  straight on; `API/Pipeline.pm` adds no deferral — read in Spotty's source, 2026-09-16). A pump
+  that skips its gap for any in-loop completion, on the grounds that only a cache hit answers
+  in-loop, will run a Spotify-only pass straight through the lockout. The resolver must pass the
+  refusal up (LBF: a 4th callback arg on the track path, `_refused` on the album result), and the
+  pump must hold on it — with a flag that stops the LAUNCH LOOP, because arming a wakeup from
+  inside the loop does not stop the loop.
 - **Back off on your OWN clock.** A flag the service plugin clears on its next SUCCESSFUL
   response reads false while you are still being refused, because at a low priority it may be
   many albums before one is sent.
@@ -324,7 +340,8 @@ zero-hit produces, having sent no request at all (it sets `spotty_rate_limit_exc
   install shares unless the user sets their own, and Spotify counts per app over a rolling
   30-second window. Assume a narrower budget than a per-user one.
 
-Full working, measurements and the live evidence: `docs/spotify-rate-limits.md`.
+Full working, measurements and the live evidence: `docs/spotify-rate-limits.md` **in the LBF repo**
+(`LMS-ListenBrainz-New-Releases`); PFR and LL carry no copy of it.
 
 ---
 
@@ -337,6 +354,7 @@ Full working, measurements and the live evidence: `docs/spotify-rate-limits.md`.
 - Do not report a permanent failure as inconclusive.
 - Do not let an empty answer from a rate-limited service stand as a no-match, and do not add a
   backoff the service plugin already performs.
+- Do not assume a synchronous answer is a cache hit — a refusal can be synchronous too.
 - Do not return an item with a coderef url from a track leg.
 - Do not construct playable items by hand.
 - Do not probe methods with `->can` that the adapter does not call.

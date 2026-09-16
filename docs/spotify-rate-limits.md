@@ -91,7 +91,7 @@ last) that can be many albums away — so the flag reads false while we are stil
   each LIVE one. A cache hit answers synchronously from inside the pump and is never slowed.
 - **A synchronous answer is not always a cache hit (1.0.5).** Spotty refuses in the SAME call
   stack — `getToken` does `return $cb->(-429)` and `_call` hands that straight to its caller
-  (checked against Spotty's `API.pm`, 2026-09-16). On libMode `never` (`prefer_library` off)
+  (checked against Spotty's `API.pm` and `API/Pipeline.pm`, which adds no deferral, 2026-09-16). On libMode `never` (`prefer_library` off)
   there is no `$deferLocal` tick, so for a Spotify-only user a refusal reached the pump looking
   exactly like a cache hit, and the pass ran every track through the lockout in one turn — each
   spending a free pass on a search never sent. Both resolvers now SAY so (`_findPlayableTrack`'s
@@ -169,8 +169,8 @@ Re-raise with a user who ranks Spotify above another service — not as a symmet
 
 ## 6. Tests
 
-`tools/t_spotifybackoff.pl` — 62 assertions (37 at build, +20 in the first 2026-09-16 review, +5 in
-the second), sub bodies lifted verbatim and driven over a fake
+`tools/t_spotifybackoff.pl` — **100 assertions** (37 at build, +20 in the first 2026-09-16 review, +5 in
+the second, +19 and +19 for the third review's fixes in 1.0.4 and 1.0.5), sub bodies lifted verbatim and driven over a fake
 clock, no LMS and no Spotty needed. Five sections: the refusal clock; the adapters stamping a
 refusal and only a refusal; the retry budget (free passes, the cap, and that it still converges);
 the paced pump (narrow while refused, full width otherwise, a view never narrowing, a refusal
@@ -193,6 +193,24 @@ fan-out, so its read-before-detach order and `paced => $warm` are checked in sou
 ways, one failing check each: follow `$warm` read after the detach; follow `paced` dropped; trending
 `paced` dropped; trending `paced => 1`; trending `$warm` read after the detach.
 
+**Third review (1.0.3 tree), §4c — built 1.0.4:** `_buildAlbumsData`'s streaming gate is lifted
+and DRIVEN with its follower fan-out stubbed synchronous: full width when healthy, one at a time
+with the gap while refusing, a view never paced, and the watchdog fired DIRECTLY (a fake clock's
+`advance` always fires the nearer timer first, so it can never show what `$finish` leaves behind).
+**An ALL-cached pass cannot see the 1.0.1 defect** — each stray wakeup re-arms the one before and
+`$finish` kills the last — so the re-entrancy check uses a MIXED pass (4 cached, then a live one).
+The first version of §4c used the all-cached pass and passed against that mutant. Anti-tested
+five ways: re-entry guard removed 1; synchronous arm removed 1; width read reverted 7; view paced
+2; finish-time timer kill removed 1.
+
+**§4d and §3b — built 1.0.5:** a SYNCHRONOUS refusal driven through BOTH pumps (the window
+closed at the start and opened by the refusal itself; cached-then-refused; views never held),
+and the REAL `_findPlayableTrack` / `_findPlayable` checked for the signal they now send — 4d's
+stubs manufacture it, so without 3b a resolver that stopped sending it passed. Anti-tested six
+ways: either pump ignoring the refusal (6, 5); either loop ignoring `$holding` (4, 4); either
+resolver not sending the signal (2, 2). The build-flag token is guarded separately, in
+`tools/t_buildingstate.pl` (the stale-release race, driven step by step; 3 mutants).
+
 **Two harness traps, both of which cost a debugging pass:**
 
 - `use constant X => $lifted` inside a package block resolves at **compile** time, when the value
@@ -204,16 +222,22 @@ ways, one failing check each: follow `$warm` read after the detach; follow `pace
 
 ## 7. Verifying it live (owed)
 
-Nothing here has been seen running. Once 1.0.3 is installed:
+Nothing here has been seen running. 1.0.3 is installed on the rig; 1.0.4 and 1.0.5 are built,
+not installed. Once 1.0.5 is:
 
 1. Watch `curl -s 'http://plex:9000/log.txt?lines=20000'` during a cold warm — the bare
    `log.txt` returns a tiny window.
 2. Spotty's own `Plugins::Spotty::API::error429 … Access Rate limit exceeded` lines should now be
    followed by LBF's `Spotify search refused (Spotify is rate-limiting)`.
 3. The warm should visibly slow for ~30s after one, then return to full width — in the playlist,
-   follow-feed AND trending-tracks stages (the last two only from 1.0.3).
+   follow-feed, trending-tracks AND trending-albums stages (follow and trending tracks from
+   1.0.3, trending albums from 1.0.4).
 4. A track missed during a storm should carry `free` in its cache entry rather than a spent
    attempt — so it is still retried afterwards rather than held for a week.
 
+5. **Spotify-only with `prefer_library` OFF (1.0.5):** after a refusal the warm should still
+   pause ~2s between searches. Before 1.0.5 this setup burned the whole pass in one turn —
+   look for a run of `Spotify track-match refused` lines with the same timestamp.
+
 To reproduce a storm deliberately: set every other service's priority to 0 (Spotify only) and
-force a cold playlist re-resolve.
+force a cold playlist re-resolve. Turn `prefer_library` off as well to exercise step 5.

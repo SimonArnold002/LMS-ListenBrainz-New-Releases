@@ -3515,10 +3515,13 @@ sub _resolveTracks {
     # Only an ASYNC completion (a real search) finds it clear. Without it, every cached
     # track in a backing-off pass armed its own timer, and those strays later launched
     # live searches straight after one another (the Pitchfork sibling guards the same).
+    # ONE EXCEPTION (1.0.5): a synchronous REFUSAL is not a cache hit, and does arm the
+    # wakeup even with $pumping set — it still never recurses; $holding stops the loop.
     #
-    # $gapTimer is the ONE pending paced wakeup. Each live completion re-arms it rather
-    # than adding another, so the next launch is always PACED_TRACK_GAP after the LAST
-    # completion — including when several were in flight as the back-off began.
+    # $gapTimer is the ONE pending paced wakeup. Each live completion (or synchronous
+    # refusal) re-arms it rather than adding another, so the next launch is always
+    # PACED_TRACK_GAP after the LAST one — including when several were in flight as the
+    # back-off began.
     #
     # $holding is set while a paced wakeup is PENDING and stops the loop launching.
     # Arming a timer alone is not enough once the arm can fire from INSIDE the loop (a
