@@ -196,9 +196,10 @@ work is for have Spotify ONLY, where there is no lower service to pin. **Re-rais
 user who ranks Spotify above another service**, not as a symmetry argument with PFR.
 
 **THIRD REVIEW OF 2026-09-16 (the 1.0.3 tree) — three findings, all fixed; built as 1.0.4 (finding 1)
-and 1.0.5 (findings 2 and 3), committed on `dev` as `7e5bf4e` and `189ee58`, NOT INSTALLED, NOT
-PUSHED (Ledger §C `CLOSED IN THE 1.0.3 REVIEW —`, which carries the mechanisms, anti-tests and both
-build notes).** (1) The trending-albums streaming gate is a THIRD Spotify pump and was unpaced — now
+and 1.0.5 (findings 2 and 3), committed on `dev` as `7e5bf4e`, `189ee58` and `199b6b9`; a fourth
+review of those builds found NOTHING (§C `CLOSED IN THE 1.0.5 REVIEW —`). ROUND CLOSED BY SIMON AND
+PUSHED TO `dev`, 2026-09-16. NOT INSTALLED (Ledger §C `CLOSED IN THE 1.0.3 REVIEW —`, which carries
+the mechanisms, anti-tests and both build notes).** (1) The trending-albums streaming gate is a THIRD Spotify pump and was unpaced — now
 paced off `$onPending`, with the re-entrancy guard ported. (2) A pass that outlived its in-flight
 flag could release the NEXT pass's flag — the flag is now a token. (3) A synchronous Spotify refusal
 looked like a cache hit and skipped the gap — the resolvers now signal it and both pumps hold on it.
@@ -307,7 +308,8 @@ because line numbers rot on the next edit.
 | 1.0.2 review: the follow-feed and trending warms were unpaced — `paced => $warm` (read at entry, before the detach), built and INSTALLED 1.0.3. Closes that defect only; the `$warm` reads are open to review | C | `CLOSED IN THE 1.0.2 REVIEW —` |
 | Spotify back-off: the WARM narrows only while Spotify refuses (always-on pacing rejected in PFR, not proposed here); a refused search does not spend a retry attempt, capped at 3 | A2 | `## Spotify back-off —` |
 | THREE pumps touch Spotify — `_resolveTracks`(`paced`), `_detailPriorityBusy` (DetailWarm queue ONLY), and `_buildAlbumsData`'s trending-albums gate (paced 1.0.4). "The album side is `_detailPriorityBusy`" was WRONG and hid the third for two rounds | A2 | `THREE PUMPS TOUCH SPOTIFY, NOT TWO` |
-| 1.0.3 review — THREE findings. (1) the trending-albums streaming gate was unpaced — `$warm` off `$onPending`, plus `$pumping`/`$gapTimer`, built 1.0.4; a paced gate times out into the 1h TTL: ACCEPTED, Simon's call. (2) `_buildingEnd` freed a NEWER pass's flag after the backstop expired — the flag is now a token. (3) a synchronous Spotify refusal skipped the paced gap — the resolvers signal it, `$holding` stops the loop. (2)+(3) built 1.0.5. Closes those defects only; the gate, token and `$holding` code are open to review | C | `CLOSED IN THE 1.0.3 REVIEW —` |
+| 1.0.3 review — THREE findings. (1) the trending-albums streaming gate was unpaced — `$warm` off `$onPending`, plus `$pumping`/`$gapTimer`, built 1.0.4; a paced gate times out into the 1h TTL: ACCEPTED, Simon's call. (2) `_buildingEnd` freed a NEWER pass's flag after the backstop expired — the flag is now a token. (3) a synchronous Spotify refusal skipped the paced gap — the resolvers signal it, `$holding` stops the loop. (2)+(3) built 1.0.5. **Round CLOSED by Simon 2026-09-16.** Closes those defects only | C | `CLOSED IN THE 1.0.3 REVIEW —` |
+| 1.0.5 review (round four on the back-off): NO findings — records what was checked across all three fixes, and one PRE-1.0.4 observation deliberately not reported (the albums gate files a refused album as a drop). Round CLOSED by Simon; pushed to `dev`. Not a suppression of the fix code | C | `CLOSED IN THE 1.0.5 REVIEW —` |
 
 **Two standing rules that kill most repeat findings:**
 
@@ -955,10 +957,33 @@ Closes the two defects as described. **The fix code is new and open to review** 
 - **UNPROVEN LIVE:** installed and loaded, but no Spotify search refusal had occurred on 1.0.2 at
   close. Evidence to look for is in the section at the top (`## Spotify back-off —`).
 
+**CLOSED IN THE 1.0.5 REVIEW — the fourth 2026-09-16 review of the Spotify back-off (commits
+`7e5bf4e..199b6b9`, i.e. what 1.0.4 and 1.0.5 ADDED). NO findings. Round CLOSED by Simon; all
+three commits PUSHED to `dev` the same day. Not installed.** Recorded so the next round knows
+what was checked — **not a suppression**: the fix code stays open to a finding with new evidence.
+- **Checked and held:** `$warm` off `$onPending` for all three `_buildAlbumsData` callers (the view
+  passes the hook, both warm ranges pass four args); the gate's three-way arm, its `$finish` killing
+  `$gapTimer`, and no stall when holding with work in flight or at `TRENDING_MAX`; the token at all
+  five release sites, `$owns` read at CALL time where the wrapper is built before the take, a stale
+  release leaving the newer pass's timer alone, and the playlist warm/view sharing `playlist:$mbid`;
+  the refusal signal at both `_findPlayableTrack` sites (cached returns send none), the stamp written
+  before the callback so the back-off read is already true, `$holding` ending the loop, and
+  `_refused` reaching the gate through SingleFlight (a joiner is always async). `_resolveTracks`'
+  `$finish` not killing `$gapTimer` is harmless (`unless $finished`).
+- **OBSERVED, DELIBERATELY NOT REPORTED — pre-1.0.4 (0.9.109):** the albums gate counts an album
+  whose streaming check failed — a Spotify refusal included — as a DROP, so a gate that finishes
+  inside its 45s watchdog caches the list at the full 7d/30d without it. Pacing makes this rarer (a
+  refused gate is slow and usually times out into the 1h TTL). `_refused` on the result hash would
+  now let the gate file such a list short. **Re-raise only with a real list seen missing an album
+  this way.**
+- **Next:** the same synchronous-refusal and single-wakeup fixes are owed in PFR — verified there
+  2026-09-16 by driving PFR's real `_resolveSection` (10 refused albums in ONE turn, no gap; 10
+  wakeups left pending with a stray launching straight after a completion). Tracked in PFR, not here.
+
 **CLOSED IN THE 1.0.3 REVIEW — the third 2026-09-16 review of the Spotify back-off (the 1.0.3
 working tree). THREE findings, all fixed: finding 1 BUILT AS 1.0.4, findings 2 and 3 BUILT AS
-1.0.5; NEITHER INSTALLED at close.** Closes the defects as described. **The gate's paced code,
-the flag token and `$holding` are open to review.**
+1.0.5; NEITHER INSTALLED at close. ROUND CLOSED BY SIMON 2026-09-16, after the 1.0.5 review
+(below) found nothing; pushed to `dev`.** Closes the defects as described.
 
 **Findings 2 and 3 were reported with finding 1 and left out of the 1.0.4 build — that was a
 scoping miss, not a decision; nothing about them was declined.**
