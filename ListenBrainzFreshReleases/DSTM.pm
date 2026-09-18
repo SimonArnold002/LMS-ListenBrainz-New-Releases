@@ -27,11 +27,14 @@ use List::Util qw(shuffle);
 
 use Slim::Utils::Log;
 use Slim::Utils::Prefs;
-use Slim::Utils::Cache;
+
+use Plugins::ListenBrainzFreshReleases::DB;
 
 my $log   = logger('plugin.listenbrainzfreshreleases');
 my $prefs = preferences('plugin.listenbrainzfreshreleases');
-my $cache = Slim::Utils::Cache->new();
+
+# THE STORE, NOT THE LMS CACHE — see the note in API.pm.
+my $cache = Plugins::ListenBrainzFreshReleases::DB::store();
 
 # CF recommendations regenerate ~weekly; cache the resolved name-pool a day.
 use constant RECS_TTL => 24 * 3600;
@@ -52,15 +55,16 @@ use constant MAX_PER_ARTIST => 1;
 use constant ARTIST_COOLDOWN => 24;
 
 # Last.fm similar-artist fallback (used when ListenBrainz has no similar artists
-# for the seed AND the user has a Last.fm API key). Capped lower than ARTIST_FANOUT
+# for the seed AND the built-in Last.fm key is in use). Capped lower than ARTIST_FANOUT
 # because Last.fm gives artist NAMES — each one without an inline MBID costs a
-# MusicBrainz name->MBID lookup to become fannable.
+# community-API name->MBID lookup to become fannable.
 use constant LFM_FANOUT => 12;
 
-# Cap simultaneous MusicBrainz name->MBID lookups when resolving Last.fm artists.
-# MusicBrainz's anonymous limit is ~1 req/s, so firing all LFM_FANOUT at once gets
-# the bulk throttled (503) and silently dropped — defeating the fallback on a cold
-# cache. A small bound drips them out; cached after the first run.
+# Cap simultaneous name->MBID lookups when resolving Last.fm artists. The lookup is
+# the community API alone since 2026-09-14 (API::getArtistMbidByName — no MusicBrainz
+# fallback), and API::_hostedGet sends to it one request at a time, so this no longer
+# governs the request rate — it bounds how many lookups sit waiting at once, and
+# stops one radio seed monopolising that queue. Cached after the first run.
 use constant MBID_RESOLVE_CONCURRENCY => 4;
 
 # Library-FIRST resolution: if the user owns the track, play their copy (better
@@ -179,18 +183,28 @@ sub _radioFromArtist {
                 });
             }
             else {
-                # ListenBrainz has no similar artists for this seed → try Last.fm
-                # before giving up. Final fallback = the seed's own top recordings
-                # (then DSTM's own random if even that's empty), as before.
+                # ListenBrainz has no similar artists for this seed (a known gap)
+                # → try the hosted API, then Last.fm, before giving up. Hosted goes
+                # first because it needs no API key and its entries carry MBIDs, so
+                # it costs no MusicBrainz lookups; Last.fm stays behind it as the
+                # rung for anyone whose seed it does not know. Final fallback = the
+                # seed's own top recordings (then DSTM's own random if even that's
+                # empty), as before.
                 $log->info("DSTM radio: no LB similar artists for $seed");
-                _radioViaLastfm($client, $cb, $seed, $seedName,
-                    sub { _radioSeedOnly($client, $cb, $seed) });
+                _radioViaNames($client, $cb, $seed, $seedName,
+                    sub {
+                        _radioViaNames($client, $cb, $seed, $seedName,
+                            sub { _radioSeedOnly($client, $cb, $seed) }, 'lastfm');
+                    }, 'hosted');
             }
         },
-        # LB request failed → try Last.fm too; final fallback = recommendations.
+        # LB request failed → try the same two rungs; final fallback = recommendations.
         sub {
-            _radioViaLastfm($client, $cb, $seed, $seedName,
-                sub { _recommendedFill($client, $cb) });
+            _radioViaNames($client, $cb, $seed, $seedName,
+                sub {
+                    _radioViaNames($client, $cb, $seed, $seedName,
+                        sub { _recommendedFill($client, $cb) }, 'lastfm');
+                }, 'hosted');
         },
     );
 }
@@ -204,40 +218,59 @@ sub _radioSeedOnly {
     });
 }
 
-# Last.fm similar-artist fallback for the radio. Needs the seed's NAME and a
-# Last.fm key; resolves the returned artist names to MBIDs (bounded, parallel) and
-# fans out from them plus the seed. No key / no name / nothing usable → $orig->().
-sub _radioViaLastfm {
-    my ($client, $cb, $seed, $seedName, $orig) = @_;
+# Name-based similar-artist fallback for the radio. Needs the seed's NAME;
+# resolves the returned artist names to MBIDs (bounded, parallel) and fans out
+# from them plus the seed. Nothing usable → $orig->().
+#
+# $src selects the source and is the whole difference between the two rungs:
+#   'hosted' — the hosted LMS-community API. NO KEY NEEDED, and every entry it
+#              returns carries an MBID, so _resolveArtistMbids below short-
+#              circuits on the inline id and makes ZERO MusicBrainz lookups.
+#   'lastfm' — Last.fm, gated on the built-in key being in use (API::lastfmKey;
+#              off only if it has been stopped). Names with spotty mbids, so the
+#              misses cost one throttled MB lookup each.
+# Split out from the old Last.fm-only _radioViaLastfm; everything after the fetch
+# is shared, because both sources deliberately return the same
+# { name, artist_mbid, score } shape.
+sub _radioViaNames {
+    my ($client, $cb, $seed, $seedName, $orig, $src) = @_;
+    $src ||= 'lastfm';
 
-    unless (length($seedName // '') && length($prefs->get('lastfm_api_key') // '')) {
+    unless (length($seedName // '')) { $orig->(); return; }
+    if ($src eq 'lastfm' && !length($API->lastfmKey)) {
         $orig->();
         return;
     }
 
-    $log->info("DSTM radio: trying Last.fm similar artists for '$seedName'");
-    $API->getSimilarArtistsLastfm($seedName,
+    my $fetch = $src eq 'hosted'
+        ? sub { $API->getSimilarArtistsHosted(@_) }
+        : sub { $API->getSimilarArtistsLastfm(@_) };
+
+    $log->info("DSTM radio: trying $src similar artists for '$seedName'");
+    $fetch->($seedName,
         sub {
             my $similar = shift // [];
             unless (@$similar) {
-                $log->info("DSTM radio: Last.fm had no similar artists for '$seedName'");
+                $log->info("DSTM radio: $src had no similar artists for '$seedName'");
                 $orig->();
                 return;
             }
 
-            # Bias toward Last.fm's match score and cap the fan-out (each name
-            # without an inline MBID costs a MusicBrainz lookup to resolve).
+            # Bias toward the source's match score and cap the fan-out (each name
+            # without an inline MBID costs a MusicBrainz lookup to resolve — which
+            # is why this cap matters far less on the hosted source, where every
+            # entry already carries one).
             my @ranked = sort { ($b->{score} // 0) <=> ($a->{score} // 0) } @$similar;
             @ranked = @ranked[0 .. LFM_FANOUT - 1] if @ranked > LFM_FANOUT;
 
             _resolveArtistMbids(\@ranked, sub {
                 my $mbids = shift // [];
                 unless (@$mbids) {
-                    $log->info("DSTM radio: no Last.fm artists resolved to MBIDs");
+                    $log->info("DSTM radio: no $src artists resolved to MBIDs");
                     $orig->();
                     return;
                 }
-                $log->info("DSTM radio: Last.fm gave " . scalar(@$mbids) . " artist MBID(s)");
+                $log->info("DSTM radio: $src gave " . scalar(@$mbids) . " artist MBID(s)");
                 _collectArtistTracks([ $seed, @$mbids ], sub {
                     _resolveAndReturn($client, $cb, shift // [], 'radio');
                 });

@@ -114,9 +114,9 @@
 
 <header class="hero">
   <h1>ListenBrainz Fresh Releases — LMS Plugin</h1>
-  <p class="tagline">A plugin for <strong>Lyrion Music Server (LMS)</strong> built around <a href="https://listenbrainz.org">ListenBrainz</a>. It browses newly released albums (a personalised feed plus the global feed), turns your ListenBrainz playlists and recommendations into playable music, and adds rich release detail pages with artist bios and one-tap streaming.</p>
+  <p class="tagline">A plugin for <strong>Lyrion Music Server (LMS)</strong> built around <a href="https://listenbrainz.org">ListenBrainz</a>. It browses newly released albums (a personalised feed plus the global feed), turns your ListenBrainz playlists and recommendations into playable music, and adds rich release detail pages with artist bios and one-tap streaming. <strong>No ListenBrainz API token needed</strong> — your username unlocks every personalised feature; a token only adds the <strong>Recommended</strong> list under People You Follow.</p>
   <div class="badges">
-    <span class="badge accent">v0.9.149</span>
+    <span class="badge accent">v1.0.13</span>
     <span class="badge">LMS 9.0.0+</span>
     <span class="badge">Material Skin</span>
     <span class="badge">Powered by ListenBrainz</span>
@@ -131,18 +131,19 @@
 <section id="features-at-a-glance">
 <h2>Features at a glance</h2>
 <div class="feature-cards">
-<div class="card"><h4>New Releases for You</h4><p>Fresh releases from artists you listen to</p><span class="needs">Needs: ListenBrainz username + token</span></div>
+<div class="card"><h4>New Releases for You</h4><p>Fresh releases from artists you listen to</p><span class="needs">Needs: ListenBrainz username</span></div>
 <div class="card"><h4>MuSpy artists <em>(optional)</em></h4><p>Fold releases — especially <strong>upcoming</strong> ones — from the artists you follow on MuSpy into New Releases for You</p><span class="needs">Needs: MuSpy user ID (public)</span></div>
 <div class="card"><h4>All Releases</h4><p>The global ListenBrainz fresh-releases feed</p><span class="needs">Needs: nothing</span></div>
 <div class="card"><h4>Release detail pages</h4><p>Streaming matches, artist photo + biography, tracklist, genres, MusicBrainz link</p></div>
 <div class="card"><h4>Created-for-You Playlists</h4><p>Your Weekly Jams / Exploration / Daily Jams as Play-all lists</p><span class="needs">Needs: ListenBrainz username</span></div>
-<div class="card"><h4>People You Follow <em>(optional)</em></h4><p>What the people you follow are playing — trending tracks &amp; albums — plus their recommendations</p><span class="needs">Needs: ListenBrainz username</span></div>
+<div class="card"><h4>People You Follow <em>(optional)</em></h4><p>What the people you follow are playing — trending tracks &amp; albums — plus their recommendations</p><span class="needs">Needs: ListenBrainz username (token only for the Recommended list)</span></div>
 <div class="card"><h4>Don't Stop The Music</h4><p>Two auto-DJ mixers (Radio + Recommended)</p><span class="needs">Needs: ListenBrainz username</span></div>
-<div class="card"><h4>Streaming playback</h4><p>Play matched albums/tracks on your services</p><span class="needs">Needs: Qobuz / Tidal / Bandcamp / Deezer plugin</span></div>
-<div class="card"><h4>Artist bios + photos</h4><p>On the detail page and behind "Read more"</p><span class="needs">Needs: MAI plugin, or a Last.fm key (bio only)</span></div>
+<div class="card"><h4>Streaming playback</h4><p>Play matched albums/tracks on your services</p><span class="needs">Needs: Qobuz / Tidal / Bandcamp / Deezer / Spotify (Spotty) plugin</span></div>
+<div class="card"><h4>Artist bios + photos</h4><p>On the detail page and behind "Read more"</p><span class="needs">Needs: MAI plugin</span></div>
 <div class="card"><h4>Albums / Singles &amp; EPs</h4><p>Flip either feed between full releases and singles/EPs, from the list itself</p></div>
 <div class="card"><h4>Block artists</h4><p>Hide an artist from every feed</p></div>
 <div class="card"><h4>Material home shelves</h4><p>Three home-screen rows</p><span class="needs">Needs: Material Skin</span></div>
+<div class="card"><h4>Connection check</h4><p>Tests every service the plugin uses, from the server, and gives you a report you can copy</p></div>
 </div>
 </section>
 <section id="requirements">
@@ -150,16 +151,20 @@
 <ul>
 <li><strong>LMS / Lyrion Music Server 9.0.0+</strong> (tested with Material Skin).
 </li>
-<li>A <strong>ListenBrainz account + API token</strong> for anything personalised (For You, Playlists, Don't Stop The Music). The global <em>All Releases</em> feed needs nothing. Your token is on your <a href="https://listenbrainz.org/settings/">ListenBrainz settings page</a>; the For You feed only reflects artists you've actually submitted listens for.
+<li>A <strong>ListenBrainz account</strong> for anything personalised (For You, Playlists, People You Follow, Don't Stop The Music) — just the <strong>username</strong>, no API token. The global <em>All Releases</em> feed needs nothing at all. The For You feed only reflects artists you've actually submitted listens for.
+</li>
+<li>An <strong>API token is optional</strong> and adds exactly one thing: the <strong>Recommended</strong> list under People You Follow, which reads your private ListenBrainz feed. Everything else uses public endpoints. Your token is on your <a href="https://listenbrainz.org/settings/">ListenBrainz settings page</a>.
 </li>
 <li><strong>Optional add-ons</strong> the plugin uses when present:
 <ul>
-<li><strong>Qobuz</strong>, <strong>Tidal</strong>, <strong>Bandcamp</strong> and/or <strong>Deezer</strong> LMS plugins (installed + signed in) → streaming playback.
+<li><strong>Qobuz</strong>, <strong>Tidal</strong>, <strong>Bandcamp</strong>, <strong>Deezer</strong> and/or <strong>Spotty</strong> (Spotify) LMS plugins (installed + signed in) → streaming playback.
 </li>
 <li><strong>Music &amp; Artist Information (MAI)</strong> plugin → artist biographies <em>and</em> photos.
 </li>
-<li>A free <strong>Last.fm API key</strong> → genre fallback, artist-bio fallback (no photo), and a similar-artist fallback for the radio. Get one at <a href="https://www.last.fm/api/account/create">last.fm/api/account/create</a>.
+<li>A <strong>local MusicBrainz mirror</strong> → faster, un-throttled lookups (auto-detected on the same machine, or set in Settings).
 </li></ul>
+</li>
+<li><strong>Last.fm is built in</strong> — there's no key to get or enter. It fills in genre labels that MusicBrainz doesn't have yet (common for brand-new releases) and gives the ListenBrainz Radio a second source of similar artists.
 </li></ul>
 <p>Every optional integration degrades gracefully — if it isn't there, that part of the UI simply hides itself.</p>
 </section>
@@ -175,11 +180,13 @@
 <ol>
 <li>Open <strong>Settings → Advanced → ListenBrainz Fresh Releases</strong> (also linked from the plugin menu as <strong>Plugin Settings</strong>).
 </li>
-<li>Enter your <strong>ListenBrainz username</strong> and <strong>API token</strong> (needed for the personalised features).
+<li>Enter your <strong>ListenBrainz username</strong> — that alone enables every personalised feature. No token needed — add your <strong>API token</strong> <em>(optional)</em> only if you also want the <strong>Recommended</strong> list under People You Follow; it adds nothing else.
 </li>
-<li><em>(Optional)</em> Paste a <strong>Last.fm API key</strong> and set <strong>Streaming Services</strong> priorities if you have Qobuz/Tidal/Bandcamp/Deezer.
+<li><em>(Optional)</em> Set <strong>Streaming Services</strong> priorities if you have Qobuz/Tidal/Bandcamp/Deezer/Spotify.
 </li>
-<li><em>(Optional)</em> Add your <strong>MuSpy user ID</strong> (bottom of the settings page, in the <strong>MuSpy</strong> section) to fold your followed artists' releases into New Releases for You.
+<li><em>(Optional)</em> Choose how many <strong>weeks</strong> each feed shows, and how many of them are upcoming, in the <strong>New Releases for You</strong> and <strong>All Releases</strong> sections.
+</li>
+<li><em>(Optional)</em> Add your <strong>MuSpy user ID</strong> (in the <strong>MuSpy</strong> section, below the feed settings) to fold your followed artists' releases into New Releases for You.
 </li>
 <li>Save. The plugin appears in <strong>Apps → ListenBrainz Fresh Releases</strong>.
 </li></ol>
@@ -191,30 +198,23 @@
 <ul>
 <li><strong>New Releases for You</strong> drops straight into your personalised list.
 </li>
-<li><strong>All Releases</strong> opens a by-week landing: one entry per week (badged <em>This Week / Last Week / Earlier</em>, and <em>Next Week / Next Fortnight / Further</em> for upcoming weeks when you've enabled future releases). A busy week shows 30 releases at a time with <strong>Show more</strong> / <strong>Show all</strong> rows (and <strong>Show less</strong> to collapse).
+<li><strong>All Releases</strong> opens a by-week landing: one entry per week (badged <em>This Week / Last Week / Earlier</em>, and <em>Next Week / Next Fortnight / Further</em> for upcoming weeks when that section's <strong>Upcoming weeks</strong> is above 0). A busy week shows 30 releases at a time with <strong>Show more</strong> / <strong>Show all</strong> rows (and <strong>Show less</strong> to collapse).
 </li>
-<li><strong>New Releases for You</strong> is grouped under <strong>weekly dividers</strong> (W/C week headers). Each list has a <strong>Sorted by…</strong> row in its Options section that cycles <strong>Release Date / Artist / Album Title</strong> — For You sorts within each week (keeping the headers); All Releases uses one sort shared across every week, set once and remembered (including across restarts). The <strong>Artist</strong> sort orders by MusicBrainz sort-name, so "Jack White" files under <strong>W</strong> while a stage name like "Panda Bear" stays under <strong>P</strong>.
+<li><strong>New Releases for You</strong> is grouped under <strong>weekly dividers</strong> (W/C week headers). Each list has a <strong>Sorted by…</strong> row in its Options section that cycles <strong>Release Date / Artist / Album Title</strong> — For You sorts within each week (keeping the headers); All Releases uses one sort shared across every week, set once and remembered (including across restarts). The <strong>Artist</strong> sort is A–Z on the artist name as shown, skipping a leading article from LMS's own ignored-articles list — so "The National" files under <strong>N</strong>.
 </li>
 <li>Each list also has a <strong>Showing Albums (tap for Singles &amp; EPs)</strong> row that flips the whole feed between the two, and back again — so singles and EPs can stay ticked in Settings without burying the albums. The row's icon changes with the view (a record sleeve for albums, a music note for singles/EPs) so you can see at a glance which you're in, and the choice sticks across visits and restarts. It appears only when that section has <strong>both</strong> kinds ticked in its Release types setting — with just one there's nothing to switch to.
 </li>
-<li>What appears in each feed (date window, past/future, artwork-only, Various Artists, release types) is controlled in the <strong>New Releases for You</strong> and <strong>All Releases</strong> settings sections.
+<li>What appears in each feed (weeks shown, upcoming weeks, release types, artwork-only, Various Artists) is set separately in the <strong>New Releases for You</strong> and <strong>All Releases</strong> settings sections — see <strong>New Releases for You / All Releases</strong> under Settings reference below.
 </li>
 <li>Use <strong>Refresh (force update now)</strong> at the top of a feed to bypass the cache and reload — it's in the Options section of each All Releases week as well as New Releases for You.
 </li></ul>
 <h3>Following artists on MuSpy (optional)</h3>
 <p><a href="https://muspy.com">MuSpy</a> tracks new releases from artists <strong>you</strong> pick — so it's more tailored than your listening history, and it's mostly about <strong>upcoming</strong> releases. Add your <strong>MuSpy user ID</strong> in the <strong>MuSpy</strong> settings section (public ID only — no password; find it in your MuSpy Settings or your RSS/notification URL as <code>id=…</code>) and those releases fold into <strong>New Releases for You</strong>. Duplicates that also come from ListenBrainz are shown once.</p>
-<p>Because MuSpy is upcoming-heavy, it has its <strong>own</strong> controls, separate from the ListenBrainz feed:</p>
-<ul>
-<li><strong>MuSpy upcoming releases</strong> (<strong>on</strong> by default) — shows MuSpy's upcoming titles <em>even when</em> the ListenBrainz feed's own "Include Upcoming Releases" is off. They're artists you chose, so they're always welcome. Turn it off to see only MuSpy's already-released titles.
-</li>
-<li><strong>MuSpy upcoming — how far ahead</strong> (<strong>12 months</strong>, 1–24) — caps how far into the future MuSpy reaches, so it can't run away. Applies to MuSpy only.
-</li>
-<li>MuSpy's <strong>past</strong> side follows the shared <strong>Days window</strong> and the feed's <strong>Include Past Releases</strong> toggle, so recent MuSpy releases line up with everything else (it can't reach back further than the Days window, max 90 days).
-</li></ul>
+<p>MuSpy has <strong>no date settings of its own</strong>: its releases use New Releases for You's <strong>Weeks to show</strong> and <strong>Upcoming weeks</strong>, so they never reach further than that feed does. A release announced further ahead isn't lost — it appears as the weeks roll forward each Monday.</p>
 <h3>Release detail pages</h3>
 <p>Tap any release for a page in three sections:</p>
 <ul>
-<li><strong>Streaming</strong> — playable matches on your services. Qobuz/Tidal/Deezer are matched automatically; <strong>Bandcamp</strong> is a one-tap <strong>Search Bandcamp</strong> button (it's slower/heavier, so it runs only when you ask, and a found match is remembered). A <strong>Refresh</strong> re-searches.
+<li><strong>Streaming</strong> — playable matches on your services. Qobuz/Tidal/Deezer/Spotify are matched automatically; <strong>Bandcamp</strong> is a one-tap <strong>Search Bandcamp</strong> button (it's slower/heavier, so it runs only when you ask, and a found match is remembered). A <strong>Refresh</strong> re-searches.
 </li>
 <li><strong>Artist Details</strong> — artist photo + a short biography preview with <strong>Read more</strong> for the full text, and <strong>Block this artist</strong>.
 </li>
@@ -223,7 +223,7 @@
 <h3>Works with Listen Later</h3>
 <p>If you also run the <strong>Listen Later</strong> plugin, adding a release from a detail page passes across what the release actually <strong>is</strong> — album, EP or single — straight from MusicBrainz. Streaming services mostly don't say, so Listen Later would otherwise have to guess from how many tracks it could resolve, which mislabels a short album or a long EP. That label drives the row's icon there and how many plays it takes to count as played. The album is also saved under the name the streaming service itself uses for it, which is the name it reports while playing — so it's recognised when you play it and moves to <em>Played</em> on its own.</p>
 <h3>Streaming playback</h3>
-<p>With <strong>Qobuz</strong>, <strong>Tidal</strong>, <strong>Bandcamp</strong> and/or <strong>Deezer</strong> installed, releases and playlist tracks are matched and made playable. In <strong>Streaming Services</strong> settings, give each service a <strong>search priority</strong> (lower = tried first, <strong>0 = never use it</strong>); matching stops at the first service that has it. Qobuz/Tidal/Deezer are searched automatically; <strong>Bandcamp</strong> is searched on demand from the detail page (a found Bandcamp match is remembered, so a Bandcamp-only release stays playable). Change a service's priority — or remove its plugin — and affected tracks <strong>re-match</strong> to your remaining services automatically.</p>
+<p>With <strong>Qobuz</strong>, <strong>Tidal</strong>, <strong>Bandcamp</strong>, <strong>Deezer</strong> and/or <strong>Spotty</strong> (Spotify) installed, releases and playlist tracks are matched and made playable. In <strong>Streaming Services</strong> settings, give each service a <strong>search priority</strong> (lower = tried first, <strong>0 = never use it</strong>); matching stops at the first service that has it. Qobuz/Tidal/Deezer/Spotify are searched automatically; <strong>Bandcamp</strong> is searched on demand from the detail page (a found Bandcamp match is remembered, so a Bandcamp-only release stays playable). Change a service's priority — or remove its plugin — and affected tracks <strong>re-match</strong> to your remaining services automatically.</p>
 <h3>Created-for-You Playlists</h3>
 <p>With a username set, the <strong>Playlists</strong> section turns your ListenBrainz <strong>Weekly Jams</strong>, <strong>Weekly Exploration</strong> and <strong>Daily Jams</strong> into Play-all lists. Each track is matched to your <strong>own library first</strong> (then streaming); unmatched tracks are dropped and the page title shows how many matched. A <strong>Refresh playlist matches</strong> row at the top of the Playlists view forces a fresh, library-first re-match of every playlist (handy if the matches were built before your library finished scanning). A <strong>Settings → Unmatched tracks (debug)</strong> view lists, per playlist, any tracks that couldn't be matched — handy for spotting a gap.</p>
 <h3>People You Follow</h3>
@@ -239,7 +239,7 @@
 <h3>Don't Stop The Music</h3>
 <p>Two auto-DJ mixers keep the queue going when it runs low. Pick one as your player's <strong>Don't Stop The Music</strong> source (LMS/Material player settings):</p>
 <ul>
-<li><strong>ListenBrainz Radio</strong> — seeds from the track you're playing and evolves outward through similar artists, so the music flows rather than loops. A new album by a different artist reseeds it. (If ListenBrainz has no similar artists for the seed and you have a Last.fm key, it falls back to Last.fm's similar artists before anything else.)
+<li><strong>ListenBrainz Radio</strong> — seeds from the track you're playing and evolves outward through similar artists, so the music flows rather than loops. A new album by a different artist reseeds it. (If ListenBrainz has no similar artists for the seed, it falls back to Last.fm's similar artists before anything else.)
 </li>
 <li><strong>ListenBrainz Recommended for You</strong> — plays from your personalised recommendations.
 </li></ul>
@@ -248,9 +248,15 @@
 <p><strong>Block this artist</strong> on any detail page hides every release by that artist from all feeds. Manage and <strong>Unblock</strong> them in the <strong>Blocked Artists</strong> settings section. (It's a local filter — no ListenBrainz account needed, and it takes effect on the next browse.)</p>
 <h3>Material home shelves</h3>
 <p>The plugin adds <strong>New Releases for You</strong>, <strong>Playlists</strong> and <strong>All Releases</strong> rows to the Material home screen. Enable them via Material's <strong>Customize home menu</strong>. <em>(Material caches the available rows in your browser — if a new one doesn't show, hard-refresh with Ctrl/Cmd-Shift-R.)</em></p>
+<h3>Connection check</h3>
+<p>If a feed is empty or your token doesn't seem to work, open <strong>Settings → Connection Check</strong> and press <strong>Run connection check</strong>. It tries every service the plugin depends on — ListenBrainz and ListenBrainz Labs, MusicBrainz (or your own mirror) and its search index, the LMS-community API, the Cover Art Archive, Last.fm, and MuSpy if you use it — <strong>from the machine running Lyrion</strong>, and reports each one with how long it took and what came back. The <strong>Check token</strong> button next to the token field runs the same check and shows the answer beside the field.</p>
+<p>That matters because it tests the connection the plugin actually uses. A check running in your web browser can fail for reasons that have nothing to do with the server — an ad-blocker, a Pi-hole, a proxy, a guest-network sign-in page — and tell you nothing useful.</p>
+<p>If MusicBrainz is refusing the server for making too many requests, its rows say so and show how long the plugin is backing off, rather than timing out. Right after a restart the server is busy with its own start-up work for a few minutes, so a check run then can be slow or time out — run it again once things settle.</p>
+<p>Use <strong>Copy report</strong> if you're asking for help; it never contains your token. The check reads your <strong>saved</strong> settings, so save the page first if you've just edited one.</p>
 </section>
 <section id="settings-reference">
 <h2>Settings reference</h2>
+<p>The sections below are in the order they appear on the settings page.</p>
 <h3>General</h3>
 <table>
 <thead><tr>
@@ -259,36 +265,47 @@
 <th>Notes</th>
 </tr></thead>
 <tbody>
-<tr><td>ListenBrainz Username</td><td><em>(empty)</em></td><td>Needed for For You, Playlists, Don't Stop The Music</td></tr>
-<tr><td>User Token</td><td><em>(empty)</em></td><td>From listenbrainz.org/settings/</td></tr>
-<tr><td>Last.fm API Key</td><td><em>(empty)</em></td><td>Optional — enables genre + artist-bio + radio similar-artist fallbacks</td></tr>
-<tr><td>Days window</td><td><strong>14</strong></td><td>1–90 days of releases to show</td></tr>
-<tr><td>Find on Streaming Services</td><td><strong>On</strong></td><td>Show playable Qobuz/Tidal/Bandcamp/Deezer matches on detail pages</td></tr>
+<tr><td>ListenBrainz Username</td><td><em>(empty)</em></td><td>Needed for For You, Playlists, People You Follow, Don't Stop The Music</td></tr>
+<tr><td>User Token <em>(optional)</em></td><td><em>(empty)</em></td><td>Only adds the <strong>Recommended</strong> list under People You Follow (private feed). From listenbrainz.org/settings/. <strong>Check token</strong> tests it</td></tr>
+<tr><td>Find on Streaming Services</td><td><strong>On</strong></td><td>Show playable Qobuz/Tidal/Bandcamp/Deezer/Spotify matches on detail pages</td></tr>
 <tr><td>Show "People You Follow" section</td><td><strong>On</strong></td><td>Turn the whole People You Follow section (trending tracks &amp; albums, recommendations) off to skip all its calls, caching and warming</td></tr>
 <tr><td>Prefer Tracks from My Library</td><td><strong>On</strong></td><td>Use your own copy (by MusicBrainz ID, then artist + title) before streaming — for Playlists and Don't Stop The Music</td></tr>
+<tr><td>MusicBrainz server</td><td><em>(empty)</em></td><td>Blank = auto-detect a musicbrainz-docker mirror on the same machine (port 5000), otherwise the public API. Or enter your mirror, e.g. <code>http://your-server:5000/ws/2/</code> (a bare host is assumed to be <code>http://</code>). Cover art still comes from the public Cover Art Archive</td></tr>
+<tr><td>Genre labels</td><td><strong>Automatic</strong></td><td>Where the genre shown next to each release (and used by the Genres filter row) comes from. <strong>Automatic</strong> = a local mirror if there is one, otherwise ListenBrainz; <strong>Always use ListenBrainz</strong>; or <strong>Never look genres up</strong>. Genres the feed itself carries are always shown</td></tr>
+<tr><td>Pre-load cover art</td><td><strong>On</strong></td><td>During the daily background warm, fetch each feed's cover art at the sizes the skin will ask for, so views open with artwork already cached. Off = no background artwork traffic</td></tr>
 <tr><td>Write a debug log</td><td><strong>Off</strong></td><td>Records the playlist warm/match activity to <code>lbf-debug.log</code> (next to the server log) — turn on only to troubleshoot a matching/caching issue</td></tr>
 </tbody></table>
-<h3>Streaming Services</h3>
-<p>A <strong>search priority</strong> per detected service (Qobuz / Tidal / Bandcamp / Deezer): lower number = searched first, <strong>0 = never use it</strong>. Drives detail-page matches, Playlists and Don't Stop The Music.</p>
 <h3>Blocked Artists</h3>
 <p>Lists the artists you've blocked; tick <strong>Unblock</strong> and save to restore them. Various Artists can't be blocked (it would hide unrelated compilations).</p>
+<h3>Streaming Services</h3>
+<p>A <strong>search priority</strong> (0–9) per detected service: lower number = searched first, <strong>0 = never use it</strong>. Drives detail-page matches, Playlists and Don't Stop The Music. Defaults: Qobuz <strong>1</strong>, Bandcamp <strong>2</strong>, Tidal <strong>3</strong>, Deezer <strong>4</strong>, Spotify <strong>5</strong>. Each service shows whether its plugin is detected.</p>
 <h3>New Releases for You / All Releases</h3>
-<p>Each section has its own copy of these filters:</p>
+<p>Each section has its own copy of these settings, so the two feeds can show different spans:</p>
 <table>
 <thead><tr>
 <th>Setting</th>
-<th>Default</th>
+<th>New Releases for You</th>
+<th>All Releases</th>
 </tr></thead>
 <tbody>
-<tr><td>Include Past Releases</td><td><strong>On</strong></td></tr>
-<tr><td>Include Upcoming Releases</td><td><strong>On</strong> for New Releases for You; <strong>Off</strong> for All Releases <em>(existing installs keep whatever you'd set)</em></td></tr>
-<tr><td>Only Releases with Artwork</td><td><strong>On</strong></td></tr>
-<tr><td>Include Various Artists</td><td><strong>On</strong></td></tr>
-<tr><td>Release types</td><td><strong>Album</strong> + <strong>Compilation</strong> on; Single, EP, Broadcast, Other, Soundtrack, Live, Remix, Demo off</td></tr>
+<tr><td>Weeks to show</td><td><strong>2</strong></td><td><strong>2</strong></td></tr>
+<tr><td>Upcoming weeks</td><td><strong>1</strong></td><td><strong>1</strong></td></tr>
+<tr><td>Release Types</td><td><strong>Album</strong> + <strong>Compilation</strong> on; Single, EP, Broadcast, Other, Soundtrack, Live, Remix, Demo off</td><td>same</td></tr>
+<tr><td>Only Releases with Artwork</td><td><strong>On</strong></td><td><strong>On</strong></td></tr>
+<tr><td>Include Various Artists Releases</td><td><strong>On</strong></td><td><strong>On</strong></td></tr>
 </tbody></table>
+<p><strong>How the weeks work.</strong> <strong>Weeks to show</strong> is the total number of weeks (1–4), and the <strong>current week counts as week 1</strong>. <strong>Upcoming weeks</strong> is how many of those come after the current week (0 up to one less than Weeks to show); the rest are earlier weeks. Weeks run Monday to Sunday and the current week is always shown in full, so Friday's releases stay visible all weekend and releases due later this week always appear.</p>
+<ul>
+<li>The defaults: both sections show <strong>this week and next week</strong>. To keep last week's releases in view as well, raise <strong>Weeks to show</strong> to 3.
+</li>
+<li>A combination that doesn't fit is corrected when you save — for example 2 weeks with 3 upcoming is saved as 2 weeks with 1 upcoming — and the page shows what was actually stored.
+</li>
+<li>MuSpy releases use the New Releases for You numbers.
+</li></ul>
+<blockquote><p><strong>Upgrading from an earlier version?</strong> The old <strong>Days window</strong>, <strong>Include Past Releases</strong> and <strong>Include Upcoming Releases</strong> settings, and MuSpy's own <strong>upcoming releases</strong> / <strong>how far ahead</strong> settings, have been replaced by the two week boxes above. They aren't carried over, so each section starts at the defaults shown — check them after updating.</p></blockquote>
 <p>Tick <strong>Single</strong> and/or <strong>EP</strong> as well as an album type and the feed gains the <strong>Showing Albums (tap for Singles &amp; EPs)</strong> row described above, so the two don't have to compete for the same list.</p>
 <h3>MuSpy</h3>
-<p>Shown at the bottom of the settings page, kept separate from the ListenBrainz options so the two aren't confused.</p>
+<p>Kept separate from the ListenBrainz options so the two aren't confused.</p>
 <table>
 <thead><tr>
 <th>Setting</th>
@@ -296,22 +313,24 @@
 <th>Notes</th>
 </tr></thead>
 <tbody>
-<tr><td>MuSpy User ID</td><td><em>(empty)</em></td><td>Public ID from muspy.com — folds your followed artists' releases into New Releases for You. Empty = off</td></tr>
-<tr><td>MuSpy upcoming releases</td><td><strong>On</strong></td><td>Show MuSpy's upcoming titles even when the feed's "Include Upcoming Releases" is off. Off = MuSpy past titles only</td></tr>
-<tr><td>MuSpy upcoming — how far ahead</td><td><strong>12</strong></td><td>Months ahead to reach (1–24). MuSpy only; the feed's Days window still governs ListenBrainz</td></tr>
+<tr><td>MuSpy user ID <em>(optional)</em></td><td><em>(empty)</em></td><td>Public ID from muspy.com — folds your followed artists' releases into New Releases for You, within that section's weeks. Empty = off</td></tr>
 </tbody></table>
+<h3>Connection Check</h3>
+<p>The last section on the page. It holds no settings — just the <strong>Run connection check</strong> and <strong>Copy report</strong> buttons described under <strong>Connection check</strong> in Using each feature above.</p>
 <blockquote><p>Don't Stop The Music uses sensible built-in defaults (no settings page of its own).</p></blockquote>
 </section>
 <section id="notes-limitations">
 <h2>Notes &amp; limitations</h2>
 <ul>
-<li><strong>Genre coverage</strong> on brand-new releases is sparse (MusicBrainz often hasn't tagged them yet). Genres show <em>when available</em>. A <strong>Last.fm API key</strong> fills the gap using Last.fm's album/artist tags.
+<li><strong>Genre coverage</strong> on brand-new releases is sparse (MusicBrainz often hasn't tagged them yet). Genres show <em>when available</em>; the built-in <strong>Last.fm</strong> lookup fills much of the gap using Last.fm's album/artist tags.
 </li>
-<li><strong>Streaming matches</strong> search each service by artist and confirm the album/track title locally, so something not on a service won't appear, and occasionally a close title may mismatch.
+<li><strong>Streaming matches</strong> search each service by artist and confirm the album/track title locally, so something not on a service won't appear, and occasionally a close title may mismatch. When an album isn't found under the credited name, the plugin tries once more with the artist's other names — each member of a joint credit, and the artist's known aliases.
 </li>
 <li><strong>MuSpy artwork:</strong> MuSpy only tells us a release <em>group</em>, not a specific cover, so the <strong>Only Releases with Artwork</strong> filter can't screen its entries — and <em>upcoming</em> releases usually have no cover art yet, so some MuSpy rows may show a placeholder until artwork lands. This is expected.
 </li>
-<li>Optional integrations (streaming services, MAI, Last.fm) are auto-detected; missing ones just hide their UI.
+<li><strong>Tracklists</strong> come from ListenBrainz for the release group, so occasionally a detail page shows the track list of another edition of the same album (a deluxe or regional version, say).
+</li>
+<li>Optional integrations (streaming services, MAI) are auto-detected; missing ones just hide their UI.
 </li></ul>
 </section>
 <section id="credits">
@@ -319,9 +338,13 @@
 <ul>
 <li>Release data from <a href="https://listenbrainz.org">ListenBrainz</a> / <a href="https://musicbrainz.org">MusicBrainz</a>; cover art from the <a href="https://coverartarchive.org">Cover Art Archive</a>. All part of the <a href="https://metabrainz.org">MetaBrainz</a> project.
 </li>
-<li>Streaming via the community <strong>Qobuz</strong>, <strong>Tidal</strong>, <strong>Bandcamp</strong> and <strong>Deezer</strong> LMS plugins.
+<li>Artist name lookups and aliases via the <a href="https://api.lms-community.org">LMS-community API</a>.
 </li>
-<li>Artist biographies and photos via the <strong>Music &amp; Artist Information (MAI)</strong> plugin, with <strong>Last.fm</strong> fallbacks.
+<li>Streaming via the community <strong>Qobuz</strong>, <strong>Tidal</strong>, <strong>Bandcamp</strong>, <strong>Deezer</strong> and <strong>Spotty</strong> LMS plugins.
+</li>
+<li>Spotify support contributed by <a href="https://github.com/honzup">honzup</a> (<a href="https://github.com/SimonArnold002/LMS-ListenBrainz-New-Releases/pull/17">PR #17</a>).
+</li>
+<li>Artist biographies and photos via the <strong>Music &amp; Artist Information (MAI)</strong> plugin; genre tags and similar artists from <strong>Last.fm</strong>.
 </li></ul>
 <p>See <a href="LICENSE">LICENSE</a> for licensing.</p>
 </section>

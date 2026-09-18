@@ -1,0 +1,548 @@
+package Plugins::ListenBrainzFreshReleases::Diag;
+
+# Connectivity diagnostic — probes every host this plugin depends on FROM THE
+# LMS SERVER and reports one row per target.
+#
+# WHY THIS EXISTS. The settings page used to check the ListenBrainz token with a
+# fetch() in the USER'S BROWSER. That tests the wrong machine: it fails on a
+# Pi-hole rule, an ad-blocker, a reverse proxy's connect-src CSP, or a captive
+# portal returning HTML (which rejects r.json() and lands in the same catch) —
+# none of which say anything about whether LMS can reach ListenBrainz, and none
+# of which leave a trace in log.txt. It also could not answer the question users
+# actually ask, which is "why is the feed empty", since the token is only one of
+# seven upstream dependencies.
+#
+# So the probes here run server-side, over the same Slim::Networking stack (and
+# therefore the same proxy settings) as the real requests, and the whole report
+# is reachable over JSON-RPC — a user can paste one result instead of a log.
+#
+# THREE OUTCOMES, not two. 'fail' means nothing answered (DNS/TLS/network).
+# 'warn' means the host ANSWERED but the answer is wrong — a rejected token, a
+# mirror whose search index returns nothing, something that is not MusicBrainz
+# listening on :5000. Collapsing those into one "unreachable" is the ambiguity
+# this module was written to remove, so keep them distinct.
+
+use strict;
+use warnings;
+
+use Slim::Networking::SimpleAsyncHTTP;
+use Slim::Utils::Log;
+use Slim::Utils::Prefs;
+use Slim::Utils::Timers;
+use Time::HiRes ();
+use JSON::XS::VersionOneAndTwo;
+
+use Plugins::ListenBrainzFreshReleases::API;
+
+my $log   = logger('plugin.listenbrainzfreshreleases');
+my $prefs = preferences('plugin.listenbrainzfreshreleases');
+
+use constant API_PKG => 'Plugins::ListenBrainzFreshReleases::API';
+
+# Per-probe timeout. Deliberately shorter than the feeds' FEED_TIMEOUT: this is a
+# reachability question, and a host that needs more than 8s to answer at all is
+# a finding in its own right.
+use constant PROBE_TIMEOUT => 8;
+
+# Global ceiling. Probes run in parallel, so this is not a sum — it exists so a
+# single host that neither answers nor errors cannot hold the whole report (and
+# with it the settings page) open indefinitely. A target still running when it
+# fires keeps its pre-filled 'timed out' row, so the report is always complete.
+use constant OVERALL_DEADLINE => 12;
+
+# Gap between two probes of the SAME remote host that do NOT go through the
+# plugin's MusicBrainz queue — today, only the fallback when API::mbGet is missing.
+# Public MusicBrainz probes are paced by that queue instead (see run), and a local
+# mirror is never paced.
+#
+# THE QUEUE CHANGED THE WORST CASE. It sends one request at a time, so the search
+# probe goes out only once the identity probe has SETTLED: up to PROBE_TIMEOUT + gap
+# + PROBE_TIMEOUT = 8 + 1.1 + 8 = 17.1s, past OVERALL_DEADLINE — longer still if a
+# warm's request is already in flight. The probes join at the FRONT of the queue so
+# queued warm work cannot add to that, and a probe the deadline catches unsent is
+# reported as "not probed" (warn), never as a timeout (see $finish).
+use constant SAME_HOST_GAP => 1.1;
+
+# ---------------------------------------------------------------------------
+# Public entry point. Calls back with (\@rows, \%context).
+#
+# Each row: { key, name, url, status, http, ms, note }, where `url` is already
+# REDACTED for display — see _targets. Never hand a caller the raw probe URL;
+# the ListenBrainz and Last.fm ones carry credentials.
+# ---------------------------------------------------------------------------
+sub run {
+    my ($class, $cb) = @_;
+
+    my @targets = _targets();
+    my @rows;
+    my $pending = 0;
+    my $done    = 0;
+    my $timer;
+    # Per row: handed to the MusicBrainz queue, actually sent, settled by a callback.
+    my (@viaQueue, @sent, @settled);
+
+    my $finish = sub {
+        return if $done;
+        $done = 1;
+        Slim::Utils::Timers::killSpecific($timer) if $timer;
+
+        # A QUEUED PROBE THE DEADLINE CAUGHT UNSENT DID NOT TIME OUT — it never had a
+        # turn, because the request ahead of it was slow. Its pre-filled "fail / timed
+        # out" row would report a fault in a host nobody asked. A probe that WAS sent
+        # and got no answer keeps its fail: that one is a real finding.
+        for my $i (0 .. $#targets) {
+            next unless $viaQueue[$i] && !$sent[$i] && !$settled[$i];
+            $rows[$i] = _row($targets[$i], 'warn', 0, undef,
+                'not probed - still queued behind a slow MusicBrainz request');
+        }
+
+        # Log the whole report too, so a user who can reach log.txt but not the
+        # settings page (or who reports this after the fact) still has it.
+        $log->info(sprintf('lbf diag: %s %s (%s) %sms%s',
+            $_->{status}, $_->{name}, $_->{url},
+            $_->{ms} // '-', ($_->{note} ? ' - ' . $_->{note} : '')))
+            for @rows;
+
+        $cb->(\@rows, _context());
+    };
+
+    for my $i (0 .. $#targets) {
+        my $t = $targets[$i];
+
+        if ($t->{skip}) {
+            $rows[$i] = _row($t, 'skip', 0, undef, $t->{skip});
+            next;
+        }
+        # A finding known without sending anything (MusicBrainz backing off).
+        if ($t->{preset}) {
+            $rows[$i] = _row($t, $t->{preset}[0], 0, undef, $t->{preset}[1]);
+            next;
+        }
+
+        # Pre-fill, so a probe that never calls back still has a row when the
+        # deadline fires. Overwritten by whichever callback lands first.
+        $rows[$i] = _row($t, 'fail', 0, undef, 'timed out');
+        $pending++;
+    }
+
+    unless ($pending) {
+        $finish->();
+        return;
+    }
+
+    $timer = Slim::Utils::Timers::setTimer(undef, time() + OVERALL_DEADLINE, $finish);
+
+    # SAME-HOST PROBES ARE STAGGERED. The MusicBrainz identity row and the search-
+    # index row are built from the same _mbBase, so on a default install with no
+    # mirror they both hit musicbrainz.org — whose anonymous limit is about 1 req/s.
+    # Fired together, the loser comes back 503; LMS routes any non-2xx to the ERROR
+    # callback, so that row settles `warn / HTTP 503` on a completely healthy
+    # install. A diagnostic that reports a false fault is worse than no diagnostic.
+    #
+    # A local mirror has no such limit and pacing it would only slow the report, so
+    # the gap applies to remote hosts only.
+    my %hostSeen;
+
+    for my $i (0 .. $#targets) {
+        my $t = $targets[$i];
+        next if $t->{skip} || $t->{preset};
+
+        # PUBLIC MUSICBRAINZ GOES THROUGH THE PLUGIN'S ONE MUSICBRAINZ QUEUE, not
+        # beside it. Staggering our own two probes kept THEM apart but not apart
+        # from a warm that was already sending — and the limit is on the sum of
+        # everything this server sends. The queue does the pacing, so no stagger.
+        # The probes ask for the FRONT, so a warm's queued lookups wait ~2s for
+        # them instead of the user's check waiting behind all of those.
+        my $queued = ($t->{mb_queue} && API_PKG->can('mbGet')) ? 1 : 0;
+        $viaQueue[$i] = $queued;
+
+        my ($host) = ($t->{url} // '') =~ m{^\w+://([^/:]+)};
+        $host = lc($host // '');
+        my $local = $host =~ /^(?:localhost|127\.|\[?::1\]?$)/ ? 1 : 0;
+        my $delay = ($local || $queued) ? 0 : ($hostSeen{$host}++ * SAME_HOST_GAP);
+
+        my $started;
+
+        my $settle = sub {
+            my ($status, $code, $note) = @_;
+            return if $done;
+            $settled[$i] = 1;
+            # $started is set when the request actually goes out, so a staggered
+            # probe reports its own round trip, not its queue wait.
+            my $ms = int((Time::HiRes::time() - ($started // Time::HiRes::time())) * 1000);
+            $rows[$i] = _row($t, $status, $ms, $code, $note);
+            $finish->() unless --$pending;
+        };
+
+        my $okcb = sub {
+                my $resp = shift;
+                my $code = _httpCode($resp);
+                my ($status, $note) = eval { $t->{check}->($resp->content, $code) };
+                # A check that dies is a bug in the check, not a network finding
+                # — say so rather than reporting the host as broken.
+                ($status, $note) = ('warn', "check failed: $@") if $@;
+                $settle->($status // 'ok', $code, $note);
+            };
+        my $errcb = sub {
+                my $resp = shift;
+                my $code = _httpCode($resp);
+                my $err  = eval { $resp->error } // 'no response';
+
+                # An HTTP status means the host answered — that IS reachability,
+                # even when the status is an error. Only a missing status is a
+                # network-level failure, and the distinction is the whole point.
+                if ($code) {
+                    # An answered_ok target is asking ONLY "did anything answer",
+                    # so quoting the status back would read as a fault when the
+                    # status is the expected one. Say what was established.
+                    $settle->($t->{answered_ok} ? 'ok' : 'warn', $code,
+                        $t->{answered_ok} ? ($t->{answered_note} // 'reachable') : "HTTP $code");
+                }
+                else {
+                    $settle->('fail', 0, $err);
+                }
+            };
+        my $http = $queued ? undef
+                 : Slim::Networking::SimpleAsyncHTTP->new($okcb, $errcb, { timeout => PROBE_TIMEOUT });
+
+        my $fire = sub {
+            return if $done;             # the deadline already closed the report
+            if ($queued) {
+                # $started is set when the queue actually sends, so the row reports
+                # its round trip rather than its wait in the queue.
+                API_PKG->mbGet($t->{url}, $okcb, $errcb, timeout => PROBE_TIMEOUT, front => 1,
+                               onSend => sub { $started = Time::HiRes::time(); $sent[$i] = 1 });
+                return;
+            }
+            $started = Time::HiRes::time();
+            $sent[$i] = 1;
+            # A target with a body is POSTed — the credential stays out of the URL,
+            # which LMS core writes to server.log when a request fails.
+            defined $t->{body}
+                ? $http->post($t->{url}, %{ $t->{headers} || {} }, $t->{body})
+                : $http->get($t->{url}, %{ $t->{headers} || {} });
+        };
+
+        # Launch now unless this host has already been probed in this run. A queued
+        # probe that never fires still has its pre-filled row and the deadline, so
+        # the worst case is a slower report, never a missing one.
+        $delay ? Slim::Utils::Timers::setTimer(undef, time() + $delay, $fire)
+               : $fire->();
+    }
+
+    return;
+}
+
+# ---------------------------------------------------------------------------
+# The probe table. Everything is derived from the SAME accessors the real code
+# uses (API::mbBase and friends), so a mirror, a changed base URL or a blank
+# credential is reflected here without this file knowing the rules.
+# ---------------------------------------------------------------------------
+sub _targets {
+    my $token   = $prefs->get('token')          // '';
+    my $muspy   = $prefs->get('muspy_userid')   // '';
+
+    my $mbBase   = API_PKG->mbBase;
+    my $mbPublic = API_PKG->mbIsPublic;
+    my $mbWhat   = $mbPublic ? 'public MusicBrainz' : 'local mirror';
+    my $ua       = { 'User-Agent' => API_PKG->USER_AGENT, 'Accept' => 'application/json' };
+
+    # MusicBrainz is backing off after refusing this server (503). A probe sent now
+    # would only wait in the queue past this report's deadline and read "timed out",
+    # which hides the actual finding — so say it instead. Past the normal 1.1s gap.
+    my $mbHold = ($mbPublic && API_PKG->can('mbQueueWait')) ? API_PKG->mbQueueWait : 0;
+    my $mbPreset = $mbHold > 2
+        ? [ 'warn', sprintf('MusicBrainz is refusing this server right now (503); the plugin is '
+                          . 'backing off for %ds - not probed', int($mbHold + 0.5)) ]
+        : undef;
+    my $json     = { 'Accept' => 'application/json' };
+
+    my @t;
+
+    # --- ListenBrainz core -------------------------------------------------
+    # validate-token is the cheapest endpoint that answers on every install:
+    # with a token it also tells us whether the token is good, and without one
+    # it still proves reachability. That second case is what keeps this row
+    # meaningful after the token-free work lands.
+    if (length $token) {
+        (my $safe = $token) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
+        push @t, {
+            key  => 'listenbrainz',
+            name => 'ListenBrainz',
+            url  => API_PKG->baseUrl . '/1/validate-token?token=' . $safe,
+            # REDACTED — the raw URL above carries the token and must never
+            # leave this sub.
+            display => API_PKG->baseUrl . '/1/validate-token?token=***',
+            headers => $json,
+            check   => sub {
+                my ($content) = @_;
+                my $d = eval { from_json($content) };
+                return ('warn', 'answered, but not JSON') if $@ || ref $d ne 'HASH';
+                return ('warn', 'token rejected by ListenBrainz') unless $d->{valid};
+                my $user = $d->{user_name} // $d->{user} // '';
+                return ('ok', length $user ? "token valid (user: $user)" : 'token valid');
+            },
+        };
+    }
+    else {
+        push @t, {
+            key         => 'listenbrainz',
+            name        => 'ListenBrainz',
+            url         => API_PKG->baseUrl . '/1/validate-token',
+            headers     => $json,
+            # No token to check, so any HTTP answer is the whole finding.
+            answered_ok => 1,
+            check       => sub { ('ok', 'reachable (no token set)') },
+        };
+    }
+
+    # --- ListenBrainz Labs (similar-artists; drives the DSTM radio) ---------
+    push @t, {
+        key     => 'lb_labs',
+        name    => 'ListenBrainz Labs',
+        url     => API_PKG->labsUrl . '/similar-artists/json?artist_mbids='
+                 . API_PKG->mbProbeMbid . '&algorithm=' . API_PKG->similarAlgo,
+        headers => $json,
+        check   => sub {
+            my ($content) = @_;
+            my $d = eval { from_json($content) };
+            return ('warn', 'answered, but not JSON') if $@;
+            return ('ok', 'reachable');
+        },
+    };
+
+    # --- MusicBrainz identity ----------------------------------------------
+    # Asserting the NAME is what separates "MusicBrainz answered" from "something
+    # is listening on :5000" — the same check the mirror auto-detect relies on.
+    push @t, {
+        key     => 'musicbrainz',
+        name    => "MusicBrainz ($mbWhat)",
+        url     => $mbBase . 'artist/' . API_PKG->mbProbeMbid . '?fmt=json',
+        headers => $ua,
+        mb_queue => $mbPublic,
+        ($mbPreset ? (preset => $mbPreset) : ()),
+        check   => sub {
+            my ($content) = @_;
+            my $d = eval { from_json($content) };
+            return ('warn', 'answered, but not JSON') if $@ || ref $d ne 'HASH';
+            my $name = $d->{name} // '';
+            return ('ok', 'identified correctly') if $name eq API_PKG->mbProbeName;
+            return ('warn', "answered, but this is not MusicBrainz (name: '$name')");
+        },
+    };
+
+    # --- MusicBrainz search index ------------------------------------------
+    # A musicbrainz-docker mirror serves browses from Postgres and SEARCH from
+    # Solr. An unbuilt Solr index returns 0 for every query while browses work
+    # perfectly, so the row above passes and name resolution silently fails.
+    # That failure has cost real debugging time; it gets its own row.
+    push @t, {
+        key     => 'mb_search',
+        name    => 'MusicBrainz search index',
+        url     => $mbBase . 'artist/?query=' . API_PKG->mbProbeName . '&fmt=json',
+        headers => $ua,
+        mb_queue => $mbPublic,
+        ($mbPreset ? (preset => $mbPreset) : ()),
+        check   => sub {
+            my ($content) = @_;
+            my $d = eval { from_json($content) };
+            return ('warn', 'answered, but not JSON') if $@ || ref $d ne 'HASH';
+            my $count = $d->{count} // 0;
+            return ('ok', "$count results") if $count > 0;
+            return ('warn', $mbPublic
+                ? 'search returned 0 results'
+                : "search returned 0 results - this mirror's Solr index is probably not built");
+        },
+    };
+
+    # --- Hosted LMS-community API ------------------------------------------
+    # The radio's artist name->MBID lookup, the streaming alias pass, Trending's
+    # album search and genres. Since 2026-09-14 the radio lookup and Trending have
+    # NO MusicBrainz fallback, so amber here means those features are degraded —
+    # the message says what still works rather than promising a fallback.
+    #
+    # Probes `/aliases`, the route the plugin actually calls. Asserts the MBID, not
+    # just that something answered: the same reasoning as the MusicBrainz identity
+    # row above. Sends the real plugin-id header via API::hostedHeaders so this
+    # probe cannot drift from what _hostedGet sends.
+    push @t, {
+        key     => 'hosted_api',
+        name    => 'LMS-community API',
+        url     => API_PKG->hostedUrl . 'artist/' . API_PKG->mbProbeName . '/aliases',
+        headers => { %{ API_PKG->hostedHeaders }, 'Accept' => 'application/json' },
+        check   => sub {
+            my ($content) = @_;
+            my $d = eval { from_json($content) };
+            return ('warn', 'answered, but not JSON') if $@ || ref $d ne 'HASH';
+            my $mbid = lc($d->{mbid} // '');
+            return ('ok', 'identified correctly') if $mbid eq lc(API_PKG->mbProbeMbid);
+            # An unknown artist here does NOT 404 — it echoes the query name back
+            # with an empty mbid, so an empty answer is a real (if odd) response.
+            return ('warn', length $mbid
+                ? "answered, but returned an unexpected artist ($mbid)"
+                : 'answered, but knows no MBID for ' . API_PKG->mbProbeName
+                  . ' - the radio may fall back to generic recommendations');
+        },
+    };
+
+    # --- Cover Art Archive --------------------------------------------------
+    # Fetched server-side by the image proxy, so a block here shows up as missing
+    # artwork rather than a broken feed.
+    #
+    # The probe id is an ARTIST mbid on a RELEASE endpoint, so CAA correctly 404s
+    # — deliberately, to avoid hardcoding a release whose art could later be
+    # removed and turn this row red for everyone at once. A 404 still proves DNS,
+    # TLS and HTTP all reached the service, which is the entire claim. The note
+    # says that outright rather than quoting "HTTP 404" back at the user, which
+    # read as a fault on the first real report.
+    push @t, {
+        key           => 'coverart',
+        name          => 'Cover Art Archive',
+        url           => API_PKG->caaBaseUrl . API_PKG->mbProbeMbid . '/front-250',
+        answered_ok   => 1,
+        answered_note => 'reachable (this probe expects a 404)',
+        check         => sub { ('ok', 'reachable') },
+    };
+
+    # --- Last.fm ------------------------------------------------------------
+    # Probed with the built-in key — the only one the plugin has — ignoring any
+    # latch, so a stopped key can be re-checked here. POSTed with the key in the
+    # body like every real call (API::_lastfmPost): a URL carrying it would be
+    # logged by LMS core on any failure. The row never shows the value.
+    my $lfmKey = API_PKG->lastfmKey(ignore_latch => 1);
+    if (length $lfmKey) {
+        (my $safe = $lfmKey) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
+        push @t, {
+            key     => 'lastfm',
+            name    => 'Last.fm',
+            url     => API_PKG->lastfmUrl,
+            body    => 'method=auth.gettoken&format=json&api_key=' . $safe,
+            display => API_PKG->lastfmUrl . ' (auth.gettoken, built-in key)',
+            headers => { 'Content-Type' => 'application/x-www-form-urlencoded' },
+            check   => sub {
+                my ($content) = @_;
+                my $d = eval { from_json($content) };
+                return ('warn', 'answered, but not JSON') if $@ || ref $d ne 'HASH';
+                return ('ok', 'The built-in API key is valid') if !$d->{error} && $d->{token};
+                return ('warn', 'Last.fm rejected the built-in API key');
+            },
+        };
+    }
+    else {
+        push @t, {
+            key  => 'lastfm',
+            name => 'Last.fm',
+            url  => API_PKG->lastfmUrl,
+            skip => 'the built-in API key did not decode',
+        };
+    }
+
+    # --- MuSpy (optional) ---------------------------------------------------
+    if (length $muspy) {
+        (my $safe = $muspy) =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X",ord($1))/ge;
+        push @t, {
+            key     => 'muspy',
+            name    => 'MuSpy',
+            url     => API_PKG->muspyUrl . '/releases/' . $safe . '?limit=1',
+            # Redacted for display, like the Last.fm row beside it. A MuSpy user id
+            # is a public identifier with no password behind it — but this report
+            # exists to be pasted into a forum thread, so the rule is the rule.
+            display => API_PKG->muspyUrl . '/releases/***?limit=1',
+            headers => $json,
+            check   => sub {
+                my ($content) = @_;
+                my $d = eval { from_json($content) };
+                return ('warn', 'answered, but not JSON') if $@;
+                return ('ok', 'reachable');
+            },
+        };
+    }
+    else {
+        push @t, {
+            key  => 'muspy',
+            name => 'MuSpy',
+            url  => API_PKG->muspyUrl,
+            skip => 'no user id set (optional)',
+        };
+    }
+
+    return @t;
+}
+
+# Non-HTTP context that explains a lot of failures on its own.
+#
+# CREDENTIALS ARE REPORTED AS PRESENCE ONLY. A diagnostic exists to be pasted
+# into a forum thread; it must be safe to paste. Never add the value of a token
+# or key here, however convenient it looks while debugging.
+sub _context {
+    my %c;
+
+    my $token = $prefs->get('token')    // '';
+    my $user  = $prefs->get('username') // '';
+
+    $c{username} = length $user  ? $user                          : '(not set)';
+    $c{token}    = length $token ? 'set (' . length($token) . ' chars)' : '(not set)';
+
+    # Whether the built-in Last.fm key is in use or has been stopped, and why
+    # ("builtin: ok"), never the value.
+    $c{lastfm} = eval { API_PKG->lastfmLatchState } // '(unknown)';
+
+    $c{proxy} = eval { preferences('server')->get('webproxy') } || '(none)';
+
+    $c{services} = eval {
+        require Plugins::ListenBrainzFreshReleases::Browse;
+        [ map {{
+            name      => $_->{name},
+            installed => $_->{installed},
+            priority  => $_->{priority},
+        }} @{ Plugins::ListenBrainzFreshReleases::Browse::serviceStatus() || [] } ];
+    } || [];
+
+    return \%c;
+}
+
+sub _row {
+    my ($t, $status, $ms, $code, $note) = @_;
+    return {
+        key    => $t->{key},
+        name   => $t->{name},
+        url    => $t->{display} // $t->{url},
+        status => $status,
+        ms     => $ms,
+        http   => $code // 0,
+        note   => $note // '',
+    };
+}
+
+# An HTTP status proves the host answered. SimpleAsyncHTTP exposes it as ->code
+# on the response, but the error path is not consistent about setting it across
+# LMS versions, so fall back to digging a status out of the error string rather
+# than misreporting an answered request as a network failure.
+sub _httpCode {
+    my ($resp) = @_;
+
+    my $code = eval { $resp->code };
+    return $code if defined $code && $code =~ /^\d{3}$/;
+
+    # ANCHORED, and deliberately so. VERIFIED against LMS 9.0's networking stack:
+    # Slim::Networking::Async::HTTP routes any non-2xx to the error callback as
+    # `$self->response->status_line` ("503 Service Unavailable"), which is exactly
+    # why this fallback is load-bearing — SimpleAsyncHTTP::code is set only in
+    # onBody, which that path never reaches. Every other error string it can carry
+    # is connect-level ("Connect timed out: ...", "Couldn't resolve IP address for:
+    # <host>"); the URL is logged separately and never appears in ->error.
+    #
+    # So an unanchored search has nothing to find today. It is anchored anyway
+    # because the cost is nil and the failure mode is silent and bad: the probe
+    # URLs contain digits (the CAA row ends in `front-250`, and `-` gives `250` a
+    # word boundary), and a bogus code is TRUTHY — which on an `answered_ok` target
+    # would report `ok / reachable` for a host that never answered.
+    my $err = eval { $resp->error };
+    return $1 if defined $err && $err =~ m{^\s*(?:HTTP(?:/\d(?:\.\d)?)?\s+)?([1-5]\d\d)\b};
+
+    return 0;
+}
+
+1;
+
+__END__

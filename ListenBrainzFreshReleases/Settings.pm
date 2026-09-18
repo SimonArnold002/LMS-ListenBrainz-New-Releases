@@ -22,9 +22,9 @@ my $log   = logger('plugin.listenbrainzfreshreleases');
 # undef-reads-ON bug for that one type).
 my @TYPE_KEYS = qw(album single ep broadcast other compilation soundtrack live remix demo);
 my @CHECKBOX_PREFS = (
-    qw(play_via people_follow prefer_library debug_log muspy_future),
-    qw(foryou_past foryou_future foryou_artwork_only foryou_various),
-    qw(all_past all_future all_artwork_only all_various),
+    qw(play_via people_follow prefer_library debug_log warm_covers),
+    qw(foryou_artwork_only foryou_various),
+    qw(all_artwork_only all_various),
     (map { "foryou_type_$_" } @TYPE_KEYS),
     (map { "all_type_$_"    } @TYPE_KEYS),
 );
@@ -39,12 +39,12 @@ sub page {
 
 sub prefs {
     return ($prefs, qw(
-        username token lastfm_api_key muspy_userid muspy_future muspy_future_months days play_via people_follow prefer_library mb_base_url debug_log
-        svc_priority_qobuz svc_priority_bandcamp svc_priority_tidal svc_priority_deezer
-        foryou_past foryou_future foryou_artwork_only foryou_various
+        username token muspy_userid play_via people_follow prefer_library mb_base_url genre_lookup debug_log warm_covers
+        svc_priority_qobuz svc_priority_bandcamp svc_priority_tidal svc_priority_deezer svc_priority_spotify
+        foryou_weeks foryou_upcoming foryou_artwork_only foryou_various
         foryou_type_album foryou_type_single foryou_type_ep foryou_type_broadcast foryou_type_other
         foryou_type_compilation foryou_type_soundtrack foryou_type_live foryou_type_remix foryou_type_demo
-        all_past all_future all_artwork_only all_various
+        all_weeks all_upcoming all_artwork_only all_various
         all_type_album all_type_single all_type_ep all_type_broadcast all_type_other
         all_type_compilation all_type_soundtrack all_type_live all_type_remix all_type_demo
     ));
@@ -67,11 +67,17 @@ sub handler {
         # Guard: only coerce when this is the REAL settings form (an unchecked box
         # and a box absent because the POST is partial/non-form are indistinguishable,
         # so a blind coercion would zero every toggle on a partial save — the same
-        # hazard the svc_priority block below guards against). `pref_days` is a
-        # number field the full form always submits, so its presence confirms the
+        # hazard the svc_priority block below guards against). `pref_foryou_weeks` is
+        # a number field the full form always submits, so its presence confirms the
         # form was posted; a partial POST skips coercion and falls back to the base
         # handler (same philosophy as the svc_priority "keep current on partial" rule).
-        if (exists $params->{pref_days}) {
+        #
+        # THE SENTINEL MOVES WITH THE FORM. It was `pref_days` until 0.9.185, then
+        # `pref_weeks_past` until the per-section week window retired that field.
+        # Deleting the field without moving the sentinel breaks EVERY checkbox on the
+        # page at once — never coerced, so an unticked box stores undef and reads
+        # back ON through the `// 1` guards, and can never be turned off.
+        if (exists $params->{pref_foryou_weeks}) {
             for my $cb (@CHECKBOX_PREFS) {
                 $params->{"pref_$cb"} = $params->{"pref_$cb"} ? 1 : 0;
             }
@@ -81,17 +87,36 @@ sub handler {
         # params BEFORE SUPER::handler runs. These prefs are in the prefs() list,
         # so the base handler re-sets each one from $params->{pref_*}; setting the
         # pref directly here would simply be overwritten by the raw input.
-        my $days = $params->{pref_days};
-        $days = 14 unless defined $days && $days =~ /^\d+$/;
-        $days = 1  if $days < 1;
-        $days = 90 if $days > 90;
-        $params->{pref_days} = $days + 0;
+        # THE WEEK WINDOW, per section: weeks shown in total (1-4, this week is
+        # week 1) and how many of those are upcoming (0 .. weeks-1). The rule is
+        # API::clampSectionWeeks — the same one sectionWeeks applies at read time,
+        # because a pref can also be hand-edited in prefs.yaml. A field missing
+        # from the POST keeps its STORED value, not a default. Writing the clamped
+        # pair back into $params is what makes the page come back showing what was
+        # actually stored (e.g. 2 weeks with 3 upcoming comes back as 2 with 1).
+        # Runtime `require` + `->can`, never a bareword cross-package reference:
+        # a bareword is resolved at COMPILE time and killed the whole module in
+        # 0.9.166, and Settings.pm is loaded before API.pm at startup.
+        require Plugins::ListenBrainzFreshReleases::API;
+        my $A     = 'Plugins::ListenBrainzFreshReleases::API';
+        my $clamp = $A->can('clampSectionWeeks');
+        for my $section (qw(foryou all)) {
+            my ($wk, $wd, $uk, $ud) = $A->sectionWeekPrefs($section);
+            next unless $wk && $clamp;
+            for my $k ($wk, $uk) {
+                $params->{"pref_$k"} = $prefs->get($k)
+                    unless defined $params->{"pref_$k"} && $params->{"pref_$k"} =~ /\S/;
+            }
+            my ($w, $u) = $clamp->($params->{"pref_$wk"}, $params->{"pref_$uk"}, $wd, $ud);
+            $params->{"pref_$wk"} = $w;
+            $params->{"pref_$uk"} = $u;
+        }
 
         # Normalise the service priorities to integers 0-9 (0 = never search).
         # If a field is absent from the POST (a partial / non-form submission)
         # keep the CURRENT saved value rather than forcing 0 — forcing 0 would
         # silently disable that service on any incomplete save.
-        for my $svc (qw(qobuz bandcamp tidal deezer)) {
+        for my $svc (qw(qobuz bandcamp tidal deezer spotify)) {
             my $p = $params->{"pref_svc_priority_$svc"};
             if (defined $p && $p =~ /^\d+$/) {
                 $p = 9 if $p > 9;

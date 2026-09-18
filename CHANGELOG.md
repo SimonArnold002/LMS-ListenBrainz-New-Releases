@@ -3,6 +3,41 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 1.0.13 — 2026-09-18
+
+The 1.0 release: no API token needed, Spotify playback, genre labels and a genre filter, a simpler week-based release window, much faster artwork, a server-side Connection Check, and proper support for the Default and Classic web skins.
+
+### Improvements
+- **No ListenBrainz API token needed.** Your username alone now unlocks New Releases for You, Playlists, People You Follow and Don't Stop The Music. The token is optional and adds exactly one thing: the **Recommended** list under People You Follow, which ListenBrainz only serves from your private feed.
+- **Spotify.** Spotify joins Qobuz, Tidal, Bandcamp and Deezer as a streaming service, through the Spotty plugin — on detail pages, the Created-for-You playlists, People You Follow and both Don't Stop The Music mixers. It has its own search priority (default 5). Contributed by [honzup](https://github.com/honzup) ([PR #17](https://github.com/SimonArnold002/LMS-ListenBrainz-New-Releases/pull/17)).
+- **Genre labels on every release, and a Genres filter.** Rows in New Releases for You and All Releases show a genre next to the type ("Album · Electronic"), and a **Genres** row narrows a list to the genres you pick. Genres come from ListenBrainz, the LMS-community API, MusicBrainz (or your mirror) and Last.fm, and the detail page and the list always agree. A new **Genre labels** setting chooses the source, or turns the lookup off.
+- **Last.fm is built in.** There's no key to get or enter any more — genre labels and the radio's similar-artist fallback work for everyone. The old Last.fm key setting is removed.
+- **A simpler release window, set per section.** The Days window and the past/upcoming toggles are replaced by two boxes in each of New Releases for You and All Releases: **Weeks to show** (1–4, the current week counts as week 1) and **Upcoming weeks**. Weeks run Monday to Sunday and the current week is always shown in full. Both default to this week and next week. MuSpy follows the For You window and has no date settings of its own. *The old settings are not carried over — check these after updating.*
+- **Connection Check.** A new Settings section tests every service the plugin uses — ListenBrainz and Labs, MusicBrainz (or your mirror) and its search index, the LMS-community API, the Cover Art Archive, Last.fm and MuSpy — **from the server**, not your browser, and gives you a report to copy when asking for help (never including your token). **Check token** uses the same check.
+- **Artwork is far faster and lighter.** Covers are cached as JPEG instead of re-encoded PNG (about 6× smaller), are pre-loaded for the whole feed rather than the first 150 releases, several at a time, and the rows you're actually looking at are fetched first. A new **Pre-load cover art** setting turns the background artwork fetch off.
+- **Feeds open instantly and refresh behind you.** Releases are now kept in the plugin's own store instead of being rebuilt every night, so a feed with anything stored draws immediately and checks for new releases in the background. **Refresh** no longer empties the list while it works, and a ListenBrainz outage can no longer blank a feed.
+- **Release pages open faster.** Tracklists and streaming matches are prepared ahead of time for the albums you're likely to open.
+- **A predictable overnight refresh.** Background preparation runs at a fixed 05:00 local time, and a restart during the day no longer repeats it.
+- **Artist sort is plain A–Z** on the name as shown, ignoring a leading "The" (or any article in LMS's list) — "The National" files under N.
+- **Better streaming matches for joint credits and aliases.** When an album isn't found under the credited name, the plugin tries once more with each member of a joint credit and the artist's known aliases.
+- **The artist biography opens in place** on the release page instead of in a separate screen, with paragraphs, section titles and bullet lists laid out properly on phone, tablet and desktop.
+- **Default and Classic web skins are properly supported.** Section and week headings render as headings rather than as album tiles, text is laid out and escaped correctly, and option rows that return nothing no longer strand you on an empty page.
+- **Faster artist lookups for the radio.** Artist names are now resolved through the LMS-community API instead of the rate-limited public MusicBrainz service.
+- **Settings page reordered** to match the sections above, with each streaming service showing whether its plugin is detected.
+
+### Fixes
+- **Players no longer drop off during a big feed refresh.** Large updates are processed in small chunks, so the server stays responsive.
+- **Tapping a release always opens that release** — including after a search within the list, when a list was still being sorted or filtered in the background.
+- **Created-for-You playlists no longer come up short after a fresh install;** an unfinished matching pass is retried instead of being remembered as the answer.
+- **MusicBrainz no longer refuses the server for making too many requests** — every MusicBrainz call now goes through one paced queue with a shared back-off.
+- **The plugin no longer locks you out of Spotify.** Spotty shares one Spotify app across every install, so the background preparation now slows right down while Spotify is refusing searches; anything you open yourself is never slowed.
+- **A same-machine MusicBrainz mirror is actually detected now** — the auto-detect had never worked.
+- **Genres could stay empty for weeks after being cleared** and now refill straight away; "no genre yet" is re-checked much sooner than a found genre.
+- **Tracks whose titles are only symbols** ("†††", "♥") are matched properly instead of all sharing one answer.
+- **A failed streaming search is no longer remembered as "not on any service."**
+- **Biography fixes:** no more blank bios for list-heavy text, missing words where the source had links, or stray dashes in the preview.
+- **Trending albums use the community API and tracklists come from ListenBrainz,** falling back to MusicBrainz only when ListenBrainz has none — fewer slow lookups when a page opens.
+
 ## 0.9.149
 
 ### Fixed

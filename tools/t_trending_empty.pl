@@ -56,18 +56,49 @@ sub grab {
     my ($src, $name) = @_;
     $src =~ /^sub \Q$name\E\b\s*\{/mg or die "no sub $name\n";
     my $start = $-[0];
-    my $i     = pos($src);
     my $depth = 1;
-    while ($i < length($src) && $depth) {
-        my $c = substr($src, $i++, 1);
-        $depth++ if $c eq '{';
-        $depth-- if $c eq '}';
+    my $end   = length($src);
+    # BRACE-SCAN BY REGEX, NOT substr()-PER-CHARACTER. The source is read with an
+    # ':encoding(UTF-8)' layer, so it is a CHARACTER string — and substr() on one
+    # is not O(1). The old per-character walk was therefore quadratic in file
+    # size, and Browse.pm is half a megabyte: several suites had grown to spend
+    # minutes here, which reads as a hang rather than as slowness. The //g picks
+    # up from the header match's pos, which is exactly where the body starts.
+    while ($src =~ /([{}])/g) {
+        $1 eq '{' ? $depth++ : $depth--;
+        next if $depth;
+        $end = pos($src);
+        last;
     }
+    my $i = $end;
     pos($src) = undef;
     return substr($src, $start, $i - $start) . "\n";
 }
 
 my $src = slurp($BROWSE);
+
+# ---------------------------------------------------------------------------
+# A minimal DB::kver/kverNum, built from the REAL KEY_VERSIONS in DB.pm.
+#
+# Since the caching rework the key builders ask DB for a family's version rather
+# than spelling it out, so a harness that evals a lifted sub body has to answer
+# that call. It is derived from the shipped table rather than restated here, for
+# the usual reason: a hand-copied constant drifts silently, and a suite that
+# asserts a key it made up itself asserts nothing. Loading the real DB.pm would
+# pull in DBI and a real file for two hash lookups.
+# ---------------------------------------------------------------------------
+{
+    my $db_src = slurp($ENV{LBF_DB}
+        || File::Spec->catfile($ROOT, 'ListenBrainzFreshReleases', 'DB.pm'));
+    my ($body) = $db_src =~ /use constant KEY_VERSIONS => \{(.*?)\n\};/s
+        or die "no KEY_VERSIONS in DB.pm\n";
+    my %v = $body =~ /'([^']+)'\s*=>\s*(\d+)/g;
+    die "KEY_VERSIONS parsed empty\n" unless keys %v;
+    no strict 'refs';
+    *{'Plugins::ListenBrainzFreshReleases::DB::kver'}    = sub { $_[0] . ($v{$_[0]} // 0) . ':' };
+    *{'Plugins::ListenBrainzFreshReleases::DB::kverNum'} = sub { $v{$_[0]} // 0 };
+    $INC{'Plugins/ListenBrainzFreshReleases/DB.pm'} = __FILE__;
+}
 
 # ---------------------------------------------------------------- stub world --
 {
@@ -141,6 +172,7 @@ my $PREFS = T::Prefs->new;
     use constant TREND_ALBUMS_YEAR_TTL      => 30 * 86400;
     use constant PLAYLIST_INCONCLUSIVE_TTL  => 1 * 3600;
     use constant PLAYLIST_TIMEOUT           => 45;
+    use constant PACED_TRACK_GAP            => 2;
     use constant TRENDING_MAX               => 50;
     use constant FOLLOWER_MAX               => 250;
     use constant FOLLOWER_FANOUT            => 6;
@@ -151,6 +183,12 @@ my $PREFS = T::Prefs->new;
 
     # Collaborators that aren't what's being tested.
     our @ADAPTERS   = ( { name => 'Qobuz' }, { name => 'Tidal' } );
+    # The streaming gate now narrows itself while Spotify is refusing. This suite is
+    # about the EMPTY/inconclusive TTLs, not the back-off (t_spotifybackoff.pl §4c owns
+    # that), so the knob stays off and the gate behaves exactly as it did before —
+    # which is the point: pacing must not change what an empty build caches.
+    our $BACKING_OFF = 0;
+    sub _spotifyBackingOff { return $BACKING_OFF ? 1 : 0 }
     our $FIND_MATCH = 1;                      # does the streaming gate keep an album?
     sub _orderedAdapters { return @ADAPTERS }
     sub _findPlayable {
@@ -160,8 +198,22 @@ my $PREFS = T::Prefs->new;
     }
     sub _blockedSet      { return { mbids => {}, names => {} } }   # real shape; _isBlocked derefs both
     sub _dbg             { 1 }
+    # Warm-stage instrumentation — answered, never asserted on here
+    # (t_warmstats.pl owns that). See the note beside the eval below.
+    sub _stage           { 1 }
+    # The in-flight registry, given its REAL semantics rather than no-op stubs.
+    # A stub `_isBuilding { 0 }` would disable the guard and let this suite pass
+    # against a build that never released its flag — and releasing the flag is
+    # what stops the next open rendering "still being built" for ever.
+    # t_buildingstate.pl owns the guard's own assertions.
+    our %BUILDING;
+    sub _buildingStart   { $BUILDING{ $_[0] // '' } = 1; return 1 }
+    sub _buildingEnd     { delete $BUILDING{ $_[0] // '' }; return }
+    sub _isBuilding      { return $BUILDING{ $_[0] // '' } ? 1 : 0 }
+    sub _buildingRow     { return { items => [ { name => 'PLUGIN_LBF_BUILDING', type => 'text' } ], cachetime => 0 } }
     sub _wantHeaders     { 1 }
     sub _sectionHeader   { my ($c, $tok) = @_; return { name => $tok, type => 'text', _hdr => 1 } }
+    sub _webListHead     { return () }
     sub _trendingAlbumRow{ my ($c, $a) = @_; return { name => $a->{title}, type => 'link' } }
     sub _trendingSortToggle { return { name => 'sorted-by', type => 'link' } }
     sub _trendingResolvedKey { return 'lbf:trending:resolved:test' }
@@ -169,13 +221,21 @@ my $PREFS = T::Prefs->new;
     sub cstring          { my (undef, $t) = @_; return $t }
 }
 
-for my $name (qw(_albumsDataKey _buildAlbumsData _aggregateAlbums _fanFollowers
-                 _activeFollowers _trendBlocked _isBlocked _trendingAlbumsResult
-                 _refreshItem)) {
+# _streamLayerTag is grabbed rather than stubbed on purpose: the albums aggregate
+# WRAPS per-album `lbf:stream:` decisions, so the inner version is a term in the
+# outer key. Stubbing it here would hide a break in exactly the layering rule this
+# repo has got wrong three times.
+for my $name (qw(_streamLayerTag _albumsDataKey _buildAlbumsData _aggregateAlbums
+                 _fanFollowers _activeFollowers _trendBlocked _isBlocked
+                 _trendingAlbumsResult _refreshItem)) {
     my $body = grab($src, $name);
     # `our` in the package block above is lexically scoped to that block, so each
     # eval must re-declare the module globals the grabbed body closes over.
-    eval "package T; our (\$cache, \$prefs, \$log); $body 1;" or die "eval $name: $@";
+    # Time::HiRes because _buildAlbumsData carries phase timing (the $dt closure,
+    # matching the one _resolveTrending has had since 0.9.108). It is a core module
+    # and Browse.pm itself `use`s it, so any harness evalling these bodies needs it.
+    eval "package T; use Time::HiRes (); our (\$cache, \$prefs, \$log); $body 1;"
+        or die "eval $name: $@";
 }
 
 # ------------------------------------------------------------------ scenarios --
@@ -281,6 +341,70 @@ print "\n5. The cache key is bumped, so poisoned empties are abandoned on update
     # makes the assertion pass on anything truthy (it did — caught by anti-test).
     ok(scalar($key =~ /^lbf:trending:albums:7:/), "key is at :7: (got $key)");
     ok(scalar($key =~ /this_month/ && $key =~ /qobuz,tidal/), 'key still carries range + service order');
+}
+
+print "\n6. A TRANSIENT empty is never cached; a DEFINITIVE one still is\n";
+{
+    # THE BUG (live 2026-08-13, "Followers feeds didn't populate — I had to use
+    # Refresh"): _resolveTrending cached an empty result for
+    # PLAYLIST_INCONCLUSIVE_TTL whenever it reached "no candidate tracks", but
+    # that outcome depends on a ~10s per-follower stats fan-out that can come
+    # back thin. The log showed `mapped 0 recordings in 0ms` and `trending cache
+    # hit (0 tracks)` in the SAME session that later produced 50 tracks. Refresh
+    # was the only way out because it is the only path that forces past the read.
+    #
+    # Worse, the FIRST call had no onError at all — and getFollowing's default is
+    # `sub { $onDone->([]) }`, so a network failure arrived as a perfectly
+    # ordinary empty list, was read as "not following anyone", and was cached for
+    # an hour. The error was laundered into a success before it could reach the
+    # branch meant to catch it.
+    #
+    # Asserted at source level: driving the whole nested fan-out through stubs
+    # would pin the CALL SHAPE rather than the CACHE DECISION, and the decision is
+    # the thing that was wrong. See docs/feed-findings-2026-08-14.md §3.
+    my $fn = grab(slurp($BROWSE), '_resolveTrending');
+    ok(defined $fn && length($fn) > 500, '_resolveTrending extracted from Browse.pm');
+
+    # THE ERROR PATH WAS ALREADY CORRECT — asserted so it stays that way.
+    # getFollowing's DEFAULT onError is `sub { $onDone->([]) }` (API.pm ~2012), which
+    # would launder a network failure into an ordinary empty list, land on "not
+    # following anyone" and cache it for an hour. The call site overrides it. The
+    # override lives at the END of the argument list; these arguments become a hash,
+    # so a SECOND onError added higher up would silently win or lose depending on
+    # order. Exactly one, and it must not pass the cache flag.
+    # Bounded to ONE line and forbidding braces: the earlier lazy `[^;]*?` form
+    # backtracked catastrophically across the 14KB body and HUNG the suite on a
+    # mutant — a test that hangs reports nothing, which is worse than failing.
+    my @onerr = $fn =~ /onError\s*=>\s*sub\s*\{([^{}\n]*)\}/g;
+    ok(scalar(@onerr) == 1,
+       'getFollowing has exactly ONE onError override (found ' . scalar(@onerr) . ')');
+    ok(scalar(@onerr) == 1 && $onerr[0] !~ /,\s*1\s*\)/,
+       'and it does NOT pass the cache-empty flag — a transport failure is not a fact');
+
+    # The thin-fan-out fix.
+    ok(scalar($fn =~ /\$sawListens\s*=\s*scalar\s+keys\s+\%recFol/),
+       '$sawListens is computed from the fan-out result (%recFol), not assumed');
+    # STRENGTHENED, not relaxed. The gate used to be $sawListens alone; it is now
+    # "$sawListens && !$fanCut", because a fan-out that hit its DEADLINE returns a
+    # partial follower set and "no candidates" from a partial set is not a fact
+    # about those users either. Both terms are required here, so dropping the
+    # newer one fails this assertion exactly as dropping the older one does.
+    ok(scalar($fn =~ /no candidate tracks[\s\S]{0,400}?\$sawListens\s*&&\s*!\$fanCut\s*\?\s*1\s*:\s*0/),
+       'the "no candidate tracks" branch caches only when listens were seen AND the fan-out completed');
+    ok(!scalar($fn =~ /\$empty->\("no candidate tracks",\s*1\)/),
+       'and it no longer passes a hard-coded 1');
+
+    # NOT A BLANKET DOWNGRADE. The two outcomes that ARE facts about the followed
+    # users must still be cached, or every browse re-runs the whole fan-out.
+    ok(scalar($fn =~ /\$empty->\("not following anyone",\s*1\)/),
+       '"not following anyone" is still cached (it is a real answer)');
+    ok(scalar($fn =~ /\$empty->\("no active followed users",\s*1\)/),
+       '"no active followed users" is still cached (_activeFollowers fails OPEN, so an empty there is real)');
+
+    # The gate itself must survive.
+    # Line-bounded for the same reason as the onError match above.
+    ok(scalar($fn =~ /\$cache->set\([^\n]*PLAYLIST_INCONCLUSIVE_TTL[^\n]*\}\s*if\s+\$cacheEmpty;/),
+       '$empty still writes the cache ONLY when $cacheEmpty is set');
 }
 
 printf("\n%d passed, %d failed\n", $pass, $fail);

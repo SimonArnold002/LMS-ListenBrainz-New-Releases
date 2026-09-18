@@ -53,13 +53,21 @@ sub grab {
     my ($name) = @_;
     $src =~ /^sub \Q$name\E\b\s*\{/mg or return '';
     my $start = $-[0];
-    my $i     = pos($src);
     my $depth = 1;
-    while ($i < length($src) && $depth) {
-        my $c = substr($src, $i++, 1);
-        $depth++ if $c eq '{';
-        $depth-- if $c eq '}';
+    my $end   = length($src);
+    # BRACE-SCAN BY REGEX, NOT substr()-PER-CHARACTER. The source is read with an
+    # ':encoding(UTF-8)' layer, so it is a CHARACTER string — and substr() on one
+    # is not O(1). The old per-character walk was therefore quadratic in file
+    # size, and Browse.pm is half a megabyte: several suites had grown to spend
+    # minutes here, which reads as a hang rather than as slowness. The //g picks
+    # up from the header match's pos, which is exactly where the body starts.
+    while ($src =~ /([{}])/g) {
+        $1 eq '{' ? $depth++ : $depth--;
+        next if $depth;
+        $end = pos($src);
+        last;
     }
+    my $i = $end;
     pos($src) = undef;
     return substr($src, $start, $i - $start) . "\n";
 }
@@ -70,8 +78,10 @@ my @SUBS = qw(
     _filterForYou _filterAll _isVariousArtists _blockedSet _isBlocked
     _dedupeReleases _sortReleases _weekStart _sortWithin _artistSortKey
     _viewFilter _releaseTags _genreKey _genreFamily _genreModifier _genreKnown
-    _loadGenreFamilies _bucketFor _genresFor _lastfmGenres _mergeMuSpy _dateShift
-    _sectionSig _sectionList _allSection _forYouSection
+    _loadGenreFamilies _bucketFor _genresFor _lastfmGenres
+    _hostedArtistKey _lbArtistGenres _lastfmArtistGenres _artistTierGenres
+    _mergeMuSpy _dateShift
+    _sectionSig _sectionBounds _sectionList _allSection _forYouSection
 );
 
 $src =~ /(my \$HAVE_NFD = .*?^\);)/ms or die "bench: no %FOLD block\n";
@@ -85,7 +95,7 @@ my @RELEASE_TYPES = qw(album single ep broadcast other compilation soundtrack li
 my %_SINGLE_FAMILY = (single => 1, ep => 1);
 use constant VA_MBID => '89ad4ac3-39f7-470e-963a-56509c546377';
 use constant GENRE_NONE => '_none';
-use constant SECTION_MEMO_TTL => 5;
+use constant SECTION_MEMO_TTL => 30 * 60;
 use constant MUSPY_FUTURE_MONTHS_DEFAULT => 12;
 use constant MUSPY_FUTURE_MONTHS_MAX     => 24;
 my %SECTION_MEMO;
@@ -98,7 +108,7 @@ our %PREFS = (
     all_artwork_only => 1, all_various => 1,
     foryou_artwork_only => 1, foryou_various => 1,
     blocked_artists => [], all_sort => 'release_date', all_view => 'albums',
-    days => 14, foryou_past => 1, muspy_future => 1,
+    foryou_weeks => 4, foryou_upcoming => 2,
 );
 my $prefs = LBF::PrefsStub->new;
 my $log   = LBF::LogStub->new;
@@ -124,10 +134,31 @@ sub coverArtUrl {
     }
     return $rel ? CAA_BASE_URL . $rel . '/front-250' : undef;
 }
-sub peekArtistSort { undef }
+sub sectionWindow { ('2026-08-03', '2026-08-30') }
 sub peekLastfmTags { [] }
+# The ARTIST-LEVEL genre tiers are read out of the render's own $meta map, so the
+# only thing the render calls here is the key builder. THAT IS THE PROPERTY THIS
+# BENCH EXISTS TO PROTECT: if a future change makes a tier read the store per
+# release again, this stub stops being enough and the _bucketFor line disappears
+# from the output — which is exactly how the per-release SELECT was caught.
+# (0.9.173 removed the hosted rung; the property is unchanged and now guards the
+# ListenBrainz and Last.fm artist tiers, which read the same map the same way.)
+sub artistKeyForName {
+    my ($class, $name) = @_;
+    return '' unless defined $name && length $name;
+    my $n = LBF::_norm($name);
+    return length $n ? 'n:' . $n : '';
+}
 package LBF;
 PRELUDE
+
+# Constants the grabbed subs read. Extracted from the source rather than restated
+# here, so a change to the value cannot silently diverge from what the bench runs.
+for my $const (qw(LB_MARK LFM_MARK)) {
+    $src =~ /^(use constant \Q$const\E\s*=>[^;]+;)/m
+        or die "bench: no `use constant $const` in Browse.pm\n";
+    $code .= "$1\n";
+}
 
 $code .= "$fold\n";
 $code .= "my \$_familiesLoaded = 0; my %_GENRE_FAMILY; my %_GENRE_MODIFIER; my %_GENRE_KNOWN;\n";
