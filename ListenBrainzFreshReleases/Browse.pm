@@ -455,6 +455,17 @@ sub _checkAgainItem {
     };
 }
 use constant MENU_SORT     => IMG_BASE . 'lbf-sort_MTL_icon_sort.png';
+# The web skins' icon for an outbound link (View on MusicBrainz). Material never sees it.
+use constant MENU_WEBLINK  => IMG_BASE . 'lbf-weblink_MTL_icon_open_in_new.png';
+# ...and for Block this artist, which otherwise gets Default's placeholder cover.
+use constant MENU_BLOCK    => IMG_BASE . 'lbf-block_MTL_icon_block.png';
+# The settings page as the web skins must link it. A bare /plugins/… path is served
+# in the SERVER's default skin (Material on most installs), so the old skins opened
+# a Material-styled page. The skins print a weblink verbatim and Classic's template
+# has no `link` (webroot-prefixed) support, so it is RELATIVE: the browse page is
+# always /<Skin>/plugins/listenbrainzfreshreleases/index.html, so this resolves to
+# /<Skin>/plugins/ListenBrainzFreshReleases/settings.html in whichever skin is open.
+use constant WEB_SETTINGS_LINK => '../ListenBrainzFreshReleases/settings.html';
 # Per-view release-family toggle: ONE cycling row whose icon reflects the CURRENT
 # family — an album disc while showing Albums, a music note while showing Singles &
 # EPs. The _MTL_icon_<name> filenames make Material render its own themed
@@ -597,7 +608,7 @@ sub _weekTargetFeed {
     # row preserves legacy clients; this explicit route is what Material actions
     # use when the root has changed since render.
     my $rows = _buildAllWeekItems(
-        [{ week_start => $week }], $client, _wantHeaders(_featuresOf($args)));
+        [{ week_start => $week }], $client, _wantHeaders(_featuresOf($args)), _webSkin($args));
     my $open = ref $rows eq 'ARRAY' && ref $rows->[0] eq 'HASH' ? $rows->[0]{url} : undef;
     unless (ref $open eq 'CODE') {
         $callback->({ items => [{ type => 'text', name => cstring($client, 'PLUGIN_LBF_VIEW_EXPIRED') }], cachetime => 0 });
@@ -658,12 +669,19 @@ sub _releaseTargetFeed {
         $data->{query} = { lbf_release => $token };
         $data->{cachetime} = 0;
         $callback->($data);
-    }, _wantHeaders(_featuresOf($args)));
+    }, _wantHeaders(_featuresOf($args)), _webSkin($args));
 }
 
 sub topLevel {
     _noteBrowse();
     my ($client, $callback, $args) = @_;
+    # The web-skin pass (see _webify): every web request enters here, on either route,
+    # and the wrapped children carry it to every level below.
+    if (_webSkin($args) && ref $callback eq 'CODE') {
+        my $cb = $callback;
+        $callback = sub { $cb->(_webify($_[0])) };
+        $args = { %$args, isWeb => 1 };
+    }
     return _releaseTargetFeed($client, $callback, $args)
         if ref $args->{params} eq 'HASH' && exists $args->{params}{lbf_release};
     return _weekTargetFeed($client, $callback, $args)
@@ -678,7 +696,8 @@ sub topLevel {
     # fetchForYou/fetchAll via passthrough (which IS forwarded).
     my $feat = _featuresOf($args);
 
-    my $useH = _wantHeaders($feat);
+    my $useH  = _wantHeaders($feat);
+    my $isWeb = _webSkin($args);
 
     # --- section child items ---------------------------------------------
     # USERNAME ONLY — fresh_releases is a public endpoint (see the header comment
@@ -687,7 +706,10 @@ sub topLevel {
     # the endpoint has never required.
     my $newReleases = $username
         ? _categoryTile($client, 'user', MENU_NEW, \&fetchForYou, $feat)
-        : { name => cstring($client, 'PLUGIN_LBF_SETUP_REQUIRED'), type => 'text', image => ICON };
+        : { name  => ($isWeb ? _escHtml(cstring($client, 'PLUGIN_LBF_SETUP_REQUIRED'))
+                             : cstring($client, 'PLUGIN_LBF_SETUP_REQUIRED')),
+            type  => _divType(0, $isWeb),
+            _divImage(0, $isWeb) };
 
     my @createdFor = ($newReleases);
     push @createdFor, _playlistsTile($client, $feat) if $username;
@@ -710,7 +732,8 @@ sub topLevel {
 
     my @settings = ({
         name => cstring($client, 'PLUGIN_LBF_SETTINGS'), type => 'link',
-        weblink => '/plugins/ListenBrainzFreshReleases/settings.html', image => MENU_COG,
+        weblink => ($isWeb ? WEB_SETTINGS_LINK : '/plugins/ListenBrainzFreshReleases/settings.html'),
+        image => MENU_COG,
     });
     # Diagnostics: list the playlist tracks that didn't resolve to any service, so a
     # matcher gap (e.g. a stylised title the service search couldn't find) is
@@ -731,7 +754,7 @@ sub topLevel {
     # Settings. The summary callback is normally synchronous, but the assembly
     # remains callback-shaped so storage failures keep the same fallback path.
     my @head;
-    push @head, _sectionHeader($client, 'PLUGIN_LBF_SECTION_CREATED_FOR_YOU', $useH, \@createdFor), @createdFor;
+    push @head, _sectionHeader($client, 'PLUGIN_LBF_SECTION_CREATED_FOR_YOU', $useH, \@createdFor, 0, $isWeb), @createdFor;
 
     my $finished;
     my $finish = sub {
@@ -739,14 +762,14 @@ sub topLevel {
         return if $finished;
         $finished = 1;
         my @items = @head;
-        push @items, _sectionHeader($client, 'PLUGIN_LBF_ALL_RELEASES', $useH, $allRows), @$allRows;
+        push @items, _sectionHeader($client, 'PLUGIN_LBF_ALL_RELEASES', $useH, $allRows, 0, $isWeb), @$allRows;
         # People You Follow sits BELOW All Releases and above Settings — last of
         # the content sections. Emitted here rather than in @head purely because
         # of that position; the array itself is built synchronously above and is
         # captured by this closure, so an empty/disabled section is still simply
         # absent, exactly as before.
-        push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_PEOPLE', $useH, \@people), @people if @people;
-        push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_SETTINGS', $useH, \@settings), @settings;
+        push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_PEOPLE', $useH, \@people, 0, $isWeb), @people if @people;
+        push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_SETTINGS', $useH, \@settings, 0, $isWeb), @settings;
         # cachetime => 0 so Material doesn't cache the top menu per-player — keeps the
         # inlined weeks in step with the weekly rollover (same rationale as the feeds).
         $callback->({ items => \@items, cachetime => 0 });
@@ -760,7 +783,7 @@ sub topLevel {
             # week drill carries Options and Refresh. With no stored summary yet,
             # retain the category tile while the detached first fetch fills it.
             my $rows = ref $weeks eq 'ARRAY' && @$weeks
-                ? _buildAllSummaryLanding($weeks, $client, $useH)
+                ? _buildAllSummaryLanding($weeks, $client, $useH, $isWeb)
                 : [ _categoryTile($client, 'all', MENU_ALL, \&fetchAll, $feat) ];
             $finish->($rows);
         },
@@ -800,14 +823,14 @@ sub _headerType {
 # Material 6.4.3+ _headerType() returns 'header-basic', which strips the action
 # (no grid-card) and harmlessly ignores the url. Non-Material skins get plain text.
 sub _sectionHeader {
-    my ($client, $stringToken, $useH, $children, $noIcon) = @_;
+    my ($client, $stringToken, $useH, $children, $noIcon, $isWeb) = @_;
     # $noIcon: drop the logo thumbnail (detail-page section headers — there's
     # nothing to drill into, the rows sit right below, so the icon just adds
     # clutter). List pages keep the icon so Material's grid toggle stays enabled.
     my $hdr = {
-        name  => cstring($client, $stringToken),
-        type  => $useH ? _headerType() : 'text',
-        ($noIcon ? () : (image => ICON)),
+        name  => _divName(cstring($client, $stringToken), $useH, $isWeb),
+        type  => _divType($useH, $isWeb),
+        _divImage($useH, $isWeb, $noIcon),
     };
     if ($useH) {
         my @kids = @$children;
@@ -942,6 +965,7 @@ sub fetchForYou {
     my ($client, $callback, $args, $passDict) = @_;
 
     my $headers = _wantHeaders(ref $passDict eq 'HASH' ? $passDict->{features} : undef);
+    my $isWeb  = _webSkin($args);
     my $mode   = $prefs->get('foryou_sort')   || 'release_date';
     # Effective release-family view + which families this section offers (clamped
     # so a section with only one family ticked never renders empty; the selector
@@ -1010,8 +1034,8 @@ sub fetchForYou {
                     # produced, which is what _renderSlots spells out.
                     my $groups = _weekGroups($shown, $mode);
                     _focusReleaseCovers($client, 'foryou', _renderSlots(scalar(@opt) + 1, $groups), $args);
-                    my @items = ( _sectionHeader($client, 'PLUGIN_LBF_SECTION_OPTIONS', $headers, \@opt),
-                                  @opt, @{ _buildItems($groups, $client, $headers, $meta) } );
+                    my @items = ( _sectionHeader($client, 'PLUGIN_LBF_SECTION_OPTIONS', $headers, \@opt, 0, $isWeb),
+                                  @opt, @{ _buildItems($groups, $client, $headers, $meta, $isWeb) } );
                     $callback->({ items => \@items, cachetime => 0 });
                 }, $gmax, peek => 1);
             },
@@ -1119,13 +1143,14 @@ sub fetchAll {
     my ($client, $callback, $args, $passDict) = @_;
 
     my $headers = _wantHeaders(ref $passDict eq 'HASH' ? $passDict->{features} : undef);
+    my $isWeb   = _webSkin($args);
 
     Plugins::ListenBrainzFreshReleases::API->getFreshReleasesAll(
         sort    => 'release_date',
         onDone  => sub {
             my $releases = _allSection(shift);
             _stashSummary('all', $releases);
-            $callback->({ items => [ _refreshItem($client, 'all'), @{ _buildAllLanding($releases, $client, $headers) } ], cachetime => 0 });
+            $callback->({ items => [ _refreshItem($client, 'all'), @{ _buildAllLanding($releases, $client, $headers, $isWeb) } ], cachetime => 0 });
         },
         onError => sub {
             $log->error("All releases fetch error: " . (shift // ''));
@@ -1518,7 +1543,7 @@ sub resolveFollowFeed {
     Plugins::ListenBrainzFreshReleases::API->getFollowFeed(
         onDone => sub {
             my $store = _mergeFollow(shift // []);
-            _resolveFollow($client, $store, $callback, 0, $feat);
+            _resolveFollow($client, $store, $callback, 0, $feat, undef, _webSkin($args));
         },
         onError => sub {
             $log->error("Follow feed resolve error: " . (shift // ''));
@@ -1532,7 +1557,7 @@ sub resolveFollowFeed {
 # Each matched item is tagged with its source rec's `created` (in _resolveTracks) so the
 # day dividers can be built at render time (see _followResult).
 sub _resolveFollow {
-    my ($client, $store, $callback, $force, $feat, $onDone) = @_;
+    my ($client, $store, $callback, $force, $feat, $onDone, $isWeb) = @_;
     $onDone ||= sub {};
     # WHO CALLED, read before the detach below clears $callback: the warm passes no
     # render callback, a view always does. Past the detach both look alike, so this is
@@ -1551,7 +1576,7 @@ sub _resolveFollow {
     if (!$force && (my $c = $cache->get($rkey))) {
         if (($c->{sig} // '') eq $sig) {
             _dbg("follow feed cache hit ($c->{matched}/$c->{total})");
-            $callback->(_followResult($client, $c, $feat)) if $callback;
+            $callback->(_followResult($client, $c, $feat, $isWeb)) if $callback;
             $onDone->();
             return;
         }
@@ -1603,7 +1628,7 @@ sub _resolveFollow {
             . ($timedOut ? " (WATCHDOG cut the pass — short TTL, will re-resolve)" : ""));
         $release->();
         $onDone->();
-        $callback->(_followResult($client, $payload, $feat)) if $callback;
+        $callback->(_followResult($client, $payload, $feat, $isWeb)) if $callback;
         # Long watchdog for the same reason as the playlists: this renders a building
         # row and completes into cache, and on the warm path there is no $callback at
         # all — so cutting the pass at 45s saves nobody time and only files an
@@ -1655,7 +1680,7 @@ sub _enrichYears {
 # week dividers (_headerType()/`image`/per-group drill coderef via _buildWeekly's pattern)
 # for a consistent look; plain text on non-header skins.
 sub _followResult {
-    my ($client, $payload, $feat) = @_;
+    my ($client, $payload, $feat, $isWeb) = @_;
 
     my $enabled = { map { lc($_->{name}) => 1 } _orderedAdapters() };
     my @tracks  = grep { _cachedSvcUsable($_->{_svc}, $enabled) } @{ $payload->{items} || [] };
@@ -1668,7 +1693,7 @@ sub _followResult {
     my $total   = $payload->{total} // $matched;
 
     my $useH    = _wantHeaders($feat);
-    my $divType = $useH ? _headerType() : 'text';
+    my $divType = _divType($useH, $isWeb);
     my $sort    = $prefs->get('follow_sort') || 'date';
 
     # Group the (already newest-first) tracks either by DAY or by the follower who
@@ -1688,8 +1713,8 @@ sub _followResult {
     for my $k (@order) {
         my $rows = $bucket{$k};
         push @items, ($sort eq 'recommender'
-            ? _recommenderDivider($client, $k, $divType, $useH, $rows)
-            : _dayDivider($client, $k, $divType, $useH, $rows));
+            ? _recommenderDivider($client, $k, $divType, $useH, $rows, $isWeb)
+            : _dayDivider($client, $k, $divType, $useH, $rows, $isWeb));
         push @items, @$rows;
     }
     @items = ({ name => cstring($client, 'PLUGIN_LBF_NO_MATCH'), type => 'text' }) unless @items;
@@ -1761,11 +1786,11 @@ sub _followSortToggle {
 # matches the by-date one. Older Material forces a drill on 'header' → point it at this
 # person's tracks (like _dayDivider); 'header-basic' (Material 6.4.3+) ignores it.
 sub _recommenderDivider {
-    my ($client, $name, $divType, $useH, $rows) = @_;
+    my ($client, $name, $divType, $useH, $rows, $isWeb) = @_;
     my $label = length $name
         ? sprintf(cstring($client, 'PLUGIN_LBF_FOLLOW_BY'), $name)
         : cstring($client, 'PLUGIN_LBF_FOLLOW_BY_UNKNOWN');
-    my $hdr = { name => $label, type => $divType, image => ICON };
+    my $hdr = { name => _divName($label, $useH, $isWeb), type => $divType, _divImage($useH, $isWeb) };
     if ($useH) {
         my @kids = @$rows;
         $hdr->{url}         = sub { $_[1]->({ items => \@kids }) };
@@ -1826,9 +1851,9 @@ sub _dayOf {
 # drill action on 'header', so (as in _buildWeekly) point it at this day's tracks rather
 # than an empty page; 'header-basic' (Material 6.4.3+) strips the action and ignores it.
 sub _dayDivider {
-    my ($client, $day, $divType, $useH, $rows) = @_;
+    my ($client, $day, $divType, $useH, $rows, $isWeb) = @_;
     my $label = length $day ? _fmtDate($day) : cstring($client, 'PLUGIN_LBF_UNDATED');
-    my $hdr   = { name => $label, type => $divType, image => ICON };
+    my $hdr   = { name => _divName($label, $useH, $isWeb), type => $divType, _divImage($useH, $isWeb) };
     if ($useH) {
         my @kids = @$rows;
         $hdr->{url}         = sub { $_[1]->({ items => \@kids }) };
@@ -2548,7 +2573,7 @@ sub resolveTrendingAlbums {
         # building row rather than an empty list the user would read as final.
         return $render->(_buildingRow($client), 'the building row (a build was already in flight)')
             unless defined $data;
-        $render->(_trendingAlbumsResult($client, $data, $range, $feat), 'the real list');
+        $render->(_trendingAlbumsResult($client, $data, $range, $feat, _webSkin($args)), 'the real list');
     }, 0,
     # A COLD build just started for this open. Render immediately and let it
     # complete into the cache — a ~50s hold is what the building row replaces.
@@ -2972,7 +2997,7 @@ sub _aggregateAlbums {
 }
 
 sub _trendingAlbumsResult {
-    my ($client, $data, $range, $feat) = @_;
+    my ($client, $data, $range, $feat, $isWeb) = @_;
 
     # Blocked artists drop at render (immediate — no cache clear needed), exactly
     # like For You / All Releases; the aggregate rows carry artist + artist_mbid.
@@ -3009,7 +3034,10 @@ sub _trendingAlbumsResult {
     my @items;
     if (@rows) {
         my @opt = ( _trendingSortToggle($client, $mode), _refreshItem($client, 'trending_albums', $range) );
-        @items  = ( _sectionHeader($client, 'PLUGIN_LBF_SECTION_OPTIONS', $useH, \@opt), @opt, @rows );
+        @items  = ( _sectionHeader($client, 'PLUGIN_LBF_SECTION_OPTIONS', $useH, \@opt, 0, $isWeb), @opt,
+                    _webListHead($isWeb, cstring($client, $range eq 'this_year'
+                        ? 'PLUGIN_LBF_TRENDING_ALBUMS_YEAR' : 'PLUGIN_LBF_TRENDING_ALBUMS_MONTH')),
+                    @rows );
     }
     else {
         # The empty view keeps its Refresh row (no sort toggle — nothing to sort).
@@ -3017,7 +3045,7 @@ sub _trendingAlbumsResult {
         # back and the user had no way to drop it, so the only exits were the cache
         # TTL or the period rolling over (January, for This Year).
         my @opt = ( _refreshItem($client, 'trending_albums', $range) );
-        @items  = ( _sectionHeader($client, 'PLUGIN_LBF_SECTION_OPTIONS', $useH, \@opt), @opt,
+        @items  = ( _sectionHeader($client, 'PLUGIN_LBF_SECTION_OPTIONS', $useH, \@opt, 0, $isWeb), @opt,
                     { name => cstring($client, 'PLUGIN_LBF_NO_TRENDING'), type => 'text' } );
     }
 
@@ -3127,7 +3155,7 @@ sub _trendingAlbumRow {
     # can still resolve to streaming from artist+album, so never leave a dead text row.
     if (($item->{type} // '') eq 'text' && (length($agg->{artist} // '') || length($agg->{title} // ''))) {
         $item->{type} = 'link';
-        $item->{url}  = sub { my ($c, $cb) = @_; _releaseDetail($rel, $c, $cb); };
+        $item->{url}  = sub { my ($c, $cb, $a) = @_; _releaseDetail($rel, $c, $cb, undef, _webSkin($a)); };
     }
     return $item;
 }
@@ -5602,8 +5630,207 @@ sub _wantHeaders {
     return (defined $features && $features =~ /h/) ? 1 : 0;
 }
 
+# TRUE when the request came from a server-rendered WEB SKIN (Default / Classic),
+# i.e. through Slim::Web::XMLBrowser rather than the JSON/CLI path. Those skins draw
+# a type=>'text' row that carries an `image` as a THUMBNAIL whose label links to the
+# image FILE (Default's xmlbrowser.html has an explicit `item.type == "text" &&
+# item.image` branch), and in Classic/EN ONE such row flips the whole page into
+# gallery mode (its hasArtwork test is `item.image && item.type == 'text'`). So a
+# divider there reads as a picture rather than a divider.
+#
+# isWeb is set by Slim::Web::XMLBrowser at EVERY feed level — the top feed and every
+# coderef sub-feed — unlike `features`, which reaches the top feed only (hence the
+# passthrough dance above). The JSON/CLI path Material, Jive, iPeng and the home
+# shelves use passes isControl and NEVER isWeb, so Material cannot reach this.
+#
+# EXCEPT that a web skin does not always come through its own path. A row carrying an
+# `itemActions => { items => … }` command (every All Releases week and every release
+# tile — _weekAction / _releaseAction) is fetched by Slim::Web::XMLBrowser as a CLI
+# request through Slim::Control::XMLBrowser, which calls the feed with isControl and no
+# isWeb. What marks that request as the web renderer's is `feedMode:1` (return the RAW
+# feed — only a server-side renderer wants it; Material sends it for its favourites list
+# alone, never to this plugin). Below the top of such a request the sub-feeds get
+# `params => $feed->{query}` and lose even that, which is why _webify re-stamps isWeb
+# onto every coderef it wraps.
+sub _webSkin {
+    my ($args) = @_;
+    return 0 unless ref $args eq 'HASH';
+    return 1 if $args->{isWeb};
+    return (ref $args->{params} eq 'HASH' && defined $args->{params}{feedMode}) ? 1 : 0;
+}
+
+# The divider's item type. 'textarea' is what the two web skins render as a bare
+# line AHEAD of the row/tile wrapper — no cover, no controls, no link — which is the
+# closest thing they have to a divider. Plain 'text' is NOT enough there: Default's
+# list mode falls back to `music/0/cover.jpg`, putting a placeholder cover on every
+# divider.
+sub _divType {
+    my ($useH, $isWeb) = @_;
+    return $useH ? _headerType() : $isWeb ? 'textarea' : 'text';
+}
+
+# The divider's `image` pair, or an empty list. A web-skin divider carries NO image:
+# the thumbnail and its link to the .png ARE the defect, and in Classic the image is
+# also what drags the whole page into gallery mode.
+sub _divImage {
+    my ($useH, $isWeb, $noIcon) = @_;
+    return () if $noIcon || (!$useH && $isWeb);
+    return (image => ICON);
+}
+
+# The divider's label. On a web skin a textarea's name is rendered as RAW HTML —
+# both templates print it through Template Toolkit's html_line_break alone, which
+# turns newlines into <br> and escapes nothing (ordinary rows go through `| html`,
+# which is why only the dividers can be styled). So the web label is drawn as a
+# real heading, bold in ListenBrainz navy over an orange rule, and ESCAPED first:
+# week and day labels are ours, but a recommender name comes from ListenBrainz.
+# Kept on one line, since html_line_break would turn a newline into a <br>.
+use constant WEB_DIV_STYLE =>
+    'font-weight:bold;font-size:1.15em;color:#353070;'
+  . 'border-bottom:2px solid #EB743B;padding:12px 0 3px 0;margin:0 8px 2px 0';
+sub _divName {
+    my ($label, $useH, $isWeb) = @_;
+    return $label if $useH || !$isWeb;
+    return '<div style="' . WEB_DIV_STYLE . '">' . _escHtml($label) . '</div>';
+}
+
+# A heading that CLOSES an Options block on a web skin. In Material the release rows
+# below Options carry cover art, which is separation enough; Classic draws no row
+# covers and Default's are small, so there the options ran straight into the list.
+# Material and plain controllers get nothing, so their row positions do not move.
+sub _webListHead {
+    my ($isWeb, $label) = @_;
+    return () unless $isWeb;
+    return { name => _divName($label, 0, 1), type => 'textarea' };
+}
+
+# THE WEB-SKIN PASS. Applied once, to whatever topLevel answers a web skin with, and
+# carried to every level below by wrapping each child's `url` coderef — so no feed
+# builder has to know about it, and both web routes (Slim::Web::XMLBrowser's own
+# coderef walk and its CLI detour through an itemActions command) are covered.
+# Three things the old skins get wrong with a Material-shaped feed:
+#
+#   1. A plain `type=>'text'` row. Ordinary row names are `| html`-escaped, so the
+#      bio's `<div style=…>` paragraphs showed as code; and Default's list mode gives
+#      every such row a placeholder cover (music/0/cover.jpg), so a release page was a
+#      column of blank album icons. Both are fixed by `textarea`, whose name is printed
+#      RAW: our own prose markup keeps its paragraphs (minus Material's 72px avatar
+#      indent), anything else is escaped here, and a text row's image (the artist
+#      photo) is drawn inline instead of as a thumbnail that links to the file — which
+#      in Classic would also flip the whole page into gallery mode.
+#   2. `nextWindow`. The web skins have no equivalent: tapping Read more, Show more, a
+#      sort or family toggle, a genre tick or Refresh opened a sub-page that repeated
+#      the list unchanged. The action itself still runs (it is the coderef); what is
+#      missing is the return. An EMPTY answer from such a row — the only shape Material
+#      acts on — is replaced by _webBounce, which sends the browser back to the page
+#      the row was on ('refresh') or the one above it ('parent').
+#   3. isWeb itself, re-stamped onto every wrapped call (see _webSkin).
+#
+# Nothing here runs for Material: topLevel applies it only when _webSkin is true.
+sub _webify {
+    my ($data) = @_;
+    my $items = ref $data eq 'HASH' ? $data->{items} : ref $data eq 'ARRAY' ? $data : undef;
+    return $data unless ref $items eq 'ARRAY';
+    my @out = map { _webifyItem($_) } @$items;
+    return ref $data eq 'HASH' ? { %$data, items => \@out } : \@out;
+}
+
+sub _webifyItem {
+    my ($it) = @_;
+    return $it unless ref $it eq 'HASH';
+    my %i = %$it;
+
+    if (($i{type} // '') eq 'text' && !defined $i{url}) {
+        my $name = $i{name} // '';
+        if (delete $i{_lbfProse}) {
+            # _proseBlock's own markup, marked by _proseBlock itself. NEVER sniffed from
+            # the name: a verbatim bio paragraph or track title is upstream text, and
+            # _cleanBio decodes &lt; LAST, so an entity-encoded "<div style='" arrives
+            # here as real markup. The indent lines the text up with Material's avatar
+            # column, which the web skins do not have.
+            $name =~ s/margin-left:\d+px;?//;
+            $name =~ s/^<div style='/<div style='margin:2px 0 6px 0;/;
+        }
+        else {
+            $name = _escHtml($name);
+        }
+        if (my $src = _webImageSrc($i{image})) {
+            $name = '<div style="display:flex;align-items:center">'
+                  . '<img src="' . _escHtml($src) . '" alt="" '
+                  . 'style="width:64px;height:64px;object-fit:cover;margin:2px 10px 2px 0">'
+                  . "<div>$name</div></div>";
+        }
+        delete $i{image};
+        $i{type} = 'textarea';
+        $i{name} = $name;
+    }
+
+    if (ref $i{url} eq 'CODE') {
+        my $orig = $i{url};
+        my $nw   = $i{nextWindow} // '';
+        $i{url} = sub {
+            my ($c, $cb, $a, @rest) = @_;
+            my %a = ref $a eq 'HASH' ? %$a : ();
+            $a{isWeb} = 1;
+            $orig->($c, sub {
+                my $d = shift;
+                if ($nw =~ /^(?:refresh|parent)$/ && _feedIsEmpty($d)) {
+                    $cb->(_webBounce($c, $nw eq 'parent' ? 2 : 1));
+                    return;
+                }
+                $cb->(_webify($d));
+            }, \%a, @rest);
+        };
+    }
+
+    $i{items} = _webify($i{items}) if ref $i{items} eq 'ARRAY';
+    return \%i;
+}
+
+sub _feedIsEmpty {
+    my ($d) = @_;
+    my $items = ref $d eq 'HASH' ? $d->{items} : ref $d eq 'ARRAY' ? $d : undef;
+    return !(ref $items eq 'ARRAY' && @$items);
+}
+
+# A row image as a URL a browser can load: remote art through the server's own image
+# proxy (what the skins do for a row thumbnail, so it is cached the same way), a local
+# path made absolute. A local path is NOT proxied — proxiedImage turns one into the
+# no-artwork placeholder.
+sub _webImageSrc {
+    my ($img) = @_;
+    return undef unless defined $img && length $img;
+    if ($img =~ m{^https?://}i) {
+        return undef unless Slim::Web::ImageProxy->can('proxiedImage');
+        my $p = Slim::Web::ImageProxy::proxiedImage($img) or return undef;
+        $p =~ s/(\.\w+)$/_100x100_o$1/;
+        return $p =~ m{^/} ? $p : "/$p";
+    }
+    return $img =~ m{^/} ? $img : "/$img";
+}
+
+# The web skins' answer to nextWindow: a one-line page that takes the browser straight
+# back, `$up` levels (1 = the page the tapped row was on). The index parameter IS the
+# position in the tree, so dropping its last segment is exactly "the level above". A
+# fresh `lbfr` parameter keeps the browser from serving the list it already has; the
+# feed never reads it. The link is the fallback for a browser with scripts off.
+sub _webBounce {
+    my ($client, $up) = @_;
+    $up = 1 unless $up && $up > 0;
+    my $js = "(function(){var u=new URL(location.href),p=u.searchParams,"
+           . "i=(p.get('index')||'').split('.');i.splice(-$up,$up);"
+           . "if(i.length&&i[0]!=='')p.set('index',i.join('.'));else p.delete('index');"
+           . "p.set('lbfr',Date.now());location.replace(u.href);})();";
+    return { items => [{
+        type => 'textarea',
+        name => '<div style="padding:8px 0"><a href="javascript:history.back()">'
+              . _escHtml(cstring($client, 'PLUGIN_LBF_WEB_BACK')) . '</a></div>'
+              . "<script>$js</script>",
+    }], cachetime => 0 };
+}
+
 sub _buildItems {
-    my ($groups, $client, $headers, $meta) = @_;   # $groups: _weekGroups; $meta: genre map
+    my ($groups, $client, $headers, $meta, $isWeb) = @_;   # $groups: _weekGroups; $meta: genre map
 
     unless ($groups && scalar @$groups) {
         return [{ name => cstring($client, 'PLUGIN_LBF_NO_RESULTS'), type => 'text' }];
@@ -5616,7 +5843,7 @@ sub _buildItems {
     # retired in 0.9.97). Both of those already happened in _weekGroups, whose
     # output the caller ALSO turned into the artwork-focus slot map — one grouping,
     # so the rows drawn here and the rows warmed cannot describe different lists.
-    return _buildWeekly($groups, $client, $headers, $meta);
+    return _buildWeekly($groups, $client, $headers, $meta, $isWeb);
 }
 
 # ---------------------------------------------------------------------------
@@ -5634,12 +5861,18 @@ sub _buildItems {
 #   - The count lives in module-level %pageState (per player, per section key), so
 #     it survives the cachetime=>0 re-walk the "Show more" refresh triggers.
 # Returns (visible tiles, paging rows) — both go into the level in that order.
+#
+# NOT ON A WEB SKIN ($isWeb): Default and Classic page every list themselves
+# (itemsPerPage, 50 by default, with their own "Items 1 to 50 of N" pager), so a
+# Show more that grew the list past 50 put the new releases AND the next Show more /
+# Show less rows on the skin's page 2 — it read as a tap that did nothing. There the
+# whole week is handed over and the skin's pager does the paging.
 # ---------------------------------------------------------------------------
 sub _pageSection {
-    my ($client, $key, $tiles) = @_;
+    my ($client, $key, $tiles, $isWeb) = @_;
 
     my $total = scalar @$tiles;
-    return ($tiles, []) if $total <= PAGE_SIZE;
+    return ($tiles, []) if $isWeb || $total <= PAGE_SIZE;
 
     my $ctx   = $pageState{ _cid($client) } ||= {};
     my $shown = $ctx->{$key} || PAGE_SIZE;
@@ -5756,7 +5989,7 @@ sub _proseBlock {
                     . ';text-indent:-'  . PROSE_BULLET_IND;
             $text   = "\x{2022}\x{00A0}$text";
         }
-        push @rows, { name => "<div style='$style'>$text</div>", type => 'text' };
+        push @rows, { name => "<div style='$style'>$text</div>", type => 'text', _lbfProse => 1 };
     }
     return @rows;
 }
@@ -6076,7 +6309,7 @@ sub _pageRow {
 # already date-sorted) and carry a release count.
 # ---------------------------------------------------------------------------
 sub _buildAllWeekItems {
-    my ($weeks, $client, $headers) = @_;
+    my ($weeks, $client, $headers, $isWeb) = @_;
     return [{ name => cstring($client, 'PLUGIN_LBF_NO_RESULTS'), type => 'text' }]
         unless ref $weeks eq 'ARRAY' && @$weeks;
 
@@ -6137,11 +6370,13 @@ sub _buildAllWeekItems {
                     # _frozenOrder, not _sortWithin: the position IS the address a tap
                     # sends back, so the order a rendered page is holding must survive
                     # until that tap resolves. See the block comment on _frozenOrder.
+                    my $web = $isWeb || _webSkin($a);
                     my ($visRel, $pgRows) = _pageSection($c, $key,
-                                                _frozenOrder($ws, $mode, $view, $set));
+                                                _frozenOrder($ws, $mode, $view, $set), $web);
                     # A single group with no `ws`: this level draws its releases
                     # flat under the Options block, with no dividers among them.
-                    _focusReleaseCovers($c, $key, _renderSlots(scalar(@opt) + 1, [{ rels => $visRel }]), $a);
+                    my @head = _webListHead($web, _weekLabel($c, $ws));
+                    _focusReleaseCovers($c, $key, _renderSlots(scalar(@opt) + 1 + scalar(@head), [{ rels => $visRel }]), $a);
                     my $draw = sub {
                         my $meta  = shift;
                         my @tiles = map { _buildReleaseItem($_, $c, $meta) } @$visRel;
@@ -6155,8 +6390,8 @@ sub _buildAllWeekItems {
                         # all away" case and wants the same answer.
                         @tiles = ({ name => cstring($c, 'PLUGIN_LBF_NO_RESULTS'), type => 'text' })
                             unless @tiles;
-                        $cb->({ items => [ _sectionHeader($c, 'PLUGIN_LBF_SECTION_OPTIONS', $headers, \@opt),
-                                           @opt, @tiles, @$pgRows ] });
+                        $cb->({ items => [ _sectionHeader($c, 'PLUGIN_LBF_SECTION_OPTIONS', $headers, \@opt, 0, $isWeb),
+                                           @opt, @head, @tiles, @$pgRows ] });
                     };
 
                     # A filtered week already loaded metadata for the WHOLE week so
@@ -6169,7 +6404,9 @@ sub _buildAllWeekItems {
                         $draw->($knownMeta);
                     }
                     else {
-                        _withGenres($visRel, $draw, undef, peek => 1);
+                        # A web skin gets the whole week (see _pageSection), which can
+                        # run past GENRE_FETCH_MAX; the read is a peek, so widen it.
+                        _withGenres($visRel, $draw, $web ? GENRE_WARM_MAX : undef, peek => 1);
                     }
                 };
 
@@ -6211,7 +6448,7 @@ sub _buildAllWeekItems {
 }
 
 sub _buildAllLanding {
-    my ($releases, $client, $headers) = @_;
+    my ($releases, $client, $headers, $isWeb) = @_;
 
     unless ($releases && scalar @$releases) {
         return [{ name => cstring($client, 'PLUGIN_LBF_NO_RESULTS'), type => 'text' }];
@@ -6227,21 +6464,21 @@ sub _buildAllLanding {
     }
     return _buildAllWeekItems(
         [ map { +{ week_start => $_, releases => $bucket{$_}, prepared => 1 } } @order ],
-        $client, $headers);
+        $client, $headers, $isWeb);
 }
 
 # Top-level/home landing from DB::feedWeeks. These descriptors carry no payloads;
 # selecting a row asks API for that exact week, so root navigation never thaws the
 # whole All Releases feed merely to discover which folders exist.
 sub _buildAllSummaryLanding {
-    my ($weeks, $client, $headers) = @_;
+    my ($weeks, $client, $headers, $isWeb) = @_;
     $weeks = [] unless ref $weeks eq 'ARRAY';
     my @valid = grep {
         ref $_ eq 'HASH'
             && defined $_->{week_start}
             && ($_->{week_start} eq '' || $_->{week_start} =~ /^\d{4}-\d{2}-\d{2}$/)
     } @$weeks;
-    return _buildAllWeekItems(\@valid, $client, $headers);
+    return _buildAllWeekItems(\@valid, $client, $headers, $isWeb);
 }
 
 # ---------------------------------------------------------------------------
@@ -6295,12 +6532,12 @@ sub _renderSlots {
 }
 
 sub _buildWeekly {
-    my ($groups, $client, $headers, $meta) = @_;
+    my ($groups, $client, $headers, $meta, $isWeb) = @_;
 
     # Real header item for Material (bold, accent colour); plain text elsewhere.
     # _headerType() => 'header-basic' on Material 6.4.3+ (a non-actionable divider,
     # so the week row isn't drawn as a grid card), else the long-standing 'header'.
-    my $divType = $headers ? _headerType() : 'text';
+    my $divType = _divType($headers, $isWeb);
 
     my @items;
     for my $g (@$groups) {
@@ -6312,7 +6549,7 @@ sub _buildWeekly {
         # disabled for the whole page). With every item carrying an image the grid
         # view stays available, and the header still renders as a divider. (Same
         # approach as the Listen to Later plugin.)
-        my $hdr = { name => _weekLabel($client, $ws), type => $divType, image => ICON };
+        my $hdr = { name => _divName(_weekLabel($client, $ws), $headers, $isWeb), type => $divType, _divImage($headers, $isWeb) };
         if ($headers) {
             # Material renders header items with a drill action that XMLBrowser
             # forces on (can't be suppressed); rather than lead nowhere, point it
@@ -6520,8 +6757,8 @@ sub _buildReleaseItem {
         $item->{type} = 'link';
         $item->{itemActions}{items} = _releaseAction(_releaseTarget($rel), undef, 'items');
         $item->{url}  = sub {
-            my ($client, $callback) = @_;
-            _releaseDetail($rel, $client, $callback);
+            my ($client, $callback, $a) = @_;
+            _releaseDetail($rel, $client, $callback, undef, _webSkin($a));
         };
     }
 
@@ -6535,8 +6772,11 @@ sub _buildReleaseItem {
 # ---------------------------------------------------------------------------
 sub _releaseDetail {
     _noteBrowse();
-    my ($rel, $client, $callback, $useH) = @_;
-    $useH = 1 unless defined $useH;   # the detail page is a Material experience by default
+    my ($rel, $client, $callback, $useH, $isWeb) = @_;
+    # The detail page is a Material experience by default — but NOT on a web skin,
+    # which has no 'header' type. A coderef caller passes only $isWeb (from the args
+    # _webify re-stamps), since `features` never reaches a sub-feed.
+    $useH = $isWeb ? 0 : 1 unless defined $useH;
 
     my $mbid   = $rel->{release_mbid}       // '';
     my $rgMbid = $rel->{release_group_mbid} // '';
@@ -6626,13 +6866,13 @@ sub _releaseDetail {
                     $bcSearched ? 'PLUGIN_LBF_SEARCH_BANDCAMP_RETRY' : 'PLUGIN_LBF_SEARCH_BANDCAMP', undef, $year, $rel);
             }
         }
-        my @artistRows = _artistRows($rel, $client, $artistImg, $bio);
-        my @albumRows  = (_albumRows($rel, $client), @genreItems, @trackItems, _mbLink($rel, $client));
+        my @artistRows = _artistRows($rel, $client, $artistImg, $bio, $isWeb);
+        my @albumRows  = (_albumRows($rel, $client), @genreItems, @trackItems, _mbLink($rel, $client, $isWeb));
 
         my @items;
-        push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_STREAMING', $useH, \@streamRows, 1), @streamRows if @streamRows;
-        push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_ARTIST',    $useH, \@artistRows, 1), @artistRows if @artistRows;
-        push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_ALBUM',     $useH, \@albumRows,  1), @albumRows  if @albumRows;
+        push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_STREAMING', $useH, \@streamRows, 1, $isWeb), @streamRows if @streamRows;
+        push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_ARTIST',    $useH, \@artistRows, 1, $isWeb), @artistRows if @artistRows;
+        push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_ALBUM',     $useH, \@albumRows,  1, $isWeb), @albumRows  if @albumRows;
 
         # cachetime => 0: don't let Material cache the detail page per-player, or a
         # Refresh (which clears the server-side play-via cache) — and any change to
@@ -6642,11 +6882,11 @@ sub _releaseDetail {
     };
 
     unless ($pending) {
-        my @artistRows = _artistRows($rel, $client, undef, undef);
-        my @albumRows  = (_albumRows($rel, $client), _mbLink($rel, $client));
+        my @artistRows = _artistRows($rel, $client, undef, undef, $isWeb);
+        my @albumRows  = (_albumRows($rel, $client), _mbLink($rel, $client, $isWeb));
         my @items;
-        push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_ARTIST', $useH, \@artistRows, 1), @artistRows if @artistRows;
-        push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_ALBUM',  $useH, \@albumRows,  1), @albumRows  if @albumRows;
+        push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_ARTIST', $useH, \@artistRows, 1, $isWeb), @artistRows if @artistRows;
+        push @items, _sectionHeader($client, 'PLUGIN_LBF_SECTION_ALBUM',  $useH, \@albumRows,  1, $isWeb), @albumRows  if @albumRows;
         $callback->({ items => \@items, cachetime => 0 });   # see cachetime note above
         return;
     }
@@ -6673,6 +6913,9 @@ sub _releaseDetail {
             push @streamItems, {
                 name        => cstring($client, 'PLUGIN_LBF_REFRESH'),
                 type        => 'link',
+                # Default gives an image-less link row a placeholder album cover;
+                # the web skins get the refresh icon every other Refresh row carries.
+                ($isWeb ? (image => MENU_REFRESH) : ()),
                 nextWindow  => 'refresh',
                 passthrough => [{}],
                 url         => sub {
@@ -6815,7 +7058,7 @@ sub _releaseDetail {
 # thumbnail when available), an optional biography, and the Block-this-artist
 # action (or a "blocked" note). The photo/bio are fetched async in _releaseDetail.
 sub _artistRows {
-    my ($rel, $client, $img, $bio) = @_;
+    my ($rel, $client, $img, $bio, $isWeb) = @_;
 
     my $artist = _pickValue($rel, 'artist_credit_name', 'artist_name', 'artist') || 'Unknown Artist';
 
@@ -6871,14 +7114,17 @@ sub _artistRows {
                 ? { name => $paras[0]{text}, type => 'text' }
                 : _proseBlock(@paras);
         }
-        elsif ($pageState{ _cid($client) }{$bkey}) {
+        elsif ($isWeb || $pageState{ _cid($client) }{$bkey}) {
             # ONE ROW PER PARAGRAPH, matching Discography — see _bioParagraphs for
             # why the split is what it is, and _proseBlock for why the row shape is
             # Discography's. NB this is N rows, not a fixed two: expanding grows the
             # page, so the bio still counts toward LMS_MAX_NON_SCROLLER_ITEMS.
             push @rows, _proseBlock(@paras);
+            # A WEB SKIN gets the whole bio and NO toggle (Simon, 2026-09-16): an
+            # in-place reveal has to reload the page there, and the Streaming rows
+            # above — the point of the page — do not move, so full text costs nothing.
             push @rows, _bioToggleRow($client, $bkey, 0,
-                cstring($client, 'PLUGIN_LBF_SHOW_LESS'), PAGE_LESS);
+                cstring($client, 'PLUGIN_LBF_SHOW_LESS'), PAGE_LESS) unless $isWeb;
         }
         else {
             # TRIM ONLY WHEN THERE IS SOMETHING TO TRIM. The body can be shorter
@@ -6907,6 +7153,7 @@ sub _artistRows {
             push @rows, {
                 name  => cstring($client, 'PLUGIN_LBF_BLOCK_ARTIST'),
                 type  => 'link',
+                ($isWeb ? (image => MENU_BLOCK) : ()),   # web only: else a placeholder cover
                 url   => sub {
                     my ($c, $cb) = @_;
                     my $name = _blockArtist($rel);
@@ -6948,13 +7195,14 @@ sub _albumRows {
 # the tracklist). Only built for a well-formed release MBID (it lands in a
 # Material-rendered href). Returns an empty list otherwise.
 sub _mbLink {
-    my ($rel, $client) = @_;
+    my ($rel, $client, $isWeb) = @_;
     my $mbid = $rel->{release_mbid} // '';
     return () unless $mbid =~ /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     return {
         name    => cstring($client, 'PLUGIN_LBF_VIEW_ON_MB'),
         type    => 'link',
         weblink => "https://musicbrainz.org/release/$mbid",
+        ($isWeb ? (image => MENU_WEBLINK) : ()),   # else Default draws a placeholder cover
     };
 }
 
@@ -8394,14 +8642,14 @@ sub _searchBandcampOnly {
                 image       => $art // $bc->{icon},
                 passthrough => [{}],
                 url         => sub {
-                    my ($c, $cb2) = @_;
+                    my ($c, $cb2, $a) = @_;
                     _pinBandcamp($id, [$cand]);
                     $cache->remove($markerKey);
                     $log->info("manual bandcamp: pinned '$name'");
                     # Re-render the album page as a fresh drill so it shows the match
                     # AND arms Add to Listen Later / Wish List. Fall back to an empty
                     # pop if we somehow have no release (shouldn't happen).
-                    $rel ? _releaseDetail($rel, $c, $cb2) : $cb2->({ items => [] });
+                    $rel ? _releaseDetail($rel, $c, $cb2, undef, _webSkin($a)) : $cb2->({ items => [] });
                 },
             };
         }

@@ -426,6 +426,7 @@ for my $c (qw(COVER_SPECS COVER_WARM_MAX COVER_WARM_TTL
   # map pass while ignoring the sort entirely. 'artist' reverses; the default
   # date mode is the identity, which is its real contract on an already-sorted list.
   use constant ICON => 'lbf-icon.png';   # the divider's image; not asserted here
+  use constant WEB_DIV_STYLE => '';       # web-skin heading style; t_webskin.pl owns it
   sub _headerType { 'header-basic' }
   sub _weekLabel  { "W/C $_[1]" }
   sub _buildReleaseItem { { name => $_[0]{caa_release_mbid} } }
@@ -436,7 +437,7 @@ for my $c (qw(COVER_SPECS COVER_WARM_MAX COVER_WARM_TTL
   }
 }
 
-for my $name (qw(_coverWeekOrder _weekStart _orderCoverQueue _focusReleaseCovers _renderSlots _weekGroups _buildWeekly _warmCovers _coverGroupsFor _coverTick _coverMaybeEnd _coverLaunch
+for my $name (qw(_coverWeekOrder _weekStart _orderCoverQueue _focusReleaseCovers _renderSlots _weekGroups _buildWeekly _divType _divImage _divName _escHtml _warmCovers _coverGroupsFor _coverTick _coverMaybeEnd _coverLaunch
                  _noteBrowse _coverLimit _coverArmRestart _coverArmResume)) {
     my $body = grab($bsrc, $name);
     eval "package T; use Time::HiRes (); use Time::Local (); our (\$cache, \$prefs, \$log); "

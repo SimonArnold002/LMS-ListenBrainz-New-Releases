@@ -213,6 +213,7 @@ my $PREFS = T::Prefs->new;
     sub _buildingRow     { return { items => [ { name => 'PLUGIN_LBF_BUILDING', type => 'text' } ], cachetime => 0 } }
     sub _wantHeaders     { 1 }
     sub _sectionHeader   { my ($c, $tok) = @_; return { name => $tok, type => 'text', _hdr => 1 } }
+    sub _webListHead     { return () }
     sub _trendingAlbumRow{ my ($c, $a) = @_; return { name => $a->{title}, type => 'link' } }
     sub _trendingSortToggle { return { name => 'sorted-by', type => 'link' } }
     sub _trendingResolvedKey { return 'lbf:trending:resolved:test' }

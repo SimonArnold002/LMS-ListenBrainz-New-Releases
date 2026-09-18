@@ -41,7 +41,7 @@ sub grab { my $n = shift; $src =~ /^(sub \Q$n\E \{.*?^\})/ms or die $n; $1 }
     package Plugins::ListenBrainzFreshReleases::API;
     sub coverArtUrl { 'cover' }
 }
-my $code = join "\n", map { grab($_) } qw(_releaseTarget _releaseAction _weekAction _weekTargetFeed _bindReleaseContext _releaseTargetFeed _buildReleaseItem);
+my $code = join "\n", map { grab($_) } qw(_releaseTarget _releaseAction _weekAction _weekTargetFeed _bindReleaseContext _releaseTargetFeed _buildReleaseItem _webSkin);
 eval "package T; no strict 'vars'; $code"; die $@ if $@;
 my @rels = map { { release_mbid => "id-$_", release_name => "Album $_", artist => 'Artist' } } 0..89;
 my @rows = map { T::_buildReleaseItem($_, undef) } @rels;

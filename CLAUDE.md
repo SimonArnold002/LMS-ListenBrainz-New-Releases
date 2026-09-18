@@ -310,6 +310,7 @@ because line numbers rot on the next edit.
 | THREE pumps touch Spotify — `_resolveTracks`(`paced`), `_detailPriorityBusy` (DetailWarm queue ONLY), and `_buildAlbumsData`'s trending-albums gate (paced 1.0.4). "The album side is `_detailPriorityBusy`" was WRONG and hid the third for two rounds | A2 | `THREE PUMPS TOUCH SPOTIFY, NOT TWO` |
 | 1.0.3 review — THREE findings. (1) the trending-albums streaming gate was unpaced — `$warm` off `$onPending`, plus `$pumping`/`$gapTimer`, built 1.0.4; a paced gate times out into the 1h TTL: ACCEPTED, Simon's call. (2) `_buildingEnd` freed a NEWER pass's flag after the backstop expired — the flag is now a token. (3) a synchronous Spotify refusal skipped the paced gap — the resolvers signal it, `$holding` stops the loop. (2)+(3) built 1.0.5. **Round CLOSED by Simon 2026-09-16.** Closes those defects only | C | `CLOSED IN THE 1.0.3 REVIEW —` |
 | 1.0.5 review (round four on the back-off): NO findings — records what was checked across all three fixes, and one PRE-1.0.4 observation deliberately not reported (the albums gate files a refused album as a drop). Round CLOSED by Simon; pushed to `dev`. Not a suppression of the fix code | C | `CLOSED IN THE 1.0.5 REVIEW —` |
+| Web-skin dividers: Default/Classic get `type=>'textarea'` with NO image (`_webSkin`/`_divType`/`_divImage`); Classic losing row covers is the ACCEPTED cost; Material untouched. 1.0.8: `_webify` pass (feedMode = web on the itemActions CLI route, text rows -> textarea, `_webBounce` for nextWindow) | A2 | `WEB-SKIN DIVIDERS ARE TEXTAREA` |
 
 **Two standing rules that kill most repeat findings:**
 
@@ -560,6 +561,99 @@ always with its reason, and those stay suppressed. The code a fix added is new a
   re-ran a complete warm. Simon's server stops all services for a 06:30 backup — the 05:00-05:30
   warm lands before it and the restart skips through the gate. If margin before a backup is ever
   wanted, shrink `WARM_JITTER_MAX`; do not move the hour ahead of ListenBrainz's job.
+
+- **WEB-SKIN DIVIDERS ARE TEXTAREA, WITH NO IMAGE — `_webSkin`, `_divType`, `_divImage`, and every divider
+  constructor (`_sectionHeader`, `_buildWeekly`, `_dayDivider`, `_recommenderDivider`). Simon, 2026-09-16
+  (BUILT as 1.0.7, sha `06f010d6…`, NOT installed, not verified live; 1.0.6 carried the divider type only).** On Default and Classic a divider used to be `type=>'text'` + the `_svg.png`:
+  Default's `xmlbrowser.html` turns a text row with an image into a thumbnail whose label LINKS TO THE PNG,
+  and Classic (EN template) flips the WHOLE PAGE into gallery mode on one such row. `textarea` renders as a
+  bare line ahead of the row wrapper in both. Decisions, each with a disprovable reason:
+  - **Gated on `isWeb` alone.** `Slim::Web::XMLBrowser` passes it at every level (top feed and every coderef
+    sub-feed); `Slim::Control::XMLBrowser` (Material, Jive, iPeng, home shelves) passes `isControl` and has
+    zero occurrences of `isWeb` (9.1 source). So Material cannot reach the change and non-web controllers keep
+    `text` + image. No passthrough is needed — unlike `features`, `isWeb` reaches sub-feeds.
+  - **Not plain `text` without the image.** Default's list mode then substitutes `music/0/cover.jpg`, a
+    placeholder cover on every divider.
+  - **CLASSIC LOSES ITS ROW COVERS, AND THAT IS ACCEPTED.** The divider was the ONLY thing setting Classic's
+    `hasArtwork` (its test is `item.image && item.type == 'text'`), and Classic's list mode draws no per-row
+    artwork (checked against another plugin's Classic feed). Do not report the missing covers as a regression,
+    and do not "fix" it by putting an image back on a divider.
+  - **The setup-required message row** follows the same rule (it had the same text+image shape).
+  - **Web dividers are STYLED headings (1.0.7).** A textarea's name is printed through Template Toolkit's
+    `html_line_break` alone (no `| html`), so `_divName` wraps the ESCAPED label in a bold ListenBrainz-navy
+    block over an orange rule (`WEB_DIV_STYLE`). Ordinary rows are `| html`-escaped, so the Options ACTION rows
+    cannot be bolded without a custom `web.type => 'htmltemplate'` that re-implements each skin's link — not
+    done; they are told apart by their icons instead. A recommender name is ListenBrainz data: `_escHtml` is
+    REQUIRED, not defensive.
+  - **The 11 `lbf-*_MTL_icon_*.png` files are real icons now (1.0.7)** — Google Material SVGs rendered in
+    `#353070` on transparent. They were opaque grey/white squares or pale-grey glyphs that vanished on the old
+    skins' light backgrounds. Material never shows them: its bundle drops `image` for any `MTL_icon_` name
+    (`a.image=a.svg=void 0,a.icon=…`, verified in the live `material.min.js`).
+  - **Pilot for the fleet:** PFR, LL and Discography get the same pattern once this is verified live; Search
+    Hub is excluded (on hold). Guard: `tools/t_webskin.pl` (50; anti-tested four ways, each mutant failing only
+    its own checks). `t_coverwarm.pl` / `t_release_target.pl` now lift the new helpers.
+  - **1.0.7 LIVE TEST (Simon, 2026-09-16): only the top level and New Releases for You were right.** Measured
+    over HTTP the same day, three causes, all fixed in **1.0.8** (sha `81f7a964…`, BUILT, NOT installed):
+    1. **A web skin does not always come through `Slim::Web::XMLBrowser`'s own path.** A row with an
+       `itemActions => { items => … }` command (every All Releases week, every release tile) is fetched as a
+       CLI request through `Slim::Control::XMLBrowser` — `isControl`, no `isWeb` — so the week's Options
+       divider and the whole release page rendered the Material fallback. That request carries `feedMode:1`
+       (the web renderer wants the RAW feed; Material sends it only for its own favourites list), so
+       `_webSkin` now accepts it; below the top of such a request sub-feeds get `params => $feed->{query}`
+       and lose even that, so `_webify` re-stamps `isWeb` on every coderef it wraps.
+       **"`isWeb` reaches every level" above is TRUE ONLY for the coderef route.**
+    2. **Plain `type=>'text'` rows are wrong on the web skins too:** `| html`-escaped (the expanded bio showed
+       its `<div style=…>` as code) and, in Default, each given a placeholder cover (25 blank album icons on
+       one release page). `_webify` turns them into `textarea` — escaped text, or our own prose markup minus
+       Material's 72px indent, with a text row's image drawn INLINE via the image proxy.
+    3. **The web skins have no `nextWindow`.** Read more / Show more / sort / family / genre / Refresh opened a
+       sub-page repeating the unchanged list. An EMPTY answer from a `refresh`/`parent` row is replaced by
+       `_webBounce`: a textarea whose script `location.replace`s the index with its last 1 (or 2) segments
+       dropped, plus a `lbfr` cache-buster the feed never reads. Both skins browse in a FRAME, so the script
+       runs. A NON-empty answer (the Bandcamp picker) is shown as before.
+    **One pass, one place:** `topLevel` wraps its callback in `_webify` only when `_webSkin` is true, and
+    every child `url` is wrapped recursively, so no feed builder knows about it. Material is untouched by
+    construction (no `isWeb`, no `feedMode`). `t_webskin.pl` 63 -> **91**, §6; anti-tested six ways
+    (feedMode ignored 1, isWeb not re-stamped 2, no bounce 4, topLevel not wrapped 2, no escaping 2,
+    parent bounced one level 1). All 38 suites exit 0; both sync checks 0; zip diffs identical to the tree.
+    **Still ACCEPTED:** Options action rows are told apart by icon only; link rows with no image still get
+    Default's placeholder cover (only TEXT rows are converted).
+  - **1.0.9 (sha `c2886d35…`, BUILT, NOT installed) — a web heading CLOSES an Options block** (`_webListHead`):
+    on Classic (no row covers) the Options rows ran straight into the releases. An All Releases week gets its
+    `W/C` label, Trending Albums its own title, between Options and the list; For You already has week headings
+    there. Web only — Material and plain controllers get no extra row, so item positions do not move; the
+    week's cover-focus slot map counts the row. `t_webskin.pl` 91 -> **96**, anti-tested 2 ways.
+  - **1.0.10 (sha `fe044979…`, BUILT, NOT installed) — NO Show more / Show all / Show less on a web skin**
+    (`_pageSection`'s 4th arg). Measured live on 1.0.9: the tap worked (the week grew 37 -> 68 rows) but Default
+    pages every list at 50 (`itemsPerPage`), so the new releases AND the next paging rows landed on the skin's
+    page 2 and the tap read as dead. A web skin now gets the whole week and the skin's own pager; the week's genre
+    peek is widened to `GENRE_WARM_MAX` to match (rows past 150 would otherwise lose their genre). Material is
+    unchanged, and a Material page state does not shorten the web list. **Do not re-add paging rows for the web
+    skins** — their pager is the paging. `t_webskin.pl` 96 -> **101**, anti-tested.
+  - **1.0.11 (sha `73af8ae0…`, BUILT, NOT installed) — the release page on a web skin.** (1) **The artist bio
+    is shown IN FULL with no Read more / Show less** (`_artistRows` 5th arg) — Simon: the reveal has the same
+    reload problem as paging, and the Streaming rows (the point of the page) sit above it, so full text costs
+    nothing. (2) **Refresh streaming matches** and **View on MusicBrainz** had no image, so Default drew its
+    placeholder album cover; on a web skin they now carry `MENU_REFRESH` and the new `MENU_WEBLINK`
+    (`lbf-weblink_MTL_icon_open_in_new.png`, drawn like the other eleven). Material is unchanged — no toggle
+    change, no new images there. `t_bioreveal.pl` 135 -> **145**, anti-tested three ways.
+  - **1.0.12 (sha `25b6018a…`) — INSTALLED 2026-09-16 (`plugin_version` 1.0.12) and SIGNED OFF by Simon on
+    Default/Classic ("caught them all in this repo"). The LBF pilot is DONE; the port to PFR / LL / DSC is next.** (1) **Block this artist** gets `MENU_BLOCK`
+    (`lbf-block_MTL_icon_block.png`) on a web skin, closing the last placeholder-cover row on the release page.
+    (2) **The Settings row opened a Material-styled page from Default/Classic**: `/plugins/…/settings.html` is served
+    in the SERVER's default skin. The skins print a weblink verbatim and Classic's (EN) template has no
+    webroot-prefixed `link`, so the web row uses the RELATIVE `WEB_SETTINGS_LINK`
+    (`../ListenBrainzFreshReleases/settings.html`), which resolves inside whichever skin's browse page is open
+    (verified: `/Default/…` and `/Classic/…` serve that skin's CSS). Material keeps the absolute path.
+    `t_bioreveal.pl` 145 -> **147**, `t_webskin.pl` 101 -> **104**; both anti-tested.
+  - **1.0.13 (sha `5a40a972…`) — BUILT, NOT installed.** `_releaseDetail`'s remaining call sites now
+    pass `_webSkin($a)` (they had been left on the old positional arg, so a web skin reaching those
+    routes fell back to the Material rendering). `_proseBlock` now tags every row it emits with
+    `_lbfProse => 1`, and `_webifyItem` checks that tag rather than sniffing the row's `name` for a
+    leading `"<div style='"` — the sniff broke the moment a prose block's own text happened to start
+    with that string. Dev build: version-only bump, no cache family touched (this is render-shape
+    only, not a stored decision), `README.html`/`CHANGELOG.md` deliberately untouched per the standing
+    rule. `t_loads.pl` 20/20 against the working tree; `perl -c` clean via that harness.
 
 ### B. KNOWN-OPEN AND ACCEPTED — do not re-report as new
 

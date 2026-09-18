@@ -88,6 +88,7 @@ my $API = $ENV{LBF_API} || File::Spec->catfile($ROOT, 'ListenBrainzFreshReleases
     sub _blockedSet       { return {} }
     sub PAGE_MORE         { 'MORE_ICON' }
     sub PAGE_LESS         { 'LESS_ICON' }
+    sub MENU_BLOCK        { 'BLOCK_ICON' }
     sub BIO_PREVIEW       { $BIO_PREVIEW }
     sub BIO_SENTENCES_PER_PARA { 3 }
     sub BIO_WRAP_MAX_COL       { 100 }
@@ -665,6 +666,40 @@ print "\n18. AN INLINE LINK KEEPS ITS WORDS\n";
     ok(scalar($disc =~ /Album One \(1994\)/),   'a link-PLUS-TEXT item survives');
     ok(scalar($disc =~ /Album Two \(1996\)/),   '...including one after it');
     ok(scalar($disc !~ /Album Three/),          '...while the link-only item still goes');
+}
+
+print "\nWEB SKINS — the whole bio, no toggle (Simon, 2026-09-16)\n";
+{
+    # A reveal there has to reload the page, so a web skin gets the full text at once.
+    %T::pageState = ();
+    my @r = T::_artistRows($REL, $CLIENT, undef, $LONG, 1);
+    my @n = names(@r);
+    ok(scalar(grep { $_ eq $T::STR{PLUGIN_LBF_READ_MORE} } @n) == 0, 'web: no "Read more" row');
+    ok(scalar(grep { $_ eq $T::STR{PLUGIN_LBF_SHOW_LESS} } @n) == 0, 'web: no "Show less" row either');
+    ok(scalar(grep { /Gamma paragraph/ } @n) >= 1,                   'web: the FULL bio is there');
+    ok(scalar(grep { /\x{2026}$/ } @n) == 0,                          'web: no ellipsised preview');
+    ok(!exists $T::pageState{ $CLIENT->{id} },                        'web: no reveal state is written');
+    my @m = T::_artistRows($REL, $CLIENT, undef, $LONG, 0);
+    ok(scalar(grep { ($_->{name} // '') eq $T::STR{PLUGIN_LBF_READ_MORE} } @m) == 1,
+       'CONTROL: Material still gets the collapsed preview and "Read more"');
+}
+
+print "\nWEB SKINS — the detail page's image-less link rows get icons\n";
+{
+    my $mb = grab($src, '_mbLink');
+    ok(scalar($mb =~ /\$isWeb\s*\?\s*\(image\s*=>\s*MENU_WEBLINK\)\s*:\s*\(\)/),
+       'View on MusicBrainz carries the weblink icon on a web skin only');
+    ok(scalar($src =~ /_mbLink\(\$rel,\s*\$client,\s*\$isWeb\)/),       '... and the detail page passes the flag');
+    ok(scalar($src =~ /'PLUGIN_LBF_REFRESH'\),\s*type\s*=>\s*'link',(?:\s*#[^\n]*)*\s*\(\$isWeb\s*\?\s*\(image\s*=>\s*MENU_REFRESH\)/),
+       'Refresh streaming matches carries the refresh icon on a web skin only');
+    my ($file) = $src =~ /use constant MENU_WEBLINK\s*=>\s*IMG_BASE\s*\.\s*'([^']+)'/;
+    (my $dir = $BROWSE) =~ s{Browse\.pm$}{HTML/EN/plugins/ListenBrainzFreshReleases/html/images/};
+    ok(defined $file && -s "$dir$file", 'the weblink icon file ships in the plugin');
+    my $ar = grab($src, '_artistRows');
+    ok(scalar($ar =~ /'PLUGIN_LBF_BLOCK_ARTIST'\),\s*type\s*=>\s*'link',\s*\(\$isWeb\s*\?\s*\(image\s*=>\s*MENU_BLOCK\)\s*:\s*\(\)\)/),
+       'Block this artist carries the block icon on a web skin only');
+    my ($bf) = $src =~ /use constant MENU_BLOCK\s*=>\s*IMG_BASE\s*\.\s*'([^']+)'/;
+    ok(defined $bf && -s "$dir$bf", 'the block icon file ships in the plugin');
 }
 
 printf "\n%d passed, %d failed\n", $pass, $fail;

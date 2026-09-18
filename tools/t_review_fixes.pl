@@ -325,6 +325,8 @@ sub _buildReleaseItem {
     return { name => \$name, type => 'link' };
 }
 sub _sectionHeader { { name => \$_[1], type => 'header' } }
+sub _webSkin { 0 }
+sub _webListHead { () }
 sub _viewToggle { ({ name => 'PLUGIN_LBF_SHOWING', type => 'link' }) }
 sub _sortToggle { ({ name => 'PLUGIN_LBF_SORTED_BY', type => 'link' }) }
 sub _refreshItem { ({ name => 'PLUGIN_LBF_REFRESH_FEED', type => 'link' }) }
