@@ -407,6 +407,21 @@ LMS 9.1 source, so the next round need not re-derive them:
   `DbArtworkCache(…, 'imgproxy', 86400*30)`. Its `get` goes through `DbCache::get`, which returns
   undef for an expired row, which is the same answer `getImage` acts on. `->new` returns the proxy's
   own singleton, so there is no second handle and no root change.
+- **LIVE RESULT, 1.0.17 (2026-09-21 afternoon, after the startup re-seed):** 6,543 reads in
+  0.39s, mean 0.047ms, max 2.1ms, so a direct proxy-cache read is cheap. **Key form PINNED: decoded.**
+  Every hit was under `proxy_decoded`; `proxy_bare` and `proxy_slash` were both 0.
+  | label | paths/spec | proxy present | LIE |
+  |---|---|---|---|
+  | all releases | 611 | 602 / 605 / 605 (150/300/600) | 9 / 6 / 6 |
+  | for you | 17 | 16 each | 1 each |
+  | trending month + year | 49 + 50 | all | 0 |
+
+  24 lying paths of ~2,200 (~1%), about 9 releases, 0 `proxy_no_marker`. All six sampled lying
+  releases answer **200** at CAA today (front-1200, ~2.5s via two redirects), so they are not "no
+  art": the marker was written on a failed fetch (placeholder) or outlived its entry. **Caveat: this
+  is the cache AFTER a day of browsing and the imgload probes, which fetched the cold covers.
+  Monday 05:00's state is not measurable now.** To measure it, re-run `coverstats` tomorrow
+  morning BEFORE anyone browses.
 - **The cap population.** `coverStats` caps each label at `COVER_WARM_MAX` raw releases in input
   order. The warm caps on releases WITH a cover URL, after `_coverWeekOrder`. These differ only past
   2,000 releases, and the largest filtered feed live is 1,776 (All Releases, warmstats 2026-09-21).
