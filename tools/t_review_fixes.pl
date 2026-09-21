@@ -449,8 +449,9 @@ print "-" x 74, "\n";
     # CLI handler, which is the least observed place in the plugin. So count the
     # call sites and require each to have a definition backing it.
     my $calls = () = ($plugin_src =~ /addResult\('plugin_version', version\(\)\)/g);
-    ok($calls == 3,
-       "all three CLI reports name the running build  ->  $calls");
+    # FOUR since 1.0.16 (coverstats joined diag, cachestats and warmstats).
+    ok($calls == 4,
+       "all four CLI reports name the running build  ->  $calls");
 
     # ONE CONTROL, because the three assertions above would all pass just as
     # happily against a file the harness failed to load.

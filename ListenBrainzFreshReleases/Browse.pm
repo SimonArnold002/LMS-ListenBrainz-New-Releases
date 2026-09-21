@@ -4167,6 +4167,123 @@ sub _coverNoteWarm {
     return;
 }
 
+# ---------------------------------------------------------------------------
+# ["lbf","coverstats"] — DIAGNOSTIC ONLY (1.0.16). Does what the warm's markers claim
+# match what the image proxy actually holds?
+#
+# The live warmstats after 1.0.15 said "1059 already warm" while a _150x150_f pass
+# over the same view still met cold covers and placeholders. This answers that from
+# inside the process, per path: marker present? proxy entry present? The lie count
+# (marker yes, proxy no) is the premise the rework rests on, so it is measured before
+# anything is built on it.
+#
+# CHANGES NOTHING THE WARM READS: it walks the last list each non-focus warm was
+# handed (a REFERENCE, no copy), builds paths the way _coverGroupsFor does but never
+# touches %coverQueued or %coverWarm, and writes no store.
+#
+# CHUNKED, because a synchronous run is ~9,000 reads in one turn of the event loop
+# — the hazard class this whole investigation is about.
+#
+# BOTH KEY FORMS: proxiedImage returns `/imageproxy/…`, while the web server hands
+# getImage the path without its leading slash, and getImage caches under the path it
+# was given. Which one the cache really uses is reported, not assumed.
+my %coverDiagSource;   # label => the last release arrayref a non-focus warm was handed
+# Releases checked per turn of the event loop.
+use constant COVER_DIAG_CHUNK => 25;
+
+sub coverStats {
+    my ($cb) = @_;
+    my $proxyCache = eval {
+        require Slim::Web::ImageProxy;
+        Slim::Web::ImageProxy::Cache->new();
+    };
+    unless ($proxyCache && Slim::Web::ImageProxy->can('proxiedImage')) {
+        $cb->({ error => 'image proxy cache unavailable: ' . ($@ || 'no proxiedImage') });
+        return;
+    }
+
+    my @work;   # [label, release]
+    for my $label (sort keys %coverDiagSource) {
+        my $rels = $coverDiagSource{$label};
+        next unless ref $rels eq 'ARRAY';
+        my $n = 0;
+        for my $rel (@$rels) {
+            last if ++$n > COVER_WARM_MAX;
+            push @work, [ $label, $rel ];
+        }
+    }
+
+    my %rep;         # label => spec => counters
+    my @lies;
+    my %seen;        # a release in two feeds is counted under both labels, once each
+    my ($reads, $readMs, $readMax) = (0, 0, 0);
+    my $t0 = Time::HiRes::time();
+
+    my $timed = sub {
+        my ($key) = @_;
+        my $s = Time::HiRes::time();
+        my $v = eval { $proxyCache->get($key) };
+        my $ms = (Time::HiRes::time() - $s) * 1000;
+        $reads++;
+        $readMs += $ms;
+        $readMax = $ms if $ms > $readMax;
+        return $v ? 1 : 0;
+    };
+
+    my $step;
+    $step = sub {
+        my $ok = eval {
+            my $budget = COVER_DIAG_CHUNK;
+            while (@work && $budget-- > 0) {
+                my ($label, $rel) = @{ shift @work };
+                my $url = Plugins::ListenBrainzFreshReleases::API->coverArtUrl($rel) or next;
+                my $base = Slim::Web::ImageProxy::proxiedImage($url) or next;
+                next if $seen{"$label\0$base"}++;
+                for my $spec (@{ +COVER_SPECS }) {
+                    (my $path = $base) =~ s/(\.\w+)$/$spec$1/ or next;
+                    my $c = $rep{$label}{$spec} ||= {
+                        paths => 0, marker => 0, proxy_slash => 0, proxy_bare => 0,
+                        proxy => 0, lie => 0, proxy_no_marker => 0, memo => 0 };
+                    $c->{paths}++;
+                    my $key = Plugins::ListenBrainzFreshReleases::DB::kver('lbf:imgwarm:') . $path;
+                    my $marker = eval { $cache->get($key) } ? 1 : 0;
+                    (my $bare = $path) =~ s{^/}{};
+                    my $slash = $timed->($path);
+                    my $noSlash = $timed->($bare);
+                    my $proxy = ($slash || $noSlash) ? 1 : 0;
+                    $c->{marker}++          if $marker;
+                    $c->{proxy_slash}++     if $slash;
+                    $c->{proxy_bare}++      if $noSlash;
+                    $c->{proxy}++           if $proxy;
+                    $c->{memo}++            if $coverWarm{$key} && $coverWarm{$key} > time();
+                    $c->{proxy_no_marker}++ if $proxy && !$marker;
+                    if ($marker && !$proxy) {
+                        $c->{lie}++;
+                        push @lies, "$label $spec $path" if @lies < 10;
+                    }
+                }
+            }
+            1;
+        };
+        if (!$ok || !@work) {
+            undef $step;   # break the self-reference
+            $cb->({
+                error    => $ok ? '' : ($@ || 'unknown error'),
+                labels   => \%rep,
+                lies     => \@lies,
+                reads    => $reads,
+                read_ms_mean => $reads ? sprintf('%.3f', $readMs / $reads) : '0',
+                read_ms_max  => sprintf('%.3f', $readMax),
+                elapsed  => sprintf('%.2f', Time::HiRes::time() - $t0),
+            });
+            return;
+        }
+        Slim::Utils::Timers::setTimer(undef, Time::HiRes::time(), $step);
+    };
+    $step->();
+    return;
+}
+
 sub _orderCoverQueue {
     @coverQueue = sort {
         my ($ap, $bp) = ($a->[0][0], $b->[0][0]);
@@ -4334,6 +4451,9 @@ sub _warmCovers {
 
     return unless $prefs->get('warm_covers') // 1;
     return unless ref $releases eq 'ARRAY' && @$releases;
+
+    # Diagnostic only (coverStats): remember what a whole-feed warm was handed.
+    $coverDiagSource{$label} = $releases unless $focus;
 
     $releases = _coverWeekOrder($releases) if !$focus && $label eq 'all releases';
     my ($groups, $seen) = _coverGroupsFor($releases, COVER_WARM_MAX, $focus || $label eq 'all releases') or return;

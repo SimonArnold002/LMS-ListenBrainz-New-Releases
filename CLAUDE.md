@@ -242,7 +242,7 @@ slower warm for ~30s, then recovery; and a track missed during a storm should ca
 than a spent attempt. Read the log as `log.txt?lines=20000` — the bare `log.txt` returns a tiny
 window. To provoke a storm: set every other service's priority to 0 and force a cold re-resolve.
 
-## Cover re-walk memo — working tree, 2026-09-21 (built 1.0.15, NOT installed, NOT reviewed)
+## Cover re-walk memo — 1.0.15, 2026-09-21 (INSTALLED + VERIFIED LIVE, reviewed twice, pushed to dev d7f39d4)
 
 **The report (Monday 2026-09-21, the week rollover):** views appeared to rebuild, a red Material
 error on a sort change, players vanished — "it is loading the entire cache". With `debug_log` on,
@@ -298,6 +298,108 @@ logged activity was For You served from the store, a playlist cache hit, then th
 cover re-queue five times in 6s — the loop this fix removes. Limit of that capture: `dbg` records
 the warm/resolve timeline only, not per-walk render timings. The 08:15 iPhone episode predates
 debug and is not captured.
+
+## Slow artwork / server freezes — investigation 2026-09-21 (NO code changed, fix NOT designed)
+
+**Why this is here:** after 1.0.15, covers that are NOT yet in the proxy cache still load slowly
+and each one briefly freezes the whole server. Simon: find the cause before designing anything,
+and redesign this part of the code **very carefully**. **Standing constraint (Simon): the fix must
+work on DEFAULT LMS settings — we cannot expect users to change server settings.**
+
+**Measured live (http://192.168.1.234:9000, the same morning):**
+- Cached renditions serve fast: 322 `_600x600_f` covers in 0.32s wall, median 6ms, worst `version`
+  ping 5ms.
+- **Every UNCACHED Cover Art Archive / archive.org fetch freezes the event loop ~0.4–0.6s**
+  (range 5–680ms), seen as a `version` ping stalled for the same window. Uncached renditions in
+  bulk stack these up: one `_150x150_f` pass had a worst image of 16.6s and a worst ping of 4.8s.
+- Stall START is ~one round trip after the TLS connect completes; stall END is when the response
+  headers are read.
+
+**Root cause — strongly supported by source + timing, NOT directly observed (UNVERIFIED):** an
+LMS core bug on its HTTPS read path, not in LBF. `SimpleAsyncHTTP` → `Net::HTTPS::NB` →
+`Net::HTTP::Methods::my_readline` (LMS `CPAN/Net/HTTP/Methods.pm`). When the first `sysread`
+after the handshake consumes a NON-application TLS record (most likely a TLS 1.3 post-handshake
+session ticket, which archive.org sends), it returns EAGAIN; `my_readline` does `redo READ`,
+which calls `can_read`, a **blocking `select($fbits, undef, undef, $timeout)`** with the socket
+timeout. The whole single-threaded server then waits there until the response arrives. The
+`Net::HTTPS::NB` "Multi-read" guard that is meant to keep the read non-blocking only trips on the
+SECOND read of a turn, so this first-read path escapes it. Any LMS HTTPS fetch to such a host is
+exposed; LBF is the one that makes many of them in a row. **Direct proof still to get** (Simon
+runs it; we do not ssh): `strace -tt -e trace=select,pselect6 -p <LMS pid>` during a cold cover
+fetch should show a long single `select` on the archive.org socket.
+
+**§A3-style: DISPROVEN during this investigation — do not re-derive:**
+| belief | killed by |
+|---|---|
+| HQPlayer / another plugin causes the freezes | Simon: not connected to that player; freezes track CAA fetches only |
+| LMS resizes in-process, decoding the 1200px source | `useLocalImageproxy=2`; the `gdresized` daemon is running and resizes in 4–40ms, async |
+| source image size drives the stall | small and large sources stall alike |
+| DNS lookups | stall starts after connect, not before |
+| TLS in general | other TLS 1.3 hosts (e.g. postman-echo) do not stall; hosts that send a post-handshake record (archive.org, httpbingo) do |
+| "loading from cache isn't optimised" | cached renditions: median 6ms, no stall |
+| the Monday episodes were not captured with debug | they were: Mac, 08:43 (see the cover re-walk memo section) |
+
+**How the others do artwork (checked 2026-09-21):**
+- **Community API** (api.lms-community.org) hosts NO images. `/album/<t>/<a>/cover` and
+  `/discography` `cover` fields are full-size `http://archive.org/download/mbid-…` originals
+  (which redirect to https); `/artist/<n>/picture` is a Deezer CDN URL. So any plugin proxying its
+  album covers has the same archive.org exposure.
+- **MusicArtistInfo (MAI)** never bulk-downloads images inside the server:
+  - Pre-caching lives in the **scanner process** (`Importer2.pm`), with **synchronous**
+    `LWP::UserAgent` (`Common::getUA` is scanner-only), gated on the server pref
+    `precacheArtwork`, library artists only.
+  - It writes the finished renditions **straight into the image-proxy cache** for every
+    `Slim::Music::Artwork::getResizeSpecs()` size:
+    `Slim::Utils::ImageResizer->resize($file, "imageproxy/mai/artist/$id/image_", $specs, undef, $imgProxyCache)`,
+    with its own `DbArtworkCache(undef,'imgproxy', time()+86400*90)`, and skips an artist whose
+    last spec is already cached.
+  - In the server it only registers an image-proxy handler (`mai/artist/…` → `_artworkUrl`) that
+    resolves a URL asynchronously (local file, else the cached `getArtistPhoto`, mostly Deezer)
+    and lets the proxy fetch lazily when a client asks.
+  - Its sources are mostly fast CDNs; the Cover Art Archive appears only in the user-opened
+    album-covers list.
+- This is the pattern the Lyrion music-service-plugin guide describes: async HTTP in the server,
+  sync HTTP only in the importer/scanner, be kind to services, cache without being aggressive.
+- **LBF is the outlier.** `_warmCovers` does bulk cover downloads INSIDE the server, via a local
+  GET to its own image proxy, which fetches from archive.org on the event loop. That is exactly
+  the path the LMS bug freezes. The page-focused warm (`_focusReleaseCovers`) does the same while
+  the user is browsing.
+
+**LBF-side items that are OPEN (pre-date 1.0.15; belong to the redesign):**
+1. A marker is written when the proxy answers 200 with its `radio.png` placeholder
+   (`_artworkError` answers 200 + `Cache-Control: no-cache`, a real image gets `max-age=31536000`),
+   so a failed cover can be recorded as warm.
+2. A marker written on a proxy cache HIT can outlive the proxy entry by up to 25d
+   (`DbCache::get` never extends expiry; see the 1.0.15 review above).
+3. Uncached fetches run while the user is browsing, which is when a freeze hurts most.
+
+**Carry-over ideas, NOT agreed (listed so a redesign starts from them, not from scratch):**
+- keep bulk downloads OFF the server event loop entirely. The scanner route MAI uses does not fit
+  as-is: LBF's content is a daily feed, not the library, and the scanner only runs on rescans.
+- write renditions directly into the image-proxy cache instead of HTTP-to-self + markers, so there
+  is no marker to lie (removes items 1 and 2);
+- prefer a fast-CDN cover where one is already known (a matched streaming album), CAA as fallback;
+- report the `my_readline` blocking-`select` bug upstream to Lyrion.
+
+**Step 0 of the rework — built 1.0.16, 2026-09-21 (DIAGNOSTIC ONLY, NOT installed, NOT reviewed).**
+Plan: `~/.claude/plans/gleaming-growing-dusk.md` (Step 0 proves the premise, Step 1 makes the warm
+truthful via the proxy's own cache, Step 2 keeps cold fetches off the browse path). 1.0.16 adds
+`["lbf","coverstats"]` (Plugin.pm `_cliCoverStats`, Browse.pm `coverStats`): per label and spec,
+`marker` / `proxy` / `proxy_slash` / `proxy_bare` / `lie` (marker, no proxy entry) /
+`proxy_no_marker` / `memo`, up to 10 lying paths, and proxy read timing. It walks the last list each
+non-focus `_warmCovers` was handed (`%coverDiagSource`, by reference), 25 releases per turn, and
+changes no warm state: no queue, no memo, no store write, no fetch. Tests: `t_coverwarm.pl` §4g (155 → 173),
+anti-tested by five mutants (memoises, slash-only key, no chunking, focus overwrites the source,
+lie inverted), each failing its own assertion. `t_review_fixes.pl`'s CLI-reports-name-the-build count
+went 3 → 4 on purpose. All 38 suites exit 0; `singleflight_sync_check` 0. **Gate before Step 1:** a
+non-zero `lie` on a warmed view, and the key form pinned (`proxy_bare` vs `proxy_slash`).
+
+**Care points for the redesign (Simon: "be very careful"):** the carriers are every caller of
+`_warmCovers` / `_coverGroupsFor` (For You, All Releases weeks, Material home shelves, web skins,
+`_fanOutFeed`, `_warmTrendingCovers`); the proxy cache key is the WHOLE PATH including the spec
+suffix; the rendition specs a client asks for vary by skin and device; `t_coverwarm.pl` (155) pins
+the current contract and must be rewritten deliberately, not patched to pass; nothing here may
+depend on a non-default server pref.
 
 ## Review Ledger — READ THIS BEFORE REPORTING ANY FINDING
 
@@ -367,6 +469,7 @@ because line numbers rot on the next edit.
 | THREE pumps touch Spotify — `_resolveTracks`(`paced`), `_detailPriorityBusy` (DetailWarm queue ONLY), and `_buildAlbumsData`'s trending-albums gate (paced 1.0.4). "The album side is `_detailPriorityBusy`" was WRONG and hid the third for two rounds | A2 | `THREE PUMPS TOUCH SPOTIFY, NOT TWO` |
 | 1.0.3 review — THREE findings. (1) the trending-albums streaming gate was unpaced — `$warm` off `$onPending`, plus `$pumping`/`$gapTimer`, built 1.0.4; a paced gate times out into the 1h TTL: ACCEPTED, Simon's call. (2) `_buildingEnd` freed a NEWER pass's flag after the backstop expired — the flag is now a token. (3) a synchronous Spotify refusal skipped the paced gap — the resolvers signal it, `$holding` stops the loop. (2)+(3) built 1.0.5. **Round CLOSED by Simon 2026-09-16.** Closes those defects only | C | `CLOSED IN THE 1.0.3 REVIEW —` |
 | 1.0.5 review (round four on the back-off): NO findings — records what was checked across all three fixes, and one PRE-1.0.4 observation deliberately not reported (the albums gate files a refused album as a drop). Round CLOSED by Simon; pushed to `dev`. Not a suppression of the fix code | C | `CLOSED IN THE 1.0.5 REVIEW —` |
+| Slow artwork / server freezes: cold archive.org cover fetch freezes LMS ~0.5s. Cause = LMS `Net::HTTP::Methods::my_readline` blocking `select` (UNVERIFIED, strace pending), NOT resizing/size/DNS/TLS-in-general/HQPlayer. Markers-on-placeholder + marker-outlives-entry are OPEN, owned by the artwork redesign | B | `SLOW ARTWORK / SERVER FREEZES` |
 | Web-skin dividers: Default/Classic get `type=>'textarea'` with NO image (`_webSkin`/`_divType`/`_divImage`); Classic losing row covers is the ACCEPTED cost; Material untouched. 1.0.8: `_webify` pass (feedMode = web on the itemActions CLI route, text rows -> textarea, `_webBounce` for nextWindow) | A2 | `WEB-SKIN DIVIDERS ARE TEXTAREA` |
 
 **Two standing rules that kill most repeat findings:**
@@ -714,6 +817,7 @@ always with its reason, and those stay suppressed. The code a fix added is new a
 
 ### B. KNOWN-OPEN AND ACCEPTED — do not re-report as new
 
+- **SLOW ARTWORK / SERVER FREEZES — `_warmCovers`, `_focusReleaseCovers`, `_coverLaunch`, `lbf:imgwarm:`, `COVER_WARM_TTL`.** OPEN, under investigation 2026-09-21 (Simon). A marker can be written on the proxy's 200 placeholder, a marker written on a cache hit can outlive the proxy entry by up to 25d, and uncached archive.org fetches run on the event loop while the user browses (each freezes LMS ~0.5s via an LMS core HTTPS read bug). Known, not missed: the fix is a deliberate redesign, not a patch. Full write-up: the "Slow artwork / server freezes — investigation" section above the ledger.
 - ~~**`matcher_sync_check.py` exits 1.**~~ **CLOSED in 0.9.194** — the hold was
   lifted 2026-08-29 and the sync is done (PFR 0.9.33, LBF 0.9.194). **The check
   now exits 0, and a non-zero exit is a real finding again.** Search Hub is

@@ -478,6 +478,54 @@ sub initPlugin {
     Slim::Control::Request::addDispatch(
         ['lbf', 'warmstats'], [0, 1, 0, \&_cliWarmStats]);
 
+    # Cover truth report (DIAGNOSTIC, 1.0.16) —
+    #     ["lbf","coverstats"]
+    # Do the warm's `lbf:imgwarm:` markers agree with what the LMS image proxy
+    # actually holds? See Browse::coverStats. Flags [0,1,1]: no player, a query, and
+    # ASYNC — it reads thousands of rows, chunked across turns of the event loop.
+    Slim::Control::Request::addDispatch(
+        ['lbf', 'coverstats'], [0, 1, 1, \&_cliCoverStats]);
+
+    return;
+}
+
+sub _cliCoverStats {
+    my $request = shift;
+    $request->setStatusProcessing();
+    my $answered = 0;
+    # Guarded like _cliDiag: the request is already processing, so a die before the
+    # callback would leave the caller hanging with no answer.
+    my $ok = eval {
+        Plugins::ListenBrainzFreshReleases::Browse::coverStats(sub {
+            my ($r) = @_;
+            $request->addResult('plugin_version', version());
+            $request->addResult($_, $r->{$_} // '')
+                for qw(error reads read_ms_mean read_ms_max elapsed);
+            my $i = 0;
+            my $labels = $r->{labels} || {};
+            for my $label (sort keys %$labels) {
+                for my $spec (sort keys %{ $labels->{$label} }) {
+                    my $c = $labels->{$label}{$spec};
+                    $request->addResultLoop('specs_loop', $i, 'label', $label);
+                    $request->addResultLoop('specs_loop', $i, 'spec',  $spec);
+                    $request->addResultLoop('specs_loop', $i, $_, $c->{$_})
+                        for qw(paths marker proxy proxy_slash proxy_bare lie proxy_no_marker memo);
+                    $i++;
+                }
+            }
+            $request->addResult('count', $i);
+            my $j = 0;
+            $request->addResultLoop('lies_loop', $j++, 'path', $_) for @{ $r->{lies} || [] };
+            $answered = 1;
+            $request->setStatusDone();
+        });
+        1;
+    };
+    unless ($ok || $answered) {
+        $request->addResult('error', $@ || 'unknown error');
+        $request->addResult('count', 0);
+        $request->setStatusDone();
+    }
     return;
 }
 

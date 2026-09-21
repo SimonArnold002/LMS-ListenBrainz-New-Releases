@@ -349,6 +349,14 @@ section('2. a warmed path is byte-identical to what Material will request');
     }
 }
 $INC{'Slim/Web/ImageProxy.pm'} = __FILE__;
+# The image proxy's own cache, for coverStats (1.0.16). A singleton like LMS's.
+# Reads are COUNTED so a test can see which key form was asked for.
+{
+    package Slim::Web::ImageProxy::Cache;
+    our %D; our @GETS; my $one;
+    sub new { $one ||= bless {}, shift }
+    sub get { my ($s, $k) = @_; push @GETS, $k; return $D{$k} }
+}
 
 our @HTTP_GETS;         # every url the runner asked for, in order
 our $HTTP_MODE = 'ok';  # 'ok' | '401'
@@ -407,7 +415,7 @@ my $LOG   = T::Log->new;
 # below would then be checking a spec nothing asks for.
 for my $c (qw(COVER_SPECS COVER_WARM_MAX COVER_WARM_TTL COVER_WARM_MEMO
               COVER_CONCURRENCY_IDLE COVER_CONCURRENCY_BROWSING COVER_BROWSE_QUIET
-              COVER_SCAN_BUDGET)) {
+              COVER_SCAN_BUDGET COVER_DIAG_CHUNK)) {
     my ($line) = $bsrc =~ /^(use constant \Q$c\E\s*=>.*?;)$/ms
         or die "no constant $c in Browse.pm\n";
     eval "package T; $line 1;" or die "eval $c: $@";
@@ -439,12 +447,13 @@ for my $c (qw(COVER_SPECS COVER_WARM_MAX COVER_WARM_TTL COVER_WARM_MEMO
 }
 
 for my $name (qw(_coverWeekOrder _weekStart _orderCoverQueue _focusReleaseCovers _renderSlots _weekGroups _buildWeekly _divType _divImage _divName _escHtml _warmCovers _coverGroupsFor _coverTick _coverMaybeEnd _coverLaunch
-                 _coverKnownWarm _coverNoteWarm _noteBrowse _coverLimit _coverArmRestart _coverArmResume)) {
+                 _coverKnownWarm _coverNoteWarm _noteBrowse _coverLimit _coverArmRestart _coverArmResume
+                 coverStats)) {
     my $body = grab($bsrc, $name);
     eval "package T; use Time::HiRes (); use Time::Local (); our (\$cache, \$prefs, \$log); "
        . "our (\@coverQueue, \%coverQueued, \%coverWarm, \$coverWarmSwept, \%_WEEK_START, \%coverRank, \%coverFocus, \%coverReveal, \$coverSequence, \$coverRunning, \$coverPumping, \$coverStageOpen, "
        . "\$coverFetched, \$coverSkipped, \$coverGroups, \$coverPeak, "
-       . "\$lastBrowseAt, \$coverRestartArmed, \$coverResumeArmed); $body 1;"
+       . "\$lastBrowseAt, \$coverRestartArmed, \$coverResumeArmed, \%coverDiagSource); $body 1;"
         or die "eval $name: $@";
 }
 
@@ -1481,6 +1490,86 @@ section('4f. a re-walk of a warm view queues nothing and reads nothing');
     # cache HIT can already outlive the entry (Browse.pm, COVER_WARM_TTL — open, 2026-09-21).
     ok(T::COVER_WARM_MEMO() <= 30 * 86400 - T::COVER_WARM_TTL(),
        'COVER_WARM_MEMO is no longer than the proxy-vs-marker TTL gap (a bound, not a guarantee)');
+    reset_world();
+}
+
+# ==========================================================================
+section('4g. coverstats (1.0.16): a DIAGNOSTIC that reads, and changes nothing');
+# ==========================================================================
+# The premise of the cover rework is that `lbf:imgwarm:` markers claim covers the
+# LMS image proxy does not hold. coverStats measures that live. It must COUNT
+# correctly (a marker with no proxy entry is a lie) and it must leave the warm
+# exactly as it found it — a diagnostic that queued, memoised or wrote would change
+# the very state it reports on.
+{
+    reset_world();
+    %Slim::Web::ImageProxy::Cache::D = (); @Slim::Web::ImageProxy::Cache::GETS = ();
+    my @feed = map { rel() } 1 .. 4;
+    T::_warmCovers(\@feed, 'all releases');
+    ok(($T::coverDiagSource{'all releases'} // 0) == \@feed,
+       'a whole-feed warm records the list it was handed (by reference, no copy)');
+    my $focusList = [ rel() ];
+    T::_warmCovers($focusList, 'all releases', 1);
+    ok(($T::coverDiagSource{'all releases'} // 0) == \@feed,
+       '...and a focus warm does NOT replace it (a page is not the feed)');
+
+    # r1 and r4: marker + proxy (under the key WITHOUT the leading slash); r2: marker,
+    # no proxy (the lie); r3: neither. TWO honest releases against ONE lying one, so a
+    # check that counted marker-AND-proxy as the lie would get a different number.
+    my @specs = @{ T::COVER_SPECS() };
+    my @base = map { Slim::Web::ImageProxy::proxiedImage(
+                         Plugins::ListenBrainzFreshReleases::API->coverArtUrl($_)) } @feed;
+    my @paths = map { my $b = $_; [ map { (my $p = $b) =~ s/(\.\w+)$/$_$1/; $p } @specs ] } @base;
+    for my $p (@{ $paths[0] }, @{ $paths[3] }) {
+        $CACHE->{d}{ $IMGWARM . $p } = 1;
+        (my $bare = $p) =~ s{^/}{};
+        $Slim::Web::ImageProxy::Cache::D{$bare} = { data_ref => \'x' };
+    }
+    $CACHE->{d}{ $IMGWARM . $_ } = 1 for @{ $paths[1] };
+
+    my %queued = %T::coverQueued; my %memo = %T::coverWarm;
+    my $qlen = scalar @T::coverQueue; my $gets = scalar @HTTP_GETS;
+    my $sets = scalar @{ $CACHE->{sets} };
+
+    my $res;
+    T::coverStats(sub { $res = shift });
+    my $turns = 0;
+    $turns++ while !$res && Slim::Utils::Timers::fire_all() && $turns < 50;
+    ok($res && !$res->{error}, 'coverStats answers without error');
+    my %sum;
+    for my $spec (keys %{ $res->{labels}{'all releases'} || {} }) {
+        my $c = $res->{labels}{'all releases'}{$spec};
+        $sum{$_} += $c->{$_} for keys %$c;
+    }
+    is_count($sum{paths}, 4 * @specs, 'every spec of every release is checked');
+    is_count($sum{marker}, 3 * @specs, 'markers counted');
+    is_count($sum{proxy}, 2 * @specs, 'proxy entries counted');
+    is_count($sum{proxy_bare}, 2 * @specs, '...found under the key WITHOUT the leading slash');
+    is_count($sum{proxy_slash}, 0, '...and not under the slashed key (both forms are tried)');
+    is_count($sum{lie}, scalar @specs, 'a marker with no proxy entry is counted as a LIE');
+    is_count(scalar @{ $res->{lies} }, scalar @specs, '...and listed as an example');
+    is_count($sum{proxy_no_marker}, 0, 'no proxy-without-marker in this world');
+
+    ok(join(',', sort keys %T::coverQueued) eq join(',', sort keys %queued),
+       'coverStats queued nothing (%coverQueued unchanged)');
+    ok(join(',', map { "$_=$T::coverWarm{$_}" } sort keys %T::coverWarm)
+       eq join(',', map { "$_=$memo{$_}" } sort keys %memo),
+       '...memoised nothing (%coverWarm unchanged)');
+    is_count(scalar @T::coverQueue, $qlen, '...left the cover queue as it was');
+    is_count(scalar @HTTP_GETS, $gets, '...fetched nothing');
+    is_count(scalar @{ $CACHE->{sets} }, $sets, '...and wrote no store row');
+
+    # CHUNKED: a feed bigger than one chunk must not be answered in a single turn.
+    reset_world();
+    my @big = map { rel() } 1 .. (T::COVER_DIAG_CHUNK() * 2 + 1);
+    $T::coverDiagSource{'big'} = \@big;
+    my $done;
+    T::coverStats(sub { $done = shift });
+    ok(!$done, 'a feed larger than COVER_DIAG_CHUNK is not answered in one turn');
+    my $t = 0;
+    $t++ while !$done && Slim::Utils::Timers::fire_all() && $t < 50;
+    ok($done && $t >= 2, "...it yields between chunks and then answers ($t extra turns)");
+    delete $T::coverDiagSource{'big'};
     reset_world();
 }
 
