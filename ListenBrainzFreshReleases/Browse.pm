@@ -4068,11 +4068,30 @@ use constant COVER_BROWSE_QUIET         => 20;   # seconds of quiet before "idle
 # only true while covers are cold. This is what makes it true the rest of the time.
 use constant COVER_SCAN_BUDGET          => 25;   # groups dequeued per turn
 
-# How long we remember that a path is warm. Deliberately UNDER the proxy's own 30d
-# (Slim::Web::ImageProxy::Cache is constructed with 86400*30), so our marker can
-# never outlive the entry it describes. Note this is the PLUGIN's store, whose
-# expires_at is always absolute — the LMS 30-day TTL cliff does not apply here.
+# How long we remember that a path is warm. UNDER the proxy's own 30d
+# (Slim::Web::ImageProxy::Cache is constructed with 86400*30), which keeps the marker
+# inside the entry's life ONLY WHEN OUR REQUEST IS WHAT STORED IT. It does not bound
+# the marker in general: the proxy's expiry is fixed when the entry is written and a
+# read never extends it (Slim::Utils::DbCache::get), so a warm request that HITS an
+# entry stored earlier — by a user's browse, or an earlier pass — writes a fresh 25d
+# marker against an entry that may expire tomorrow. The marker can then claim a cover
+# for up to COVER_WARM_TTL after the proxy dropped it; the cost is a cold fetch on the
+# next render, not a broken image. Known and open (2026-09-21 review), not fixed here.
+# Note this is the PLUGIN's store, whose expires_at is always absolute — the LMS
+# 30-day TTL cliff does not apply here.
 use constant COVER_WARM_TTL => 25 * 86400;
+# How long THIS PROCESS trusts a marker it has already read (or written), so a
+# re-walk of a warm view queues nothing and reads nothing. Without it every walk of
+# a Show-all week re-queued every release and re-read every marker — 322 releases,
+# 966 reads, on each sort tap and each refresh (live, 2026-09-21, the "it is loading
+# the entire cache" report). The markers were right; asking them again was the waste.
+#
+# KEPT INSIDE THE GAP BETWEEN THE TWO TTLs (30d - COVER_WARM_TTL = 5d). That gap only
+# protects a marker whose own request stored the proxy entry; for one written on a
+# cache HIT the marker itself can already outlive the entry (see COVER_WARM_TTL), and
+# the memo inherits that — it adds at most COVER_WARM_MEMO on top, never a guarantee.
+# A day is short, and the daily restart clears it anyway.
+use constant COVER_WARM_MEMO => 86400;
 
 # A queue element is a GROUP: every proxy path for ONE release, which after the
 # ladder collapse all resolve to the same source URL. They are launched together
@@ -4083,6 +4102,8 @@ my %coverFocus;      # path => rank in the most recently requested view
 my $coverSequence = 0;
 my %coverReveal;     # player/view => previous reveal count
 my %coverQueued;     # $path => 1 while queued, so two feeds can't queue it twice
+my %coverWarm;       # marker KEY => epoch until which this process trusts it (COVER_WARM_MEMO)
+my $coverWarmSwept = 0;
 my $coverRunning = 0;   # RELEASES currently in flight (0 .. _coverLimit())
 my $coverPumping = 0;   # re-entrancy guard on _coverTick's launch loop
 my $lastBrowseAt = 0;   # epoch of the last browse tap — see _noteBrowse
@@ -4118,6 +4139,32 @@ sub _coverWeekOrder {
     push @out, sort { ($b->{release_date} // '') cmp ($a->{release_date} // '') }
                     @{ $buckets{$_} } for @weeks;
     return \@out;
+}
+
+# KEYED BY THE MARKER KEY, NOT THE PATH: the key carries the `lbf:imgwarm:` family
+# version, so a version bump misses here exactly as it misses in the store, with no
+# second invalidation to remember. Reads NO store — a hash lookup is what makes it
+# safe on the render path, where _coverGroupsFor must stay allocation-only.
+sub _coverKnownWarm {
+    my ($key) = @_;
+    my $until = $coverWarm{$key} or return 0;
+    return 1 if $until > time();
+    delete $coverWarm{$key};
+    return 0;
+}
+
+# Recorded only on EVIDENCE: a marker read that answered, or a download the proxy
+# completed. Never on a failure, so a cover that could not be fetched is still
+# retried by the next walk. Swept at most hourly, so a long uptime cannot let
+# expired entries accumulate.
+sub _coverNoteWarm {
+    my ($key) = @_;
+    my $now = time();
+    $coverWarm{$key} = $now + COVER_WARM_MEMO;
+    return if $now - $coverWarmSwept < 3600;
+    $coverWarmSwept = $now;
+    delete @coverWarm{ grep { $coverWarm{$_} <= $now } keys %coverWarm };
+    return;
 }
 
 sub _orderCoverQueue {
@@ -4300,6 +4347,10 @@ sub _warmCovers {
             my $base = Slim::Web::ImageProxy::proxiedImage($url) or next;
             for my $spec (@{ +COVER_SPECS }) {
                 (my $path = $base) =~ s/(\.\w+)$/$spec$1/ or next;
+                # A path known warm will never be queued, so ranking it only grows
+                # %coverFocus with entries no launch will ever clear.
+                next if _coverKnownWarm(
+                    Plugins::ListenBrainzFreshReleases::DB::kver('lbf:imgwarm:') . $path);
                 $coverFocus{$path} = $rank++;
             }
         }
@@ -4384,6 +4435,9 @@ sub _coverGroupsFor {
             # (the `.png` -> `.jpg` switch being exactly that), and there was no
             # way to retire the stale ones short of the dev wipe.
             my $key = Plugins::ListenBrainzFreshReleases::DB::kver('lbf:imgwarm:') . $path;
+            # Already proven warm in this process: queue nothing, so the launcher
+            # reads nothing. An in-memory lookup, so this stays allocation-only.
+            next if _coverKnownWarm($key);
             $coverQueued{$path} = 1;
             push @grp, [ $path, $key ];
         }
@@ -4588,6 +4642,7 @@ sub _coverLaunch {
     for my $ent (@$group) {
         my ($path, $key) = @$ent;
         if (eval { $cache->get($key) }) {
+            _coverNoteWarm($key);
             delete $coverQueued{$path};
             delete $coverRank{$path};
             delete $coverFocus{$path};
@@ -4644,6 +4699,7 @@ sub _coverLaunch {
                     # returns the resized image is in its cache, and we throw our copy
                     # away.
                     eval { $cache->set($key, 1, COVER_WARM_TTL); 1 };
+                    _coverNoteWarm($key);
                     $done->();
                 },
                 sub {

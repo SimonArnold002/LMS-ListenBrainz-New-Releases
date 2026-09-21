@@ -377,8 +377,9 @@ $INC{'Slim/Networking/SimpleAsyncHTTP.pm'} = __FILE__;
 sub http_settle {
     my $req = shift @HTTP_PENDING or return 0;
     my ($s) = @$req;
-    if ($HTTP_MODE eq '401') { $s->{err}->(undef, 'Failed to open socket: 401 Authorization Required') }
-    else                     { $s->{done}->(bless {}, 'T::Resp') }
+    if    ($HTTP_MODE eq '401')  { $s->{err}->(undef, 'Failed to open socket: 401 Authorization Required') }
+    elsif ($HTTP_MODE eq 'fail') { $s->{err}->(undef, 'Timed out waiting for data') }
+    else                         { $s->{done}->(bless {}, 'T::Resp') }
     return 1;
 }
 
@@ -404,7 +405,7 @@ my $LOG   = T::Log->new;
 # Constants are EVALLED FROM SOURCE, not restated: a hand-copied COVER_SPECS
 # would drift the moment the shipped list changed, and every path assertion
 # below would then be checking a spec nothing asks for.
-for my $c (qw(COVER_SPECS COVER_WARM_MAX COVER_WARM_TTL
+for my $c (qw(COVER_SPECS COVER_WARM_MAX COVER_WARM_TTL COVER_WARM_MEMO
               COVER_CONCURRENCY_IDLE COVER_CONCURRENCY_BROWSING COVER_BROWSE_QUIET
               COVER_SCAN_BUDGET)) {
     my ($line) = $bsrc =~ /^(use constant \Q$c\E\s*=>.*?;)$/ms
@@ -438,10 +439,10 @@ for my $c (qw(COVER_SPECS COVER_WARM_MAX COVER_WARM_TTL
 }
 
 for my $name (qw(_coverWeekOrder _weekStart _orderCoverQueue _focusReleaseCovers _renderSlots _weekGroups _buildWeekly _divType _divImage _divName _escHtml _warmCovers _coverGroupsFor _coverTick _coverMaybeEnd _coverLaunch
-                 _noteBrowse _coverLimit _coverArmRestart _coverArmResume)) {
+                 _coverKnownWarm _coverNoteWarm _noteBrowse _coverLimit _coverArmRestart _coverArmResume)) {
     my $body = grab($bsrc, $name);
     eval "package T; use Time::HiRes (); use Time::Local (); our (\$cache, \$prefs, \$log); "
-       . "our (\@coverQueue, \%coverQueued, \%_WEEK_START, \%coverRank, \%coverFocus, \%coverReveal, \$coverSequence, \$coverRunning, \$coverPumping, \$coverStageOpen, "
+       . "our (\@coverQueue, \%coverQueued, \%coverWarm, \$coverWarmSwept, \%_WEEK_START, \%coverRank, \%coverFocus, \%coverReveal, \$coverSequence, \$coverRunning, \$coverPumping, \$coverStageOpen, "
        . "\$coverFetched, \$coverSkipped, \$coverGroups, \$coverPeak, "
        . "\$lastBrowseAt, \$coverRestartArmed, \$coverResumeArmed); $body 1;"
         or die "eval $name: $@";
@@ -452,6 +453,7 @@ sub reset_world {
     no warnings 'once';
     @T::coverQueue  = ();
     %T::coverQueued = ();
+    %T::coverWarm = (); $T::coverWarmSwept = 0;
     %T::coverRank = (); %T::coverFocus = (); %T::coverReveal = (); $T::coverSequence = 0;
     $T::coverRunning = 0;
     $T::coverPumping = 0;
@@ -1359,5 +1361,128 @@ reset_world();
 }
 
 # ==========================================================================
+
+# ==========================================================================
+section('4f. a re-walk of a warm view queues nothing and reads nothing');
+# ==========================================================================
+# THE REPORT (live, 2026-09-21): every walk of a Show-all All Releases week logged
+# "covers - all releases queued 322 release(s) of 322" — five times in six seconds
+# while the user changed the sort — and each one re-read all 966 markers. Nothing
+# was downloaded (the stage note said "966 already warm"); asking again WAS the
+# waste. %coverWarm remembers, per process, what a marker read or a completed
+# download has already proven.
+#
+# COUNTED AT BOTH PLACES THE WORK CAN LIVE, per the 0.9.196 lesson: the builder
+# (queue length) AND the pump (store reads during the drain). A fix that stopped
+# queueing but moved the reads elsewhere would pass a queue-only assertion.
+{
+    reset_world(); $n = 0;
+    local $T::coverPumping = 0;
+    my @rows = map { rel() } 1 .. 30;
+    my $flat = sub { T::_renderSlots(5, [{ rels => $_[0] }]) };
+    my $specs = scalar @{ +T::COVER_SPECS() };
+    for my $r (@rows) {
+        my $base = Slim::Web::ImageProxy::proxiedImage(
+            Plugins::ListenBrainzFreshReleases::API->coverArtUrl($r));
+        for my $spec (@{ +T::COVER_SPECS() }) {
+            (my $path = $base) =~ s/(\.\w+)$/$spec$1/;
+            $CACHE->set($IMGWARM . $path, 1, 100);
+        }
+    }
+    my $drain = sub {
+        my $g = 0;
+        T::_coverTick();
+        while ((@T::coverQueue || @HTTP_PENDING || @Slim::Utils::Timers::PENDING) && ++$g < 500) {
+            http_settle() while @HTTP_PENDING;
+            Slim::Utils::Timers::fire_all();
+        }
+    };
+
+    # First walk: the markers MUST be read — it is the only way to learn they are warm.
+    $CACHE->{gets} = 0;
+    T::_focusReleaseCovers(undef, 'arweek:test', $flat->(\@rows), {});
+    $drain->();
+    is_count($CACHE->{gets}, 30 * $specs, 'first walk of a warm week reads each marker once');
+    is_count(scalar(@HTTP_GETS), 0, '...and downloads nothing');
+
+    # Second walk — the sort tap. Nothing to queue, nothing to read.
+    $CACHE->{gets} = 0;
+    T::_focusReleaseCovers(undef, 'arweek:test', $flat->(\@rows), {});
+    is_count(scalar(@T::coverQueue), 0, 'a re-walk of the same warm week queues NOTHING');
+    $drain->();
+    is_count($CACHE->{gets}, 0, '...and reads the store ZERO times, builder and pump together');
+    is_count(scalar(@HTTP_GETS), 0, '...and downloads nothing');
+    is_count(scalar(keys %T::coverFocus), 0, '...and leaves no focus entries behind for warm paths');
+
+    # CONTROL: a genuinely cold release arriving in the same week is still warmed.
+    my $cold = rel();
+    $CACHE->{gets} = 0;
+    T::_focusReleaseCovers(undef, 'arweek:test', $flat->([ @rows, $cold ]), {});
+    # Asserted on requests IN FLIGHT, not queue length: a cold group launches in the
+    # same turn it is queued, so the queue is already empty when this runs.
+    is_count(scalar(@HTTP_PENDING), $specs, 'CONTROL: a cold release in the re-walk is still launched');
+    $drain->();
+    is_count(scalar(@HTTP_GETS), $specs, '...and fetched, every spec');
+    is_count($CACHE->{gets}, $specs, '...reading only its own markers');
+
+    # ...and a completed download is itself proof: the next walk skips it too.
+    @HTTP_GETS = ();
+    $CACHE->{gets} = 0;
+    T::_focusReleaseCovers(undef, 'arweek:test', $flat->([ @rows, $cold ]), {});
+    is_count(scalar(@T::coverQueue), 0, 'a cover this process just downloaded is not re-queued');
+    $drain->();
+    is_count($CACHE->{gets} + scalar(@HTTP_GETS), 0, '...no read, no request');
+    reset_world();
+}
+{
+    # A FAILED download is NOT evidence. The next walk must try again.
+    reset_world(); $n = 0;
+    my $r = rel();
+    $HTTP_MODE = 'fail';
+    T::_warmCovers([ $r ], 'all releases', 1);
+    http_settle() while @HTTP_PENDING;
+    Slim::Utils::Timers::fire_all();
+    is_count(scalar(keys %T::coverWarm), 0, 'a failed download records nothing as warm');
+    $HTTP_MODE = 'ok'; @HTTP_GETS = ();
+    T::_warmCovers([ $r ], 'all releases', 1);
+    is_count(scalar(@HTTP_GETS), scalar(@{ +T::COVER_SPECS() }), '...so the next walk fetches it again');
+    reset_world();
+}
+{
+    # THE MEMO EXPIRES, and a key-family bump misses it exactly as it misses the store.
+    reset_world(); $n = 0;
+    my $r = rel();
+    T::_warmCovers([ $r ], 'all releases', 1);
+    http_settle() while @HTTP_PENDING;
+    my $specs = scalar @{ +T::COVER_SPECS() };
+    is_count(scalar(keys %T::coverWarm), $specs, 'a completed download remembers every spec');
+
+    $T::coverWarm{$_} = time() - 1 for keys %T::coverWarm;
+    @HTTP_GETS = (); $CACHE->{gets} = 0;
+    T::_warmCovers([ $r ], 'all releases', 1);
+    is_count($CACHE->{gets}, $specs, 'an EXPIRED memo is not trusted: the markers are read again');
+    is_count(scalar(@HTTP_GETS), 0, '...and, the markers being warm, nothing is fetched');
+
+    $KEY_VERSIONS{'lbf:imgwarm:'}++;
+    @HTTP_GETS = ();
+    T::_warmCovers([ $r ], 'all releases', 1);
+    is_count(scalar(@HTTP_GETS), $specs, 'a key-family bump misses the memo too, so the cover is re-warmed');
+    $KEY_VERSIONS{'lbf:imgwarm:'}--;
+    reset_world();
+}
+{
+    # BOUNDED: the hourly sweep drops expired entries instead of growing for ever.
+    reset_world();
+    $T::coverWarm{"stale$_"} = time() - 10 for 1 .. 50;
+    $T::coverWarmSwept = 0;
+    T::_coverNoteWarm('fresh');
+    is_count(scalar(keys %T::coverWarm), 1, 'the sweep drops expired entries, keeping the fresh one');
+    # A BOUND ON THE MEMO ONLY, not a freshness guarantee: a marker written on a proxy
+    # cache HIT can already outlive the entry (Browse.pm, COVER_WARM_TTL — open, 2026-09-21).
+    ok(T::COVER_WARM_MEMO() <= 30 * 86400 - T::COVER_WARM_TTL(),
+       'COVER_WARM_MEMO is no longer than the proxy-vs-marker TTL gap (a bound, not a guarantee)');
+    reset_world();
+}
+
 print "\n" . ('=' x 74) . "\n$pass passed, $fail failed.\n";
 exit($fail ? 1 : 0);

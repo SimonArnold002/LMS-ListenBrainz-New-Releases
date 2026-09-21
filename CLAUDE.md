@@ -242,6 +242,63 @@ slower warm for ~30s, then recovery; and a track missed during a storm should ca
 than a spent attempt. Read the log as `log.txt?lines=20000` — the bare `log.txt` returns a tiny
 window. To provoke a storm: set every other service's priority to 0 and force a cold re-resolve.
 
+## Cover re-walk memo — working tree, 2026-09-21 (built 1.0.15, NOT installed, NOT reviewed)
+
+**The report (Monday 2026-09-21, the week rollover):** views appeared to rebuild, a red Material
+error on a sort change, players vanished — "it is loading the entire cache". With `debug_log` on,
+the one LBF behaviour that matched was **`_warmCovers` re-queuing EVERY release on EVERY walk**:
+`covers — all releases queued 322 release(s) of 322` five times in six seconds on a Show-all W/C
+14 Sep week, each re-reading all 966 `lbf:imgwarm:` markers. Nothing was downloaded (stage note
+`0 request(s) … 966 already warm`); the re-asking was the waste.
+
+**The fix (`Browse.pm`):** `%coverWarm`, keyed by the full marker KEY (so a `lbf:imgwarm:` family
+bump misses it like the store does), filled only on evidence — a marker read that answers
+(`_coverLaunch`) or a completed download — never on a failure. `_coverGroupsFor` and the focus
+loop in `_warmCovers` skip known-warm keys via `_coverKnownWarm` (a hash lookup, so the builder
+stays allocation-only). `COVER_WARM_MEMO` = 1 day, and it MUST stay inside the proxy-vs-marker
+gap (30d − `COVER_WARM_TTL` 25d = 5d): a marker answering at t guarantees the rendition until
+t+5d. Hourly sweep in `_coverNoteWarm`. The runtime `wipeDerived` only runs at startup on a build
+change, before the memo holds anything. Carriers: every warm goes through `_warmCovers` →
+`_coverGroupsFor` (`_focusReleaseCovers` for For You + All Releases weeks — so Material home
+shelves and web skins too — `_fanOutFeed`, `_warmTrendingCovers`). No stored shape changed, so
+no key-family bump. **Visible side effect:** a fully known-warm walk no longer opens the `covers`
+stage, so warmstats keeps the LAST real pass's note; "already warm" now counts marker reads only.
+
+**Tests:** `t_coverwarm.pl` §4f (136 → 155): second walk queues 0, reads 0 (builder AND pump
+counted), control cold release still fetched, a download is remembered, a failure is not, expiry,
+family bump, sweep, TTL-gap bound. **Anti-tested by nine mutated copies** (`LBF_BROWSE=`): no
+builder skip, no note on hit, no note on fetch, note on failure, never expires, path-keyed, focus
+ranks warm, no sweep, memo 30d — each fails its own assertion. All 38 suites exit 0 with baseline
+counts; `singleflight_sync_check` 0.
+
+**Review of 1.0.15 (2026-09-21): ONE finding, PROSE — fixed as prose only, on Simon's call.**
+`COVER_WARM_TTL`'s and `COVER_WARM_MEMO`'s comments claimed a marker "can never outlive the entry
+it describes". FALSE for a marker written on a proxy cache HIT: `Slim::Utils::DbCache::get` never
+extends an entry's expiry (verified in the 9.1 source), so a warm that hits an entry stored earlier
+writes a fresh 25d marker that can outlive the entry by up to 25d (cold fetch on next render, not a
+broken image; pre-dates 1.0.15). Comments and the §4f test label now say so. **The behaviour is
+OPEN, deliberately not fixed here** — it belongs to the slow-artwork round that follows this
+review. No code line changed (non-comment diff against the 1.0.15 zip is empty); 38 suites exit 0.
+**Second review (2026-09-21): NO findings.** Checked and cleared: no runtime path clears the markers
+(`wipeDerived`/`retirePrefixes` are startup-only, nothing in `Settings.pm`), so the memo cannot
+outlive a wiped marker; `DB::kver` is a constant-hash lookup, so the focus-loop check reads no store;
+failures incl. the 401/403 abort never record warm; the memo is keyed by the versioned marker key;
+a known-warm path is skipped before it is queued or ranked; `COVER_WARM_MAX` counts releases as
+before. The open marker-outlives-entry item was correctly left unreported. Not a suppression.
+
+**Measured on the live server the same morning, recorded so it is not re-derived:** warm walks
+0.01–0.8s; ten PARALLEL Show-all walks of the 322-release week 0.53s wall, worst `version` ping
+0.25s — no event-loop stall reproduced. Both red errors (08:18:58 iPhone, 08:43:15 Mac) were
+logged by LMS as `Request in error, returning`, which `Slim::Control::Request::execute` emits
+when `validate()` fails BEFORE dispatch — status 103, the request named a player not in
+`clientHash` — followed 0.25s later by `errorNeedsClient` for that player id. The live build
+was 1.0.14, an abandoned xTune experiment never committed; this fix is built on 1.0.13.
+**The behaviour WAS captured with `debug_log` on** (Simon reproduced it on the Mac, 08:43): LBF's
+logged activity was For You served from the store, a playlist cache hit, then the 322-release
+cover re-queue five times in 6s — the loop this fix removes. Limit of that capture: `dbg` records
+the warm/resolve timeline only, not per-walk render timings. The 08:15 iPhone episode predates
+debug and is not captured.
+
 ## Review Ledger — READ THIS BEFORE REPORTING ANY FINDING
 
 **Why this exists.** Reviews kept re-reporting things that had already been
