@@ -393,6 +393,28 @@ anti-tested by five mutants (memoises, slash-only key, no chunking, focus overwr
 lie inverted), each failing its own assertion. `t_review_fixes.pl`'s CLI-reports-name-the-build count
 went 3 → 4 on purpose. All 38 suites exit 0; `singleflight_sync_check` 0. **Gate before Step 1:** a
 non-zero `lie` on a warmed view, and the key form pinned (`proxy_bare` vs `proxy_slash`).
+**Review 1 of 1.0.16 (2026-09-21, commit 437d343): NO findings.** Checked and cleared against the
+LMS 9.1 source, so the next round need not re-derive them:
+- ~~**Key form.** `proxy_bare` is the form expected to hit.~~ **WRONG, and live-disproved on
+  install:** 1.0.16 read 0 proxy hits of 4,362 reads in both forms. `Slim::Web::HTTP` also
+  URL-DECODES the path (`$params->{path} = Slim::Utils::Misc::unescape($path)`) before
+  `Slim::Web::Graphics::artworkRequest` → `getImage`, which caches under that path. The real key is
+  `imageproxy/https://coverartarchive.org/…/image_150x150_f.jpg` (no slash, decoded). This review
+  read `Graphics.pm` but not the line in `HTTP.pm` that builds the path. **1.0.17** adds
+  `proxy_decoded`, using LMS's own `Slim::Utils::Misc::unescape`; §4g now stores under the decoded
+  key (175), with a sixth mutant (`no_decoded`) failing its own assertion.
+- **The proxy read means what `getImage` sees.** `Slim::Web::ImageProxy::Cache` is a
+  `DbArtworkCache(…, 'imgproxy', 86400*30)`. Its `get` goes through `DbCache::get`, which returns
+  undef for an expired row, which is the same answer `getImage` acts on. `->new` returns the proxy's
+  own singleton, so there is no second handle and no root change.
+- **The cap population.** `coverStats` caps each label at `COVER_WARM_MAX` raw releases in input
+  order. The warm caps on releases WITH a cover URL, after `_coverWeekOrder`. These differ only past
+  2,000 releases, and the largest filtered feed live is 1,776 (All Releases, warmstats 2026-09-21).
+  No writer reaches it. `lie` is unaffected either way, since an unwarmed release has no marker.
+- **The callback's timer context.** A die inside `$cb` after the first chunk would leave the request
+  processing. The callback only calls `addResult`/`addResultLoop`, so it has no failing path.
+- **Not unit-tested:** the `_cliCoverStats` response shape (diagnostic only; checked live on install).
+
 
 **Care points for the redesign (Simon: "be very careful"):** the carriers are every caller of
 `_warmCovers` / `_coverGroupsFor` (For You, All Releases weeks, Material home shelves, web skins,

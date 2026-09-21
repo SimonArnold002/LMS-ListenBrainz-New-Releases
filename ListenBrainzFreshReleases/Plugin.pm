@@ -509,7 +509,7 @@ sub _cliCoverStats {
                     $request->addResultLoop('specs_loop', $i, 'label', $label);
                     $request->addResultLoop('specs_loop', $i, 'spec',  $spec);
                     $request->addResultLoop('specs_loop', $i, $_, $c->{$_})
-                        for qw(paths marker proxy proxy_slash proxy_bare lie proxy_no_marker memo);
+                        for qw(paths marker proxy proxy_slash proxy_bare proxy_decoded lie proxy_no_marker memo);
                     $i++;
                 }
             }

@@ -4184,9 +4184,15 @@ sub _coverNoteWarm {
 # CHUNKED, because a synchronous run is ~9,000 reads in one turn of the event loop
 # — the hazard class this whole investigation is about.
 #
-# BOTH KEY FORMS: proxiedImage returns `/imageproxy/…`, while the web server hands
-# getImage the path without its leading slash, and getImage caches under the path it
-# was given. Which one the cache really uses is reported, not assumed.
+# THREE KEY FORMS. proxiedImage returns `/imageproxy/<url-ESCAPED>/image_…`, but
+# the web server strips the leading slash AND URL-DECODES the path
+# (Slim::Web::HTTP: `$params->{path} = Slim::Utils::Misc::unescape($path)`) before
+# Slim::Web::Graphics::artworkRequest hands it to getImage, which caches under
+# exactly that (`cachekey => $path`). So the expected key is
+# `imageproxy/https://coverartarchive.org/…/image_150x150_f.jpg`. 1.0.16 tried only
+# the two ESCAPED forms and read 0 hits of 4,362 — a wrong key, not an empty cache.
+# All three are still reported, so the live answer pins the form rather than this
+# comment.
 my %coverDiagSource;   # label => the last release arrayref a non-focus warm was handed
 # Releases checked per turn of the event loop.
 use constant COVER_DIAG_CHUNK => 25;
@@ -4195,6 +4201,7 @@ sub coverStats {
     my ($cb) = @_;
     my $proxyCache = eval {
         require Slim::Web::ImageProxy;
+        require Slim::Utils::Misc;
         Slim::Web::ImageProxy::Cache->new();
     };
     unless ($proxyCache && Slim::Web::ImageProxy->can('proxiedImage')) {
@@ -4243,17 +4250,22 @@ sub coverStats {
                     (my $path = $base) =~ s/(\.\w+)$/$spec$1/ or next;
                     my $c = $rep{$label}{$spec} ||= {
                         paths => 0, marker => 0, proxy_slash => 0, proxy_bare => 0,
-                        proxy => 0, lie => 0, proxy_no_marker => 0, memo => 0 };
+                        proxy_decoded => 0, proxy => 0, lie => 0, proxy_no_marker => 0,
+                        memo => 0 };
                     $c->{paths}++;
                     my $key = Plugins::ListenBrainzFreshReleases::DB::kver('lbf:imgwarm:') . $path;
                     my $marker = eval { $cache->get($key) } ? 1 : 0;
                     (my $bare = $path) =~ s{^/}{};
                     my $slash = $timed->($path);
                     my $noSlash = $timed->($bare);
-                    my $proxy = ($slash || $noSlash) ? 1 : 0;
+                    # LMS's own decoder, so this cannot drift from what the web
+                    # server does to the path.
+                    my $decoded = $timed->(Slim::Utils::Misc::unescape($bare));
+                    my $proxy = ($slash || $noSlash || $decoded) ? 1 : 0;
                     $c->{marker}++          if $marker;
                     $c->{proxy_slash}++     if $slash;
                     $c->{proxy_bare}++      if $noSlash;
+                    $c->{proxy_decoded}++   if $decoded;
                     $c->{proxy}++           if $proxy;
                     $c->{memo}++            if $coverWarm{$key} && $coverWarm{$key} > time();
                     $c->{proxy_no_marker}++ if $proxy && !$marker;

@@ -357,6 +357,18 @@ $INC{'Slim/Web/ImageProxy.pm'} = __FILE__;
     sub new { $one ||= bless {}, shift }
     sub get { my ($s, $k) = @_; push @GETS, $k; return $D{$k} }
 }
+# Slim::Utils::Misc::unescape, TRANSCRIBED from LMS 9.1 (the web server decodes the
+# request path with it before the proxy caches under that path).
+{
+    package Slim::Utils::Misc;
+    sub unescape {
+        my ($in, $isParam) = @_;
+        $in =~ s/\+/ /g if $isParam;
+        $in =~ s/%([0-9A-Fa-f]{2})/chr(hex($1))/eg;
+        return $in;
+    }
+}
+$INC{'Slim/Utils/Misc.pm'} = __FILE__;
 
 our @HTTP_GETS;         # every url the runner asked for, in order
 our $HTTP_MODE = 'ok';  # 'ok' | '401'
@@ -1513,7 +1525,8 @@ section('4g. coverstats (1.0.16): a DIAGNOSTIC that reads, and changes nothing')
     ok(($T::coverDiagSource{'all releases'} // 0) == \@feed,
        '...and a focus warm does NOT replace it (a page is not the feed)');
 
-    # r1 and r4: marker + proxy (under the key WITHOUT the leading slash); r2: marker,
+    # r1 and r4: marker + proxy (under the key LMS really uses: no leading slash AND
+    # url-DECODED, as Slim::Web::HTTP hands it to getImage); r2: marker,
     # no proxy (the lie); r3: neither. TWO honest releases against ONE lying one, so a
     # check that counted marker-AND-proxy as the lie would get a different number.
     my @specs = @{ T::COVER_SPECS() };
@@ -1523,7 +1536,7 @@ section('4g. coverstats (1.0.16): a DIAGNOSTIC that reads, and changes nothing')
     for my $p (@{ $paths[0] }, @{ $paths[3] }) {
         $CACHE->{d}{ $IMGWARM . $p } = 1;
         (my $bare = $p) =~ s{^/}{};
-        $Slim::Web::ImageProxy::Cache::D{$bare} = { data_ref => \'x' };
+        $Slim::Web::ImageProxy::Cache::D{ Slim::Utils::Misc::unescape($bare) } = { data_ref => \'x' };
     }
     $CACHE->{d}{ $IMGWARM . $_ } = 1 for @{ $paths[1] };
 
@@ -1544,8 +1557,11 @@ section('4g. coverstats (1.0.16): a DIAGNOSTIC that reads, and changes nothing')
     is_count($sum{paths}, 4 * @specs, 'every spec of every release is checked');
     is_count($sum{marker}, 3 * @specs, 'markers counted');
     is_count($sum{proxy}, 2 * @specs, 'proxy entries counted');
-    is_count($sum{proxy_bare}, 2 * @specs, '...found under the key WITHOUT the leading slash');
-    is_count($sum{proxy_slash}, 0, '...and not under the slashed key (both forms are tried)');
+    is_count($sum{proxy_decoded}, 2 * @specs, '...found under the DECODED, slash-less key (what LMS stores)');
+    is_count($sum{proxy_bare}, 0, '...not under the escaped slash-less key');
+    is_count($sum{proxy_slash}, 0, '...nor the escaped slashed one (all three forms are tried)');
+    ok(scalar(grep { m{^imageproxy/https://coverartarchive\.org/} } @Slim::Web::ImageProxy::Cache::GETS),
+       'the decoded key really is decoded (imageproxy/https://coverartarchive.org/...)');
     is_count($sum{lie}, scalar @specs, 'a marker with no proxy entry is counted as a LIE');
     is_count(scalar @{ $res->{lies} }, scalar @specs, '...and listed as an example');
     is_count($sum{proxy_no_marker}, 0, 'no proxy-without-marker in this world');
