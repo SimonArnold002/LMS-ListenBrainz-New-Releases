@@ -1870,14 +1870,15 @@ sub _dayDivider {
 # forced warm always re-resolves.
 sub _warmFollow {
     my ($client, $force, $onDone) = @_;
+    my $transient = $force;   # a manual refresh (see warmCache)
     $onDone ||= sub {};
     unless (($prefs->get('token') // '') ne '') {
-        _stage('end', 'follow_feed', 'skipped', 'no token');
+        _stage('end', 'follow_feed', 'skipped', 'no token', $transient);
         $onDone->();
         return;
     }
 
-    _stage('start', 'follow_feed');
+    _stage('start', 'follow_feed', undef, undef, $transient);
     Plugins::ListenBrainzFreshReleases::API->getFollowFeed(
         # force => 1: bypass the working-cache READ so a warm always re-pulls the
         # feed and can discover newly-arrived recommendations.
@@ -1886,32 +1887,32 @@ sub _warmFollow {
             my $store  = _mergeFollow(shift // []);
             my $tracks = $store->{tracks} || [];
             unless (@$tracks) {
-                _stage('end', 'follow_feed', 'done', 'empty');
+                _stage('end', 'follow_feed', 'done', 'empty', $transient);
                 _dbg("warm: follow feed empty");
                 $onDone->();
             return;
             }
             unless ($client) {   # no player → resolve on first open instead
-                _stage('end', 'follow_feed', 'skipped', 'no player');
+                _stage('end', 'follow_feed', 'skipped', 'no player', $transient);
                 $onDone->();
             return;
             }
 
             my $c = $cache->get(_followResolvedKey());
             if (!$force && $c && ($c->{sig} // '') eq _followSig($tracks)) {
-                _stage('end', 'follow_feed', 'cache-hit', 'unchanged');
+                _stage('end', 'follow_feed', 'cache-hit', 'unchanged', $transient);
                 _dbg("warm: follow feed unchanged — skip");
                 $onDone->();
             return;
             }
             _resolveFollow($client, $store, undef, $force, undef, sub {
-                _stage('end', 'follow_feed', 'done', scalar(@$tracks) . ' track(s), processed');
+                _stage('end', 'follow_feed', 'done', scalar(@$tracks) . ' track(s), processed', $transient);
                 $onDone->();
             });
         },
         onError => sub {
             my $err = shift // '';
-            _stage('end', 'follow_feed', 'failed', $err);
+            _stage('end', 'follow_feed', 'failed', $err, $transient);
             $log->info("warm: follow feed fetch failed: $err");
             $onDone->();
         },
@@ -2202,6 +2203,11 @@ sub _resolveTrending {
     # WHO CALLED, read before the cold build detaches $callback: the warm passes none,
     # a view always does. It decides whether the resolve is paced while Spotify refuses.
     my $warm = !$callback;
+    # WHOSE STAGE BOUNDARY: only the tick's. The view (a callback) closes
+    # `trending_tracks` too — a cache hit or a cold build started from the page — and
+    # a manual refresh reaches here with $force; both are TRANSIENT, so neither can
+    # replace the saved scheduled warm's row (review of 1.0.21).
+    my $transient = (!$warm || $force) ? 1 : 0;
 
     # $onDone signals COMPLETION to the warm chain, which is a different thing from
     # $callback (which renders). It must fire at EVERY terminal point or the chain
@@ -2230,7 +2236,7 @@ sub _resolveTrending {
     my $rkey = _trendingResolvedKey();
     if (!$force && (my $c = $cache->get($rkey))) {
         my $n = scalar(@{ $c->{items} || [] });
-        _stage('end', 'trending_tracks', 'cache-hit', "$n tracks");
+        _stage('end', 'trending_tracks', 'cache-hit', "$n tracks", $transient);
         _dbg("trending cache hit ($n tracks)");
         $callback->(_trendingResult($client, $c, $feat)) if $callback;
         $finish->();
@@ -2268,7 +2274,7 @@ sub _resolveTrending {
 
     my $empty = sub {
         my ($msg, $cacheEmpty) = @_;
-        _stage('end', 'trending_tracks', ($cacheEmpty ? 'done' : 'failed'), ($msg // 'empty'));
+        _stage('end', 'trending_tracks', ($cacheEmpty ? 'done' : 'failed'), ($msg // 'empty'), $transient);
         _dbg("trending: $msg") if $msg;
         # Cache a genuine "no data" outcome (nobody followed / all stale / no candidates)
         # SHORT, so it doesn't re-run the whole fan-out + aggregation on every browse but
@@ -2385,7 +2391,7 @@ sub _resolveTrending {
                                 or $log->warn("resolved trending cache set failed: $@");
                             _stage('end', 'trending_tracks', 'done',
                                    scalar(@$items) . " tracks, $owned owned excluded"
-                                   . ($inconclusive ? ", $inconclusive inconclusive" : ""));
+                                   . ($inconclusive ? ", $inconclusive inconclusive" : ""), $transient);
                             _dbg("resolved trending: " . scalar(@$items) . " tracks"
                                 . " ($owned owned excluded"
                                 . ($inconclusive ? ", $inconclusive inconclusive — short TTL" : "")
@@ -3189,10 +3195,10 @@ sub _trendingAlbumRow {
 # queued behind every mapped row in all three spec passes, which is a small rerun of
 # the ordering bug 0.9.189 exists to fix. Both go away with the second rel.
 sub _warmTrendingCovers {
-    my ($aggs, $label) = @_;
+    my ($aggs, $label, $transient) = @_;
     return unless ref $aggs eq 'ARRAY' && @$aggs;
     my @rels = map { _trendingAlbumRel($_) } grep { ref $_ eq 'HASH' } @$aggs;
-    _warmCovers(\@rels, $label);
+    _warmCovers(\@rels, $label, undef, $transient);
     return;
 }
 
@@ -3201,9 +3207,10 @@ sub _warmTrendingCovers {
 # the follow-feed warm in warmCache.
 sub _warmTrending {
     my ($client, $force, $onDone) = @_;
+    my $transient = $force;   # a manual refresh (see warmCache)
     $onDone ||= sub {};
     unless (($prefs->get('username') // '') ne '') {
-        _stage('end', $_, 'skipped', 'no username')
+        _stage('end', $_, 'skipped', 'no username', $transient)
             for qw(trending_tracks trending_month trending_year);
         $onDone->();
         return;
@@ -3229,10 +3236,10 @@ sub _warmTrending {
     #
     # Chained back-to-front so each step is defined before the one that calls it.
     my $albumsYear = sub {
-        _stage('start', 'trending_year');
+        _stage('start', 'trending_year', undef, undef, $transient);
         _buildAlbumsData($client, 'this_year', sub {
-            _stage('end', 'trending_year', 'done', scalar(@{ $_[0] // [] }) . ' album(s)');
-            _warmTrendingCovers($_[0], 'trending albums · this year');
+            _stage('end', 'trending_year', 'done', scalar(@{ $_[0] // [] }) . ' album(s)', $transient);
+            _warmTrendingCovers($_[0], 'trending albums · this year', $transient);
             $onDone->();
         }, $force);
     };
@@ -3240,16 +3247,16 @@ sub _warmTrending {
     # The albums build needs the player too (its streaming gate resolves each album
     # via _findPlayable); with no player it builds ungated on a short TTL.
     my $albumsMonth = sub {
-        _stage('start', 'trending_month');
+        _stage('start', 'trending_month', undef, undef, $transient);
         _buildAlbumsData($client, 'this_month', sub {
-            _stage('end', 'trending_month', 'done', scalar(@{ $_[0] // [] }) . ' album(s)');
-            _warmTrendingCovers($_[0], 'trending albums · this month');
+            _stage('end', 'trending_month', 'done', scalar(@{ $_[0] // [] }) . ' album(s)', $transient);
+            _warmTrendingCovers($_[0], 'trending albums · this month', $transient);
             $albumsYear->();
         }, $force);
     };
 
     if ($client) {
-        _stage('start', 'trending_tracks');
+        _stage('start', 'trending_tracks', undef, undef, $transient);
         # The 5th arg is the COMPLETION hook, distinct from the render callback
         # (4th is $feat, which the warm has no use for). It fires at every terminal
         # point in _resolveTrending, including the cache-hit and empty ones — a
@@ -3258,7 +3265,7 @@ sub _warmTrending {
         _resolveTrending($client, undef, $force, undef, $albumsMonth);
     }
     else {
-        _stage('end', 'trending_tracks', 'skipped', 'no player');
+        _stage('end', 'trending_tracks', 'skipped', 'no player', $transient);
         $albumsMonth->();
     }
 }
@@ -4511,7 +4518,10 @@ sub _focusReleaseCovers {
 }
 
 sub _warmCovers {
-    my ($releases, $label, $focus) = @_;
+    my ($releases, $label, $focus, $transient) = @_;
+    # A browse's cover warm (focus) is always transient; a manual refresh's
+    # (_warmTrendingCovers) says so itself. Only the stage boundary reads this.
+    $transient = ($focus || $transient) ? 1 : 0;
 
     return unless $prefs->get('warm_covers') // 1;
     return unless ref $releases eq 'ARRAY' && @$releases;
@@ -4548,11 +4558,12 @@ sub _warmCovers {
     _orderCoverQueue();
     return unless @coverQueue;
 
-    # A whole-feed warm joining a stage a browse opened makes that drain the warm's.
-    $coverStageTransient = 0 if $coverStageOpen && !$focus;
+    # A tick's whole-feed warm joining a stage a browse or a refresh opened makes that
+    # drain the tick's.
+    $coverStageTransient = 0 if $coverStageOpen && !$transient;
     unless ($coverStageOpen) {
         $coverStageOpen = 1;
-        $coverStageTransient = $focus ? 1 : 0;
+        $coverStageTransient = $transient;
         $coverFetched   = 0;
         $coverSkipped   = 0;
         $coverGroups    = 0;
@@ -4937,18 +4948,23 @@ sub _coverLaunch {
 sub warmCache {
     my ($client, %opts) = @_;
     my $force = $opts{force} ? 1 : 0;   # force => 1: re-resolve even already-cached playlists (manual refresh)
+    # A MANUAL REFRESH IS NOT A WARM (docs/scheduled-overnight-warm.md §3.3): the tick
+    # calls warmCache() bare, only "Refresh playlist matches" passes force. Every stage
+    # this reaches is marked TRANSIENT on a refresh, so it shows in the live table and
+    # never in the saved scheduled warm (reviews of 1.0.20 and 1.0.21).
+    my $transient = $force;
 
     # ListenBrainz metadata stays early. Only Last.fm waits for core processing
     # and artwork, including Last.fm jobs submitted by a browse top-up.
     my $releaseLastfm = _holdLastfm();
-    _warmGenres();
+    _warmGenres($transient);
 
     unless (($prefs->get('username') // '') ne '') {
         # The genre stages are NOT listed here any more — `_warmGenres` has just
         # recorded them itself, correctly: For You skipped, All Releases running.
         # Re-marking them 'skipped' here would overwrite a live stage with a
         # wrong outcome, which is worse than the missing warm was.
-        _stage('end', $_, 'skipped', 'no username')
+        _stage('end', $_, 'skipped', 'no username', $transient)
             for qw(playlists follow_feed trending_tracks trending_month trending_year);
         $releaseLastfm->();
         return;
@@ -4960,7 +4976,7 @@ sub warmCache {
     $client ||= (Slim::Player::Client::clients())[0];
 
 
-    _stage('start', 'playlists');
+    _stage('start', 'playlists', undef, undef, $transient);
     Plugins::ListenBrainzFreshReleases::API->getCreatedForPlaylists(
         # force => 1: bypass the working-cache READ so the warm always re-pulls the
         # listing from ListenBrainz. Without this, a warm tick that ran while the
@@ -4978,7 +4994,7 @@ sub warmCache {
             my $next;
             $next = sub {
                 my $pl = shift @queue or do {
-                    _stage('end', 'playlists', 'done', "$nPl playlist(s)");
+                    _stage('end', 'playlists', 'done', "$nPl playlist(s)", $transient);
                     _dbg("warm: playlists done");
                     # Then warm the follow feed (a no-op without a token), then the
                     # People-You-Follow trending list + album aggregates. Chained
@@ -4997,7 +5013,7 @@ sub warmCache {
                         # follower block genuinely costs nothing — worth seeing in
                         # the report, since it is otherwise indistinguishable from
                         # a follower stage that hung and never recorded an end.
-                        _stage('end', $_, 'skipped', 'people_follow off')
+                        _stage('end', $_, 'skipped', 'people_follow off', $transient)
                             for qw(follow_feed trending_tracks trending_month trending_year);
                         $releaseLastfm->();
                     }
@@ -5087,8 +5103,8 @@ sub warmCache {
         # one of them is a follower problem.
         onError => sub {
             my $err = shift // '';
-            _stage('end', 'playlists', 'failed', $err);
-            _stage('end', $_, 'skipped', 'playlist listing failed')
+            _stage('end', 'playlists', 'failed', $err, $transient);
+            _stage('end', $_, 'skipped', 'playlist listing failed', $transient)
                 for qw(follow_feed trending_tracks trending_month trending_year);
             $log->info("warm: playlist list fetch failed: $err");
             $releaseLastfm->();
@@ -5110,7 +5126,11 @@ sub refreshPlaylists {
     my $msg = $client
         ? cstring($client, 'PLUGIN_LBF_REFRESH_STARTED')
         : cstring($client, 'PLUGIN_LBF_REFRESH_NO_PLAYER');
-    warmCache($client, force => 1) if $client;
+    if ($client) {
+        # Not a warm (§3.3): force => 1 also marks every stage it records transient,
+        # so none of them can replace the saved scheduled warm.
+        warmCache($client, force => 1);
+    }
 
     $callback->({ items => [{ name => $msg, type => 'text' }], cachetime => 0 });
 }
@@ -10967,6 +10987,7 @@ sub _warmReport {
 }
 
 sub _warmGenres {
+    my ($transient) = @_;   # a manual refresh (see warmCache)
     my $user  = $prefs->get('username') // '';
     my $token = $prefs->get('token')    // '';
 
@@ -10984,7 +11005,7 @@ sub _warmGenres {
 
     # All Releases needs no account, so it's warmed for everyone.
     my $warmAll = sub {
-        _stage('start', 'genres_all');
+        _stage('start', 'genres_all', undef, undef, $transient);
         Plugins::ListenBrainzFreshReleases::API->getFreshReleasesAll(
             sort    => 'release_date',
             onDone  => sub {
@@ -10997,8 +11018,8 @@ sub _warmGenres {
                     # below it, because it is the paced one (one request per
                     # second) and folding the two together would hide which of
                     # them the ladder actually spends its time in.
-                    _stage('end', 'genres_all', 'done', scalar(keys %$meta) . ' release group(s)');
-                    _stage('start', 'genres_lastfm_all');
+                    _stage('end', 'genres_all', 'done', scalar(keys %$meta) . ' release group(s)', $transient);
+                    _stage('start', 'genres_lastfm_all', undef, undef, $transient);
                     _dbg("warm: genres — All Releases, " . scalar(keys %$meta) . " release group(s)");
                     _persistLbArtistTags($rels, $meta);
                     # Ladder order, strictly chained so the two never fan out
@@ -11008,7 +11029,7 @@ sub _warmGenres {
                     # other cannot prepare a feed — see LFM_WARM_ALL.
                     _warmLastfm($rels, $meta, sub {
                         my $stats = shift;
-                        _stage('end', 'genres_lastfm_all', 'done', _lastfmWarmNote($stats));
+                        _stage('end', 'genres_lastfm_all', 'done', _lastfmWarmNote($stats), $transient);
                         _warmReport($rels, $meta, 'All Releases');
                         $branchDone->();
                     }, LFM_WARM_ALL);
@@ -11016,7 +11037,7 @@ sub _warmGenres {
             },
             onError => sub {
                 my $err = shift // '';
-                _stage('end', 'genres_all', 'failed', $err);
+                _stage('end', 'genres_all', 'failed', $err, $transient);
                 _dbg("warm: genres — All Releases fetch failed: $err");
                 $branchDone->();
             },
@@ -11028,28 +11049,28 @@ sub _warmGenres {
     # tokenless user's For You genres were never warmed at all, and their rows
     # could only ever fill from a background top-up two minutes at a time.
     unless ($user) {
-        _stage('end', 'genres_foryou',         'skipped', 'no username');
-        _stage('end', 'genres_lastfm_foryou',  'skipped', 'no username');
+        _stage('end', 'genres_foryou',         'skipped', 'no username', $transient);
+        _stage('end', 'genres_lastfm_foryou',  'skipped', 'no username', $transient);
         $warmAll->();
         return;
     }
 
-    _stage('start', 'genres_foryou');
+    _stage('start', 'genres_foryou', undef, undef, $transient);
     Plugins::ListenBrainzFreshReleases::API->getFreshReleasesForUser(
         sort    => 'release_date',
         onDone  => sub {
             my $rels = _filterForYou(shift);
             _withGenres($rels, sub {
                 my $meta = shift // {};
-                _stage('end', 'genres_foryou', 'done', scalar(keys %$meta) . ' release group(s)');
-                _stage('start', 'genres_lastfm_foryou');
+                _stage('end', 'genres_foryou', 'done', scalar(keys %$meta) . ' release group(s)', $transient);
+                _stage('start', 'genres_lastfm_foryou', undef, undef, $transient);
                 _dbg("warm: genres — For You, " . scalar(keys %$meta) . " release group(s)");
                 _persistLbArtistTags($rels, $meta);
                 # Queue Last.fm independently; All Releases metadata must not
                 # wait for the optional, paced Last.fm tail.
                 _warmLastfm($rels, $meta, sub {
                     my $stats = shift;
-                    _stage('end', 'genres_lastfm_foryou', 'done', _lastfmWarmNote($stats));
+                    _stage('end', 'genres_lastfm_foryou', 'done', _lastfmWarmNote($stats), $transient);
                     _warmReport($rels, $meta, 'For You');
                     $branchDone->();
                 }, LFM_WARM_ALL);
@@ -11058,7 +11079,7 @@ sub _warmGenres {
         },
         onError => sub {
             my $err = shift // '';
-            _stage('end', 'genres_foryou', 'failed', $err);
+            _stage('end', 'genres_foryou', 'failed', $err, $transient);
             _dbg("warm: genres — For You fetch failed: $err");
             $branchDone->();
             $warmAll->();

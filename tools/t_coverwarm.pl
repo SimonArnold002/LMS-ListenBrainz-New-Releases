@@ -1736,6 +1736,57 @@ section('4i. review of 1.0.19: the browse stage is transient; the tick asks the 
     }
     my @ends = grep { $_->[0] eq 'end' } @stage;
     ok(scalar(@ends) == 1 && !$ends[0][4], 'a warm that joins a browse-opened stage makes its end SAVED');
+
+    # A MANUAL REFRESH (review of 1.0.21): its trending cover warm is not a browse (no
+    # focus, so no ranking change) but it is not the tick either — the stage it opens
+    # is transient, and the tick joining it makes that drain the tick's again.
+    reset_world(); $n = 0; @stage = ();
+    T::_warmCovers([ rel() ], 'trending albums · this year', undef, 1);   # the refresh
+    my ($s3) = grep { $_->[0] eq 'start' } @stage;
+    ok($s3 && $s3->[4], 'a covers stage opened by a REFRESH is started transient');
+    is_count(scalar(keys %T::coverFocus), 0, '...without the browse ranking (a refresh is not a focus)');
+    http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    my ($e3) = grep { $_->[0] eq 'end' } @stage;
+    ok($e3 && $e3->[4], '...and ended transient');
+
+    reset_world(); $n = 0; @stage = ();
+    $T::lastBrowseAt = time();
+    T::_warmCovers([ map { rel() } 1 .. 5 ], 'trending albums · this year', undef, 1);
+    T::_warmCovers([ map { rel() } 1 .. 3 ], 'all releases');           # the tick joins
+    $T::lastBrowseAt = 0;
+    $g = 0;
+    while ((@HTTP_PENDING || @T::coverQueue || @Slim::Utils::Timers::PENDING) && ++$g < 200) {
+        http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    }
+    @ends = grep { $_->[0] eq 'end' } @stage;
+    ok(scalar(@ends) == 1 && !$ends[0][4], 'the tick joining a refresh-opened stage makes its end SAVED');
+
+    # A refresh warms BOTH trending cover lists (year, then month): the second joining
+    # the first's stage is still the refresh, so the stage stays transient.
+    reset_world(); $n = 0; @stage = ();
+    $T::lastBrowseAt = time();
+    T::_warmCovers([ map { rel() } 1 .. 5 ], 'trending albums · this year',  undef, 1);
+    T::_warmCovers([ map { rel() } 1 .. 3 ], 'trending albums · this month', undef, 1);
+    $T::lastBrowseAt = 0;
+    $g = 0;
+    while ((@HTTP_PENDING || @T::coverQueue || @Slim::Utils::Timers::PENDING) && ++$g < 200) {
+        http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    }
+    @ends = grep { $_->[0] eq 'end' } @stage;
+    ok(scalar(@ends) == 1 && $ends[0][4], 'a refresh\'s second cover list joining its first keeps the stage TRANSIENT');
+
+    # ...and the refresh joining the TICK's stage does not make it transient.
+    reset_world(); $n = 0; @stage = ();
+    $T::lastBrowseAt = time();
+    T::_warmCovers([ map { rel() } 1 .. 3 ], 'all releases');           # the tick
+    T::_warmCovers([ map { rel() } 1 .. 5 ], 'trending albums · this year', undef, 1);
+    $T::lastBrowseAt = 0;
+    $g = 0;
+    while ((@HTTP_PENDING || @T::coverQueue || @Slim::Utils::Timers::PENDING) && ++$g < 200) {
+        http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    }
+    @ends = grep { $_->[0] eq 'end' } @stage;
+    ok(scalar(@ends) == 1 && !$ends[0][4], 'a refresh joining the TICK\'s stage leaves its end SAVED');
     reset_world();
 }
 {

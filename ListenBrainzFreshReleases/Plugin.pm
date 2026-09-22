@@ -105,9 +105,11 @@ my %WARM_STAGE;     # name => { start, end, outcome, note }
 my @WARM_ORDER;     # names in the order they STARTED — the overlap is the point
 my $WARM_TICK_AT;   # epoch the current tick began
 my $WARM_TICK_N = 0;
-# The SAVED warm's own copy of its rows (see _saveLastWarm). Separate from the live
-# table because a browse after the tick re-opens `covers` in the live table, and a
-# later tick boundary must not carry that row into the save.
+# The SAVED warm's own rows (see _saveLastWarm). A table of its own, moved ONLY by
+# non-transient boundaries and never copied from the live entry: a transient boundary
+# (a browse, a manual refresh, the What's Trending view) may replace the live entry
+# of a stage the tick has open, and copying that entry would carry its start into
+# the save (review of 1.0.21).
 my %LAST_STAGE;
 my @LAST_ORDER;
 
@@ -115,15 +117,16 @@ my @LAST_ORDER;
 # runs once per feed, say) overwrites it rather than accumulating — the tick is
 # the unit of measurement, not the call.
 #
-# $transient: a boundary a BROWSE caused (a covers stage opened by the page-focused
-# warm). It updates the live table as always but never the saved warm — see
-# _saveLastWarm.
+# $transient: a boundary that is NOT the scheduled warm's — a browse (the page-focused
+# cover warm), a manual refresh (warmCache(force => 1)), the What's Trending view.
+# It updates the live table as always but never the saved warm — see _saveLastWarm.
 sub stageStart {
     my ($name, $transient) = @_;
     return unless defined $name && length $name;
+    my $now = Time::HiRes::time();
     push @WARM_ORDER, $name unless exists $WARM_STAGE{$name};
-    $WARM_STAGE{$name} = { start => Time::HiRes::time(), end => 0, outcome => 'running', note => '' };
-    _noteLast($name) unless $transient;
+    $WARM_STAGE{$name} = { start => $now, end => 0, outcome => 'running', note => '' };
+    _noteLast($name, $now) unless $transient;
     return;
 }
 
@@ -145,7 +148,7 @@ sub stageEnd {
     $e->{end}     = Time::HiRes::time();
     $e->{outcome} = $outcome // 'done';
     $e->{note}    = $note    // '';
-    _noteLast($name) unless $transient;
+    _noteLast($name, undef, $e->{end}, $e->{outcome}, $e->{note}) unless $transient;
     return;
 }
 
@@ -208,15 +211,24 @@ sub warmStages {
 # instrument that can die turns into an outage.
 use constant LAST_WARM_TTL => 8 * 86400;
 #
-# THE SAVE IS ITS OWN TABLE (%LAST_STAGE), filled only by non-transient boundaries
-# (_noteLast). Saving the live table instead let a browse after the tick replace the
-# warm's `covers` row — directly, or via the next tick stage to finish (review of
-# 1.0.19).
+# THE SAVE IS ITS OWN TABLE (%LAST_STAGE), moved only by non-transient boundaries
+# (_noteLast), with the boundary's own values — the same start/end rules as the live
+# table, applied independently. Saving the live table let a browse after the tick
+# replace the warm's `covers` row (review of 1.0.19); copying the live ENTRY let a
+# refresh that restarted a stage the tick had open lend the saved row its start
+# (review of 1.0.21).
+#
+# ($name, $start) for a start; ($name, undef, $end, $outcome, $note) for an end.
 sub _noteLast {
-    my ($name) = @_;
-    my $e = $WARM_STAGE{$name} or return;
+    my ($name, $start, $end, $outcome, $note) = @_;
     push @LAST_ORDER, $name unless exists $LAST_STAGE{$name};
-    $LAST_STAGE{$name} = { %$e };
+    if (defined $start) {
+        $LAST_STAGE{$name} = { start => $start, end => 0, outcome => 'running', note => '' };
+    }
+    else {
+        my $e = $LAST_STAGE{$name} ||= { start => 0 };
+        @$e{qw(end outcome note)} = ($end, $outcome, $note);
+    }
     _saveLastWarm();
     return;
 }

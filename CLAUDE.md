@@ -338,6 +338,9 @@ fetch should show a long single `select` on the archive.org socket.
 | TLS in general | other TLS 1.3 hosts (e.g. postman-echo) do not stall; hosts that send a post-handshake record (archive.org, httpbingo) do |
 | "loading from cache isn't optimised" | cached renditions: median 6ms, no stall |
 | the Monday episodes were not captured with debug | they were: Mac, 08:43 (see the cover re-walk memo section) |
+| **Material asks a release row for a SIZED cover (`_150`/`_300`/`_600x600_f`)** — the premise of `COVER_SPECS`, the warm, and the "largest ask is _600x600_f" comment on the 1200 swap in `Plugin.pm` | 2026-09-22: every device request was UNSIZED `…/image.jpg` (iPhone 125, Mac 14, Simon's Chrome devtools on tile view), so the 1200px original was served (avg ~340–480KB, up to 849KB). Cause: Material 6.4.10 `browse-resp.js` sizes the row (`resolveImage(icon‖icon-id, …, LMS_LIST_IMAGE_SIZE)`), then `mapIcon(i, command)` falls through (`mapIconType` returns false on any `imageproxy/` icon) and runs `item.image = item.icon`, overwriting the sized URL with the raw one. Only an `icon-id` row keeps its size. LMS `Control/XMLBrowser.pm` emits `icon-id` only for an item `icon` that is NOT `http…`; an item `image` always goes out as `icon`. Reproduced by running the served functions under `jsc`: `icon` → `image.jpg`, `icon-id` → `image_300x300_f.jpg`. The same on `main` (rows have been `image => https…` since June) and for Qobuz rows (whose source is a 600px file, so it doesn't show). **Material's dev confirmed it a Material BUG 2026-09-22, fix due in the NEXT Material release** — so LBF's sized warm (150/300/600 off the 1200 source) is the RIGHT design and stays; NO LBF change. After Simon updates Material: re-log `artwork.imageproxy` + `network.http` and confirm rows request `image_300x300_f.jpg` (150 non-retina) served from cache. Known side-note for their dev: `toggleBrowseImageSize` only matches a size at end-of-string or before `.png`, so a `.jpg` tile keeps the list size (300) — harmless, warmed |
+| the LMS log strips the resize spec from the path | a hand-sent `image_300x300_f.jpg` logs as `Resize specification: 300x300_f.jpg` and serves the warm's 27KB rendition |
+| the server restart makes devices re-download covers | 12:27 (straight after a restart): the iPhone opened For You and asked for NONE of its 13 covers; the fade-in is the device decoding 1200px originals, which is visible even from its own cache |
 
 **How the others do artwork (checked 2026-09-21):**
 - **Community API** (api.lms-community.org) hosts NO images. `/album/<t>/<a>/cover` and
@@ -515,6 +518,76 @@ first pass left TWO survivors, both closed. (a) `_stage` dropping the flag: `t_c
 `_stage`, so no suite drove the real shim; it is now driven. (b) Removing `_noteLast`'s tick
 guard: a redundant duplicate of `_saveLastWarm`'s, now deleted, and that guard's own mutant fails.
 All 19 fail their own assertion. All 38 suites exit 0; `singleflight_sync_check` 0.
+
+**/code-review of 1.0.20 (2026-09-22): ONE finding, PLAUSIBLE → VERIFIED, FIXED in 1.0.21 (built,
+NOT installed, NOT committed).** "Refresh playlist matches" (`Browse::refreshPlaylists` →
+`warmCache(force => 1)`) runs OUTSIDE any tick, and its stages (genres, playlists, trending, covers
+via `_warmTrendingCovers`) are real, non-transient boundaries. Once a tick had run in the process,
+they overwrote the saved warm, although `docs/scheduled-overnight-warm.md` §3.3 says a refresh is
+not a warm. Traced: it is the ONLY non-tick caller of `warmCache`/`warmFeeds`. The re-seed runs only
+before a tick; `_warmTrendingCovers` runs only inside `warmCache`. On Simon's rig this is live only
+between 05:xx and the 06:30 restart (the post-restart process never ticks, so it saves nothing);
+on a server with no daily restart it is live all day. `t_warmstats.pl` §8 reproduced it on the
+1.0.20 code (5 red). Fix:
+- `Plugin::stageSeal` sets `$LAST_SEAL`.
+- `stageStart`, and `stageEnd` when it creates a never-started row, mark the live entry
+  `late` while sealed; `_noteLast` skips late entries. A tick stage already running at the seal
+  still has its end saved.
+- `stageReset` lifts the seal.
+- `Browse::refreshPlaylists` calls the eval-guarded shim `_stageSeal()` BEFORE `warmCache`.
+- The live table is unchanged.
+- `stageSeal` has no tick guard: it was redundant (the next tick's reset lifts the seal and nothing
+  saves before a tick), so a mutant could not kill it.
+
+Tests: `t_warmstats.pl` 72 → 81. 15 mutants (the seal's six, the shim's three, and the earlier
+Plugin.pm set regenerated) each fail their own assertion. All 38 suites exit 0;
+`singleflight_sync_check` 0.
+**Cleared by that review, logged so it is not re-derived:**
+(a) A browse opening `covers` BEFORE the tick, then joined by the tick's warm, saves a row with
+start 0. This pre-dates 1.0.20; `stageReset` empties the live table, so the joined stage's end
+creates a fresh row.
+(b) `coverMemoForget` can fail quietly on the first tick if Browse is not loaded yet. That is
+harmless: the memo is empty after a restart anyway.
+
+**/code-review of 1.0.21 (2026-09-22): TWO findings, both reproduced red, FIXED in 1.0.22 (built,
+NOT installed, NOT committed; sha bcdc48c6).** Both in the saved-warm code the last two rounds added.
+1. **The What's Trending VIEW overwrote the saved `trending_tracks` row.** `_resolveTrending` closes
+   that stage on a cache hit and on a cold build started from the page (three `_stage('end', …)`
+   calls), unmarked. 1.0.21's trace followed only callers of `warmCache`/`warmFeeds` and missed it,
+   because the view closes the stage DIRECTLY. The TRACE THIS TIME was every sub that closes a stage,
+   and every caller of each: the view and the manual refresh are the only non-tick paths;
+   `reseedFromStore` runs at startup before any tick (tick guard); `_warmPlaylistsWhenReady` is
+   tick-only.
+2. **A refresh tapped DURING the tick lost a tick stage's saved end.** The 1.0.21 seal was by TIME,
+   so a refresh restarting a stage the tick had open replaced the live entry with a `late` one and
+   the tick's end was never saved (the row read `running` until the next day). Tick stages that
+   first started after the seal were dropped too, contradicting the comment and the ledger.
+
+**Fix: attribute boundaries by CALLER, not time.** The seal (`stageSeal`, `$LAST_SEAL`, `late`,
+`_stageSeal`) is REMOVED.
+- The tick calls `warmCache()` bare; only "Refresh playlist matches" passes `force => 1`. So
+  `warmCache`'s `$transient = $force`, handed to `_warmGenres($transient)`; `_warmFollow` and
+  `_warmTrending` derive it from the `$force` they already took. Every `_stage` call in those five
+  subs passes it (35 calls).
+- `_resolveTrending`: `$transient = (!$warm || $force)`, so the VIEW (a callback) and a refresh are
+  transient; only the tick is not.
+- The refresh's trending cover warm: `_warmTrendingCovers($aggs, $label, $transient)` →
+  `_warmCovers($rels, $label, undef, $transient)`. It is NOT a focus (no ranking change). The covers
+  stage opens transient if the opener is; a NON-transient (tick) warm joining clears it. A refresh's
+  second list joining its first does not.
+- **The saved table is its own, moved only by non-transient boundaries with their own values**
+  (`_noteLast($name, $start)` / `_noteLast($name, undef, $end, $outcome, $note)`). It never copies the
+  live entry, which a transient restart may have replaced, so the saved row keeps the TICK's start.
+
+Tests: `t_warmstats.pl` 81 → 96 (§8 rewritten for the interleaved refresh-during-tick case, §9 new:
+every `_stage` call in the five subs carries `$transient`, the flag's origins, the seal gone);
+`t_coverwarm.pl` 194 → 200 (refresh opens transient, no focus ranking, tick joining saves,
+refresh-joins-refresh stays transient). Red on 1.0.21: 15 in `t_warmstats`, 2 in `t_coverwarm`.
+10 mutants (both `_noteLast` guards, copying the live entry, view/refresh flag origins, the
+cover-warm flag, the join rule reverted to `!$focus`, `_warmGenres` and `_warmTrendingCovers` losing
+the flag, one bare `_stage` in `_warmFollow`) each go red. `t_genrefill.pl`'s literal
+`_warmGenres()` / skip-list patterns widened to accept the flag, with the checks unchanged. All 38
+suites exit 0 (four of them must be run from the repo root); `singleflight_sync_check` 0.
 
 **Care points for the redesign (Simon: "be very careful"):** the carriers are every caller of
 `_warmCovers` / `_coverGroupsFor` (For You, All Releases weeks, Material home shelves, web skins,

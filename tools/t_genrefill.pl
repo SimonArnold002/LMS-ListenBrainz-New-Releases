@@ -625,15 +625,15 @@ print "-" x 74, "\n";
     # opened bare and could only fill from the 120s-apart background top-up.
     my $wc = grab($browse_src, 'warmCache');
     my ($beforeGate) = $wc =~ /^(.*?)unless \(\(\$prefs->get\('username'\)/s;
-    ok(defined $beforeGate && scalar($beforeGate =~ /_warmGenres\(\)/),
+    ok(defined $beforeGate && scalar($beforeGate =~ /_warmGenres\((?:\$transient)?\)/),
        '_warmGenres runs BEFORE warmCache\'s username gate');
-    my $calls = () = $wc =~ /_warmGenres\(\)/g;
+    my $calls = () = $wc =~ /_warmGenres\((?:\$transient)?\)/g;
     ok($calls == 1, '...and exactly once — the old call site below the gate is gone');
 
     # The gate must no longer mark the genre stages skipped: _warmGenres has just
     # recorded them itself (For You skipped, All Releases running), and re-ending a
     # live stage with the wrong outcome is worse than the missing warm was.
-    my ($skipList) = $wc =~ /'no username'\)\s*\n\s*for qw\(([^)]*)\)/s;
+    my ($skipList) = $wc =~ /'no username'(?:,\s*\$transient)?\)\s*\n\s*for qw\(([^)]*)\)/s;
     ok(defined $skipList && !scalar($skipList =~ /genres_/),
        'the no-username skip list names no genre stage');
     ok(defined $skipList && scalar($skipList =~ /playlists/) && scalar($skipList =~ /trending_year/),
@@ -1119,14 +1119,14 @@ print "-" x 74, "\n";
     # WHERE in the chain the call sits, and the failure mode is silent.
     my $warm = grab($browse_src, 'warmCache');
 
-    my $genres    = index($warm, '_warmGenres();');
+    my $genres    = $warm =~ /_warmGenres\((?:\$transient)?\);/ ? $-[0] : -1;
     my $playlists = index($warm, 'getCreatedForPlaylists');
     ok($genres >= 0, 'warmCache still starts the genre ladder at all');
     ok($genres < $playlists,
        'and starts it BEFORE the playlist/follow/trending chain, not after it');
 
     # Exactly one call site — a second one would double every request in the ladder.
-    my $n = () = $warm =~ /_warmGenres\(\)/g;
+    my $n = () = $warm =~ /_warmGenres\((?:\$transient)?\)/g;
     is($n, 1, 'exactly once — not kicked again at the end of the chain');
 
     # The ladder itself must keep its own order, which is the whole point of the
