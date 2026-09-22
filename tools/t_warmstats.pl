@@ -141,9 +141,10 @@ sub harness {
         "package $pkg;\n",
         "use strict; use warnings; use Time::HiRes ();\n",
         "my %WARM_STAGE; my \@WARM_ORDER; my \$WARM_TICK_AT; my \$WARM_TICK_N = 0;\n",
+        "my %LAST_STAGE; my \@LAST_ORDER;\n",
         "sub version { '9.9.9' }\n",
         "$lastTtlLine\n",
-        map { grab($psrc, $_) } qw(stageStart stageEnd stageReset warmStages _saveLastWarm lastWarm),
+        map { grab($psrc, $_) } qw(stageStart stageEnd stageReset _stageRows warmStages _noteLast _saveLastWarm lastWarm),
     );
     eval $h;
     die "harness $pkg failed to compile: $@" if $@;
@@ -263,6 +264,24 @@ section('5. THE RECORDER IS ACTUALLY CALLED — a perfect unused instrument is d
     my $shim = grab($bsrc, '_stage');
     ok(scalar($shim =~ /eval \{/), '_stage is eval-guarded (a die inside an async callback is unrecoverable)');
     ok(scalar($shim !~ /\bdie\b/), '_stage cannot itself raise');
+
+    # THE SHIM PASSES THE TRANSIENT FLAG THROUGH (review of 1.0.19). Driven for real:
+    # t_coverwarm.pl stubs _stage, so a shim that dropped the 5th argument would let
+    # every browse overwrite the saved warm with every suite green — the anti-test
+    # run found exactly that gap.
+    {
+        my @got;
+        no warnings 'once';
+        local *Plugins::ListenBrainzFreshReleases::Plugin::stageStart = sub { push @got, [ 'start', @_ ] };
+        local *Plugins::ListenBrainzFreshReleases::Plugin::stageEnd   = sub { push @got, [ 'end',   @_ ] };
+        eval "package T::Shim; $shim 1;" or die "shim failed to compile: $@";
+        T::Shim::_stage('start', 'covers', undef, undef, 1);
+        T::Shim::_stage('end',   'covers', 'done', 'n', 1);
+        T::Shim::_stage('start', 'covers');
+        ok(scalar(@got) == 3 && $got[0][2] && $got[1][4],
+           '_stage passes the TRANSIENT flag through to stageStart and stageEnd');
+        ok(scalar(@got) == 3 && !$got[2][2], '...and a plain call stays non-transient');
+    }
 
     # Every stage the report is expected to carry must be marked somewhere.
     for my $stage (qw(all_feed foryou_feed muspy_feed covers
@@ -388,6 +407,55 @@ section('6. THE LAST SCHEDULED WARM SURVIVES A RESTART (1.0.18)');
        'warmstats reports the saved warm under its own last_ names');
     ok(scalar(grab($psrc, '_saveLastWarm') =~ /\beval\s*\{/),
        '_saveLastWarm is eval-guarded (its callers are inside async callbacks)');
+}
+
+# ---------------------------------------------------------------------------
+section('7. A BROWSE AFTER THE TICK DOES NOT OVERWRITE THE SAVED WARM (review of 1.0.19)');
+# The 1.0.19 review: a browse that queues a cold cover opens a NEW `covers` stage,
+# and _saveLastWarm stored the whole live table — so a 06:10 browse replaced the
+# 05:xx warm's cover numbers (and on a server with no daily restart, every browse
+# did, all day). A browse-driven boundary is TRANSIENT: it shows in the live table
+# and never reaches the saved warm. Nor may a LATER tick boundary carry the browse's
+# row into the save with it.
+{
+    %STORE = (); @SETS = ();
+    harness('T::P3');
+    T::P3::stageReset();
+    T::P3::stageStart('covers');
+    T::P3::stageEnd('covers', 'done', '54 request(s) / 18 release(s)');
+    T::P3::stageStart('genres_lastfm_all');                     # still running
+    my $n = scalar @SETS;
+
+    # The browse: a transient covers stage.
+    T::P3::stageStart('covers', 1);
+    T::P3::stageEnd('covers', 'done', '3 request(s) / 1 release(s)', 1);
+    ok(scalar(@SETS) == $n, 'a TRANSIENT (browse) boundary writes nothing to the store');
+    my $live = { map { $_->{name} => $_ } @{ T::P3::warmStages()->{stages} } };
+    ok(scalar(($live->{covers}{note} // '') =~ /^3 request/),
+       '...while the LIVE table still shows the browse (unchanged behaviour)');
+
+    # A tick stage finishing AFTER the browse must not drag the browse's row in.
+    T::P3::stageEnd('genres_lastfm_all', 'done', '68 requested');
+    my $saved = { map { $_->{name} => $_ } @{ (T::P3::lastWarm() || {})->{stages} || [] } };
+    ok(scalar(($saved->{covers}{note} // '') =~ /^54 request/),
+       'the saved warm keeps the TICK\'s covers row after a later tick stage is saved');
+    ok(($saved->{genres_lastfm_all}{outcome} // '') eq 'done',
+       '...and still records the tick stage that finished after the browse');
+    ok(scalar(keys %$saved) == 2, '...and nothing else');
+
+    # A new tick starts a new saved table.
+    T::P3::stageReset();
+    T::P3::stageStart('all_feed');
+    my $fresh = T::P3::lastWarm();
+    ok($fresh && scalar(@{ $fresh->{stages} }) == 1 && $fresh->{stages}[0]{name} eq 'all_feed',
+       'a new tick starts a new saved table (yesterday\'s rows do not carry over)');
+}
+# ...and the tick must clear the cover memo, or a cover memoised by an evening
+# browse is skipped at 05:xx without asking the proxy (the second 1.0.19 finding).
+{
+    my $tick = grab($psrc, '_warmTick');
+    ok(scalar($tick =~ /stageReset\(\);.*?coverMemoForget/s),
+       '_warmTick clears the cover memo (Browse::coverMemoForget) after the reset');
 }
 
 printf "\n%s\n%d passed, %d failed.\n", '=' x 74, $pass, $fail;

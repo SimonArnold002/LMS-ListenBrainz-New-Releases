@@ -105,16 +105,25 @@ my %WARM_STAGE;     # name => { start, end, outcome, note }
 my @WARM_ORDER;     # names in the order they STARTED — the overlap is the point
 my $WARM_TICK_AT;   # epoch the current tick began
 my $WARM_TICK_N = 0;
+# The SAVED warm's own copy of its rows (see _saveLastWarm). Separate from the live
+# table because a browse after the tick re-opens `covers` in the live table, and a
+# later tick boundary must not carry that row into the save.
+my %LAST_STAGE;
+my @LAST_ORDER;
 
 # Mark a stage as started. Re-starting a name that is already open (a stage that
 # runs once per feed, say) overwrites it rather than accumulating — the tick is
 # the unit of measurement, not the call.
+#
+# $transient: a boundary a BROWSE caused (a covers stage opened by the page-focused
+# warm). It updates the live table as always but never the saved warm — see
+# _saveLastWarm.
 sub stageStart {
-    my ($name) = @_;
+    my ($name, $transient) = @_;
     return unless defined $name && length $name;
     push @WARM_ORDER, $name unless exists $WARM_STAGE{$name};
     $WARM_STAGE{$name} = { start => Time::HiRes::time(), end => 0, outcome => 'running', note => '' };
-    _saveLastWarm();
+    _noteLast($name) unless $transient;
     return;
 }
 
@@ -126,7 +135,7 @@ sub stageStart {
 # section switched off), and it is worth seeing in the report rather than being
 # silently absent.
 sub stageEnd {
-    my ($name, $outcome, $note) = @_;
+    my ($name, $outcome, $note, $transient) = @_;
     return unless defined $name && length $name;
     my $e = $WARM_STAGE{$name};
     unless ($e) {
@@ -136,7 +145,7 @@ sub stageEnd {
     $e->{end}     = Time::HiRes::time();
     $e->{outcome} = $outcome // 'done';
     $e->{note}    = $note    // '';
-    _saveLastWarm();
+    _noteLast($name) unless $transient;
     return;
 }
 
@@ -145,6 +154,8 @@ sub stageEnd {
 sub stageReset {
     %WARM_STAGE   = ();
     @WARM_ORDER   = ();
+    %LAST_STAGE   = ();
+    @LAST_ORDER   = ();
     $WARM_TICK_AT = Time::HiRes::time();
     $WARM_TICK_N++;
     return;
@@ -152,10 +163,13 @@ sub stageReset {
 
 # The recorded table, oldest-start first. Returns plain data so the CLI (and any
 # test) can read it without touching the lexicals.
-sub warmStages {
+# Rows for a table, oldest-start first — shared by the live report and the save, so
+# the two can never disagree on what a row holds.
+sub _stageRows {
+    my ($order, $stage) = @_;
     my @rows;
-    for my $name (@WARM_ORDER) {
-        my $e = $WARM_STAGE{$name} or next;
+    for my $name (@$order) {
+        my $e = $stage->{$name} or next;
         push @rows, {
             name    => $name,
             start   => $e->{start},
@@ -171,6 +185,11 @@ sub warmStages {
             note    => $e->{note},
         };
     }
+    return @rows;
+}
+
+sub warmStages {
+    my @rows = _stageRows(\@WARM_ORDER, \%WARM_STAGE);
     return {
         tick_at => $WARM_TICK_AT // 0,
         ticks   => $WARM_TICK_N,
@@ -188,17 +207,30 @@ sub warmStages {
 # Eval-guarded here, because the callers are inside async HTTP callbacks: an
 # instrument that can die turns into an outage.
 use constant LAST_WARM_TTL => 8 * 86400;
+#
+# THE SAVE IS ITS OWN TABLE (%LAST_STAGE), filled only by non-transient boundaries
+# (_noteLast). Saving the live table instead let a browse after the tick replace the
+# warm's `covers` row — directly, or via the next tick stage to finish (review of
+# 1.0.19).
+sub _noteLast {
+    my ($name) = @_;
+    my $e = $WARM_STAGE{$name} or return;
+    push @LAST_ORDER, $name unless exists $LAST_STAGE{$name};
+    $LAST_STAGE{$name} = { %$e };
+    _saveLastWarm();
+    return;
+}
+
 sub _saveLastWarm {
     return unless $WARM_TICK_N;
     eval {
         require Plugins::ListenBrainzFreshReleases::DB;
-        my $rep = warmStages();
         Plugins::ListenBrainzFreshReleases::DB::store()->set(
             Plugins::ListenBrainzFreshReleases::DB::kver('lbf:warmlast:') . 'tick',
-            { tick_at  => $rep->{tick_at},
+            { tick_at  => $WARM_TICK_AT // 0,
               saved_at => Time::HiRes::time(),
               version  => (eval { version() } // ''),
-              stages   => $rep->{stages} },
+              stages   => [ _stageRows(\@LAST_ORDER, \%LAST_STAGE) ] },
             LAST_WARM_TTL);
         1;
     };
@@ -1258,6 +1290,11 @@ sub _warmTick {
     # deferred tick has not begun, and resetting here would show an empty table
     # for however long the scan runs, which reads as "the warm did nothing".
     stageReset();
+
+    # The daily warm ASKS THE PROXY for every cover. Without this a cover memoised
+    # by an evening browse (COVER_WARM_MEMO, 12h) is still trusted at 05:xx, and one
+    # LMS dropped overnight loads cold on screen (review of 1.0.19).
+    eval { Plugins::ListenBrainzFreshReleases::Browse::coverMemoForget(); 1 };
 
     # THE FEED WARM RUNS AHEAD OF warmCache, AND THAT ORDER IS THE POINT.
     # `warmCache` returns early without a username (Browse.pm), so All Releases —

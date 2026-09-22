@@ -82,12 +82,15 @@ sub _dbg { Plugins::ListenBrainzFreshReleases::Plugin::dbg(@_) }
 # eval and simply abandons the rest of the chain. An instrument must not be able
 # to break the thing it measures, and one that logged its own failure at every
 # call would be worse than the gap it leaves.
+#
+# A 5th argument marks the boundary TRANSIENT — caused by a browse, so it shows in
+# the live table but never overwrites the saved scheduled warm (Plugin::_saveLastWarm).
 sub _stage {
-    my ($what, $name, $outcome, $note) = @_;
+    my ($what, $name, $outcome, $note, $transient) = @_;
     eval {
         my $P = 'Plugins::ListenBrainzFreshReleases::Plugin';
-        if ($what eq 'start') { $P->can('stageStart')->($name) }
-        else                  { $P->can('stageEnd')->($name, $outcome, $note) }
+        if ($what eq 'start') { $P->can('stageStart')->($name, $transient) }
+        else                  { $P->can('stageEnd')->($name, $outcome, $note, $transient) }
         1;
     };
     return;
@@ -4098,10 +4101,12 @@ use constant COVER_MISS_TTL => 86400;
 # view queues nothing and reads nothing (1.0.15: every walk of a Show-all week
 # re-queued 322 releases and re-read 966 markers on each sort tap).
 #
-# UNDER A DAY, AND THAT IS THE POINT. The proxy's entries expire (30d, fixed at
-# write) and are purged; the memo cannot see that. 12h means the daily warm always
-# finds the memo expired and re-asks the proxy, so a rendition that has gone is
-# re-fetched overnight rather than on screen. A restart clears it anyway.
+# The proxy's entries expire (30d, fixed at write) and are purged; the memo cannot see
+# that. So the scheduled warm does not rely on the memo lapsing: it FORGETS it
+# (coverMemoForget, from Plugin::_warmTick) and asks the proxy for every cover, so a
+# rendition that has gone is re-fetched overnight rather than on screen. (A 12h memo
+# alone did not guarantee that — one set by an evening browse is still fresh at
+# 05:xx; review of 1.0.19.) 12h bounds how long a browse trusts it between warms.
 use constant COVER_WARM_MEMO => 12 * 3600;
 
 # A queue element is a GROUP: every proxy path for ONE release, which after the
@@ -4140,6 +4145,9 @@ my $coverGroups    = 0;
 my $coverPeak      = 0;
 my $coverHeld      = 0;
 my $coverFailed    = 0;
+# The open covers stage was opened by a BROWSE (a focus warm) and no whole-feed warm
+# has joined it: its boundaries are transient and never overwrite the saved warm.
+my $coverStageTransient = 0;
 
 # Current week first, then earlier weeks newest-first, then upcoming weeks.
 sub _coverWeekOrder {
@@ -4202,6 +4210,17 @@ sub _coverNoteWarm {
     return if $now - $coverWarmSwept < 3600;
     $coverWarmSwept = $now;
     delete @coverWarm{ grep { $coverWarm{$_} <= $now } keys %coverWarm };
+    return;
+}
+
+# Forget what this process has proven warm. Called by the scheduled warm tick
+# (Plugin::_warmTick) so the daily warm ASKS THE PROXY for every cover: a memo set by
+# an evening browse is otherwise still trusted at 05:xx (COVER_WARM_MEMO is 12h), and
+# a rendition LMS dropped overnight loads cold on screen. The cost is one proxy read
+# per path per day (0.047ms, live).
+sub coverMemoForget {
+    %coverWarm = ();
+    $coverWarmSwept = time();
     return;
 }
 
@@ -4529,15 +4548,18 @@ sub _warmCovers {
     _orderCoverQueue();
     return unless @coverQueue;
 
+    # A whole-feed warm joining a stage a browse opened makes that drain the warm's.
+    $coverStageTransient = 0 if $coverStageOpen && !$focus;
     unless ($coverStageOpen) {
         $coverStageOpen = 1;
+        $coverStageTransient = $focus ? 1 : 0;
         $coverFetched   = 0;
         $coverSkipped   = 0;
         $coverGroups    = 0;
         $coverPeak      = 0;
         $coverHeld      = 0;
         $coverFailed    = 0;
-        _stage('start', 'covers');
+        _stage('start', 'covers', undef, undef, $coverStageTransient);
     }
     _dbg("warm: covers — $label queued " . scalar(@$groups) . " release(s) of $seen");
     _coverTick();
@@ -4775,7 +4797,8 @@ sub _coverMaybeEnd {
     _stage('end', 'covers', 'done',
            "$coverFetched request(s) / $coverGroups release(s)"
          . ", $coverSkipped already warm, $coverFailed not cached"
-         . ", $coverHeld held (recent miss), peak $coverPeak in flight");
+         . ", $coverHeld held (recent miss), peak $coverPeak in flight",
+           $coverStageTransient);
 }
 
 # Launch ONE release: every spec, in a single synchronous turn.

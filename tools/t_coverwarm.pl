@@ -480,12 +480,12 @@ for my $c (qw(COVER_SPECS COVER_WARM_MAX COVER_MISS_TTL COVER_WARM_MEMO
 
 for my $name (qw(_coverWeekOrder _weekStart _orderCoverQueue _focusReleaseCovers _renderSlots _weekGroups _buildWeekly _divType _divImage _divName _escHtml _warmCovers _coverGroupsFor _coverTick _coverMaybeEnd _coverLaunch
                  _coverKnownWarm _coverNoteWarm _noteBrowse _coverLimit _coverArmRestart _coverArmResume
-                 _coverProxyKey _coverProxyWarm _coverNoteMiss coverStats)) {
+                 _coverProxyKey _coverProxyWarm _coverNoteMiss coverStats coverMemoForget)) {
     my $body = grab($bsrc, $name);
     eval "package T; use Time::HiRes (); use Time::Local (); our (\$cache, \$prefs, \$log); "
        . "our (\@coverQueue, \%coverQueued, \%coverWarm, \$coverWarmSwept, \%_WEEK_START, \%coverRank, \%coverFocus, \%coverReveal, \$coverSequence, \$coverRunning, \$coverPumping, \$coverStageOpen, "
        . "\$coverFetched, \$coverSkipped, \$coverGroups, \$coverPeak, "
-       . "\$lastBrowseAt, \$coverRestartArmed, \$coverResumeArmed, \%coverDiagSource, \$coverHeld, \$coverFailed, \$coverProxyCache); $body 1;"
+       . "\$lastBrowseAt, \$coverRestartArmed, \$coverResumeArmed, \%coverDiagSource, \$coverHeld, \$coverFailed, \$coverProxyCache, \$coverStageTransient); $body 1;"
         or die "eval $name: $@";
 }
 
@@ -504,6 +504,7 @@ sub reset_world {
     $T::coverPeak    = 0;
     $T::coverHeld    = 0;
     $T::coverFailed  = 0;
+    $T::coverStageTransient = 0;
     $T::coverStageOpen = 0;
     %Slim::Web::ImageProxy::Cache::D = (); @Slim::Web::ImageProxy::Cache::GETS = ();
     %T::coverDiagSource = ();
@@ -1695,6 +1696,70 @@ section('4h. the warm tells the truth (1.0.18): the proxy decides, not a marker'
     my $want = 'imageproxy/https://coverartarchive.org/release/x/front-250.jpg/image_150x150_f.jpg';
     ok(T::_coverProxyKey($p) eq $want && pkey($p) eq $want,
        'the proxy key is slash-less and url-DECODED (plugin and suite agree)');
+}
+
+# ==========================================================================
+section('4i. review of 1.0.19: the browse stage is transient; the tick asks the proxy');
+# ==========================================================================
+{
+    # FINDING 1, Browse side: a covers stage a BROWSE opens is marked transient, so
+    # it never overwrites the saved scheduled warm. One the warm opens is not.
+    reset_world(); $n = 0;
+    my @stage;
+    no warnings 'redefine';
+    local *T::_stage = sub { push @stage, [ @_ ] };
+    T::_warmCovers([ rel() ], 'all releases', 1);                # a browse (focus)
+    my ($s1) = grep { $_->[0] eq 'start' } @stage;
+    ok($s1 && $s1->[4], 'a covers stage opened by a BROWSE is started transient');
+    http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    my ($e1) = grep { $_->[0] eq 'end' } @stage;
+    ok($e1 && $e1->[4], '...and ended transient');
+
+    reset_world(); $n = 0; @stage = ();
+    T::_warmCovers([ rel() ], 'all releases');                   # the warm (no focus)
+    my ($s2) = grep { $_->[0] eq 'start' } @stage;
+    ok($s2 && !$s2->[4], 'a covers stage opened by the WARM is not transient');
+    http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    my ($e2) = grep { $_->[0] eq 'end' } @stage;
+    ok($e2 && !$e2->[4], '...and its end is saved');
+
+    # The warm JOINING a stage a browse opened makes that drain the warm's: its end
+    # must be saved, or the 05:xx cover work vanishes whenever someone was browsing.
+    reset_world(); $n = 0; @stage = ();
+    $T::lastBrowseAt = time();                                   # brake on: the browse group waits
+    T::_warmCovers([ map { rel() } 1 .. 5 ], 'all releases', 1);
+    T::_warmCovers([ map { rel() } 1 .. 3 ], 'all releases');
+    $T::lastBrowseAt = 0;
+    my $g = 0;
+    while ((@HTTP_PENDING || @T::coverQueue || @Slim::Utils::Timers::PENDING) && ++$g < 200) {
+        http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    }
+    my @ends = grep { $_->[0] eq 'end' } @stage;
+    ok(scalar(@ends) == 1 && !$ends[0][4], 'a warm that joins a browse-opened stage makes its end SAVED');
+    reset_world();
+}
+{
+    # FINDING 2: the memo survives from an evening browse into the 05:xx warm, which
+    # then skips a cover the proxy has since dropped — it loads cold on screen.
+    reset_world(); $n = 0;
+    my $r = rel();
+    my $specs = scalar @{ +T::COVER_SPECS() };
+    T::_warmCovers([ $r ], 'all releases', 1);                   # the evening browse
+    http_settle() while @HTTP_PENDING;
+    is_count(scalar(keys %T::coverWarm), $specs, 'an evening browse memoises the cover');
+    %Slim::Web::ImageProxy::Cache::D = ();                       # LMS drops it overnight
+    @HTTP_GETS = ();
+    T::_warmCovers([ $r ], 'all releases');                      # a warm WITHOUT the forget
+    is_count(scalar(@HTTP_GETS), 0, 'CONTROL: with the memo still fresh the warm skips it (the bug)');
+    http_settle() while @HTTP_PENDING;
+    ok(T->can('coverMemoForget'), 'Browse has coverMemoForget, for the tick to call');
+    @HTTP_GETS = ();
+    reset_reads();
+    T::coverMemoForget() if T->can('coverMemoForget');
+    is_count(scalar(keys %T::coverWarm), 0, '...which empties the memo');
+    T::_warmCovers([ $r ], 'all releases');
+    is_count(scalar(@HTTP_GETS), $specs, '...so the warm asks the proxy, finds it gone, and re-fetches it');
+    reset_world();
 }
 
 print "\n" . ('=' x 74) . "\n$pass passed, $fail failed.\n";

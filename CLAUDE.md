@@ -493,6 +493,29 @@ not taken):
   each fail their own assertion.
 - All 38 suites exit 0; `singleflight_sync_check` 0.
 
+**/code-review of 1.0.19 (2026-09-22): TWO findings, both VERIFIED by failing tests on the committed
+code, both FIXED in 1.0.20 (built, NOT installed, NOT committed).**
+1. **`_saveLastWarm` — a browse after the tick overwrote the saved warm.** A focus warm that
+   queues a cold cover re-opens `covers`, and the whole live table was saved. A later tick stage
+   finishing carried the browse's row in too. Fix: the saved warm keeps its OWN table
+   (`%LAST_STAGE`/`@LAST_ORDER`, filled by `_noteLast`, cleared by `stageReset`). `stageStart` and
+   `stageEnd` take a `$transient` flag; `_stage` passes a 5th argument. The covers stage records
+   `$coverStageTransient` (set when a browse opens it, cleared when a whole-feed warm joins it) and
+   passes it on both boundaries. `_stageRows` is shared by the live report and the save. The live
+   table's behaviour is unchanged.
+2. **`COVER_WARM_MEMO` comment claimed the daily warm always re-asks the proxy — false.** A memo
+   set by an evening browse is still fresh at 05:xx. Fix: `Browse::coverMemoForget`, called
+   (eval-guarded) by `_warmTick` right after `stageReset`, so the scheduled warm asks the proxy for
+   every cover. The comment is rewritten to match.
+
+Tests: `t_warmstats.pl` §5 now DRIVES the real `_stage` shim, and §7 covers the browse, a later tick
+stage and a fresh tick (63 → 72). `t_coverwarm.pl` §4i covers the transient open, end and join, and
+the evening-browse memo against the proxy dropping the cover (184 → 194). 19 mutants were run; the
+first pass left TWO survivors, both closed. (a) `_stage` dropping the flag: `t_coverwarm` stubs
+`_stage`, so no suite drove the real shim; it is now driven. (b) Removing `_noteLast`'s tick
+guard: a redundant duplicate of `_saveLastWarm`'s, now deleted, and that guard's own mutant fails.
+All 19 fail their own assertion. All 38 suites exit 0; `singleflight_sync_check` 0.
+
 **Care points for the redesign (Simon: "be very careful"):** the carriers are every caller of
 `_warmCovers` / `_coverGroupsFor` (For You, All Releases weeks, Material home shelves, web skins,
 `_fanOutFeed`, `_warmTrendingCovers`); the proxy cache key is the WHOLE PATH including the spec
