@@ -3998,8 +3998,9 @@ use constant COVER_SPECS => [qw(_150x150_f _300x300_f _600x600_f)];
 # arithmetic that justified a small cap has changed by ~4x. Measured against the
 # live server, cold covers through the proxy: 0.40/s serial, 1.62/s at
 # concurrency 8. A whole 2,157-release feed is 3 x 2,157 = 6,471 requests, which
-# went from ~4.5 hours to ~1.1 hours of background work — and the markers hold
-# for COVER_WARM_TTL (25 days), so this is a first-run cost, not a nightly one.
+# went from ~4.5 hours to ~1.1 hours of background work — and the proxy holds each
+# rendition for 30 days (the warm asks it, _coverProxyWarm), so this is a first-run
+# cost, not a nightly one.
 # Steady state is whatever is genuinely new.
 # WHAT IS WARMED IS WHAT WILL BE RENDERED (0.9.196). The warm used to be handed
 # the RAW feed while every render path applies _filterSection first, so blocked
@@ -4068,30 +4069,40 @@ use constant COVER_BROWSE_QUIET         => 20;   # seconds of quiet before "idle
 # only true while covers are cold. This is what makes it true the rest of the time.
 use constant COVER_SCAN_BUDGET          => 25;   # groups dequeued per turn
 
-# How long we remember that a path is warm. UNDER the proxy's own 30d
-# (Slim::Web::ImageProxy::Cache is constructed with 86400*30), which keeps the marker
-# inside the entry's life ONLY WHEN OUR REQUEST IS WHAT STORED IT. It does not bound
-# the marker in general: the proxy's expiry is fixed when the entry is written and a
-# read never extends it (Slim::Utils::DbCache::get), so a warm request that HITS an
-# entry stored earlier — by a user's browse, or an earlier pass — writes a fresh 25d
-# marker against an entry that may expire tomorrow. The marker can then claim a cover
-# for up to COVER_WARM_TTL after the proxy dropped it; the cost is a cold fetch on the
-# next render, not a broken image. Known and open (2026-09-21 review), not fixed here.
-# Note this is the PLUGIN's store, whose expires_at is always absolute — the LMS
-# 30-day TTL cliff does not apply here.
-use constant COVER_WARM_TTL => 25 * 86400;
-# How long THIS PROCESS trusts a marker it has already read (or written), so a
-# re-walk of a warm view queues nothing and reads nothing. Without it every walk of
-# a Show-all week re-queued every release and re-read every marker — 322 releases,
-# 966 reads, on each sort tap and each refresh (live, 2026-09-21, the "it is loading
-# the entire cache" report). The markers were right; asking them again was the waste.
+# WHAT "WARM" MEANS (1.0.18): THE IMAGE PROXY HOLDS THE RENDITION. Asked of the
+# proxy's own cache (Slim::Web::ImageProxy::Cache, see _coverProxyWarm), never of a
+# copy of it.
 #
-# KEPT INSIDE THE GAP BETWEEN THE TWO TTLs (30d - COVER_WARM_TTL = 5d). That gap only
-# protects a marker whose own request stored the proxy entry; for one written on a
-# cache HIT the marker itself can already outlive the entry (see COVER_WARM_TTL), and
-# the memo inherits that — it adds at most COVER_WARM_MEMO on top, never a guarantee.
-# A day is short, and the daily restart clears it anyway.
-use constant COVER_WARM_MEMO => 86400;
+# Until 1.0.17 the warm kept its own `lbf:imgwarm:` marker per path, 25 days, and
+# believed it. Measured live with ["lbf","coverstats"] (1.0.17): ~1% of markers
+# claimed a rendition the proxy did not hold, every sampled one a cover that exists
+# at CAA. A marker could lie three ways and nothing in the plugin could see any of
+# them: written on the proxy's 200 PLACEHOLDER (_artworkError answers a failed fetch
+# with 200 + radio.png), written on a cache HIT so it outlived the entry (DbCache::get
+# never extends an expiry), or left standing when LMS purged or cleared its cache. A
+# lying marker kept a cover cold in front of the user for up to 25 days. The proxy's
+# cache cannot lie about itself, and reading it costs 0.047ms (6,543 reads, live).
+#
+# The family is RETIRED, not deleted: `lbf:imgwarm:` stays in DB::KEY_VERSIONS at a
+# version nothing writes, so the startup retirePrefixes sweep reclaims every old row.
+
+# A cover that could not be fetched — a placeholder instead of an image, a timeout,
+# an error — is not asked for again until this has passed. Without it a genuinely
+# missing or failing cover would be re-fetched on EVERY walk, and each cold CAA fetch
+# freezes the event loop ~0.5s (the LMS Net::HTTP read path; see CLAUDE.md "Slow
+# artwork / server freezes"). One day, so the next daily warm retries it. The proxy
+# is asked FIRST, so a cover that has since been cached is never held back by this.
+use constant COVER_MISS_TTL => 86400;
+
+# How long THIS PROCESS trusts that the proxy held a path, so a re-walk of a warm
+# view queues nothing and reads nothing (1.0.15: every walk of a Show-all week
+# re-queued 322 releases and re-read 966 markers on each sort tap).
+#
+# UNDER A DAY, AND THAT IS THE POINT. The proxy's entries expire (30d, fixed at
+# write) and are purged; the memo cannot see that. 12h means the daily warm always
+# finds the memo expired and re-asks the proxy, so a rendition that has gone is
+# re-fetched overnight rather than on screen. A restart clears it anyway.
+use constant COVER_WARM_MEMO => 12 * 3600;
 
 # A queue element is a GROUP: every proxy path for ONE release, which after the
 # ladder collapse all resolve to the same source URL. They are launched together
@@ -4115,15 +4126,20 @@ my $coverResumeArmed  = 0;   # ditto for the budget continuation — see _coverA
 # work actually happens and three rows would imply a parallelism that isn't there.
 #
 # THREE COUNTERS, NOT ONE, and the split is what makes the stage note falsifiable:
-# $coverFetched is requests actually ISSUED, $coverSkipped is requests the marker
-# check answered without touching the network, and $coverGroups is releases —
-# i.e. upstream downloads. The claim this stage exists to prove is
-# "$coverFetched ~ 3 x $coverGroups", and a single merged counter cannot show it.
+# $coverFetched is requests actually ISSUED, $coverSkipped is paths the proxy's own
+# cache already held (no network), and $coverGroups is releases — i.e. upstream
+# downloads. The claim this stage exists to prove is "$coverFetched ~ 3 x
+# $coverGroups", and a single merged counter cannot show it. Two more since 1.0.18:
+# $coverHeld is paths not asked for because they failed inside COVER_MISS_TTL, and
+# $coverFailed is issued requests that did NOT leave a rendition in the proxy
+# (placeholder, timeout, error) — the number the old markers could not see.
 my $coverStageOpen = 0;
 my $coverFetched   = 0;
 my $coverSkipped   = 0;
 my $coverGroups    = 0;
 my $coverPeak      = 0;
+my $coverHeld      = 0;
+my $coverFailed    = 0;
 
 # Current week first, then earlier weeks newest-first, then upcoming weeks.
 sub _coverWeekOrder {
@@ -4141,10 +4157,32 @@ sub _coverWeekOrder {
     return \@out;
 }
 
-# KEYED BY THE MARKER KEY, NOT THE PATH: the key carries the `lbf:imgwarm:` family
-# version, so a version bump misses here exactly as it misses in the store, with no
-# second invalidation to remember. Reads NO store — a hash lookup is what makes it
-# safe on the render path, where _coverGroupsFor must stay allocation-only.
+# The key the IMAGE PROXY caches a path under, which is NOT the path proxiedImage
+# returns. Slim::Web::HTTP strips the leading slash and URL-DECODES the request path
+# (`$params->{path} = Slim::Utils::Misc::unescape($path)`) before getImage caches
+# under it (`cachekey => $path`): the key is `imageproxy/https://coverartarchive.org/…
+# /image_150x150_f.jpg`. Pinned live by coverstats 1.0.17 — every hit was under
+# this form and none under either escaped one. LMS's own decoder, so it cannot drift.
+# A regex, no store: safe inside the allocation-only builder.
+sub _coverProxyKey {
+    my ($path) = @_;
+    (my $k = $path) =~ s{^/}{};
+    return Slim::Utils::Misc::unescape($k);
+}
+
+# Does the image proxy hold this rendition? The ONE definition of "warm". A read
+# that dies answers no, so the cover is fetched rather than wrongly skipped.
+my $coverProxyCache;
+sub _coverProxyWarm {
+    my ($pkey) = @_;
+    $coverProxyCache ||= eval { require Slim::Web::ImageProxy; Slim::Web::ImageProxy::Cache->new() }
+        or return 0;
+    return eval { $coverProxyCache->get($pkey) } ? 1 : 0;
+}
+
+# KEYED BY THE PROXY KEY (_coverProxyKey), the same string the proxy's own cache is
+# asked with. Reads NO store — a hash lookup is what makes it safe on the render
+# path, where _coverGroupsFor must stay allocation-only.
 sub _coverKnownWarm {
     my ($key) = @_;
     my $until = $coverWarm{$key} or return 0;
@@ -4153,9 +4191,9 @@ sub _coverKnownWarm {
     return 0;
 }
 
-# Recorded only on EVIDENCE: a marker read that answered, or a download the proxy
-# completed. Never on a failure, so a cover that could not be fetched is still
-# retried by the next walk. Swept at most hourly, so a long uptime cannot let
+# Recorded only on EVIDENCE: the proxy's own cache answered for the path, before a
+# fetch or after one. Never on a failure or a placeholder, so a cover that could not
+# be fetched is retried (after COVER_MISS_TTL). Swept at most hourly, so a long uptime cannot let
 # expired entries accumulate.
 sub _coverNoteWarm {
     my ($key) = @_;
@@ -4167,32 +4205,38 @@ sub _coverNoteWarm {
     return;
 }
 
+# A fetch that left no rendition in the proxy. Held back for COVER_MISS_TTL, in the
+# plugin's store so the hold survives a restart (a restart must not turn a failing
+# cover into a fresh fetch — and a fresh freeze — on every startup walk).
+sub _coverNoteMiss {
+    my ($path) = @_;
+    $coverFailed++;
+    eval {
+        $cache->set(Plugins::ListenBrainzFreshReleases::DB::kver('lbf:imgmiss:') . $path,
+                    1, COVER_MISS_TTL);
+        1;
+    };
+    return;
+}
+
 # ---------------------------------------------------------------------------
-# ["lbf","coverstats"] — DIAGNOSTIC ONLY (1.0.16). Does what the warm's markers claim
-# match what the image proxy actually holds?
+# ["lbf","coverstats"] — DIAGNOSTIC. Of the covers the warm is responsible for, how
+# many does the image proxy actually hold?
 #
-# The live warmstats after 1.0.15 said "1059 already warm" while a _150x150_f pass
-# over the same view still met cold covers and placeholders. This answers that from
-# inside the process, per path: marker present? proxy entry present? The lie count
-# (marker yes, proxy no) is the premise the rework rests on, so it is measured before
-# anything is built on it.
+# Built in 1.0.16/1.0.17 to test the premise of the 1.0.18 rework: that the old
+# `lbf:imgwarm:` markers claimed renditions the proxy did not hold. It found ~1%
+# lying, and pinned the proxy's key form (decoded — see _coverProxyKey). Since the
+# warm now asks the proxy itself, the report is the warm's own truth: `proxy` of
+# `paths` after a daily warm should be all of them bar `miss` (held failures).
+# `paths` and `proxy` keep their 1.0.17 meaning, so a 1.0.17 reading and a 1.0.18
+# reading compare directly.
 #
 # CHANGES NOTHING THE WARM READS: it walks the last list each non-focus warm was
 # handed (a REFERENCE, no copy), builds paths the way _coverGroupsFor does but never
 # touches %coverQueued or %coverWarm, and writes no store.
 #
-# CHUNKED, because a synchronous run is ~9,000 reads in one turn of the event loop
-# — the hazard class this whole investigation is about.
-#
-# THREE KEY FORMS. proxiedImage returns `/imageproxy/<url-ESCAPED>/image_…`, but
-# the web server strips the leading slash AND URL-DECODES the path
-# (Slim::Web::HTTP: `$params->{path} = Slim::Utils::Misc::unescape($path)`) before
-# Slim::Web::Graphics::artworkRequest hands it to getImage, which caches under
-# exactly that (`cachekey => $path`). So the expected key is
-# `imageproxy/https://coverartarchive.org/…/image_150x150_f.jpg`. 1.0.16 tried only
-# the two ESCAPED forms and read 0 hits of 4,362 — a wrong key, not an empty cache.
-# All three are still reported, so the live answer pins the form rather than this
-# comment.
+# CHUNKED, because a synchronous run is thousands of reads in one turn of the event
+# loop — the hazard class this whole investigation is about.
 my %coverDiagSource;   # label => the last release arrayref a non-focus warm was handed
 # Releases checked per turn of the event loop.
 use constant COVER_DIAG_CHUNK => 25;
@@ -4221,7 +4265,7 @@ sub coverStats {
     }
 
     my %rep;         # label => spec => counters
-    my @lies;
+    my @cold;
     my %seen;        # a release in two feeds is counted under both labels, once each
     my ($reads, $readMs, $readMax) = (0, 0, 0);
     my $t0 = Time::HiRes::time();
@@ -4249,29 +4293,18 @@ sub coverStats {
                 for my $spec (@{ +COVER_SPECS }) {
                     (my $path = $base) =~ s/(\.\w+)$/$spec$1/ or next;
                     my $c = $rep{$label}{$spec} ||= {
-                        paths => 0, marker => 0, proxy_slash => 0, proxy_bare => 0,
-                        proxy_decoded => 0, proxy => 0, lie => 0, proxy_no_marker => 0,
-                        memo => 0 };
+                        paths => 0, proxy => 0, miss => 0, cold => 0, memo => 0 };
                     $c->{paths}++;
-                    my $key = Plugins::ListenBrainzFreshReleases::DB::kver('lbf:imgwarm:') . $path;
-                    my $marker = eval { $cache->get($key) } ? 1 : 0;
-                    (my $bare = $path) =~ s{^/}{};
-                    my $slash = $timed->($path);
-                    my $noSlash = $timed->($bare);
-                    # LMS's own decoder, so this cannot drift from what the web
-                    # server does to the path.
-                    my $decoded = $timed->(Slim::Utils::Misc::unescape($bare));
-                    my $proxy = ($slash || $noSlash || $decoded) ? 1 : 0;
-                    $c->{marker}++          if $marker;
-                    $c->{proxy_slash}++     if $slash;
-                    $c->{proxy_bare}++      if $noSlash;
-                    $c->{proxy_decoded}++   if $decoded;
-                    $c->{proxy}++           if $proxy;
-                    $c->{memo}++            if $coverWarm{$key} && $coverWarm{$key} > time();
-                    $c->{proxy_no_marker}++ if $proxy && !$marker;
-                    if ($marker && !$proxy) {
-                        $c->{lie}++;
-                        push @lies, "$label $spec $path" if @lies < 10;
+                    my $key = _coverProxyKey($path);
+                    my $proxy = $timed->($key);
+                    my $miss = eval { $cache->get(
+                        Plugins::ListenBrainzFreshReleases::DB::kver('lbf:imgmiss:') . $path) } ? 1 : 0;
+                    $c->{proxy}++ if $proxy;
+                    $c->{miss}++  if $miss && !$proxy;
+                    $c->{memo}++  if $coverWarm{$key} && $coverWarm{$key} > time();
+                    if (!$proxy && !$miss) {
+                        $c->{cold}++;
+                        push @cold, "$label $spec $path" if @cold < 10;
                     }
                 }
             }
@@ -4282,7 +4315,7 @@ sub coverStats {
             $cb->({
                 error    => $ok ? '' : ($@ || 'unknown error'),
                 labels   => \%rep,
-                lies     => \@lies,
+                cold     => \@cold,
                 reads    => $reads,
                 read_ms_mean => $reads ? sprintf('%.3f', $readMs / $reads) : '0',
                 read_ms_max  => sprintf('%.3f', $readMax),
@@ -4481,8 +4514,7 @@ sub _warmCovers {
                 (my $path = $base) =~ s/(\.\w+)$/$spec$1/ or next;
                 # A path known warm will never be queued, so ranking it only grows
                 # %coverFocus with entries no launch will ever clear.
-                next if _coverKnownWarm(
-                    Plugins::ListenBrainzFreshReleases::DB::kver('lbf:imgwarm:') . $path);
+                next if _coverKnownWarm(_coverProxyKey($path));
                 $coverFocus{$path} = $rank++;
             }
         }
@@ -4503,6 +4535,8 @@ sub _warmCovers {
         $coverSkipped   = 0;
         $coverGroups    = 0;
         $coverPeak      = 0;
+        $coverHeld      = 0;
+        $coverFailed    = 0;
         _stage('start', 'covers');
     }
     _dbg("warm: covers — $label queued " . scalar(@$groups) . " release(s) of $seen");
@@ -4560,13 +4594,9 @@ sub _coverGroupsFor {
         for my $spec (@{ +COVER_SPECS }) {
             (my $path = $base) =~ s/(\.\w+)$/$spec$1/ or next;
             next if $coverQueued{$path};
-            # THROUGH kver, so the family can be invalidated like every other.
-            # Written as a bare literal this marker outlived the thing it
-            # described: it is a claim about an entry in the LMS image proxy's
-            # cache, keyed by a path that changes whenever the row URL changes
-            # (the `.png` -> `.jpg` switch being exactly that), and there was no
-            # way to retire the stale ones short of the dev wipe.
-            my $key = Plugins::ListenBrainzFreshReleases::DB::kver('lbf:imgwarm:') . $path;
+            # The key the image proxy caches this path under (_coverProxyKey) —
+            # the truth _coverLaunch asks, and the memo's key.
+            my $key = _coverProxyKey($path);
             # Already proven warm in this process: queue nothing, so the launcher
             # reads nothing. An in-memory lookup, so this stays allocation-only.
             next if _coverKnownWarm($key);
@@ -4744,7 +4774,8 @@ sub _coverMaybeEnd {
     # distinguish a pass that did nothing from a pass that skipped everything.
     _stage('end', 'covers', 'done',
            "$coverFetched request(s) / $coverGroups release(s)"
-         . ", $coverSkipped already warm, peak $coverPeak in flight");
+         . ", $coverSkipped already warm, $coverFailed not cached"
+         . ", $coverHeld held (recent miss), peak $coverPeak in flight");
 }
 
 # Launch ONE release: every spec, in a single synchronous turn.
@@ -4762,23 +4793,34 @@ sub _coverLaunch {
     $coverRunning++;
     $coverPeak = $coverRunning if $coverRunning > $coverPeak;
 
-    # THE MARKER CHECK LIVES HERE, not in the queue builder, for two reasons that
+    # THE WARM CHECK LIVES HERE, not in the queue builder, for two reasons that
     # both matter. (1) The builder runs inside an async HTTP callback and, later,
-    # inside a browse callback; doing this there is thousands of synchronous
-    # SQLite reads in one turn of the event loop. Here it is one read per launch,
-    # naturally spread across the pump. (2) The page-aligned warm unshifts
+    # inside a browse callback; reading there is thousands of synchronous SQLite
+    # reads in one turn of the event loop. Here it is one read per path per
+    # launch, naturally spread across the pump. (2) The page-aligned warm unshifts
     # unchecked precisely because it cannot afford the read — so this is the only
     # thing standing between a re-rendered page and a re-fetch of covers that are
     # already warm.
+    #
+    # THE PROXY IS ASKED FIRST, THE MISS MEMO SECOND. A cover the proxy holds is
+    # warm whatever a past failure recorded; a cover it does not hold is fetched
+    # unless it failed inside COVER_MISS_TTL.
     my @todo;
     for my $ent (@$group) {
         my ($path, $key) = @$ent;
-        if (eval { $cache->get($key) }) {
+        if (_coverProxyWarm($key)) {
             _coverNoteWarm($key);
             delete $coverQueued{$path};
             delete $coverRank{$path};
             delete $coverFocus{$path};
             $coverSkipped++;
+            next;
+        }
+        if (eval { $cache->get(Plugins::ListenBrainzFreshReleases::DB::kver('lbf:imgmiss:') . $path) }) {
+            delete $coverQueued{$path};
+            delete $coverRank{$path};
+            delete $coverFocus{$path};
+            $coverHeld++;
             next;
         }
         push @todo, $ent;
@@ -4827,11 +4869,17 @@ sub _coverLaunch {
 
             Slim::Networking::SimpleAsyncHTTP->new(
                 sub {
-                    # Only the fact that the proxy answered matters — by the time this
-                    # returns the resized image is in its cache, and we throw our copy
-                    # away.
-                    eval { $cache->set($key, 1, COVER_WARM_TTL); 1 };
-                    _coverNoteWarm($key);
+                    # AN ANSWER IS NOT A COVER. The proxy answers a failed upstream
+                    # fetch with 200 and its placeholder (_artworkError), which is
+                    # exactly how the old markers came to lie. So the proxy's own
+                    # cache is asked: it stores the rendition BEFORE it responds
+                    # (_resizeFromFile), so a real image is already there by now.
+                    if (_coverProxyWarm($key)) {
+                        _coverNoteWarm($key);
+                    }
+                    else {
+                        _coverNoteMiss($path);
+                    }
                     $done->();
                 },
                 sub {
@@ -4846,6 +4894,11 @@ sub _coverLaunch {
                         %coverQueued = ();
                         %coverRank = ();
                         %coverFocus = ();
+                    }
+                    # A local refusal says nothing about the cover, so it is never
+                    # recorded as a miss; anything else (a timeout, a proxy error) is.
+                    else {
+                        _coverNoteMiss($path);
                     }
                     $done->();
                 },

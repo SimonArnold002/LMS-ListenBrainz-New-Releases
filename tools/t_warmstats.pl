@@ -117,14 +117,38 @@ my $bsrc = slurp($BROWSE);
 # them. The declarations are restated here (they are four `my` lines, not logic);
 # everything with behaviour in it is lifted verbatim.
 # ---------------------------------------------------------------------------
-my $harness = join('',
-    "package T::Warm;\n",
-    "use strict; use warnings; use Time::HiRes ();\n",
-    "my %WARM_STAGE; my \@WARM_ORDER; my \$WARM_TICK_AT; my \$WARM_TICK_N = 0;\n",
-    map { grab($psrc, $_) } qw(stageStart stageEnd stageReset warmStages),
-);
-eval $harness;
-die "harness failed to compile: $@" if $@;
+# THE STORE, stubbed: one hash shared by every harness package, because the point
+# of section 6 is that a SECOND PROCESS (a restart) reads what the first one saved.
+our %STORE; our @SETS;
+{
+    package Plugins::ListenBrainzFreshReleases::DB;
+    sub store { return bless {}, 'T::Store' }
+    sub kver  { return $_[0] . '1:' }
+}
+{
+    package T::Store;
+    sub set { my (undef, $k, $v, $ttl) = @_; push @main::SETS, [ $k, $ttl ]; $main::STORE{$k} = $v; 1 }
+    sub get { my (undef, $k) = @_; return $main::STORE{$k} }
+}
+$INC{'Plugins/ListenBrainzFreshReleases/DB.pm'} = __FILE__;
+
+my ($lastTtlLine) = $psrc =~ /^(use constant LAST_WARM_TTL\s*=>.*?;)$/m
+    or die "no LAST_WARM_TTL in Plugin.pm\n";
+# One harness per "process": each gets its own lexicals, as a restart does.
+sub harness {
+    my ($pkg) = @_;
+    my $h = join('',
+        "package $pkg;\n",
+        "use strict; use warnings; use Time::HiRes ();\n",
+        "my %WARM_STAGE; my \@WARM_ORDER; my \$WARM_TICK_AT; my \$WARM_TICK_N = 0;\n",
+        "sub version { '9.9.9' }\n",
+        "$lastTtlLine\n",
+        map { grab($psrc, $_) } qw(stageStart stageEnd stageReset warmStages _saveLastWarm lastWarm),
+    );
+    eval $h;
+    die "harness $pkg failed to compile: $@" if $@;
+}
+harness('T::Warm');
 
 # ---------------------------------------------------------------------------
 section('1. BEFORE ANY TICK — empty, but answering');
@@ -312,6 +336,58 @@ section('5. THE RECORDER IS ACTUALLY CALLED — a perfect unused instrument is d
     ok(scalar($cli =~ /setStatusDone/),             'the handler completes the request');
     ok(scalar($cli =~ /\bat\b/ && $cli =~ /\buntil\b/),
        'the CLI emits start AND end offsets, so the overlap survives to the reader');
+}
+
+# ---------------------------------------------------------------------------
+section('6. THE LAST SCHEDULED WARM SURVIVES A RESTART (1.0.18)');
+# Simon's server stops every service for a 06:30 backup, so the 05:xx warm's table
+# was gone by the time anyone read it (live 2026-09-22: ticks 0). The table is now
+# also saved to the store — but ONLY by a process that ran a tick, so the restart's
+# re-seed (which still marks `covers`) cannot overwrite the real warm.
+{
+    %STORE = (); @SETS = ();
+    harness('T::P1');                  # the process that runs the 05:xx warm
+    T::P1::stageStart('covers');       # a mark BEFORE any tick (a startup re-seed)
+    T::P1::stageEnd('covers', 'done', 're-seed');
+    ok(scalar(@SETS) == 0, 'a process that has run no tick saves nothing');
+
+    T::P1::stageReset();
+    T::P1::stageStart('all_feed');
+    my $saved = T::P1::lastWarm();
+    ok($saved && ($saved->{stages}[0]{outcome} // '') eq 'running',
+       'a stage START is saved, so a warm cut off mid-stage shows it still running');
+    T::P1::stageEnd('all_feed', 'done', '1776 releases');
+    T::P1::stageStart('covers');
+    T::P1::stageEnd('covers', 'done', '54 request(s)');
+    $saved = T::P1::lastWarm();
+    ok($saved && scalar(@{ $saved->{stages} }) == 2, 'every stage of the tick is saved');
+    ok($saved && $saved->{stages}[0]{note} eq '1776 releases' && $saved->{stages}[1]{outcome} eq 'done',
+       '...with its outcome and note');
+    ok($saved && $saved->{tick_at} > 0 && $saved->{version} eq '9.9.9',
+       '...and the tick time and the build that ran it');
+    my ($k, $ttl) = @{ $SETS[-1] || [] };
+    ok(($k // '') eq 'lbf:warmlast:1:tick', 'saved under the versioned lbf:warmlast: family');
+    ok(($ttl // 0) == T::P1::LAST_WARM_TTL() && T::P1::LAST_WARM_TTL() > 86400,
+       '...with a TTL longer than a day, so yesterday\'s warm is readable the next morning');
+
+    # THE RESTART: a new process, fresh lexicals, same store.
+    harness('T::P2');
+    my $n = scalar @SETS;
+    T::P2::stageStart('covers');
+    T::P2::stageEnd('covers', 'done', '0 request(s), 1908 already warm');
+    ok(scalar(@SETS) == $n, 'after a restart the re-seed marks do NOT overwrite the saved warm');
+    my $after = T::P2::lastWarm();
+    ok($after && scalar(@{ $after->{stages} }) == 2 && $after->{stages}[1]{note} eq '54 request(s)',
+       '...and the restarted process reads the 05:xx warm back intact');
+    ok(scalar(@{ T::P2::warmStages()->{stages} }) == 1,
+       '...while its OWN table stays its own (the re-seed row only, never merged)');
+
+    # The CLI has to report it, under names that cannot be read as the live table.
+    my $cli = grab($psrc, '_cliWarmStats');
+    ok(scalar($cli =~ /lastWarm\(\)/ && $cli =~ /last_stages_loop/ && $cli =~ /last_tick_at/),
+       'warmstats reports the saved warm under its own last_ names');
+    ok(scalar(grab($psrc, '_saveLastWarm') =~ /\beval\s*\{/),
+       '_saveLastWarm is eval-guarded (its callers are inside async callbacks)');
 }
 
 printf "\n%s\n%d passed, %d failed.\n", '=' x 74, $pass, $fail;

@@ -91,6 +91,13 @@ use constant WARM_SVC_MAX_WAIT => 300;       # give up waiting, warm anyway
 # not durable cached data. A stage table from before a restart would describe a
 # different run.
 #
+# ...WHICH IS WHY THE LAST SCHEDULED WARM IS ALSO SAVED, SEPARATELY (1.0.18). Simon's
+# server stops every service for a 06:30 backup, so the 05:xx warm's table was gone
+# by the time anyone read it (live 2026-09-22: `ticks 0`, only the re-seed's covers
+# row). _saveLastWarm copies the table to the store — labelled as the last TICK, never
+# merged into this process's table — and warmstats reports both. Only a process that
+# has run a tick saves, so a restart's re-seed can never overwrite the real warm.
+#
 # Every entry is eval-guarded at the call site's expense, never this module's: a
 # recorder that can die turns an instrument into an outage.
 # ---------------------------------------------------------------------------
@@ -107,6 +114,7 @@ sub stageStart {
     return unless defined $name && length $name;
     push @WARM_ORDER, $name unless exists $WARM_STAGE{$name};
     $WARM_STAGE{$name} = { start => Time::HiRes::time(), end => 0, outcome => 'running', note => '' };
+    _saveLastWarm();
     return;
 }
 
@@ -128,6 +136,7 @@ sub stageEnd {
     $e->{end}     = Time::HiRes::time();
     $e->{outcome} = $outcome // 'done';
     $e->{note}    = $note    // '';
+    _saveLastWarm();
     return;
 }
 
@@ -167,6 +176,43 @@ sub warmStages {
         ticks   => $WARM_TICK_N,
         stages  => \@rows,
     };
+}
+
+# Copy this process's table to the store as "the last scheduled warm". Called on
+# every stage boundary, so a warm cut off mid-stage (the 06:30 backup) is saved with
+# that stage still `running` — which is itself the answer to "did it finish?".
+#
+# ONLY AFTER A TICK IN THIS PROCESS ($WARM_TICK_N). After a restart the re-seed and
+# browses still mark stages (covers), and those must not replace the real warm.
+#
+# Eval-guarded here, because the callers are inside async HTTP callbacks: an
+# instrument that can die turns into an outage.
+use constant LAST_WARM_TTL => 8 * 86400;
+sub _saveLastWarm {
+    return unless $WARM_TICK_N;
+    eval {
+        require Plugins::ListenBrainzFreshReleases::DB;
+        my $rep = warmStages();
+        Plugins::ListenBrainzFreshReleases::DB::store()->set(
+            Plugins::ListenBrainzFreshReleases::DB::kver('lbf:warmlast:') . 'tick',
+            { tick_at  => $rep->{tick_at},
+              saved_at => Time::HiRes::time(),
+              version  => (eval { version() } // ''),
+              stages   => $rep->{stages} },
+            LAST_WARM_TTL);
+        1;
+    };
+    return;
+}
+
+# The last scheduled warm as saved, or undef. Read by ["lbf","warmstats"].
+sub lastWarm {
+    my $v = eval {
+        require Plugins::ListenBrainzFreshReleases::DB;
+        Plugins::ListenBrainzFreshReleases::DB::store()->get(
+            Plugins::ListenBrainzFreshReleases::DB::kver('lbf:warmlast:') . 'tick');
+    };
+    return ref $v eq 'HASH' ? $v : undef;
 }
 
 # ARE WE A DEV BUILD? 1 on `dev`, 0 on `main`. This is telemetry only: ordinary
@@ -478,10 +524,10 @@ sub initPlugin {
     Slim::Control::Request::addDispatch(
         ['lbf', 'warmstats'], [0, 1, 0, \&_cliWarmStats]);
 
-    # Cover truth report (DIAGNOSTIC, 1.0.16) —
+    # Cover truth report (DIAGNOSTIC, 1.0.16; proxy-only since 1.0.18) —
     #     ["lbf","coverstats"]
-    # Do the warm's `lbf:imgwarm:` markers agree with what the LMS image proxy
-    # actually holds? See Browse::coverStats. Flags [0,1,1]: no player, a query, and
+    # Of the covers the warm is responsible for, how many does the LMS image proxy
+    # actually hold? See Browse::coverStats. Flags [0,1,1]: no player, a query, and
     # ASYNC — it reads thousands of rows, chunked across turns of the event loop.
     Slim::Control::Request::addDispatch(
         ['lbf', 'coverstats'], [0, 1, 1, \&_cliCoverStats]);
@@ -509,13 +555,13 @@ sub _cliCoverStats {
                     $request->addResultLoop('specs_loop', $i, 'label', $label);
                     $request->addResultLoop('specs_loop', $i, 'spec',  $spec);
                     $request->addResultLoop('specs_loop', $i, $_, $c->{$_})
-                        for qw(paths marker proxy proxy_slash proxy_bare proxy_decoded lie proxy_no_marker memo);
+                        for qw(paths proxy miss cold memo);
                     $i++;
                 }
             }
             $request->addResult('count', $i);
             my $j = 0;
-            $request->addResultLoop('lies_loop', $j++, 'path', $_) for @{ $r->{lies} || [] };
+            $request->addResultLoop('cold_loop', $j++, 'path', $_) for @{ $r->{cold} || [] };
             $answered = 1;
             $request->setStatusDone();
         });
@@ -571,6 +617,28 @@ sub _cliWarmStats {
         $i++;
     }
     $request->addResult('count', $i);
+
+    # THE LAST SCHEDULED WARM, from the store — survives the 06:30 backup restart.
+    # Same row shape and offsets as the live table, under its own `last_` names so the
+    # two can never be read as one run.
+    my $last = eval { lastWarm() };
+    my $l0 = $last ? ($last->{tick_at} || 0) : 0;
+    $request->addResult('last_tick_at',  int($l0));
+    $request->addResult('last_saved_at', $last ? int($last->{saved_at} || 0) : 0);
+    $request->addResult('last_version',  $last ? ($last->{version} // '') : '');
+    my $k = 0;
+    for my $s (@{ ($last && $last->{stages}) || [] }) {
+        $request->addResultLoop('last_stages_loop', $k, 'name',    $s->{name});
+        $request->addResultLoop('last_stages_loop', $k, 'outcome', $s->{outcome});
+        $request->addResultLoop('last_stages_loop', $k, 'at',
+            $s->{start} && $l0 ? sprintf('%.2f', $s->{start} - $l0) : '');
+        $request->addResultLoop('last_stages_loop', $k, 'until',
+            $s->{end}   && $l0 ? sprintf('%.2f', $s->{end}   - $l0) : '');
+        $request->addResultLoop('last_stages_loop', $k, 'elapsed', sprintf('%.2f', $s->{elapsed} // 0));
+        $request->addResultLoop('last_stages_loop', $k, 'note',    $s->{note} // '');
+        $k++;
+    }
+    $request->addResult('last_count', $k);
 
     $request->setStatusDone();
 }

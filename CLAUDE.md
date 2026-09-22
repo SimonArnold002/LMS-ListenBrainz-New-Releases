@@ -431,6 +431,68 @@ LMS 9.1 source, so the next round need not re-derive them:
 - **Not unit-tested:** the `_cliCoverStats` response shape (diagnostic only; checked live on install).
 
 
+**Step 1 of the rework — built 1.0.18, 2026-09-21 (truthful warm; NOT installed, held until the
+1.0.17 baseline `coverstats` is read the next morning before browsing).** "Warm" now means THE
+IMAGE PROXY HOLDS THE RENDITION, asked of `Slim::Web::ImageProxy::Cache` itself:
+- `_coverProxyKey` (slash stripped, url-decoded via `Slim::Utils::Misc::unescape`, the form pinned
+  live) and `_coverProxyWarm` (a read that dies answers no, so the cover is fetched rather than
+  wrongly skipped).
+- `_coverLaunch` asks the proxy FIRST, then the miss memo. After a download it asks the proxy
+  again: a rendition there is noted warm, anything else (the 200 placeholder, a timeout, an
+  error) is a MISS.
+- `lbf:imgmiss:` (new family, v1) holds a failed cover for `COVER_MISS_TTL` 1d, so a failing cover
+  is not a freeze per walk. It is stored in the plugin's store, so a restart does not re-fetch.
+  A 401/403 local refusal is never a miss.
+- `lbf:imgwarm:` is RETIRED: bumped to v3, which nothing writes, so the startup `retirePrefixes`
+  reclaims every old row. `COVER_WARM_TTL` is deleted.
+- `COVER_WARM_MEMO` 1d → **12h**, so every daily warm re-asks the proxy (a purged rendition is
+  re-fetched overnight, not on screen). The memo is keyed by the proxy key.
+- The stage note gains `N not cached, N held (recent miss)`.
+- `coverstats` now reports `paths / proxy / miss / cold / memo`. `paths` and `proxy` keep their
+  1.0.17 meaning, so the before and after readings compare directly.
+
+Tests: `t_coverwarm.pl` 184. The marker assertions were rewritten on purpose to proxy truth,
+through an independently derived `pkey`. The one behaviour change pinned: a failed cover is HELD,
+not re-fetched on the next walk. New §4h covers the placeholder, proxy-beats-stale-miss, refusal
+not a miss, the stage note and the key form. Anti-tested by ten mutants (answer-is-warm,
+no-miss-hold, miss-beats-proxy, refusal-is-miss, key-not-decoded, key-is-path, memo-a-day,
+failure-uncounted, no-builder-skip, timeout-no-miss), each failing its own assertion with the
+suite completing. All 38 suites exit 0; `singleflight_sync_check` 0.
+**Self-review (2026-09-21): NO findings.** Cleared against the LMS 9.1 source:
+- The proxy writes the rendition BEFORE it responds on BOTH resize paths. With the `gdresized`
+  daemon, the callback re-reads `$cache->get($cachekey)`. With the default in-process path,
+  `GDResizer::gdresize` → `_cache($cache, $cachekey, …)` for a single spec. So the post-download
+  proxy read is reliable on default settings.
+- `_coverProxyWarm`'s `||= eval {…} or return 0` parses as intended.
+- The miss memo is keyed by the ESCAPED path at every writer and reader (`_coverNoteMiss`,
+  `_coverLaunch`, `coverStats`); only the proxy and the memo use the decoded key.
+- Held paths are re-queued (not memoised) on a walk, which costs two cheap reads each and stays
+  inside `COVER_SCAN_BUDGET`.
+- **On install:** the startup re-seed will fetch the covers that are truly cold (about 24 paths
+  in the 1.0.17 reading) once, at idle width. That is a one-off cost of the truth.
+
+**BASELINE, 1.0.17, 2026-09-22 07:52, after the 05:xx warm and the 06:30 backup restart, before
+browsing:** 1,914 of 1,935 cover paths held by the proxy (98.9%). All 21 cold paths were lying
+markers, the same count as the day before (24), and release `8a69867c…` was on both lists. Fetched
+once through the proxy it answered a real 150×150 JPEG (`max-age`, 3.3s), so it was a TRANSIENT
+failure hidden by a 25d marker. Lie 1 exactly. **Conclusion: the warm does not leave covers cold
+in bulk. Monday's slowness = the re-walk flood (fixed 1.0.15) + a handful of lying covers,** each a
+cold fetch and freeze on scroll. `warmstats` read `ticks 0`: the 05:xx table is lost every day to
+the 06:30 backup restart (recorded 2026-09-14; the warm stays at 05:00 by §A2).
+
+**1.0.19 (built 2026-09-22, NOT installed, NOT committed) = 1.0.18's Step 1 + the last warm kept
+across a restart.** On Simon's pick (option 1 of 2; option 2, moving the warm after the backup, was
+not taken):
+- `Plugin::_saveLastWarm` copies the stage table to the store (`lbf:warmlast:` v1, 8d) on every
+  `stageStart`/`stageEnd`, ONLY after a tick in this process, so the restart's re-seed cannot
+  overwrite it. A warm cut off mid-stage is saved with that stage `running`.
+- `warmstats` adds `last_tick_at`, `last_saved_at`, `last_version` and `last_stages_loop`
+  (same offsets as the live table), never merged into it.
+- `t_warmstats.pl` §6 (51 → 63) proves it with two harness "processes" sharing one store. Five
+  Plugin.pm mutants (no tick guard, no save on start, no save on end, TTL an hour, CLI omits it)
+  each fail their own assertion.
+- All 38 suites exit 0; `singleflight_sync_check` 0.
+
 **Care points for the redesign (Simon: "be very careful"):** the carriers are every caller of
 `_warmCovers` / `_coverGroupsFor` (For You, All Releases weeks, Material home shelves, web skins,
 `_fanOutFeed`, `_warmTrendingCovers`); the proxy cache key is the WHOLE PATH including the spec
@@ -506,7 +568,7 @@ because line numbers rot on the next edit.
 | THREE pumps touch Spotify — `_resolveTracks`(`paced`), `_detailPriorityBusy` (DetailWarm queue ONLY), and `_buildAlbumsData`'s trending-albums gate (paced 1.0.4). "The album side is `_detailPriorityBusy`" was WRONG and hid the third for two rounds | A2 | `THREE PUMPS TOUCH SPOTIFY, NOT TWO` |
 | 1.0.3 review — THREE findings. (1) the trending-albums streaming gate was unpaced — `$warm` off `$onPending`, plus `$pumping`/`$gapTimer`, built 1.0.4; a paced gate times out into the 1h TTL: ACCEPTED, Simon's call. (2) `_buildingEnd` freed a NEWER pass's flag after the backstop expired — the flag is now a token. (3) a synchronous Spotify refusal skipped the paced gap — the resolvers signal it, `$holding` stops the loop. (2)+(3) built 1.0.5. **Round CLOSED by Simon 2026-09-16.** Closes those defects only | C | `CLOSED IN THE 1.0.3 REVIEW —` |
 | 1.0.5 review (round four on the back-off): NO findings — records what was checked across all three fixes, and one PRE-1.0.4 observation deliberately not reported (the albums gate files a refused album as a drop). Round CLOSED by Simon; pushed to `dev`. Not a suppression of the fix code | C | `CLOSED IN THE 1.0.5 REVIEW —` |
-| Slow artwork / server freezes: cold archive.org cover fetch freezes LMS ~0.5s. Cause = LMS `Net::HTTP::Methods::my_readline` blocking `select` (UNVERIFIED, strace pending), NOT resizing/size/DNS/TLS-in-general/HQPlayer. Markers-on-placeholder + marker-outlives-entry are OPEN, owned by the artwork redesign | B | `SLOW ARTWORK / SERVER FREEZES` |
+| Slow artwork / server freezes: cold archive.org cover fetch freezes LMS ~0.5s. Cause = LMS `Net::HTTP::Methods::my_readline` blocking `select` (UNVERIFIED, strace pending), NOT resizing/size/DNS/TLS-in-general/HQPlayer. Lying markers FIXED in 1.0.18 (the warm asks the proxy's cache, key = slash-less + url-DECODED; `lbf:imgwarm:` retired; failures held 1d via `lbf:imgmiss:`). Cold fetches while browsing = Step 2, OPEN | B | `SLOW ARTWORK / SERVER FREEZES` |
 | Web-skin dividers: Default/Classic get `type=>'textarea'` with NO image (`_webSkin`/`_divType`/`_divImage`); Classic losing row covers is the ACCEPTED cost; Material untouched. 1.0.8: `_webify` pass (feedMode = web on the itemActions CLI route, text rows -> textarea, `_webBounce` for nextWindow) | A2 | `WEB-SKIN DIVIDERS ARE TEXTAREA` |
 
 **Two standing rules that kill most repeat findings:**
@@ -854,7 +916,7 @@ always with its reason, and those stay suppressed. The code a fix added is new a
 
 ### B. KNOWN-OPEN AND ACCEPTED — do not re-report as new
 
-- **SLOW ARTWORK / SERVER FREEZES — `_warmCovers`, `_focusReleaseCovers`, `_coverLaunch`, `lbf:imgwarm:`, `COVER_WARM_TTL`.** OPEN, under investigation 2026-09-21 (Simon). A marker can be written on the proxy's 200 placeholder, a marker written on a cache hit can outlive the proxy entry by up to 25d, and uncached archive.org fetches run on the event loop while the user browses (each freezes LMS ~0.5s via an LMS core HTTPS read bug). Known, not missed: the fix is a deliberate redesign, not a patch. Full write-up: the "Slow artwork / server freezes — investigation" section above the ledger.
+- **SLOW ARTWORK / SERVER FREEZES — `_warmCovers`, `_focusReleaseCovers`, `_coverLaunch`, `_coverProxyWarm`, `lbf:imgwarm:`, `lbf:imgmiss:`.** Markers-on-placeholder and marker-outlives-entry: FIXED in 1.0.18 (built 2026-09-21, not yet installed): the warm asks the image proxy's own cache and holds failures for 1d. STILL OPEN: uncached archive.org fetches run on the event loop while the user browses (each freezes LMS ~0.5s via an LMS core HTTPS read bug) — Step 2 of the plan. Known, not missed. Full write-up: the "Slow artwork / server freezes — investigation" section above the ledger.
 - ~~**`matcher_sync_check.py` exits 1.**~~ **CLOSED in 0.9.194** — the hold was
   lifted 2026-08-29 and the sync is done (PFR 0.9.33, LBF 0.9.194). **The check
   now exits 0, and a non-zero exit is a real finding again.** Search Hub is

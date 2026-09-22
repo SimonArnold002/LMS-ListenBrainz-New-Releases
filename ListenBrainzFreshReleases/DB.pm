@@ -915,8 +915,12 @@ use constant KEY_VERSIONS => {
     # markers claim a warm entry for a URL no client will ever request again, so
     # without a bump the warm would skip the whole feed and every cover would be
     # cold on first sight — the exact failure the warm exists to prevent.
-    'lbf:imgwarm:'           => 2,
+    'lbf:imgwarm:'           => 3,   # RETIRED 1.0.18: nothing writes v3; the bump makes
+                                     # retirePrefixes reclaim every old marker row. The warm
+                                     # asks the image proxy's own cache now (Browse::_coverProxyWarm).
+    'lbf:imgmiss:'           => 1,   # a cover fetch that left no rendition; held COVER_MISS_TTL
     'lbf:lastlisten:'        => 1,
+    'lbf:warmlast:'          => 1,   # the last scheduled warm's stage table (Plugin::_saveLastWarm), survives the 06:30 backup restart
     'lbf:lbtracks:'          => 1,   # ListenBrainz tracklist per release GROUP (API::getTracklist)
     'lbf:rgbyname:'          => 2,
     'lbf:stream:'            => 29,
