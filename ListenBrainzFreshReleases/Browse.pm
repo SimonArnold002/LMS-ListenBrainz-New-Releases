@@ -4117,10 +4117,12 @@ use constant COVER_SCAN_BUDGET          => 25;   # groups dequeued per turn
 # than the day-1 fetch that recorded the miss did (a hold costs two cheap reads; the
 # pass that recorded it was fetching at ~1.6/s). So a 24h hold is always still standing
 # when the next warm arrives, and the retry would land on the first browse walk after
-# it lapsed — a cold CAA fetch, and its ~0.5s freeze, in front of the user. The tick
-# therefore FORGETS the family outright (coverMissForget, from Plugin::_warmTick),
-# exactly as it forgets the warm memo (review of 1.0.23). The TTL is the backstop for a
-# process that never ticks. The proxy is asked FIRST, so a cover that has since been
+# it lapsed — a cold CAA fetch, and its ~0.5s freeze, in front of the user. So the tick
+# STAMPS ITS START (coverTickBegin, from Plugin::_warmTick) and a warm launch retries a
+# hold older than that stamp (review of 1.0.23, corrected in 1.0.26 — 1.0.24 deleted the
+# whole family here, which lost every hold the capped, interruptible pass never reached).
+# This TTL is what ends a hold the warm never revisits, and the only thing that ends one
+# in a process that never ticks. The proxy is asked FIRST, so a cover that has since been
 # cached is never held back by this.
 use constant COVER_MISS_TTL => 86400;
 
@@ -4298,7 +4300,7 @@ sub _coverNoteMiss {
     $coverFailed++;
     eval {
         # THE VALUE IS THE INSTANT IT WAS HELD, not a bare 1: the daily retry compares it
-        # with the tick's start (coverMissRetry). An old row written as 1 compares as
+        # with the tick's start (coverTickBegin). An old row written as 1 compares as
         # older than any tick, so it is retried once, which is the wanted behaviour.
         $cache->set(Plugins::ListenBrainzFreshReleases::DB::kver('lbf:imgmiss:') . $path,
                     Time::HiRes::time(), COVER_MISS_TTL);
@@ -4928,7 +4930,7 @@ sub _coverLaunch {
             next;
         }
         # A HOLD IS HONOURED UNLESS THIS IS THE DAILY WARM RETRYING IT (see
-        # coverMissRetry). A focus path is a BROWSE: always honoured, because a
+        # coverTickBegin). A focus path is a BROWSE: always honoured, because a
         # re-fetch there is the freeze on screen.
         my $miss = eval { $cache->get(Plugins::ListenBrainzFreshReleases::DB::kver('lbf:imgmiss:') . $path) };
         if ($miss && ($coverTickAt <= 0 || exists $coverFocus{$path} || $miss >= $coverTickAt)) {

@@ -702,6 +702,21 @@ no-reopen, reopen-always, tick-never-stamps) each go red. The harness now SKIPS 
 lacks instead of dying, so an anti-test against an older Browse.pm reports FAILs rather than taking
 the suite down. All 38 suites exit 0; `singleflight_sync_check` 0.
 
+**Inline review of 1.0.26 (2026-09-23): ONE finding, a DOC defect, FIXED in 1.0.27 (comments only;
+built, NOT installed; sha 013b995e).** `COVER_MISS_TTL`'s own comment block still described 1.0.24's
+deleted behaviour — "the tick therefore FORGETS the family outright (coverMissForget)" — which
+1.0.26 replaced with the stamp-and-compare rule, and two more comments named `coverMissRetry`, an
+intermediate name that never shipped. A COMMENT IS NOT THE CONTRACT: where it claims an invariant the
+code does not implement, the comment is the defect. The block now states the rule the code runs, and
+says what the TTL is FOR under it (it ends a hold the warm never revisits, and is the only thing that
+ends one in a process that never ticks). No behaviour change; all 38 suites exit 0.
+**Cleared in the same pass, logged so it is not re-derived:** a path left in `%coverFocus` by a
+browse that never launched it makes the tick HONOUR its hold (the focus set is only cleared by the
+next `_focusReleaseCovers`). Accepted: the retry is deferred to the following tick, never lost, and a
+per-path flag cannot tell which pass is launching it. The saved covers row still takes its start from
+a BROWSE that opened the stage after the tick began (ledger note (a)'s shape) — unchanged, and the
+re-open rule deliberately does not fire there.
+
 **Care points for the redesign (Simon: "be very careful"):** the carriers are every caller of
 `_warmCovers` / `_coverGroupsFor` (For You, All Releases weeks, Material home shelves, web skins,
 `_fanOutFeed`, `_warmTrendingCovers`); the proxy cache key is the WHOLE PATH including the spec
