@@ -4208,11 +4208,20 @@ sub _coverProxyKey {
 # Does the image proxy hold this rendition? The ONE definition of "warm". A read
 # that dies answers no, so the cover is fetched rather than wrongly skipped.
 my $coverProxyCache;
+# THREE ANSWERS, NOT TWO (review of 1.0.24): 1 the proxy holds it, 0 it does not,
+# UNDEF the question could not be asked (no cache object, or the read died). The same
+# 0 used to mean both "not there" and "could not ask" — harmless where it only gates a
+# FETCH, but 1.0.18 made it drive a WRITE: a proxy cache that could not be read filed
+# every cover of the pass as a 24h miss, holding a whole feed on a fault that says
+# nothing about any cover. Callers that fetch treat undef as 0; the caller that RECORDS
+# must not.
 sub _coverProxyWarm {
     my ($pkey) = @_;
     $coverProxyCache ||= eval { require Slim::Web::ImageProxy; Slim::Web::ImageProxy::Cache->new() }
-        or return 0;
-    return eval { $coverProxyCache->get($pkey) } ? 1 : 0;
+        or return undef;
+    my $hit = eval { $coverProxyCache->get($pkey) };
+    return undef if $@;
+    return $hit ? 1 : 0;
 }
 
 # KEYED BY THE PROXY KEY (_coverProxyKey), the same string the proxy's own cache is
@@ -4940,20 +4949,28 @@ sub _coverLaunch {
                     # exactly how the old markers came to lie. So the proxy's own
                     # cache is asked: it stores the rendition BEFORE it responds
                     # (_resizeFromFile), so a real image is already there by now.
-                    if (_coverProxyWarm($key)) {
+                    my $held = _coverProxyWarm($key);
+                    if ($held) {
                         _coverNoteWarm($key);
                     }
-                    else {
+                    elsif (defined $held) {
                         _coverNoteMiss($path);
+                    }
+                    else {
+                        # The proxy cache could not be asked. The download may well have
+                        # worked; holding the cover for a day on OUR fault would keep it
+                        # cold on screen (review of 1.0.24). Counted, never held.
+                        $coverFailed++;
                     }
                     $done->();
                 },
                 sub {
                     my (undef, $error) = @_;
+                    my $err = $error // '';
                     # A server behind HTTP auth refuses our own request, and retrying
                     # the rest of the queue would just log the same failure a few
                     # hundred times. Drop the whole pass; the next warm retries.
-                    if (($error // '') =~ /\b40[13]\b/) {
+                    if ($err =~ /\b40[13]\b/) {
                         $log->info("warm: covers — the server refused a local request ($error);"
                                  . " skipping the cover warm");
                         @coverQueue  = ();
@@ -4961,8 +4978,23 @@ sub _coverLaunch {
                         %coverRank = ();
                         %coverFocus = ();
                     }
-                    # A local refusal says nothing about the cover, so it is never
-                    # recorded as a miss; anything else (a timeout, a proxy error) is.
+                    # A LOCAL FAILURE SAYS NOTHING ABOUT THE COVER, and a 401/403 is not
+                    # the only one (review of 1.0.24). The request is to 127.0.0.1: a
+                    # refused connection, a reset or a closed socket means OUR server went
+                    # away mid-pass — Simon's stops every service for the 06:30 backup, and
+                    # a dev restart does the same. Holding those covers for a day would
+                    # keep them cold on screen, which is the freeze this rework removes.
+                    # Counted, never held.
+                    #
+                    # A TIMEOUT IS STILL A MISS, deliberately (1.0.18, mutant
+                    # `timeout-no-miss`): an upstream CAA hang can expire our loopback
+                    # request too, and re-fetching a hanging cover on every walk is a
+                    # freeze per walk. Note an upstream FAILURE does not arrive here at
+                    # all — the proxy answers it 200 with its placeholder, which the
+                    # success path catches by asking the proxy's cache.
+                    elsif ($err =~ /connection refused|refused|reset by peer|connect(?:ion)? (?:failed|closed)|broken pipe|not connected|no route|unreachable/i) {
+                        $coverFailed++;
+                    }
                     else {
                         _coverNoteMiss($path);
                     }

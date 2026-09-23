@@ -375,9 +375,11 @@ $INC{'Slim/Web/ImageProxy.pm'} = __FILE__;
 # Reads are COUNTED so a test can see which key form was asked for.
 {
     package Slim::Web::ImageProxy::Cache;
-    our %D; our @GETS; my $one;
+    our %D; our @GETS; our $DIES = 0; my $one;
     sub new { $one ||= bless {}, shift }
-    sub get { my ($s, $k) = @_; push @GETS, $k; return $D{$k} }
+    # $DIES: the cache cannot be READ (a broken DbCache, a locked db). Distinct from
+    # "the key is not there", and since 1.0.18 that difference drives a WRITE.
+    sub get { my ($s, $k) = @_; push @GETS, $k; die "cache unavailable\n" if $DIES; return $D{$k} }
 }
 # Slim::Utils::Misc::unescape, TRANSCRIBED from LMS 9.1 (the web server decodes the
 # request path with it before the proxy caches under that path).
@@ -393,7 +395,7 @@ $INC{'Slim/Web/ImageProxy.pm'} = __FILE__;
 $INC{'Slim/Utils/Misc.pm'} = __FILE__;
 
 our @HTTP_GETS;         # every url the runner asked for, in order
-our $HTTP_MODE = 'ok';  # 'ok' | '401'
+our $HTTP_MODE = 'ok';  # 'ok' | '401' | 'fail' | 'refused' | 'placeholder' | 'die'
 {
     package Slim::Networking::SimpleAsyncHTTP;
     # 'die' mode reproduces a launch that never gets off the ground, which is the
@@ -421,6 +423,9 @@ sub http_settle {
     my ($s) = @$req;
     if    ($HTTP_MODE eq '401')  { $s->{err}->(undef, 'Failed to open socket: 401 Authorization Required') }
     elsif ($HTTP_MODE eq 'fail') { $s->{err}->(undef, 'Timed out waiting for data') }
+    # OUR OWN server went away mid-pass (the 06:30 backup stops every service; a dev
+    # restart does the same). A loopback transport failure, not the cover's fault.
+    elsif ($HTTP_MODE eq 'refused') { $s->{err}->(undef, 'Connect failed: Connection refused') }
     # The proxy's 200 PLACEHOLDER: an answer, and nothing cached. How markers lied.
     elsif ($HTTP_MODE eq 'placeholder') { $s->{done}->(bless {}, 'T::Resp') }
     else {
@@ -1546,6 +1551,57 @@ section('4f. a re-walk of a warm view queues nothing and reads nothing');
     delete $CACHE->{d}{$_} for grep { /^\Q$IMGMISS\E/ } keys %{ $CACHE->{d} };
     T::_warmCovers([ $r ], 'all releases', 1);
     is_count(scalar(@HTTP_GETS), $specs, '...and once the hold lapses it is fetched again');
+    reset_world();
+}
+{
+    # A LOCAL TRANSPORT FAILURE IS NOT THE COVER'S FAULT (review of 1.0.24). The 401/403
+    # refusal was already exempt; a refused connection is the same class — our own
+    # server went away mid-pass (the 06:30 backup, a restart). Holding those covers for
+    # a day would keep them cold on screen, which is the freeze this rework removes.
+    reset_world(); $n = 0;
+    my $r = rel();
+    my $specs = scalar @{ +T::COVER_SPECS() };
+    $HTTP_MODE = 'refused';
+    T::_warmCovers([ $r ], 'all releases', 1);
+    http_settle() while @HTTP_PENDING;
+    Slim::Utils::Timers::fire_all();
+    is_count(scalar(grep { $_->[0] =~ /^\Q$IMGMISS\E/ } @{ $CACHE->{sets} }), 0,
+             'a refused local connection records NO miss');
+    is_count($T::coverFailed, $specs, '...but is counted as a failure (the note stays honest)');
+    $HTTP_MODE = 'ok'; @HTTP_GETS = ();
+    T::_warmCovers([ $r ], 'all releases', 1);
+    is_count(scalar(@HTTP_GETS), $specs, '...so the very next walk fetches it (never held)');
+    http_settle() while @HTTP_PENDING;
+
+    # CONTROL, and the ledger's pinned rule (1.0.18, mutant `timeout-no-miss`): a
+    # TIMEOUT is still a miss. An upstream hang can expire our loopback request too, and
+    # re-fetching a hanging cover on every walk is a freeze per walk.
+    reset_world(); $n = 0;
+    my $r2 = rel();
+    $HTTP_MODE = 'fail';
+    T::_warmCovers([ $r2 ], 'all releases', 1);
+    http_settle() while @HTTP_PENDING;
+    Slim::Utils::Timers::fire_all();
+    is_count(scalar(grep { $_->[0] =~ /^\Q$IMGMISS\E/ } @{ $CACHE->{sets} }), $specs,
+             'CONTROL: a TIMEOUT is still held as a miss');
+    reset_world();
+}
+{
+    # THE PROXY CACHE CANNOT BE READ (review of 1.0.24). _coverProxyWarm answered 0 for
+    # both "not there" and "could not ask"; since 1.0.18 that 0 drives a WRITE, so a
+    # broken cache filed every cover of the pass as a 24h miss — a whole feed held on a
+    # fault that says nothing about any cover.
+    reset_world(); $n = 0;
+    my $r = rel();
+    my $specs = scalar @{ +T::COVER_SPECS() };
+    local $Slim::Web::ImageProxy::Cache::DIES = 1;
+    T::_warmCovers([ $r ], 'all releases', 1);
+    is_count(scalar(@HTTP_GETS), $specs, 'a cache that cannot be read still fetches (undef gates like 0)');
+    http_settle() while @HTTP_PENDING;
+    Slim::Utils::Timers::fire_all();
+    is_count(scalar(grep { $_->[0] =~ /^\Q$IMGMISS\E/ } @{ $CACHE->{sets} }), 0,
+             '...and records NO miss, so it cannot hold a whole feed on our own fault');
+    is_count(scalar(keys %T::coverWarm), 0, '...nor claims the cover warm on an answer it could not verify');
     reset_world();
 }
 {

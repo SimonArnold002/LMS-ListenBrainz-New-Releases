@@ -633,6 +633,36 @@ AND `coverMemoForget` for this same clock reason; the miss hold got neither.
   0 cold, read in 0.15s; `warmstats` showed the 07:55 tick's complete 13-stage saved table surviving
   the restart with nothing stuck `running` — the 1.0.18/1.0.19 model confirmed working live.
 
+**/code-review of 1.0.24 (2026-09-23): TWO findings, VERIFIED, FIXED in 1.0.25 (built, NOT
+installed; sha 2908bf4e).** Both are the same question — WHOSE FAULT WAS THAT? — on the write side
+of the 1.0.18 miss hold.
+1. **A loopback transport failure was filed as a 24h miss.** The error callback exempted only
+   `/\b40[13]\b/`; a refused connection (Simon's server stops every service for the 06:30 backup,
+   and a dev restart does the same, while the cover pass is still pumping) or a reset socket fell
+   into the `else` and wrote `lbf:imgmiss:`. Those covers were then skipped by every walk until the
+   next tick, so each loaded cold ON SCREEN with the ~0.5s freeze the rework exists to remove, and
+   `$coverFailed` blamed the proxy in the stage note for a local outage. **This addresses the 1.0.18
+   entry "a timeout … is a MISS" head-on rather than re-reporting it:** the code's own rule two lines
+   above is "a local refusal says nothing about the cover", and a loopback connect failure is
+   exactly as local as a 401.
+   - Fix: a `connection refused | reset by peer | connect failed/closed | broken pipe | not
+     connected | no route | unreachable` error counts as a failure and is NEVER held.
+   - **A TIMEOUT IS STILL A MISS, deliberately** (1.0.18's pinned rule + its `timeout-no-miss`
+     mutant): an upstream CAA hang can expire our loopback request too, and a hanging cover
+     re-fetched on every walk is a freeze per walk. An upstream FAILURE never reaches this callback
+     at all — the proxy answers it 200 + placeholder, which the success path catches by asking the
+     proxy's cache.
+2. **`_coverProxyWarm`'s fail-to-0 drove a write.** The same 0 meant "not cached" (fetch it) and
+   "could not ask" (record a miss). A proxy cache that could not be built or read therefore filed
+   EVERY cover of the pass as a miss and held a whole feed for a day on a fault that says nothing
+   about any cover. Fix: it now answers 1 / 0 / **undef** (could not ask). Fetch gates treat undef as
+   0, unchanged; the success path counts it and records nothing.
+
+Tests: `t_coverwarm.pl` 206 → 213. The stub cache gained a `$DIES` mode (a read that dies, distinct
+from "not there") and the HTTP stub a `refused` mode. 3 red on 1.0.24. 5 mutants — refused-is-miss,
+an exemption that swallows timeouts too (7 red, the control), `_coverProxyWarm` back to two answers,
+undef-files-miss, undef-is-warm — each go red. All 38 suites exit 0; `singleflight_sync_check` 0.
+
 **Care points for the redesign (Simon: "be very careful"):** the carriers are every caller of
 `_warmCovers` / `_coverGroupsFor` (For You, All Releases weeks, Material home shelves, web skins,
 `_fanOutFeed`, `_warmTrendingCovers`); the proxy cache key is the WHOLE PATH including the spec
