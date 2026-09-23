@@ -4118,9 +4118,11 @@ use constant COVER_SCAN_BUDGET          => 25;   # groups dequeued per turn
 # pass that recorded it was fetching at ~1.6/s). So a 24h hold is always still standing
 # when the next warm arrives, and the retry would land on the first browse walk after
 # it lapsed — a cold CAA fetch, and its ~0.5s freeze, in front of the user. So the tick
-# STAMPS ITS START (coverTickBegin, from Plugin::_warmTick) and a warm launch retries a
-# hold older than that stamp (review of 1.0.23, corrected in 1.0.26 — 1.0.24 deleted the
-# whole family here, which lost every hold the capped, interruptible pass never reached).
+# STAMPS ITS START (coverTickBegin, from Plugin::_warmTick) and a launch of a group THE
+# SCHEDULED WARM QUEUED retries a hold older than that stamp (review of 1.0.23, corrected
+# in 1.0.26 and again in 1.0.27 — 1.0.24 deleted the whole family here, which lost every
+# hold the capped, interruptible pass never reached, and 1.0.26 read "is this the warm?"
+# off %coverFocus, which a later browse clears).
 # This TTL is what ends a hold the warm never revisits, and the only thing that ends one
 # in a process that never ticks. The proxy is asked FIRST, so a cover that has since been
 # cached is never held back by this.
@@ -4149,8 +4151,9 @@ my %coverReveal;     # player/view => previous reveal count
 my %coverQueued;     # $path => 1 while queued, so two feeds can't queue it twice
 my %coverWarm;       # marker KEY => epoch until which this process trusts it (COVER_WARM_MEMO)
 # The instant this process's current scheduled warm began (Plugin::_warmTick via
-# coverTickBegin). Two rules read it: a warm launch retries a hold older than it, and a
-# covers stage opened before it is RE-OPENED when the tick's own pass joins. 0 means no
+# coverTickBegin). Two rules read it: a launch of a group the scheduled warm queued
+# retries a hold older than it, and a covers stage opened before it is RE-OPENED when
+# the tick's own pass joins. 0 means no
 # tick has run in this process, so every hold stands (a restart must not turn a failing
 # cover into a fetch storm) and no stage is re-opened.
 my $coverTickAt = 0;
@@ -4278,12 +4281,19 @@ sub coverMemoForget {
 # no retry, so the re-fetch landed on a browse walk: the cold CAA fetch and ~0.5s freeze
 # the hold exists to prevent, the opposite of what the fix intended.
 #
-# So nothing is deleted. The tick stamps an instant, and a WARM launch ignores a hold
-# written BEFORE it (retrying that cover once, at 05:xx where a freeze is unseen) while
-# honouring one written during or after it (a cover that failed again this morning is
-# not re-fetched all day). A hold the pass never reaches simply stands, and its own
-# COVER_MISS_TTL still ends it. A BROWSE launch (a focus path) always honours a hold:
-# on-screen is exactly where a re-fetch must not happen.
+# So nothing is deleted. The tick stamps an instant, and a launch of a group THE
+# SCHEDULED WARM QUEUED ignores a hold written BEFORE it (retrying that cover once, at
+# 05:xx where a freeze is unseen) while honouring one written during or after it (a cover
+# that failed again this morning is not re-fetched all day). A hold the pass never reaches
+# simply stands, and its own COVER_MISS_TTL still ends it.
+#
+# EVERY OTHER LAUNCH HONOURS A HOLD, and which pass queued a group is carried on the
+# group itself (%coverRank's third field) rather than inferred from %coverFocus (review
+# of 1.0.27). Focus alone was wrong in both directions: it is cleared and rebuilt by the
+# next focus warm, so a held cover queued by a browse of For You was re-fetched — cold,
+# on screen — as soon as the user opened All Releases, and a manual refresh's trending
+# covers were never marked at all. Focus is still read, as the second half of the rule:
+# a path on screen RIGHT NOW is never re-fetched even when the warm queued it.
 sub coverTickBegin {
     # Time::HiRes, the same clock $coverStageOpenedAt uses: a whole-second stamp
     # compares wrongly against a stage opened a fraction of a second earlier, and the
@@ -4616,7 +4626,17 @@ sub _warmCovers {
         my $path = $group->[0][0];
         # For You (including MuSpy) precedes All Releases when nobody is looking.
         my $section = $label =~ /for you|muspy/ ? 0 : $label =~ /all releases/ ? 1 : 2;
-        $coverRank{$path} = [$section, ++$coverSequence];
+        # THE THIRD FIELD IS PROVENANCE, NOT ORDER (review of 1.0.27): 1 when the
+        # SCHEDULED WARM queued this group, 0 when a browse or a manual refresh did.
+        # _coverLaunch reads it to decide whether it may retry a held miss, because
+        # that is a property of the PASS and there is nowhere else to keep it: the
+        # queue is shared, groups outlive the pass that queued them, and %coverFocus
+        # — which the first cut read instead — is CLEARED and rebuilt by the next
+        # focus warm, so view A's queued covers lost their browse marking the moment
+        # the user opened view B. The order fields are untouched (_orderCoverQueue
+        # reads [0] and [1] only), and a group with no entry reads as a browse's,
+        # which is the safe default: the hold stands.
+        $coverRank{$path} = [$section, ++$coverSequence, $transient ? 0 : 1];
     }
     push @coverQueue, @$groups;
     _orderCoverQueue();
@@ -4918,6 +4938,11 @@ sub _coverLaunch {
     # THE PROXY IS ASKED FIRST, THE MISS MEMO SECOND. A cover the proxy holds is
     # warm whatever a past failure recorded; a cover it does not hold is fetched
     # unless it failed inside COVER_MISS_TTL.
+    # WHOSE PASS QUEUED THIS GROUP, read ONCE and before the loop below deletes the
+    # rank entry it lives in. Only the scheduled warm may retry a held miss.
+    my $warmPass = $coverTickAt > 0
+                && (($coverRank{ $group->[0][0] } || [])->[2] ? 1 : 0);
+
     my @todo;
     for my $ent (@$group) {
         my ($path, $key) = @$ent;
@@ -4930,10 +4955,13 @@ sub _coverLaunch {
             next;
         }
         # A HOLD IS HONOURED UNLESS THIS IS THE DAILY WARM RETRYING IT (see
-        # coverTickBegin). A focus path is a BROWSE: always honoured, because a
-        # re-fetch there is the freeze on screen.
+        # coverTickBegin), which takes all three of: a group the SCHEDULED WARM
+        # queued ($warmPass), a path not on screen right now (%coverFocus), and a
+        # hold recorded before this tick began. Anything else honours it, because a
+        # re-fetch anywhere else is a cold CAA fetch — and its ~0.5s freeze — while
+        # somebody is looking.
         my $miss = eval { $cache->get(Plugins::ListenBrainzFreshReleases::DB::kver('lbf:imgmiss:') . $path) };
-        if ($miss && ($coverTickAt <= 0 || exists $coverFocus{$path} || $miss >= $coverTickAt)) {
+        if ($miss && !($warmPass && !exists $coverFocus{$path} && $miss < $coverTickAt)) {
             delete $coverQueued{$path};
             delete $coverRank{$path};
             delete $coverFocus{$path};

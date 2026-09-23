@@ -1572,6 +1572,117 @@ section('4f. a re-walk of a warm view queues nothing and reads nothing');
     is_count(scalar(@HTTP_GETS), 0, 'a BROWSE honours a hold older than the tick (no freeze on screen)');
     is_count($T::coverHeld, $specs, '...and counts it held');
 
+    # ...AND IT STILL HONOURS IT ONCE THE USER HAS MOVED ON (review of 1.0.27). The
+    # first cut read "is this the daily warm?" off %coverFocus, which _warmCovers
+    # CLEARS and rebuilds on every focus warm — so a held cover queued by a browse of
+    # All Releases lost its marking the moment the user opened For You, and the pump
+    # then re-fetched it cold, on screen, which is the freeze the hold exists to
+    # prevent. Which pass queued a group is now carried on the group (%coverRank's
+    # third field) instead.
+    reset_world(); $n = 0;
+    my $hb = rel();                                        # oldest, so it queues LAST
+    my $hm = $hb->{caa_release_mbid};
+    $HTTP_MODE = 'fail';
+    T::_warmCovers([ $hb ], 'all releases', 1);            # yesterday's browse fails
+    http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    select(undef, undef, undef, 0.02);
+    T::coverTickBegin() if T->can('coverTickBegin');       # 05:00 arrives
+    $HTTP_MODE = 'ok'; @HTTP_GETS = ();
+    $T::lastBrowseAt = time();                             # browsing: two releases wide
+    T::_warmCovers([ (map { rel() } 1 .. 6), $hb ], 'all releases', 1);   # view A
+    is_count(scalar(grep { index($_, $hm) >= 0 } keys %T::coverFocus), $specs,
+             'the held cover is queued by view A, and focused');
+    T::_warmCovers([ map { rel() } 1 .. 3 ], 'for you', 1);               # view B
+    is_count(scalar(grep { index($_, $hm) >= 0 } keys %T::coverFocus), 0,
+             '...and view B clears that focus while it is still queued');
+    $T::lastBrowseAt = 0;
+    my $gb = 0;
+    while ((@HTTP_PENDING || @T::coverQueue || @Slim::Utils::Timers::PENDING) && ++$gb < 500) {
+        http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    }
+    is_count(scalar(grep { index($_, $hm) >= 0 } @HTTP_GETS), 0,
+             '...yet the hold still stands: a browse-queued cover is never the warm retrying');
+
+    # A MANUAL REFRESH IS NOT THE WARM EITHER, and it has no focus of its own to be
+    # read as one — the same rule, the other carrier.
+    reset_world(); $n = 0;
+    my $hr = rel();
+    $HTTP_MODE = 'fail';
+    T::_warmCovers([ $hr ], 'trending albums', undef, 1);
+    http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    select(undef, undef, undef, 0.02);
+    T::coverTickBegin() if T->can('coverTickBegin');
+    $HTTP_MODE = 'ok'; @HTTP_GETS = ();
+    T::_warmCovers([ $hr ], 'trending albums', undef, 1);
+    is_count(scalar(@HTTP_GETS), 0, 'a manual REFRESH honours a hold older than the tick');
+    is_count($T::coverHeld, $specs, '...and counts it held');
+
+    # CONTROL: narrowing the rule must not cost the tick its retry. The tick queues the
+    # group, a browse then clears the focus map, and the hold is STILL retried.
+    reset_world(); $n = 0;
+    my $ht = rel();                                        # oldest, so it queues last
+    my $tm = $ht->{caa_release_mbid};
+    $HTTP_MODE = 'fail';
+    T::_warmCovers([ $ht ], 'all releases', 1);
+    http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    select(undef, undef, undef, 0.02);
+    T::coverTickBegin() if T->can('coverTickBegin');
+    $HTTP_MODE = 'ok'; @HTTP_GETS = ();
+    $T::lastBrowseAt = time();
+    T::_warmCovers([ $ht, map { rel() } 1 .. 6 ], 'for you');            # the TICK's pass
+    T::_warmCovers([ map { rel() } 1 .. 2 ], 'all releases', 1);         # a browse clears focus
+    $T::lastBrowseAt = 0;
+    my $gt = 0;
+    while ((@HTTP_PENDING || @T::coverQueue || @Slim::Utils::Timers::PENDING) && ++$gt < 500) {
+        http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    }
+    is_count(scalar(grep { index($_, $tm) >= 0 } @HTTP_GETS), $specs,
+             'CONTROL: a hold the TICK queued is still retried after a browse clears the focus');
+
+    # ...unless the user is LOOKING at it. The second half of the rule: the tick queued
+    # the group at 05:00, somebody opened that view at 05:05, and the retry would be a
+    # cold CAA fetch on screen. A browse marks already-queued paths into %coverFocus
+    # exactly so this can be seen here.
+    reset_world(); $n = 0;
+    my $hw = rel();
+    my $wm = $hw->{caa_release_mbid};
+    $HTTP_MODE = 'fail';
+    T::_warmCovers([ $hw ], 'all releases', 1);
+    http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    select(undef, undef, undef, 0.02);
+    T::coverTickBegin() if T->can('coverTickBegin');
+    $HTTP_MODE = 'ok'; @HTTP_GETS = ();
+    $T::lastBrowseAt = time();
+    T::_warmCovers([ $hw, map { rel() } 1 .. 6 ], 'for you');       # the tick queues it
+    T::_warmCovers([ $hw ], 'for you', 1);                          # the user opens that view
+    is_count(scalar(grep { index($_, $wm) >= 0 } keys %T::coverFocus), $specs,
+             'a browse focuses a path the TICK already queued');
+    $T::lastBrowseAt = 0;
+    my $gw = 0;
+    while ((@HTTP_PENDING || @T::coverQueue || @Slim::Utils::Timers::PENDING) && ++$gw < 500) {
+        http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    }
+    is_count(scalar(grep { index($_, $wm) >= 0 } @HTTP_GETS), 0,
+             '...and the tick does NOT retry its hold while that page is on screen');
+
+    # WHICH PASS QUEUED THE GROUP IS READ ONCE, BEFORE THE LOOP. It lives in the rank
+    # entry of the group's FIRST path, and that entry is deleted the moment that path
+    # is skipped — so reading it per path would lose the tick's retry for every spec
+    # behind a spec the proxy already holds.
+    reset_world(); $n = 0;
+    my $hx = rel();                                        # mbid-0001: $EXPECT names it
+    $HTTP_MODE = 'fail';
+    T::_warmCovers([ $hx ], 'all releases', 1);            # a browse records the holds
+    http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    select(undef, undef, undef, 0.02);
+    T::coverTickBegin() if T->can('coverTickBegin');
+    $HTTP_MODE = 'ok'; @HTTP_GETS = ();
+    mark_warm($EXPECT . T::COVER_SPECS()->[0] . $EXT);     # the proxy now holds spec one
+    T::_warmCovers([ $hx ], 'all releases');               # the tick's pass
+    http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    is_count(scalar(@HTTP_GETS), $specs - 1,
+             'the tick retries the specs BEHIND one the proxy already holds');
+
     # The hold lapses (the store's TTL): the next walk retries.
     reset_world(); $n = 0;
     my $rl = rel();

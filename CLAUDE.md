@@ -717,6 +717,45 @@ per-path flag cannot tell which pass is launching it. The saved covers row still
 a BROWSE that opened the stage after the tick began (ledger note (a)'s shape) — unchanged, and the
 re-open rule deliberately does not fire there.
 
+**/code-review of 1.0.27 (2026-09-23): ONE finding, VERIFIED IN THE SUITE, FIXED in 1.0.28 (built,
+NOT installed; sha 94e65f66).** It is 1.0.26's own wake, so it is new information even though the
+symbols hit that round.
+
+**1.0.26 read "is this the daily warm retrying?" off `%coverFocus`, and `%coverFocus` is not a
+property of the pass.** `_warmCovers` CLEARS it and rebuilds it on every focus warm
+(`if ($focus) { %coverFocus = (); ... }`), while the groups an earlier pass queued stay in the
+SHARED queue. Two carriers, both live:
+- **A second browse.** View A (All Releases) queues its held covers and marks them focused; the user
+  opens view B (For You) before the pump reaches them; the marks are gone, so `_coverLaunch` read
+  them as the warm's and re-fetched them — a cold CAA fetch and its ~0.5s freeze, on screen, which
+  is the freeze the hold exists to prevent.
+- **A manual refresh.** `_warmTrendingCovers` passes `$transient` but never a focus, so a refresh's
+  covers were never marked at all: every hold older than the morning's tick was retried on a
+  user-initiated action.
+- **Proved before it was reported**, with a probe section in a scratch copy of `t_coverwarm.pl`:
+  `queued-in-A=1 focus-in-A=3 focus-after-B=0 refetched=3`.
+- **Fix: provenance rides on the GROUP, not on the view.** `%coverRank`'s entry gains a THIRD field
+  — 1 when the scheduled warm queued the group, 0 when a browse or a refresh did — and
+  `_coverLaunch` retries a hold only when all three hold: the warm queued this group, the path is
+  not in the CURRENT focus, and the hold predates `$coverTickAt`. The flag is read ONCE, before the
+  per-path loop, because that loop deletes the rank entry of the group's first path the moment that
+  path is skipped. `_orderCoverQueue` reads fields [0] and [1] only, and a group with no entry reads
+  as a browse's, which is the safe default: the hold stands.
+
+**This CORRECTS the 1.0.26 round's cleared note**, which said "a per-path flag cannot tell which
+pass is launching it". Wrong question: the one worth asking is which pass QUEUED the group, and the
+queue already carried a per-group record with exactly the right lifetime. The residual that note
+records is unchanged and still accepted — a path a BROWSE queued first is invisible to the tick's
+pass (`_coverGroupsFor` skips queued paths), so its retry is deferred by one tick, never lost.
+
+Tests: `t_coverwarm.pl` 219 → 228 — view A focuses the held cover, view B clears it, the hold still
+stands; a manual REFRESH honours a pre-tick hold and counts it held; CONTROL, the tick still retries
+its own queued hold after a browse has cleared the focus map; the tick does NOT retry while that
+page is on screen; and the tick retries the specs BEHIND one the proxy already holds (the read-once
+property). 7 mutants — back to 1.0.26's rule, the focus clause dropped, `$warmPass` dropped, the
+flag inverted, always-warm, never-set, and read-per-path — each go red. All 38 suites exit 0;
+`singleflight_sync_check` 0.
+
 **Care points for the redesign (Simon: "be very careful"):** the carriers are every caller of
 `_warmCovers` / `_coverGroupsFor` (For You, All Releases weeks, Material home shelves, web skins,
 `_fanOutFeed`, `_warmTrendingCovers`); the proxy cache key is the WHOLE PATH including the spec
