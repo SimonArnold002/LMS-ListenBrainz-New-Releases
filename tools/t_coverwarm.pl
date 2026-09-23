@@ -494,12 +494,16 @@ for my $c (qw(COVER_SPECS COVER_WARM_MAX COVER_MISS_TTL COVER_WARM_MEMO
 
 for my $name (qw(_coverWeekOrder _weekStart _orderCoverQueue _focusReleaseCovers _renderSlots _weekGroups _buildWeekly _divType _divImage _divName _escHtml _warmCovers _coverGroupsFor _coverTick _coverMaybeEnd _coverLaunch
                  _coverKnownWarm _coverNoteWarm _noteBrowse _coverLimit _coverArmRestart _coverArmResume
-                 _coverProxyKey _coverProxyWarm _coverNoteMiss coverStats coverMemoForget coverMissForget)) {
+                 _coverProxyKey _coverProxyWarm _coverNoteMiss coverStats coverMemoForget coverTickBegin)) {
+    # A sub the source does not have is SKIPPED, not fatal: its own assertion then reports
+    # the absence as a FAIL (and an anti-test against an older Browse.pm still runs the
+    # whole suite) instead of the harness dying before any section is reached.
+    next unless $bsrc =~ /^sub \Q$name\E\b/m;
     my $body = grab($bsrc, $name);
     eval "package T; use Time::HiRes (); use Time::Local (); our (\$cache, \$prefs, \$log); "
        . "our (\@coverQueue, \%coverQueued, \%coverWarm, \$coverWarmSwept, \%_WEEK_START, \%coverRank, \%coverFocus, \%coverReveal, \$coverSequence, \$coverRunning, \$coverPumping, \$coverStageOpen, "
        . "\$coverFetched, \$coverSkipped, \$coverGroups, \$coverPeak, "
-       . "\$lastBrowseAt, \$coverRestartArmed, \$coverResumeArmed, \%coverDiagSource, \$coverHeld, \$coverFailed, \$coverProxyCache, \$coverStageTransient); $body 1;"
+       . "\$lastBrowseAt, \$coverRestartArmed, \$coverResumeArmed, \%coverDiagSource, \$coverHeld, \$coverFailed, \$coverProxyCache, \$coverStageTransient, \$coverTickAt, \$coverStageOpenedAt); $body 1;"
         or die "eval $name: $@";
 }
 
@@ -520,6 +524,9 @@ sub reset_world {
     $T::coverFailed  = 0;
     $T::coverStageTransient = 0;
     $T::coverStageOpen = 0;
+    $T::coverStageOpenedAt = 0;
+    # No tick has run in the harness process unless a test says so: every hold stands.
+    $T::coverTickAt = 0;
     %Slim::Web::ImageProxy::Cache::D = (); @Slim::Web::ImageProxy::Cache::GETS = ();
     %T::coverDiagSource = ();
     $T::lastBrowseAt = 0;          # nobody browsing: every section below runs at the IDLE width
@@ -1521,35 +1528,59 @@ section('4f. a re-walk of a warm view queues nothing and reads nothing');
     # THE HOLD DOES NOT LAPSE IN TIME FOR THE NEXT WARM (review of 1.0.23). The warm
     # fires at the same instant daily and reaches a held path earlier in the tick than
     # the fetch that recorded it, so a 24h TTL is always still standing — the retry
-    # would land on a browse walk, which is the freeze this whole rework is about. The
-    # tick forgets the family outright, as it forgets the memo.
-    ok(T->can('coverMissForget'), 'Browse has coverMissForget, for the tick to call');
+    # would land on a browse walk, which is the freeze this whole rework is about.
+    #
+    # 1.0.24 DELETED the family at the top of the tick; the review of 1.0.25 killed that:
+    # the pass is capped (COVER_WARM_MAX) and interruptible (the 06:30 backup), so every
+    # hold it never reached was wiped with no retry at all. The tick now STAMPS AN
+    # INSTANT and a warm launch retries only a hold older than it.
+    ok(T->can('coverTickBegin'), 'Browse has coverTickBegin, for the tick to call');
     @HTTP_GETS = ();
-    # A SENTINEL FROM ANOTHER FAMILY. The prefix is a DELETE over the kv table, so a
-    # broad one ('lbf:') would take the feeds, the details and the saved warm with it —
-    # a mutant that did exactly that survived the first cut of this section.
-    $CACHE->{d}{'lbf:feed:1:all'}       = 'keep me';
-    $CACHE->{d}{'lbf:warmlast:1:tick'}  = 'keep me too';
-    my $forgot = T->can('coverMissForget') ? T::coverMissForget() : 0;
-    is_count($forgot, $specs, '...and it forgets every held path');
-    is_count(scalar(grep { /^\Q$IMGMISS\E/ } keys %{ $CACHE->{d} }), 0, '...leaving no hold behind');
-    is_count(scalar(grep { exists $CACHE->{d}{$_} } qw(lbf:feed:1:all lbf:warmlast:1:tick)), 2,
-             '...and NOTHING from another lbf: family (the prefix is a DELETE over the kv table)');
-    delete $CACHE->{d}{$_} for qw(lbf:feed:1:all lbf:warmlast:1:tick);
     T::_warmCovers([ $r ], 'all releases', 1);
-    is_count(scalar(@HTTP_GETS), $specs, '...so the next warm RETRIES it (not a later browse walk)');
-    # ...and it is the miss family alone: a warm path must survive the forget.
-    reset_world(); $n = 0; @HTTP_GETS = ();
-    my $r2 = rel();
-    T::_warmCovers([ $r2 ], 'all releases', 1);
-    http_settle() while @HTTP_PENDING;
-    my $keysBefore = scalar keys %{ $CACHE->{d} };
-    T::coverMissForget() if T->can('coverMissForget');
-    is_count(scalar(keys %{ $CACHE->{d} }), $keysBefore, 'a forget with no held path removes nothing else');
+    is_count(scalar(@HTTP_GETS), 0, 'CONTROL: before the tick the hold still stands');
+    select(undef, undef, undef, 0.02);
+    T::coverTickBegin() if T->can('coverTickBegin');
+    T::_warmCovers([ $r ], 'all releases');   # the tick's own pass: NOT a focus
+    is_count(scalar(@HTTP_GETS), $specs, '...and the tick RETRIES a hold written before it');
+    is_count(scalar(grep { /^\Q$IMGMISS\E/ } keys %{ $CACHE->{d} }), $specs,
+             '...without deleting anything: a hold the pass never reaches must stand');
+    http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+
+    # A HOLD WRITTEN DURING THE TICK IS HONOURED for the rest of the day — a cover that
+    # failed again this morning must not be re-fetched on every walk.
+    reset_world(); $n = 0;
+    my $rd = rel();
+    T::coverTickBegin() if T->can('coverTickBegin');
+    $HTTP_MODE = 'fail';
+    T::_warmCovers([ $rd ], 'all releases');
+    http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    $HTTP_MODE = 'ok'; @HTTP_GETS = ();
+    T::_warmCovers([ $rd ], 'all releases');
+    is_count(scalar(@HTTP_GETS), 0, 'a hold written DURING the tick is still honoured');
+
+    # A BROWSE (a focus path) honours a hold whatever its age: on screen is exactly
+    # where a re-fetch must not happen.
+    reset_world(); $n = 0;
+    my $rb = rel();
+    $HTTP_MODE = 'fail';
+    T::_warmCovers([ $rb ], 'all releases', 1);
+    http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    select(undef, undef, undef, 0.02);
+    T::coverTickBegin() if T->can('coverTickBegin');
+    $HTTP_MODE = 'ok'; @HTTP_GETS = ();
+    T::_warmCovers([ $rb ], 'all releases', 1);   # focus: a browse
+    is_count(scalar(@HTTP_GETS), 0, 'a BROWSE honours a hold older than the tick (no freeze on screen)');
+    is_count($T::coverHeld, $specs, '...and counts it held');
 
     # The hold lapses (the store's TTL): the next walk retries.
+    reset_world(); $n = 0;
+    my $rl = rel();
+    $HTTP_MODE = 'fail';
+    T::_warmCovers([ $rl ], 'all releases', 1);
+    http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    $HTTP_MODE = 'ok'; @HTTP_GETS = ();
     delete $CACHE->{d}{$_} for grep { /^\Q$IMGMISS\E/ } keys %{ $CACHE->{d} };
-    T::_warmCovers([ $r ], 'all releases', 1);
+    T::_warmCovers([ $rl ], 'all releases', 1);
     is_count(scalar(@HTTP_GETS), $specs, '...and once the hold lapses it is fetched again');
     reset_world();
 }
@@ -1830,6 +1861,34 @@ section('4i. review of 1.0.19: the browse stage is transient; the tick asks the 
     }
     my @ends = grep { $_->[0] eq 'end' } @stage;
     ok(scalar(@ends) == 1 && !$ends[0][4], 'a warm that joins a browse-opened stage makes its end SAVED');
+
+    # THE TICK RE-OPENS A STAGE IT INHERITED (review of 1.0.25). stageReset clears
+    # Plugin.pm's tables, not $coverStageOpen, so a covers stage still open from before
+    # the tick — the startup re-seed's whole-feed pass (~1.1h cold), or a browse's — left
+    # the tick's saved row with NO start at all: it landed via the end alone, printing
+    # `at ''` / `elapsed 0.00` and a note carrying the earlier pass's counts.
+    reset_world(); $n = 0; @stage = ();
+    $T::lastBrowseAt = time();                                  # hold the queue open
+    T::_warmCovers([ map { rel() } 1 .. 5 ], 'all releases');    # the re-seed: NOT the tick
+    is_count(scalar(grep { $_->[0] eq 'start' } @stage), 1, 'the pre-tick pass opens the stage once');
+    select(undef, undef, undef, 0.02);
+    T::coverTickBegin() if T->can('coverTickBegin');            # 05:00 arrives
+    T::_warmCovers([ map { rel() } 1 .. 3 ], 'for you');         # the tick joins
+    my @starts = grep { $_->[0] eq 'start' } @stage;
+    is_count(scalar(@starts), 2, '...and the TICK re-opens it, so its own row has a start');
+    ok(scalar(@starts) == 2 && !$starts[1][4], '...non-transient, so that start is SAVED');
+    # ...but the tick's OWN second label must not restart it again, or the note would
+    # describe only the last feed warmed.
+    T::_warmCovers([ map { rel() } 1 .. 2 ], 'muspy');
+    is_count(scalar(grep { $_->[0] eq 'start' } @stage), 2,
+             '...while the tick\'s next label joins its own stage without restarting it');
+    $T::lastBrowseAt = 0;
+    $g = 0;
+    while ((@HTTP_PENDING || @T::coverQueue || @Slim::Utils::Timers::PENDING) && ++$g < 400) {
+        http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    }
+    is_count(scalar(grep { $_->[0] eq 'end' } @stage), 1, '...and the stage still ends exactly once');
+    reset_world();
 
     # A MANUAL REFRESH (review of 1.0.21): its trending cover warm is not a browse (no
     # focus, so no ranking change) but it is not the tick either — the stage it opens

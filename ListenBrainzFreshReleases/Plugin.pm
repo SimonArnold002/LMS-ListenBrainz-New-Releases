@@ -1311,8 +1311,10 @@ sub _warmTick {
     # ...and RETRIES yesterday's failures. A 24h hold (COVER_MISS_TTL) is still standing
     # when a warm that fires at the same instant each day reaches the path, so without
     # this the retry landed on a browse walk instead — a cold CAA fetch and its ~0.5s
-    # freeze in front of the user (review of 1.0.23).
-    eval { Plugins::ListenBrainzFreshReleases::Browse::coverMissForget(); 1 };
+    # freeze in front of the user (review of 1.0.23). It marks the instant rather than
+    # deleting the family: a hold this capped, interruptible pass never reaches must
+    # keep standing (review of 1.0.25).
+    eval { Plugins::ListenBrainzFreshReleases::Browse::coverTickBegin(); 1 };
 
     # THE FEED WARM RUNS AHEAD OF warmCache, AND THAT ORDER IS THE POINT.
     # `warmCache` returns early without a username (Browse.pm), so All Releases —

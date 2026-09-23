@@ -663,6 +663,45 @@ from "not there") and the HTTP stub a `refused` mode. 3 red on 1.0.24. 5 mutants
 an exemption that swallows timeouts too (7 red, the control), `_coverProxyWarm` back to two answers,
 undef-files-miss, undef-is-warm — each go red. All 38 suites exit 0; `singleflight_sync_check` 0.
 
+**/code-review of 1.0.25 (2026-09-23): TWO findings, VERIFIED, FIXED in 1.0.26 (built, NOT
+installed; sha 3f140bef).** Both are 1.0.24's own wake: behaviour a fix introduced is new
+information even where the symbol hits an earlier round.
+1. **1.0.24's up-front wipe retried only what the pass then reached.** `coverMissForget` DELETED the
+   whole `lbf:imgmiss:` family at the top of the tick, but the pass is capped (`COVER_WARM_MAX`
+   2000, against an All Releases feed of ~2,157) and interruptible (the 06:30 backup cuts a ~1.1h
+   cold pass). Every hold it never reached was wiped with NO retry, so the re-fetch landed on a
+   browse walk — the cold CAA fetch and ~0.5s freeze the hold exists to prevent, the opposite of the
+   1.0.23 entry's stated cost.
+   - Fix: **nothing is deleted.** `Browse::coverTickBegin` (from `_warmTick`, replacing
+     `coverMissForget`) stamps `$coverTickAt`; `_coverNoteMiss` now stores the INSTANT it held the
+     cover rather than a bare 1; `_coverLaunch` honours a hold unless this is a warm launch and the
+     hold is older than the tick. A hold the pass never reaches simply stands (its own
+     `COVER_MISS_TTL` still ends it); one written DURING the tick is honoured all day; a FOCUS path
+     (a browse) always honours a hold, because on screen is where a re-fetch must not happen.
+     A process with no tick ($coverTickAt 0) honours everything, so a restart cannot fetch-storm.
+2. **The tick's covers row had no START when it inherited an open stage.** `stageReset` clears
+   Plugin.pm's tables, not Browse.pm's `$coverStageOpen`, so a stage still open from before the tick
+   (the startup re-seed's whole-feed pass, or a browse's) meant `_warmCovers` skipped its
+   `unless ($coverStageOpen)` block: no `_stage('start','covers')`, no counter reset. The saved row
+   landed via the end alone — `at ''`, `elapsed 0.00`, and a note carrying the EARLIER pass's counts.
+   (Ledger note (a) cleared the `start => 0` shape for a browse-opened stage; the counters and the
+   re-seed carrier are new.)
+   - Fix: a non-transient warm joining a stage opened BEFORE `$coverTickAt` re-opens it (new
+     `$coverStageOpenedAt`), stamping the tick's own window and zeroing the six counters. Only for a
+     stage older than the tick: the tick warms several labels through this same sub, and re-opening
+     on each would leave the note describing only the last one.
+   - Both stamps use `Time::HiRes::time()`: a whole-second tick stamp compares wrongly against a
+     stage opened a fraction of a second earlier, and the rule would never fire.
+
+Tests: `t_coverwarm.pl` 213 → 219 (the tick retries a pre-tick hold and deletes nothing; a hold
+written during the tick is honoured; a BROWSE honours a hold whatever its age; the inherited stage is
+re-opened once, the tick's own next label does not restart it, and the stage still ends exactly
+once), `t_warmstats.pl` unchanged at 103 (the tick assertion now names `coverTickBegin`). 5 red on
+1.0.25. 7 mutants (browse-ignores-hold, tick-honours-all, same-tick-retried, stamp-is-one,
+no-reopen, reopen-always, tick-never-stamps) each go red. The harness now SKIPS a sub the source
+lacks instead of dying, so an anti-test against an older Browse.pm reports FAILs rather than taking
+the suite down. All 38 suites exit 0; `singleflight_sync_check` 0.
+
 **Care points for the redesign (Simon: "be very careful"):** the carriers are every caller of
 `_warmCovers` / `_coverGroupsFor` (For You, All Releases weeks, Material home shelves, web skins,
 `_fanOutFeed`, `_warmTrendingCovers`); the proxy cache key is the WHOLE PATH including the spec

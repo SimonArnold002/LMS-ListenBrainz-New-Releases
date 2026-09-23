@@ -464,8 +464,8 @@ section('7. A BROWSE AFTER THE TICK DOES NOT OVERWRITE THE SAVED WARM (review of
     # promises never happens: the warm fires at the same instant each day and reaches a
     # held path earlier in the tick than the fetch that recorded it, so a 24h hold is
     # still standing and the retry lands on a browse walk instead (review of 1.0.23).
-    ok(scalar($tick =~ /stageReset\(\);.*?coverMissForget/s),
-       '...and the held-miss family (Browse::coverMissForget), so the warm retries them');
+    ok(scalar($tick =~ /stageReset\(\);.*?coverTickBegin/s),
+       '...and stamps the tick (Browse::coverTickBegin), so the warm retries yesterday\'s holds');
 }
 
 # ---------------------------------------------------------------------------

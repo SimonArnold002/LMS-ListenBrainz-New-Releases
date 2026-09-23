@@ -4146,6 +4146,12 @@ my $coverSequence = 0;
 my %coverReveal;     # player/view => previous reveal count
 my %coverQueued;     # $path => 1 while queued, so two feeds can't queue it twice
 my %coverWarm;       # marker KEY => epoch until which this process trusts it (COVER_WARM_MEMO)
+# The instant this process's current scheduled warm began (Plugin::_warmTick via
+# coverTickBegin). Two rules read it: a warm launch retries a hold older than it, and a
+# covers stage opened before it is RE-OPENED when the tick's own pass joins. 0 means no
+# tick has run in this process, so every hold stands (a restart must not turn a failing
+# cover into a fetch storm) and no stage is re-opened.
+my $coverTickAt = 0;
 my $coverWarmSwept = 0;
 my $coverRunning = 0;   # RELEASES currently in flight (0 .. _coverLimit())
 my $coverPumping = 0;   # re-entrancy guard on _coverTick's launch loop
@@ -4175,6 +4181,9 @@ my $coverFailed    = 0;
 # The open covers stage was opened by a BROWSE (a focus warm) and no whole-feed warm
 # has joined it: its boundaries are transient and never overwrite the saved warm.
 my $coverStageTransient = 0;
+# When the open covers stage was started, so the tick can tell its own stage from one it
+# inherited (see _warmCovers).
+my $coverStageOpenedAt = 0;
 
 # Current week first, then earlier weeks newest-first, then upcoming weeks.
 sub _coverWeekOrder {
@@ -4260,16 +4269,25 @@ sub coverMemoForget {
     return;
 }
 
-# Forget the held-miss family, so the daily warm RETRIES every cover that failed
-# yesterday rather than skipping it into a browse walk (see COVER_MISS_TTL). Called by
-# the scheduled warm tick (Plugin::_warmTick) beside coverMemoForget. The cost is one
-# fetch per genuinely-missing cover per day, paid at 05:xx where a freeze is unseen;
-# holds recorded DURING the tick still protect the rest of the day's walks.
-sub coverMissForget {
-    return int(eval {
-        Plugins::ListenBrainzFreshReleases::DB::kvForgetPrefix(
-            Plugins::ListenBrainzFreshReleases::DB::kver('lbf:imgmiss:'));
-    } || 0);
+# THE DAILY WARM RETRIES WHAT IT REACHES, AND ONLY THAT (review of 1.0.25). 1.0.24
+# DELETED the whole held-miss family at the top of the tick, which retried a hold only
+# if the pass then walked that path — and the pass is capped (COVER_WARM_MAX) and
+# interruptible (the 06:30 backup cuts it). Every hold it never reached was wiped with
+# no retry, so the re-fetch landed on a browse walk: the cold CAA fetch and ~0.5s freeze
+# the hold exists to prevent, the opposite of what the fix intended.
+#
+# So nothing is deleted. The tick stamps an instant, and a WARM launch ignores a hold
+# written BEFORE it (retrying that cover once, at 05:xx where a freeze is unseen) while
+# honouring one written during or after it (a cover that failed again this morning is
+# not re-fetched all day). A hold the pass never reaches simply stands, and its own
+# COVER_MISS_TTL still ends it. A BROWSE launch (a focus path) always honours a hold:
+# on-screen is exactly where a re-fetch must not happen.
+sub coverTickBegin {
+    # Time::HiRes, the same clock $coverStageOpenedAt uses: a whole-second stamp
+    # compares wrongly against a stage opened a fraction of a second earlier, and the
+    # stage re-open rule would never fire.
+    $coverTickAt = Time::HiRes::time();
+    return $coverTickAt;
 }
 
 # A fetch that left no rendition in the proxy. Held back for COVER_MISS_TTL, in the
@@ -4279,8 +4297,11 @@ sub _coverNoteMiss {
     my ($path) = @_;
     $coverFailed++;
     eval {
+        # THE VALUE IS THE INSTANT IT WAS HELD, not a bare 1: the daily retry compares it
+        # with the tick's start (coverMissRetry). An old row written as 1 compares as
+        # older than any tick, so it is retried once, which is the wanted behaviour.
         $cache->set(Plugins::ListenBrainzFreshReleases::DB::kver('lbf:imgmiss:') . $path,
-                    1, COVER_MISS_TTL);
+                    Time::HiRes::time(), COVER_MISS_TTL);
         1;
     };
     return;
@@ -4602,8 +4623,23 @@ sub _warmCovers {
     # A tick's whole-feed warm joining a stage a browse or a refresh opened makes that
     # drain the tick's.
     $coverStageTransient = 0 if $coverStageOpen && !$transient;
+    # ...AND THE STAGE IS RE-OPENED, or the tick's own row has no start (review of
+    # 1.0.25). `stageReset` clears Plugin.pm's tables, not this flag, so a stage still
+    # open from before the tick (the startup re-seed's whole-feed pass, ~1.1h cold, or a
+    # browse's) left the tick with no `start` mark at all: the saved row landed via the
+    # end alone, printing `at ''` / `elapsed 0.00` and a note carrying the EARLIER pass's
+    # counts. Re-opening stamps this tick's window and zeroes the counters.
+    #
+    # ONLY FOR A STAGE OLDER THAN THIS TICK. The tick warms several labels (all
+    # releases, for you, muspy, trending) through this same sub, and re-opening on every
+    # one of those would restart the counters mid-tick and leave the note describing
+    # only the last label.
+    if ($coverStageOpen && !$transient && $coverTickAt > 0 && $coverStageOpenedAt < $coverTickAt) {
+        $coverStageOpen = 0;
+    }
     unless ($coverStageOpen) {
         $coverStageOpen = 1;
+        $coverStageOpenedAt  = Time::HiRes::time();
         $coverStageTransient = $transient;
         $coverFetched   = 0;
         $coverSkipped   = 0;
@@ -4891,7 +4927,11 @@ sub _coverLaunch {
             $coverSkipped++;
             next;
         }
-        if (eval { $cache->get(Plugins::ListenBrainzFreshReleases::DB::kver('lbf:imgmiss:') . $path) }) {
+        # A HOLD IS HONOURED UNLESS THIS IS THE DAILY WARM RETRYING IT (see
+        # coverMissRetry). A focus path is a BROWSE: always honoured, because a
+        # re-fetch there is the freeze on screen.
+        my $miss = eval { $cache->get(Plugins::ListenBrainzFreshReleases::DB::kver('lbf:imgmiss:') . $path) };
+        if ($miss && ($coverTickAt <= 0 || exists $coverFocus{$path} || $miss >= $coverTickAt)) {
             delete $coverQueued{$path};
             delete $coverRank{$path};
             delete $coverFocus{$path};
