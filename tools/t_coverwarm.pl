@@ -166,6 +166,15 @@ die "'lbf:imgmiss:' is not a registered key family\n"
 {
     package Plugins::ListenBrainzFreshReleases::DB;
     sub kver { return $_[0] . $KEY_VERSIONS{ $_[0] } . ':' }
+    # The store's own prefix delete, standing in for DB::kvForgetPrefix: it must hit
+    # the SAME rows _coverNoteMiss wrote, so a wrong prefix in the plugin fails here.
+    sub kvForgetPrefix {
+        my ($prefix) = @_;
+        my $c = $T::cache or return 0;
+        my @hit = grep { index($_, $prefix) == 0 } keys %{ $c->{d} };
+        delete $c->{d}{$_} for @hit;
+        return scalar @hit;
+    }
 }
 my $IMGMISS = 'lbf:imgmiss:' . $KEY_VERSIONS{'lbf:imgmiss:'} . ':';
 
@@ -480,7 +489,7 @@ for my $c (qw(COVER_SPECS COVER_WARM_MAX COVER_MISS_TTL COVER_WARM_MEMO
 
 for my $name (qw(_coverWeekOrder _weekStart _orderCoverQueue _focusReleaseCovers _renderSlots _weekGroups _buildWeekly _divType _divImage _divName _escHtml _warmCovers _coverGroupsFor _coverTick _coverMaybeEnd _coverLaunch
                  _coverKnownWarm _coverNoteWarm _noteBrowse _coverLimit _coverArmRestart _coverArmResume
-                 _coverProxyKey _coverProxyWarm _coverNoteMiss coverStats coverMemoForget)) {
+                 _coverProxyKey _coverProxyWarm _coverNoteMiss coverStats coverMemoForget coverMissForget)) {
     my $body = grab($bsrc, $name);
     eval "package T; use Time::HiRes (); use Time::Local (); our (\$cache, \$prefs, \$log); "
        . "our (\@coverQueue, \%coverQueued, \%coverWarm, \$coverWarmSwept, \%_WEEK_START, \%coverRank, \%coverFocus, \%coverReveal, \$coverSequence, \$coverRunning, \$coverPumping, \$coverStageOpen, "
@@ -1504,6 +1513,35 @@ section('4f. a re-walk of a warm view queues nothing and reads nothing');
     T::_warmCovers([ $r ], 'all releases', 1);
     is_count(scalar(@HTTP_GETS), 0, '...so the next walk does NOT fetch it again (no freeze per walk)');
     is_count($T::coverHeld, $specs, '...and counts it as held');
+    # THE HOLD DOES NOT LAPSE IN TIME FOR THE NEXT WARM (review of 1.0.23). The warm
+    # fires at the same instant daily and reaches a held path earlier in the tick than
+    # the fetch that recorded it, so a 24h TTL is always still standing — the retry
+    # would land on a browse walk, which is the freeze this whole rework is about. The
+    # tick forgets the family outright, as it forgets the memo.
+    ok(T->can('coverMissForget'), 'Browse has coverMissForget, for the tick to call');
+    @HTTP_GETS = ();
+    # A SENTINEL FROM ANOTHER FAMILY. The prefix is a DELETE over the kv table, so a
+    # broad one ('lbf:') would take the feeds, the details and the saved warm with it —
+    # a mutant that did exactly that survived the first cut of this section.
+    $CACHE->{d}{'lbf:feed:1:all'}       = 'keep me';
+    $CACHE->{d}{'lbf:warmlast:1:tick'}  = 'keep me too';
+    my $forgot = T->can('coverMissForget') ? T::coverMissForget() : 0;
+    is_count($forgot, $specs, '...and it forgets every held path');
+    is_count(scalar(grep { /^\Q$IMGMISS\E/ } keys %{ $CACHE->{d} }), 0, '...leaving no hold behind');
+    is_count(scalar(grep { exists $CACHE->{d}{$_} } qw(lbf:feed:1:all lbf:warmlast:1:tick)), 2,
+             '...and NOTHING from another lbf: family (the prefix is a DELETE over the kv table)');
+    delete $CACHE->{d}{$_} for qw(lbf:feed:1:all lbf:warmlast:1:tick);
+    T::_warmCovers([ $r ], 'all releases', 1);
+    is_count(scalar(@HTTP_GETS), $specs, '...so the next warm RETRIES it (not a later browse walk)');
+    # ...and it is the miss family alone: a warm path must survive the forget.
+    reset_world(); $n = 0; @HTTP_GETS = ();
+    my $r2 = rel();
+    T::_warmCovers([ $r2 ], 'all releases', 1);
+    http_settle() while @HTTP_PENDING;
+    my $keysBefore = scalar keys %{ $CACHE->{d} };
+    T::coverMissForget() if T->can('coverMissForget');
+    is_count(scalar(keys %{ $CACHE->{d} }), $keysBefore, 'a forget with no held path removes nothing else');
+
     # The hold lapses (the store's TTL): the next walk retries.
     delete $CACHE->{d}{$_} for grep { /^\Q$IMGMISS\E/ } keys %{ $CACHE->{d} };
     T::_warmCovers([ $r ], 'all releases', 1);

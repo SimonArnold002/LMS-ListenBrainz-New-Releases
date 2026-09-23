@@ -609,6 +609,30 @@ prevent. The same shape was in the `no username` exit, unreachable from the tick
   added lines, properties unchanged. 4 mutants (drop either close, drop the flag on one, move the
   close after `$finish`) each go red. All 38 suites exit 0; `singleflight_sync_check` 0.
 
+**/code-review of 1.0.23 (2026-09-23): ONE finding, VERIFIED, FIXED in 1.0.24 (built, NOT installed;
+sha 58b7521a).** `COVER_MISS_TTL` is 86400s and its comment claimed "the next daily warm retries it".
+It does not: the warm fires at the SAME INSTANT every day (WARM_HOUR + a cached, uuid-derived
+`_warmJitter`), and a day-2 pass reaches a held path EARLIER in the tick than the day-1 fetch that
+recorded the miss (a hold costs two cheap reads, ~25 groups/turn; the pass that recorded it was
+fetching at ~1.6/s). So the hold was always still standing at the next warm, and the retry landed on
+the first browse walk after it lapsed — a cold CAA fetch and its ~0.5s freeze IN FRONT OF THE USER,
+the exact hazard the rework exists to remove. The sibling `COVER_WARM_MEMO` was given both a 12h cut
+AND `coverMemoForget` for this same clock reason; the miss hold got neither.
+- Fix: `Browse::coverMissForget` (DB::kvForgetPrefix over `kver('lbf:imgmiss:')`), called by
+  `Plugin::_warmTick` beside `coverMemoForget`, after `stageReset`. The TTL stays as the backstop for
+  a process that never ticks; holds recorded DURING a tick still protect the rest of the day's walks.
+  Cost is one fetch per genuinely-missing cover per day, paid at 05:xx.
+- Tests: `t_coverwarm.pl` 200 → 206 (the forget empties the family, the next warm re-fetches, and
+  NOTHING from another `lbf:` family goes with it), `t_warmstats.pl` 102 → 103 (the tick calls it
+  after the reset). 5 mutants: wrong family, a no-op forget and dropping the tick call each go red.
+  **A broad-prefix mutant (`kvForgetPrefix('lbf:')`, which would delete the feeds, the details and
+  the saved warm) SURVIVED the first cut** — the sentinel-key assertion was added for it. The one
+  surviving mutant is equivalent (an extra forget before the reset; the real call still runs).
+  All 38 suites exit 0; `singleflight_sync_check` 0.
+- Live at review time (1.0.22 installed): `coverstats` 2,052 paths, 2,046 proxy-warm, 6 held,
+  0 cold, read in 0.15s; `warmstats` showed the 07:55 tick's complete 13-stage saved table surviving
+  the restart with nothing stuck `running` — the 1.0.18/1.0.19 model confirmed working live.
+
 **Care points for the redesign (Simon: "be very careful"):** the carriers are every caller of
 `_warmCovers` / `_coverGroupsFor` (For You, All Releases weeks, Material home shelves, web skins,
 `_fanOutFeed`, `_warmTrendingCovers`); the proxy cache key is the WHOLE PATH including the spec

@@ -4111,8 +4111,17 @@ use constant COVER_SCAN_BUDGET          => 25;   # groups dequeued per turn
 # an error — is not asked for again until this has passed. Without it a genuinely
 # missing or failing cover would be re-fetched on EVERY walk, and each cold CAA fetch
 # freezes the event loop ~0.5s (the LMS Net::HTTP read path; see CLAUDE.md "Slow
-# artwork / server freezes"). One day, so the next daily warm retries it. The proxy
-# is asked FIRST, so a cover that has since been cached is never held back by this.
+# artwork / server freezes"). One day, and the next daily warm retries it — but NOT
+# because this lapses. The warm fires at the same instant every day (WARM_HOUR + a
+# fixed per-install jitter), and a day-2 pass reaches a held path EARLIER in the tick
+# than the day-1 fetch that recorded the miss did (a hold costs two cheap reads; the
+# pass that recorded it was fetching at ~1.6/s). So a 24h hold is always still standing
+# when the next warm arrives, and the retry would land on the first browse walk after
+# it lapsed — a cold CAA fetch, and its ~0.5s freeze, in front of the user. The tick
+# therefore FORGETS the family outright (coverMissForget, from Plugin::_warmTick),
+# exactly as it forgets the warm memo (review of 1.0.23). The TTL is the backstop for a
+# process that never ticks. The proxy is asked FIRST, so a cover that has since been
+# cached is never held back by this.
 use constant COVER_MISS_TTL => 86400;
 
 # How long THIS PROCESS trusts that the proxy held a path, so a re-walk of a warm
@@ -4240,6 +4249,18 @@ sub coverMemoForget {
     %coverWarm = ();
     $coverWarmSwept = time();
     return;
+}
+
+# Forget the held-miss family, so the daily warm RETRIES every cover that failed
+# yesterday rather than skipping it into a browse walk (see COVER_MISS_TTL). Called by
+# the scheduled warm tick (Plugin::_warmTick) beside coverMemoForget. The cost is one
+# fetch per genuinely-missing cover per day, paid at 05:xx where a freeze is unseen;
+# holds recorded DURING the tick still protect the rest of the day's walks.
+sub coverMissForget {
+    return int(eval {
+        Plugins::ListenBrainzFreshReleases::DB::kvForgetPrefix(
+            Plugins::ListenBrainzFreshReleases::DB::kver('lbf:imgmiss:'));
+    } || 0);
 }
 
 # A fetch that left no rendition in the proxy. Held back for COVER_MISS_TTL, in the

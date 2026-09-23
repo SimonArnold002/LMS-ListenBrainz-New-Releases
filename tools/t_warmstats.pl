@@ -460,6 +460,12 @@ section('7. A BROWSE AFTER THE TICK DOES NOT OVERWRITE THE SAVED WARM (review of
     my $tick = grab($psrc, '_warmTick');
     ok(scalar($tick =~ /stageReset\(\);.*?coverMemoForget/s),
        '_warmTick clears the cover memo (Browse::coverMemoForget) after the reset');
+    # ...and forgets yesterday's HELD MISSES, or the daily retry the hold's comment
+    # promises never happens: the warm fires at the same instant each day and reaches a
+    # held path earlier in the tick than the fetch that recorded it, so a 24h hold is
+    # still standing and the retry lands on a browse walk instead (review of 1.0.23).
+    ok(scalar($tick =~ /stageReset\(\);.*?coverMissForget/s),
+       '...and the held-miss family (Browse::coverMissForget), so the warm retries them');
 }
 
 # ---------------------------------------------------------------------------
