@@ -564,5 +564,38 @@ section('9. EVERY NON-TICK CALLER MARKS ITS STAGES TRANSIENT (reviews of 1.0.20 
        'the time-based seal is gone (it lost a tick stage restarted by a refresh)');
 }
 
+# ---------------------------------------------------------------------------
+section('10. EVERY EXIT OF _resolveTrending CLOSES trending_tracks (review of 1.0.22)');
+# The mirror of section 9, and a REGRESSION THE 1.0.22 FIX COULD INTRODUCE. The warm
+# opens `trending_tracks` in _warmTrending and _resolveTrending closes it. Two exits
+# never did: "a build is already in flight" and "no username". While the VIEW's close
+# was non-transient that was invisible — the view eventually closed the row for the
+# warm. Now the view's close is transient, so a tick taking one of those exits leaves
+# the SAVED warm's row `running` for 24h: warmstats reports a warm that finished as cut
+# off mid-stage, the exact false signal the save exists to prevent.
+#
+# The rule, not the two cases: each $finish->() must have a stage end between it and
+# the previous exit. ($finish is the one thing every exit calls — it releases the
+# in-flight flag, which t_buildingstate.pl pins.)
+{
+    my $b = grab($bsrc, '_resolveTrending');
+    my @exits;
+    my $prev = 0;
+    while ($b =~ /\$finish->\(\)/g) {
+        my $at = $-[0];
+        push @exits, substr($b, $prev, $at - $prev);
+        $prev = pos($b);
+    }
+    ok(scalar(@exits) >= 4, 'found the exits of _resolveTrending (' . scalar(@exits) . ')');
+    my $n = 0;
+    for my $seg (@exits) {
+        $n++;
+        my ($tail) = $seg =~ /([^\n]*\n[^\n]*)$/;
+        $tail = ' ' . join(' ', split ' ', ($tail // ''));
+        ok(scalar($seg =~ /_stage\('end', 'trending_tracks',[^;]*\$transient\)/s),
+           "exit $n closes trending_tracks (with \$transient) before it finishes —$tail");
+    }
+}
+
 printf "\n%s\n%d passed, %d failed.\n", '=' x 74, $pass, $fail;
 exit($fail ? 1 : 0);

@@ -192,8 +192,18 @@ section '2. _resolveTrending TAKES the flag, and RELEASES it on every exit';
        'and it releases the flag — so every exit that calls $finish releases it');
 
     # The guard's own exit must NOT be counted as an exit that started a build.
-    ok(scalar($b =~ /_isBuilding\(\$bkey\)\)\s*\{[\s\S]{0,300}?\$finish->\(\);\s*return;/),
+    ok(scalar($b =~ /_isBuilding\(\$bkey\)\)\s*\{[\s\S]{0,900}?\$finish->\(\);\s*return;/),
        'the already-building path still calls $finish, so a WARM caller advances its chain');
+
+    # ...AND CLOSES THE WARM'S STAGE (review of 1.0.22). A view's cold build (~50s) can
+    # still be running at 05:00, so the tick takes this exit; _warmTrending opened
+    # `trending_tracks` and only _resolveTrending closes it. The view's own close is
+    # transient, so without a close here the saved warm's row read `running` for 24h.
+    ok(scalar($b =~ /_isBuilding\(\$bkey\)\)\s*\{[\s\S]{0,400}?_stage\('end', 'trending_tracks',[^;]*\$transient\);[\s\S]{0,300}?\$finish->\(\);/),
+       '...and closes trending_tracks before it does, so a tick cannot leave the row running');
+    # The flag itself is still left alone: this caller does not own it.
+    ok(scalar($b =~ /_isBuilding\(\$bkey\)\)\s*\{(?:(?!_buildingStart|_buildingEnd)[\s\S]){0,900}?\$finish->\(\);/),
+       '...without taking or clearing the in-flight flag it does not own');
 }
 
 section '3. _buildAlbumsData RELEASES via a WRAPPER, not at each exit';

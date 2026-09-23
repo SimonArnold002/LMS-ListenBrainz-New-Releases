@@ -2228,6 +2228,13 @@ sub _resolveTrending {
 
     my $user = $prefs->get('username') // '';
     unless (length $user) {
+        # CLOSE THE STAGE ON EVERY EXIT (review of 1.0.22). _warmTrending opens
+        # `trending_tracks` and this sub is the only thing that closes it, so an exit
+        # that just returns leaves the SAVED warm's row `running` for 24h — warmstats
+        # then reports a warm that finished as cut off. Unreachable from the tick today
+        # (_warmTrending's own username gate ends the three stages and never calls
+        # here), but it is the same shape as the in-flight exit below, which was live.
+        _stage('end', 'trending_tracks', 'skipped', 'no username', $transient);
         $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_SETUP_REQUIRED'), type => 'text' }], cachetime => 0 }) if $callback;
         $finish->();
         return;
@@ -2248,6 +2255,10 @@ sub _resolveTrending {
     # build is ~50s, far past any watchdog worth waiting behind, which is what the
     # measurement settled. The flag is left alone: this caller does not own it.
     if (_isBuilding($bkey)) {
+        # The stage closes here too: a VIEW's cold build (~50s) can still be running at
+        # 05:00, and the tick then takes this exit. Its own close is transient, so
+        # without this the tick's row never moved off `running` (review of 1.0.22).
+        _stage('end', 'trending_tracks', 'skipped', 'a build is already in flight', $transient);
         _dbg("trending: a build is already in flight — rendering the building row");
         $callback->(_buildingRow($client)) if $callback;
         $finish->();

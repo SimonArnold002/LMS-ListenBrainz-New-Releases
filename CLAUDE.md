@@ -589,6 +589,26 @@ the flag, one bare `_stage` in `_warmFollow`) each go red. `t_genrefill.pl`'s li
 `_warmGenres()` / skip-list patterns widened to accept the flag, with the checks unchanged. All 38
 suites exit 0 (four of them must be run from the repo root); `singleflight_sync_check` 0.
 
+**/code-review of 1.0.22 (2026-09-23): ONE finding, VERIFIED, FIXED in 1.0.23 (built, INSTALLED
+1.0.22 earlier that morning; sha 1b64a848).** A REGRESSION 1.0.22 INTRODUCED, which is why the
+symbol hitting the 1.0.21/1.0.22 rounds does not suppress it. `_warmTrending` opens
+`trending_tracks` and `_resolveTrending` is the only thing that closes it; its "a build is already
+in flight" exit (`_isBuilding($bkey)`) closed nothing. While the VIEW's close was non-transient the
+view eventually closed the row for the warm; 1.0.22 made the view's close transient, so a tick that
+takes that exit (a user's cold ~50s build still running at 05:00) left the SAVED row `running` for
+24h — warmstats reporting a finished warm as cut off, the exact false signal the save exists to
+prevent. The same shape was in the `no username` exit, unreachable from the tick today
+(`_warmTrending`'s own gate ends the three stages and never calls in), fixed alongside it.
+- Fix: `_stage('end', 'trending_tracks', 'skipped', <why>, $transient)` before `$finish->()` on both
+  exits. Correct for both callers — the view hitting them is transient anyway — and the in-flight
+  exit still neither takes nor clears the flag it does not own.
+- Tests: `t_warmstats.pl` 96 → 102, new §10 pinning THE RULE, not the two cases: every `$finish->()`
+  in `_resolveTrending` has a `_stage('end','trending_tracks',…,$transient)` between it and the
+  previous exit (5 exits found; 2 were red). `t_buildingstate.pl` 87 → 89 (the in-flight exit closes
+  the stage before `$finish`, without touching the flag); two of its window patterns widened for the
+  added lines, properties unchanged. 4 mutants (drop either close, drop the flag on one, move the
+  close after `$finish`) each go red. All 38 suites exit 0; `singleflight_sync_check` 0.
+
 **Care points for the redesign (Simon: "be very careful"):** the carriers are every caller of
 `_warmCovers` / `_coverGroupsFor` (For You, All Releases weeks, Material home shelves, web skins,
 `_fanOutFeed`, `_warmTrendingCovers`); the proxy cache key is the WHOLE PATH including the spec
