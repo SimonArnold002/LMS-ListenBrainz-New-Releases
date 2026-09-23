@@ -854,6 +854,37 @@ EXIT CODE, not by last line (the `perl -c`-invisible trap this repo has been bit
 - **The view's `_resolveTrending` is transient** (`$transient = (!$warm || $force)`, and a view
   always passes a callback), so a view closing `trending_tracks` never touches the saved warm.
 
+**/code-review of 1.0.31 (2026-09-23): ONE finding, in the SUITES, fixed in the suites —
+NO PLUGIN FILE CHANGED, so there is no build and the version stays 1.0.31.** The lens was the
+change 1.0.31 itself made: it added three names to a source-level assertion list, so what happens
+when one of those names goes?
+
+**THE ASSERTION THAT CATCHES AN UNWIRED ENTRY POINT DIED INSTEAD OF FAILING.** `grab()` /
+`sub_body()` die on a missing sub. That is right where a body is LIFTED and run — nothing below
+can work without it — and wrong in an assertion about a body's SHAPE: a rename aborts the whole
+file at **exit 255, zero FAIL lines, and a PASS as its last printed line**, which reads like a
+pass. Measured, not argued: renaming `homeForYou` in a mutated copy gave exit 255 and 0 FAILs,
+with `PASS a full-width pass arms no restart timer` as the final line. The same held for every one
+of `t_buildingstate.pl`'s 15 `sub_body` assertions — including the ones that pin that a
+`_resolveTrending` exit closes its stage.
+- Fix: a `body_of()` helper in `t_coverwarm.pl` (used by the three SOURCE assertions — the
+  entry-point list, the All Releases week drill, `warmFeeds`'s fan-out labels; the two LIFT sites
+  still die, correctly), and `sub_body()` in `t_buildingstate.pl` now reports and returns ''. Both
+  print `sub <name> is GONE from ... — the assertion(s) below could not run`.
+- Verified: six renames (homeForYou, _buildAllWeekItems, warmFeeds, _warmTrending,
+  _resolveTrending, _buildingRow) now exit 1 with 2–18 named FAILs each, where every one of them
+  previously exited 255 with none.
+- **This is the third time this class has been logged** (0.9.196 `_noteBrowse`, the
+  `t_review_fixes` week coderef, now this), which is why the rule "run EVERY suite and check the
+  EXIT CODE" exists. The suites now also say it themselves.
+- **NOT swept fleet-wide.** Every suite's extractor dies, but in most of them the extraction is a
+  LIFT, where dying is correct; converting those would trade a loud abort for a vacuous pass. Only
+  the two suites whose extraction feeds assertions were changed.
+
+All 38 suites exit 0 BY EXIT CODE; `singleflight_sync_check` 0. `t_coverwarm.pl` 228 and
+`t_buildingstate.pl` 94, both unchanged — the fix adds no assertion, it changes how a missing one
+reports.
+
 **Care points for the redesign (Simon: "be very careful"):** the carriers are every caller of
 `_warmCovers` / `_coverGroupsFor` (For You, All Releases weeks, Material home shelves, web skins,
 `_fanOutFeed`, `_warmTrendingCovers`); the proxy cache key is the WHOLE PATH including the spec

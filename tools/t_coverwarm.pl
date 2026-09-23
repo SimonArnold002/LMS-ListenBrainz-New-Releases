@@ -103,6 +103,20 @@ sub slurp {
     local $/; my $s = <$fh>; close $fh; return $s;
 }
 
+# A SUB THAT IS GONE MUST FAIL, NOT DIE. grab() dies on a missing sub, and that is
+# right where the harness LIFTS a body — nothing below can run without it. It is wrong
+# in an ASSERTION about a named sub: a rename then aborts the whole file at exit 255
+# with NO FAIL line and a PASS as its last output, which reads like a pass, and the
+# assertion that dies is the very one that exists to catch an entry point nobody wired.
+# Verified 2026-09-23 by renaming homeForYou in a mutated copy: exit 255, 0 FAILs.
+sub body_of {
+    my ($src, $name) = @_;
+    my $b = eval { grab($src, $name) };
+    return $b if defined $b;
+    ok(0, "sub $name is GONE from the source — the assertion below could not run");
+    return '';
+}
+
 # Brace-matched verbatim extraction of a named sub.
 sub grab {
     my ($src, $name) = @_;
@@ -1015,13 +1029,13 @@ section('4b. the browsing brake — one compromise number becomes two');
     my @entries = qw(topLevel fetchForYou fetchAll fetchPlaylists resolvePlaylist
                      resolveFollowFeed resolveTrending resolveTrendingAlbums
                      _releaseDetail homeForYou homePlaylists homeAllReleases);
-    my @missing = grep { grab($bsrc, $_) !~ /_noteBrowse\(\)/ } @entries;
+    my @missing = grep { body_of($bsrc, $_) !~ /_noteBrowse\(\)/ } @entries;
     ok(!@missing, 'every browse entry point calls _noteBrowse (' . scalar(@entries)
                   . ' checked)' . (@missing ? ' — missing: ' . join(', ', @missing) : ''));
     # The All Releases week drill is a coderef, not a sub, so it needs naming
     # separately — and it is the level a user is most often sitting on while the
     # warm runs.
-    ok(scalar(grab($bsrc, '_buildAllWeekItems') =~ /_noteBrowse\(\)/),
+    ok(scalar(body_of($bsrc, '_buildAllWeekItems') =~ /_noteBrowse\(\)/),
        '...including the All Releases week drill, which is a coderef not a sub');
 }
 
@@ -1162,7 +1176,7 @@ section('4c. the warm warms only what will be rendered');
 # is new information about BOTH — re-point the counter, or it measures the place
 # the work left.)
 {
-    my $warm = grab($bsrc, 'warmFeeds');
+    my $warm = body_of($bsrc, 'warmFeeds');
     $warm =~ s/^\s*#.*$//mg;                      # comments cannot satisfy this
     my @calls = $warm =~ /_fanOutFeed\(([^,]+),/g;
     is_count(scalar(@calls), 4, 'warmFeeds has four feed fan-out call sites');

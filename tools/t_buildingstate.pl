@@ -167,10 +167,19 @@ section '1. THE REGISTRY: set, observe, release';
 # control-flow property of two long async subs. There is no return value to
 # inspect for "a second fan-out was not started".
 # ---------------------------------------------------------------------------
+# A SUB THAT IS GONE MUST FAIL, NOT DIE (review of 1.0.31). Every use below is an
+# ASSERTION about a body's shape, not a lift — nothing here is eval'd and run except
+# the registry, which has its own die. Dying on a rename aborted the whole file at
+# exit 255 with NO FAIL line and a PASS as its last output, which reads like a pass;
+# this repo has been bitten by that class twice, and the assertions that would die are
+# the ones pinning that an exit closes its stage. Now it reports and carries on.
 sub sub_body {
     my ($name) = @_;
     my ($body) = $src =~ /\nsub \Q$name\E \{(.*?)\n\}\n/s;
-    die "t_buildingstate: could not find sub $name in Browse.pm\n" unless $body;
+    unless (defined $body && length $body) {
+        ok(0, "sub $name is GONE from Browse.pm — the assertions below could not run");
+        return '';
+    }
     return $body;
 }
 
