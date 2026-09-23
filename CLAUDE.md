@@ -756,6 +756,29 @@ property). 7 mutants — back to 1.0.26's rule, the focus clause dropped, `$warm
 flag inverted, always-warm, never-set, and read-per-path — each go red. All 38 suites exit 0;
 `singleflight_sync_check` 0.
 
+**/code-review of 1.0.28 (2026-09-23): ONE finding, a DOC defect, FIXED in 1.0.29 (comments only;
+built, NOT installed; sha c2a79e03).** `%coverRank`'s declaration still read
+`# path => default [section, arrival] priority` after 1.0.28 gave the value a THIRD field. The
+declaration line is the first thing anyone reads about the hash, and that field is not ordering —
+it decides whether a held cover may be re-fetched, so a wrong reading of it costs a cold CAA fetch
+and its ~0.5s freeze in front of somebody. It now names all three fields and says what the third
+is for. No behaviour change; all 38 suites exit 0, `singleflight_sync_check` 0.
+**Checked and cleared in the same pass, logged so the next round does not re-derive it:**
+- **An empty group cannot reach `_coverLaunch`**, so `$group->[0][0]` cannot autovivify:
+  `_coverGroupsFor` ends with `push @groups, \@grp if @grp`, and the queue has no other writer
+  (the "page-aligned warm unshifts unchecked" in the block comment is history — there is no
+  `unshift` left).
+- **`_orderCoverQueue`'s `$coverRank{$ap}[0]` DOES autovivify** a bare `[]` for a first path with
+  no entry, but every queued group is ranked by `_warmCovers` before `_orderCoverQueue` runs, the
+  `// 2` / `// 1` defaults cover it, and an autovivified entry is deleted with the path at launch.
+  It cannot erase a flag that was set, so 1.0.28 does not make it matter. Not reported.
+- **The tick's own queue draining late** — the pump stalled by the browse brake, so a hold the warm
+  queued at 05:00 is retried at 09:00 while somebody is looking. Real, and NOT reported: it is
+  Step 2 of the plan (no bulk cold fetches while browsing), which is OPEN by decision, and it is
+  true of every cold cover the tick queued, not just held ones.
+- Earlier rounds' mutant families re-run against 1.0.28 (the trending-exit four, the
+  local-failure/`_coverProxyWarm` five): all still go red. The 1.0.28 rule's own seven do too.
+
 **Care points for the redesign (Simon: "be very careful"):** the carriers are every caller of
 `_warmCovers` / `_coverGroupsFor` (For You, All Releases weeks, Material home shelves, web skins,
 `_fanOutFeed`, `_warmTrendingCovers`); the proxy cache key is the WHOLE PATH including the spec

@@ -4144,7 +4144,13 @@ use constant COVER_WARM_MEMO => 12 * 3600;
 # ladder collapse all resolve to the same source URL. They are launched together
 # so the image proxy can coalesce them into a single download (see _coverLaunch).
 my @coverQueue;      # [ [ [$path,$key], ... ], ... ] — one entry per release
-my %coverRank;       # path => default [section, arrival] priority
+# THE GROUP'S FIRST PATH => [section, arrival, queued-by-the-warm]. The first two
+# fields are the default priority _orderCoverQueue sorts on; the THIRD is provenance,
+# 1 when the scheduled warm queued the group and 0 when a browse or a manual refresh
+# did, and _coverLaunch reads it to decide whether it may retry a held miss (see
+# coverTickBegin). It is not ordering, and it is load-bearing: get it wrong and a
+# cold CAA fetch — with its ~0.5s freeze — happens in front of somebody.
+my %coverRank;
 my %coverFocus;      # path => rank in the most recently requested view
 my $coverSequence = 0;
 my %coverReveal;     # player/view => previous reveal count
