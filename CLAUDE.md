@@ -857,6 +857,27 @@ EXIT CODE, not by last line (the `perl -c`-invisible trap this repo has been bit
 - **The view's `_resolveTrending` is transient** (`$transient = (!$warm || $force)`, and a view
   always passes a callback), so a view closing `trending_tracks` never touches the saved warm.
 
+**ALL REVIEW ROUNDS 1.0.16–1.0.31 CLOSED BY SIMON 2026-09-23; PUSHED TO `dev`.** Installed on the
+rig: 1.0.23 is the last build recorded as installed; 1.0.31 is built, NOT installed, NOT verified live.
+
+**Cumulative review of `origin/dev..1.0.31` (2026-09-23, all of 1.0.16–1.0.31 as one diff): NO
+findings.** Not a suppression. What was checked, so it is not re-walked:
+- **1.0.31's `_noteBrowse()` on the home shelves reaches THREE readers, not one.** The audit above
+  records only `_coverLimit`; `$lastBrowseAt` also feeds `_lastfmPriorityBusy` and, through it,
+  `_detailPriorityBusy`, so every home-page load now also pauses the Last.fm warm and the detail
+  queue for `COVER_BROWSE_QUIET` (20s), the same as every other browse entry point. Cleared as
+  intended and bounded: Material (checked in `lms-material`, `browse-page.js`) calls `getHomeExtra`
+  only on a home build, `refreshList`, a display-settings change, a player change when a shelf
+  `needsPlayer`, and `refresh-home`. The server sends `refresh-home` only through
+  `setHomeExtraTitle`/`signalHomeExtraUpdate`, and the only fleet caller is PFR's `_setHomeYearTitle`,
+  which is guarded to fire once per year change. So nothing re-requests the shelves on a timer, and a
+  device left open on the home page does not hold the queues.
+- Two candidates were already cleared in the 1.0.26 inline review and were NOT re-reported: a
+  browse-opened covers stage the tick joins AFTER `$coverTickAt` keeps the browse's start (the
+  re-open rule deliberately does not fire), and a stale `%coverFocus` entry defers a retry by a day.
+- All 38 suites exit 0 BY EXIT CODE; `singleflight_sync_check` 0. (macOS has no `timeout`: wrapping
+  the suites in it makes every one exit 127, which is not a failure of the suites.)
+
 **/code-review of 1.0.31 (2026-09-23): ONE finding, in the SUITES, fixed in the suites —
 NO PLUGIN FILE CHANGED, so there is no build and the version stays 1.0.31.** The lens was the
 change 1.0.31 itself made: it added three names to a source-level assertion list, so what happens
@@ -965,6 +986,7 @@ because line numbers rot on the next edit.
 | 1.0.5 review (round four on the back-off): NO findings — records what was checked across all three fixes, and one PRE-1.0.4 observation deliberately not reported (the albums gate files a refused album as a drop). Round CLOSED by Simon; pushed to `dev`. Not a suppression of the fix code | C | `CLOSED IN THE 1.0.5 REVIEW —` |
 | Slow artwork / server freezes: cold archive.org cover fetch freezes LMS ~0.5s. Cause = LMS `Net::HTTP::Methods::my_readline` blocking `select` (UNVERIFIED, strace pending), NOT resizing/size/DNS/TLS-in-general/HQPlayer. Lying markers FIXED in 1.0.18 (the warm asks the proxy's cache, key = slash-less + url-DECODED; `lbf:imgwarm:` retired; failures held 1d via `lbf:imgmiss:`). Cold fetches while browsing = Step 2, OPEN | B | `SLOW ARTWORK / SERVER FREEZES` |
 | ONE cached rendition is NOT enough and Qobuz does not do that: LMS refetches the SOURCE for any size it does not hold (measured 1.78s vs 0.04s; Qobuz 0.117s vs 0.042s). `COVER_SPECS` stays at three; `front-1200` stays (bytes, not speed). Simon: leave the warm alone, 2026-09-23 | A3 | `Warming ONE rendition` |
+| Slow-artwork rework 1.0.16–1.0.31 (truthful warm via the proxy's own cache, `lbf:imgmiss:` holds + daily retry, provenance on `%coverRank`, saved last warm, home shelves = browse): every round CLOSED by Simon 2026-09-23, pushed to `dev`; cumulative review NO findings. Closes those defects only; the code is open to review. 1.0.31 NOT installed | C | `ALL REVIEW ROUNDS 1.0.16–1.0.31 CLOSED` |
 | Web-skin dividers: Default/Classic get `type=>'textarea'` with NO image (`_webSkin`/`_divType`/`_divImage`); Classic losing row covers is the ACCEPTED cost; Material untouched. 1.0.8: `_webify` pass (feedMode = web on the itemActions CLI route, text rows -> textarea, `_webBounce` for nextWindow) | A2 | `WEB-SKIN DIVIDERS ARE TEXTAREA` |
 
 **Two standing rules that kill most repeat findings:**
