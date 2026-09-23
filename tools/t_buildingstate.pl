@@ -372,6 +372,20 @@ section '7. THE FIRST OPENER GETS THE ROW TOO — the case 0.9.180 shipped broke
     ok(scalar(@warmAlbums >= 2), 'the warm drives both album ranges');
     ok(scalar($wt !~ /_buildAlbumsData\([^;]*?_buildingRow/s),
        'and passes NO $onPending for either — the warm gets completions, not placeholders');
+
+    # ...AND THE ALBUM STAGES TELL undef FROM [] (review of 1.0.29). _buildAlbumsData
+    # answers undef when a build is already in flight, never []; `// []` recorded that
+    # as `done, 0 album(s)`, so warmstats reported a warm that did nothing as a warm
+    # that ran and found nobody's listens — the confusion the undef answer exists to
+    # remove, and the same carrier the trending_tracks close above was written for.
+    ok(scalar($wt !~ /_stage\('end', 'trending_(?:year|month)', 'done',[^;]*\/\/ \[\]/s),
+       'neither album stage collapses undef into an empty list');
+    for my $st (qw(year month)) {
+        ok(scalar($wt =~ /_stage\('end', 'trending_$st', 'skipped', 'a build is already in flight'[^;]*\$transient\)/),
+           "trending_$st records the in-flight build as SKIPPED, not done");
+        ok(scalar($wt =~ /_stage\('end', 'trending_$st', 'done', scalar\(\@\$albums\)/),
+           "...and still counts the albums when there really are some ($st)");
+    }
 }
 
 section '8. EVERY UNREADY VIEW, AND THE "CHECK AGAIN" ROW';

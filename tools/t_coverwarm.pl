@@ -1007,9 +1007,14 @@ section('4b. the browsing brake — one compromise number becomes two');
 # return value to inspect and the defect is an entry point that was never wired —
 # exactly how the People You Follow section came to warm no artwork at all.
 {
+    # The three Material HOME SHELVES are entry points too, and were missed until the
+    # 1.0.30 carrier audit: HomeExtraBase runs the same XMLBrowser `items` query as the
+    # browse menu, Material re-requests all three on every home-page load (verified
+    # 0.9.26), and until then none of them marked a browse — so the cover pump ran at
+    # the IDLE width on the one surface a user sits on most.
     my @entries = qw(topLevel fetchForYou fetchAll fetchPlaylists resolvePlaylist
                      resolveFollowFeed resolveTrending resolveTrendingAlbums
-                     _releaseDetail);
+                     _releaseDetail homeForYou homePlaylists homeAllReleases);
     my @missing = grep { grab($bsrc, $_) !~ /_noteBrowse\(\)/ } @entries;
     ok(!@missing, 'every browse entry point calls _noteBrowse (' . scalar(@entries)
                   . ' checked)' . (@missing ? ' — missing: ' . join(', ', @missing) : ''));

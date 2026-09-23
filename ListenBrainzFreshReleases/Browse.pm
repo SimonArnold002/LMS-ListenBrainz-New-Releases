@@ -1062,6 +1062,16 @@ sub fetchForYou {
 sub homeForYou {
     my ($client, $cb, $args) = @_;
 
+    # A HOME SHELF IS A BROWSE (review of 1.0.30). Material re-requests all three
+    # shelves on every home-page load — verified 0.9.26, two loads produced two full
+    # re-fetches — so this is the LBF surface most often on screen, and it was the one
+    # place the brake never engaged: the cover pump stayed at the IDLE width (8
+    # releases, 24 local requests) while somebody sat on the home page, each cold one
+    # able to freeze the loop ~0.5s. The shelves take no focus warm of their own, and
+    # deliberately: a focus warm queues the WHOLE feed, which is what Step 2 of the
+    # rework exists to bound.
+    _noteBrowse();
+
     # Flat list of release cards — NO week-divider headers. The Material carousel
     # and its "show all" click-in are the SAME feed (Material exposes no way to
     # give the click-in a different command), so they must share one structure.
@@ -1101,6 +1111,8 @@ sub homeForYou {
 sub homePlaylists {
     my ($client, $cb, $args) = @_;
 
+    _noteBrowse();   # a home shelf is a browse — see homeForYou
+
     Plugins::ListenBrainzFreshReleases::API->getCreatedForPlaylists(
         onDone => sub {
             my $playlists = shift // [];
@@ -1125,6 +1137,8 @@ sub homePlaylists {
 # vs "show all"), keeping deep drill-in stable.
 sub homeAllReleases {
     my ($client, $cb, $args) = @_;
+
+    _noteBrowse();   # a home shelf is a browse — see homeForYou
 
     Plugins::ListenBrainzFreshReleases::API->getFreshReleaseWeeksAll(
         sort    => 'release_date',
@@ -3246,11 +3260,25 @@ sub _warmTrending {
     # was supposed to make this cheap.
     #
     # Chained back-to-front so each step is defined before the one that calls it.
+    # UNDEF IS NOT AN EMPTY LIST HERE EITHER (review of 1.0.29). _buildAlbumsData
+    # answers undef — never [] — when a build is ALREADY IN FLIGHT, precisely so the
+    # two cannot be confused; a view's cold build can still be running at 05:00, and
+    # that is the same carrier the tracks stage's in-flight close was written for
+    # (review of 1.0.22). Collapsing it with `// []` recorded that as
+    # `done, 0 album(s)`: a warm that did nothing, reported in warmstats as a warm
+    # that ran and found People You Follow empty — the exact confusion the undef
+    # answer exists to remove. The chain still advances either way.
     my $albumsYear = sub {
         _stage('start', 'trending_year', undef, undef, $transient);
         _buildAlbumsData($client, 'this_year', sub {
-            _stage('end', 'trending_year', 'done', scalar(@{ $_[0] // [] }) . ' album(s)', $transient);
-            _warmTrendingCovers($_[0], 'trending albums · this year', $transient);
+            my ($albums) = @_;
+            if (defined $albums) {
+                _stage('end', 'trending_year', 'done', scalar(@$albums) . ' album(s)', $transient);
+            }
+            else {
+                _stage('end', 'trending_year', 'skipped', 'a build is already in flight', $transient);
+            }
+            _warmTrendingCovers($albums, 'trending albums · this year', $transient);
             $onDone->();
         }, $force);
     };
@@ -3260,8 +3288,14 @@ sub _warmTrending {
     my $albumsMonth = sub {
         _stage('start', 'trending_month', undef, undef, $transient);
         _buildAlbumsData($client, 'this_month', sub {
-            _stage('end', 'trending_month', 'done', scalar(@{ $_[0] // [] }) . ' album(s)', $transient);
-            _warmTrendingCovers($_[0], 'trending albums · this month', $transient);
+            my ($albums) = @_;   # undef: already in flight — see $albumsYear above
+            if (defined $albums) {
+                _stage('end', 'trending_month', 'done', scalar(@$albums) . ' album(s)', $transient);
+            }
+            else {
+                _stage('end', 'trending_month', 'skipped', 'a build is already in flight', $transient);
+            }
+            _warmTrendingCovers($albums, 'trending albums · this month', $transient);
             $albumsYear->();
         }, $force);
     };

@@ -259,8 +259,13 @@ stays allocation-only). `COVER_WARM_MEMO` = 1 day, and it MUST stay inside the p
 gap (30d − `COVER_WARM_TTL` 25d = 5d): a marker answering at t guarantees the rendition until
 t+5d. Hourly sweep in `_coverNoteWarm`. The runtime `wipeDerived` only runs at startup on a build
 change, before the memo holds anything. Carriers: every warm goes through `_warmCovers` →
-`_coverGroupsFor` (`_focusReleaseCovers` for For You + All Releases weeks — so Material home
-shelves and web skins too — `_fanOutFeed`, `_warmTrendingCovers`). No stored shape changed, so
+`_coverGroupsFor` (`_focusReleaseCovers` for For You + All Releases weeks — so the web skins
+too, since they enter through the SAME subs — `_fanOutFeed`, `_warmTrendingCovers`).
+**CORRECTED 2026-09-23 (the 1.0.30 carrier audit): Material home shelves are NOT covered by
+`_focusReleaseCovers`.** `homeForYou` / `homePlaylists` / `homeAllReleases` are separate subs and
+call it nowhere; they render cards from whatever the overnight warm left. Deliberate, and left
+that way — a focus warm queues the WHOLE feed, which is what Step 2 exists to bound — but the
+sentence as written sent one review looking for a carrier that does not exist. No stored shape changed, so
 no key-family bump. **Visible side effect:** a fully known-warm walk no longer opens the `covers`
 stage, so warmstats keeps the LAST real pass's note; "already warm" now counts marker reads only.
 
@@ -778,6 +783,76 @@ is for. No behaviour change; all 38 suites exit 0, `singleflight_sync_check` 0.
   true of every cold cover the tick queued, not just held ones.
 - Earlier rounds' mutant families re-run against 1.0.28 (the trending-exit four, the
   local-failure/`_coverProxyWarm` five): all still go red. The 1.0.28 rule's own seven do too.
+
+**/code-review of 1.0.29 (2026-09-23): ONE finding, VERIFIED, FIXED in 1.0.30 (built, NOT
+installed; sha f4159b02).** The lens was the one thing the 1.0.22/1.0.23 rounds settled for a
+SINGLE stage: every stage the warm starts must be closed truthfully on every exit. `_resolveTrending`
+was fixed then; nobody walked the OTHER stage-bearing warm subs.
+
+**`trending_year` and `trending_month` reported an in-flight build as `done, 0 album(s)`.**
+`_buildAlbumsData` answers **undef** — never `[]` — when a build is already in flight, and its own
+comment says why: "Returning [] here would render an affirmative 'nobody you follow has listened' —
+a cold build reported as a finished empty one, which is the confusion this whole change exists to
+remove." `_warmTrending`'s two album callbacks then did exactly that, with
+`scalar(@{ $_[0] // [] })` and a hard-coded `done`. Same carrier as the 1.0.22 in-flight close that
+WAS live: a view's cold build can still be running at 05:00, and the tick's own `trending_tracks`
+row says `skipped, a build is already in flight` while the two album rows beside it claim a warm
+that ran and found nothing. `warmstats` is the instrument the whole saved-warm feature exists to
+make truthful, so a row that reads as its own opposite is the defect.
+- Fix: both callbacks take the answer, record `done, N album(s)` when it is an arrayref and
+  `skipped, a build is already in flight` when it is undef, and hand the same value to
+  `_warmTrendingCovers` (which already guards on `ref ... eq 'ARRAY'`). The chain advances exactly
+  as before — this changes what is RECORDED, not what runs.
+
+Tests: `t_buildingstate.pl` 89 → 94, in the section that already pins `_warmTrending` (neither
+stage collapses undef into an empty list; each records the in-flight build as skipped and carries
+`$transient`; each still counts real albums). 5 mutants — year collapses, month collapses,
+in-flight-is-done, the count dropped, the transient flag dropped — each go red. All 38 suites exit
+0; `singleflight_sync_check` 0.
+**Checked and cleared in the same pass:** every OTHER stage the warm opens closes on all of its
+exits — `follow_feed` (no token / empty / no player / cache-hit / done / failed), `all_feed`,
+`foryou_feed`, `muspy_feed` (done + failed), `playlists` (done + failed + the skip fan-out),
+`genres_all` / `genres_foryou` and their two Last.fm children, and `covers` (`_coverMaybeEnd`).
+`_buildAlbumsData` itself calls its wrapped `$onDone` on every exit, so neither the chain nor the
+in-flight flag can strand. The only `->(undef)` reaching a stage-bearing warm chain was the one
+fixed above.
+
+**Carrier audit (Simon: "check all carriers", 2026-09-23): ONE finding, FIXED in 1.0.31 (built,
+NOT installed; sha 52cf568b).** Every carrier of the two rules the last rounds changed was
+walked mechanically, not by memory.
+
+**THE THREE MATERIAL HOME SHELVES NEVER MARKED A BROWSE.** `homeForYou`, `homePlaylists` and
+`homeAllReleases` are full browse entry points — `MaterialSkin::HomeExtraBase` runs the same
+`Slim::Control::XMLBrowser` `items` query as the browse menu, and Material re-requests all three on
+EVERY home-page load (verified 0.9.26, two loads → two full re-fetches of all three) — and not one
+of them called `_noteBrowse()`. So on the LBF surface a user sits on most, `_coverLimit()` stayed at
+`COVER_CONCURRENCY_IDLE`: 8 releases, 24 concurrent local image requests, each cold one able to
+freeze the loop ~0.5s, exactly while the home page was drawing. The brake has existed since the
+artwork rework; it simply was not wired here. Same defect class the suite's own comment names
+("an entry point that was never wired — exactly how the People You Follow section came to warm no
+artwork at all"). Fix: `_noteBrowse()` at the top of all three. They still take NO focus warm, and
+deliberately: a focus warm queues the whole feed, which is Step 2's business.
+
+Tests: `t_coverwarm.pl`'s entry-point list 9 → 12 names (228 assertions, unchanged count — the list
+is one assertion). 3 mutants, one per shelf, each names the missing sub. All 38 suites exit 0 BY
+EXIT CODE, not by last line (the `perl -c`-invisible trap this repo has been bitten by twice);
+`singleflight_sync_check` 0.
+
+**The rest of the audit — walked, correct, and recorded so it is not re-walked:**
+- **Who queues covers, and with which provenance flag (1.0.28):** `fetchForYou` and
+  `_buildAllWeekItems` via `_focusReleaseCovers` → focus, flag 0 (a browse); `warmFeeds` (the tick)
+  and `reseedFromStore` (startup) via `_fanOutFeed` → flag 1; `_warmTrending` via
+  `_warmTrendingCovers` → flag 1 from the tick, 0 from a manual refresh. Those are ALL the callers
+  of `_warmCovers`, and `_coverGroupsFor` has exactly one caller (`_warmCovers` itself).
+- **`reseedFromStore` cannot run after a tick in the same process**, so its flag-1 groups can never
+  mean a retry the tick did not authorise: the skip path arms it only when the clock is more than
+  `WARM_DELAY` away (`_warmCatchUp`), and `$coverTickAt` is 0 until `_warmTick` stamps it.
+- **`stageReset` has exactly one caller**, `_warmTick`, as its comment claims.
+- **The albums VIEW opens no stage and warms no covers** — `resolveTrendingAlbums` calls
+  `_buildAlbumsData` bare — so it cannot corrupt the saved table, and the trending-albums covers
+  come from the tick alone. Pre-existing, not a finding.
+- **The view's `_resolveTrending` is transient** (`$transient = (!$warm || $force)`, and a view
+  always passes a callback), so a view closing `trending_tracks` never touches the saved warm.
 
 **Care points for the redesign (Simon: "be very careful"):** the carriers are every caller of
 `_warmCovers` / `_coverGroupsFor` (For You, All Releases weeks, Material home shelves, web skins,
