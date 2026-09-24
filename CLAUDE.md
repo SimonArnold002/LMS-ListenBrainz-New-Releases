@@ -1177,6 +1177,24 @@ always with its reason, and those stay suppressed. The code a fix added is new a
 - **The bio parser is end-of-life** — the bio path moves to the hosted
   LMS-community API. Fix narrowly; do NOT re-architect `_bioBlocks` & co., and do
   not propose heuristics that re-derive structure a source already states.
+  - **Two narrow fixes ported from Discography 0.51.20 (2026-09-24, built as 1.0.32)** —
+    `_bioHardWrapped` and `_maiNotFound`. (1) `_bioHardWrapped` leaves a setext underline AND the
+    title it underlines out of the wrap count: a one-paragraph MAI stub cleaned to four lines
+    (sentence, "(Source: Wikipedia)", "More online sources", dashes), read as hard-wrapped, and
+    "(Source: Wikipedia)" rendered as a bold heading. Its comment claiming a false positive
+    "costs one joined paragraph" was wrong and is corrected. (2) `_fetchArtistInfo` skips MAI's
+    NOT-FOUND item: MAI answers an unknown artist with ONE item whose text is the localised
+    `PLUGIN_MUSICARTISTINFO_NOT_FOUND` ("I'm sorry, didn't find any relevant information." —
+    measured live, and read in MAI's source), which rendered AS the bio. `_maiNotFound` is MAI's
+    own prefix test on the markup-stripped text, localised via `cstring($client)` (MAI builds the
+    text the same way), guarded by `stringExists`. **Evidence nothing else moved:** the committed
+    and new parsers run side by side over 44 live MAI answers (bios + reviews, html:1 AND
+    plain-text html:0), cleaned and raw — 89 of 90 outputs byte-identical, the stub the only
+    change; every hard-wrapped plain-text bio still detected. `t_bioreveal.pl` 147 -> **157**
+    (§19 stub + hard-wrapped CONTROL, §20 not-found; fixtures captured in `tools/fixtures/`).
+    Anti-tested five ways, each failing only its own assertion (the two icon-file checks also
+    fail under ANY `LBF_BROWSE=` mutant — they look for images beside the mutant, a harness
+    artefact). All 38 suites exit 0. No cache involved (LBF caches no bio since 0.9.186).
 
 - **The 45s `PLAYLIST_TIMEOUT` default is NOT an oversight left behind by
   `PLAYLIST_RESOLVE_TIMEOUT`(150s).** The long one goes to resolves nobody waits on

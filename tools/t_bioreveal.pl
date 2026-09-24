@@ -702,5 +702,56 @@ print "\nWEB SKINS — the detail page's image-less link rows get icons\n";
     ok(defined $bf && -s "$dir$bf", 'the block icon file ships in the plugin');
 }
 
+print "\n19. A ONE-PARAGRAPH STUB — the attribution is not a heading (DSC 0.51.20 port)\n";
+{
+    # _cleanBio turns MAI's trailing "More online sources" into a setext title +
+    # dashes. Counted as prose, those two lines tipped _bioHardWrapped on a stub, and
+    # _bioLooksLikeHeading then made "(Source: Wikipedia)" a bold heading. The CONTROL
+    # is a real hard-wrapped plain-text MAI bio (captured from the live server,
+    # html:0, 2026-09-24), which must stay detected.
+    my $stub = '<p>Foo are an indie band from Leeds.</p><div>(Source: Wikipedia)</div>'
+             . '<h4>More online sources</h4><ul><li><a href="x">AllMusic</a></li></ul>';
+    my @p = T::_bioParagraphs(A::_cleanBio($stub));
+    ok(scalar(@p == 2 && !$p[1]{heading} && $p[1]{text} eq '(Source: Wikipedia)'),
+       'the attribution renders as body, not a bold heading');
+    my @rows = T::_artistRows($REL, $CLIENT, undef, A::_cleanBio($stub), 0);
+    ok(scalar(!headings_in(@rows)), '... and no row the release page draws is bold');
+
+    my $plain = slurp(File::Spec->catfile($ROOT, 'tools', 'fixtures', 'mai_bio_lambchop_plaintext.txt'));
+    my @l = map { my $t = $_; $t =~ s/^\s+|\s+$//g; $t } split /\n/, $plain, -1;
+    ok(scalar(T::_bioHardWrapped(\@l)), 'CONTROL: the real hard-wrapped plain-text bio is still detected');
+    my %h = map { $_->{text} => 1 } grep { $_->{heading} } T::_bioParagraphs($plain);
+    ok(scalar($h{'Description and history'} && $h{'Personal lives'} && $h{'Personnel'}),
+       'CONTROL: ... and its setext headings are still headings');
+}
+
+print "\n20. MAI's NOT-FOUND ANSWER IS NOT A BIOGRAPHY (DSC 0.51.20 port)\n";
+{
+    # MAI calls back with ONE item carrying the localised "I'm sorry..." text (read in
+    # its source; measured live for an unknown artist). It rendered as the bio.
+    $T::STR{PLUGIN_MUSICARTISTINFO_NOT_FOUND} = "I'm sorry, didn't find any relevant information.";
+    no warnings 'once';
+    our $NO_MAI_STRINGS = 0;
+    *Slim::Utils::Strings::stringExists = sub { !$main::NO_MAI_STRINGS };
+    eval "package T; " . grab($src, '_maiNotFound') . "; 1" or die "eval _maiNotFound failed: $@";
+
+    my $web = slurp(File::Spec->catfile($ROOT, 'tools', 'fixtures', 'mai_review_notfound_kraftwerk_computerworld.html'));
+    ok(scalar(T::_maiNotFound(undef, $web)), 'the captured web-wrapped not-found answer is recognised');
+    ok(scalar(T::_maiNotFound(undef, "I'm sorry, didn't find any relevant information.")),
+       'the plain form (what the CLI returned for an unknown artist) is recognised');
+    ok(scalar(!T::_maiNotFound(undef, '<p>Lambchop are an American band from Nashville.</p>')),
+       'a real biography is not');
+    ok(scalar(!T::_maiNotFound(undef, "<p>He said I'm sorry, didn't find any relevant information. Then left.</p>")),
+       'the phrase INSIDE real text is not (prefix only, as MAI\'s own check)');
+    { local $main::NO_MAI_STRINGS = 1;
+      ok(scalar(!T::_maiNotFound(undef, $web)), 'with MAI\'s strings absent nothing is treated as not-found'); }
+
+    # _fetchArtistInfo itself needs LMS to run, so its wiring is pinned in source:
+    # the check comes BEFORE the item is cleaned and kept, and skips to the next item.
+    my $fetch = grab($src, '_fetchArtistInfo');
+    ok(scalar($fetch =~ /_maiNotFound\(\$client, \$t\)\)\s*\{[^}]*\bnext;\s*\}\s*if \(defined \$t && length \$t\)/s),
+       '_fetchArtistInfo skips a not-found item before it can become the bio');
+}
+
 printf "\n%d passed, %d failed\n", $pass, $fail;
 exit($fail ? 1 : 0);

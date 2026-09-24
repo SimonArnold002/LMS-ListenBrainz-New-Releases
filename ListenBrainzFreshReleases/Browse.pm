@@ -6471,13 +6471,30 @@ sub _proseBlock {
 #     admits a long unpunctuated run.
 # Plus a floor of BIO_WRAP_MIN_LINES, since two or three short lines prove nothing.
 #
-# A false positive costs one joined paragraph — never a broken render — which is
-# why the gates are stated as a preference for leaving 0.9.151's behaviour alone.
+# A FALSE POSITIVE IS NOT HARMLESS: it joins lines AND lets _bioLooksLikeHeading
+# promote any short unpunctuated line to a bold heading. (This comment used to say
+# "one joined paragraph — never a broken render"; the 2026-09-24 review of
+# Discography's copy showed otherwise.)
+#
+# SETEXT HEADINGS ARE STRUCTURE, NOT PROSE, so a setext underline and the title it
+# underlines are left out of the count. Counted, they are exactly the lines the
+# test reads as wrapping: short, unpunctuated. A one-paragraph Wikipedia stub from
+# MAI cleans to four lines — the sentence, "(Source: Wikipedia)", "More online
+# sources" and its dashes — which cleared the floor and the mid-sentence test, and
+# "(Source: Wikipedia)" rendered as a bold heading. The underline itself is still
+# consumed by _bioBlocks whatever this returns. Ported from Discography 0.51.20,
+# where it was measured over 44 live MAI answers (html and plain text): the stub
+# was the only output that changed, and every hard-wrapped plain-text bio was
+# still detected.
 use constant BIO_WRAP_MAX_COL   => 100;
 use constant BIO_WRAP_MIN_LINES => 4;
 sub _bioHardWrapped {
     my ($lines) = @_;
-    my @l = grep { length } @$lines;
+    my $rule = qr/^[-=_~*]{3,}$/;      # the same underline test as _bioBlocks
+    my @l = grep { length }
+            map  { ($lines->[$_] =~ $rule
+                    || ($_ < $#$lines && $lines->[$_ + 1] =~ $rule)) ? () : $lines->[$_] }
+            0 .. $#$lines;
     return 0 if @l < BIO_WRAP_MIN_LINES;
 
     my $mid = 0;
@@ -7675,6 +7692,36 @@ sub _maiEnabled {
     return $on ? 1 : 0;
 }
 
+# Is this MAI item its NOT-FOUND answer rather than a biography?
+#
+# READ IN MAI's SOURCE (michaelherger/MusicArtistInfo) and MEASURED LIVE
+# (2026-09-24): with nothing to offer, getBiography does NOT call back empty. It
+# hands over ONE item whose `name` is the localised PLUGIN_MUSICARTISTINFO_NOT_FOUND
+# ("I'm sorry, didn't find any relevant information."), and for a web client wraps
+# it as "<p>…</p>" plus the "More online sources" links (ArtistInfo::_getBioItems;
+# the Last.fm fallback every failed bio ends in, LFM.pm, builds the same text). An
+# unknown artist's `biography` over the CLI is exactly that sentence. Until this
+# check it rendered AS the artist's biography on the release page.
+#
+# The test is MAI's OWN: its CLI wrapper classifies an item as an error when the
+# text starts with that string (ArtistInfo::getBiographyCLI). We strip the markup
+# first, which MAI's check does not, so the web-wrapped form is caught too. The
+# item TYPE cannot tell them apart for a bio (both are `textarea`). cstring($client)
+# resolves the same language MAI rendered with — MAI builds the text with
+# cstring($client, …) in every place it does. Ported from Discography 0.51.20.
+sub _maiNotFound {
+    my ($client, $raw) = @_;
+    return 0 unless defined $raw && !ref $raw && length $raw;
+    my $nf = eval {
+        Slim::Utils::Strings::stringExists('PLUGIN_MUSICARTISTINFO_NOT_FOUND')
+            ? cstring($client, 'PLUGIN_MUSICARTISTINFO_NOT_FOUND') : '';
+    } // '';
+    return 0 unless length $nf;
+    (my $plain = $raw) =~ s/<[^>]+>//g;
+    $plain =~ s/^\s+//;
+    return index($plain, $nf) == 0 ? 1 : 0;
+}
+
 # Fetch an artist biography + photo for the detail page's Artist section, from the
 # MAI (Music Artist Info) plugin. Calls $cb->({ bio => $text|undef, image =>
 # $url|undef }). Fully guarded: any MAI failure degrades to "no bio / no photo"
@@ -7721,6 +7768,10 @@ sub _fetchArtistInfo {
                 for my $it (@$items) {
                     next unless ref $it eq 'HASH';
                     my $t = $it->{name};
+                    if (_maiNotFound($client, $t)) {
+                        $log->info("artist-info '$artist': MAI not-found answer");
+                        next;
+                    }
                     if (defined $t && length $t) {
                         $info{bio} = Plugins::ListenBrainzFreshReleases::API::_cleanBio($t);
                         last;
