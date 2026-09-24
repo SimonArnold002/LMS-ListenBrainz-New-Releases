@@ -8051,6 +8051,9 @@ sub _streamKey {
     # to carry "<album> - <artist>" too, so :25: cached that. Now _stripArtistAffix'd.
     # :26→:27 (0.9.148): 0.9.147 applied that strip on ALL FOUR services, so :26: can hold a
     # Qobuz/Tidal/Deezer title truncated at a dash the service really does use. Bandcamp-only now.
+    # :29→:30 (1.0.33): _albumMatches no longer strips the artist prefix across a spaced " / "
+    # (fleet sync, DSC 0.51.7). The rule only REJECTS more, so the stale entries are cached
+    # MATCHES of a two-album set for its single album; those would otherwise play for 7 days.
     my $key = Plugins::ListenBrainzFreshReleases::DB::kver("lbf:stream:") . $svcOrder . ':' . ($idPart // '');
     utf8::encode($key) if utf8::is_utf8($key);   # octet key — non-Latin fallback can't crash md5
     return $key;
@@ -10225,9 +10228,19 @@ sub _albumMatches {
     # "Write About Love". Strip a leading "<artist> " from both sides and
     # re-compare, gated on a >=3 char remainder; the artist check below still
     # applies. (Ported from the Discography plugin 0.9.1.)
+    #
+    # NOT across a spaced slash: "The B‐52’s / Cosmic Thing" is TWO titles, the
+    # first of which merely equals the artist name. _norm erases the slash, so
+    # without this the two-album set claimed "Cosmic Thing", and a service's
+    # two-fer would stand in for the single album. Only the side carrying the
+    # slash is refused; the other side still gets its own prefix stripped.
+    # $albumRaw/$candTitle are the RAW titles - the slash is gone after _norm.
+    # (Fleet matcher sync from the Discography plugin 0.51.7.)
     if (!$ok && length $artistNorm) {
-        my $ab = _stripArtistPrefix($albumNorm, $artistNorm);
-        my $tb = _stripArtistPrefix($t, $artistNorm);
+        my $ab = ($albumRaw  // '') =~ m{\s/\s} ? $albumNorm
+               : _stripArtistPrefix($albumNorm, $artistNorm);
+        my $tb = ($candTitle // '') =~ m{\s/\s} ? $t
+               : _stripArtistPrefix($t, $artistNorm);
         if (($ab ne $albumNorm || $tb ne $t) && length($ab) >= 3 && length($tb) >= 3) {
             $ok = 1 if $tb eq $ab || index($tb, "$ab ") == 0;
         }

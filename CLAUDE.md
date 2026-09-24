@@ -6809,6 +6809,22 @@ Detected in `_isVariousArtists()`:
 >
 > **A non-zero exit is NO LONGER the normal state. Treat one as real drift again.**
 >
+> **2026-09-24 — LBF takes DSC 0.51.7's SPACED-SLASH guard (BUILT as 1.0.33, not installed;
+> not verified live). PFR does NOT yet** — so the check still exits 1, on `_albumMatches`, DSC+LBF vs
+> PFR. The port to LBF was PARKED earlier the same day and reopened by Simon ("lets update
+> the matcher on lbf"); PFR was not asked for. The rule: the artist-prefix tier does not strip
+> across a spaced " / " on the side that carries it — `_norm` erases the slash, so "The B‐52’s /
+> Cosmic Thing" read as a byline and claimed "Cosmic Thing" (both directions: an LB two-fer
+> resolving to the single, and a service two-fer standing in for it). Every LBF caller
+> (`_albumMatchesAlt`, five adapters) passes the RAW `$album` as `$albumRaw`, and `$candTitle`
+> is always the service's raw title, so the guard sees the slash. It only REJECTS more, so the
+> stale state is cached MATCHES: **`lbf:stream:` 29 → 30** (`lbf:trending:albums:` re-keys
+> through `_streamLayerTag`); `lbf:track:` untouched (`_trackMatches` has no prefix tier).
+> Pinned: `t_matchersync.pl` §3c (DSC t_alias §9's cases + an unspaced "Third/Sister Lovers"
+> control), `t_aliasmatch.pl` §1 (a credit PART or another name cannot route round it);
+> `t_playlistresolve.pl` 5.3 re-pinned to 30. The four new rejections FAIL against the
+> committed Browse.pm, controls pass on both. All 38 suites exit 0.
+>
 > The three rules that came across, each pinned by the field failure that motivated it:
 > 1. **Apostrophes ELIDE** rather than becoming a space (DSC 0.44.26) — spacing keyed
 >    "Jane's Addiction" as `jane s addiction` against `janes addiction`, and `_artistMatch`

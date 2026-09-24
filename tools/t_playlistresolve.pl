@@ -445,7 +445,8 @@ section('5. Nothing else in the cache may move (the constraint, pinned)');
 {
     ok(($KEYV{'lbf:pl:resolved:'} // 0) == 9, '5.1 lbf:pl:resolved: bumped to 9 to drop the pinned partials');
     ok(($KEYV{'lbf:track:'} // 0) == 10, '5.2 lbf:track: UNCHANGED at 10 — the expensive layer must not be orphaned');
-    ok(($KEYV{'lbf:stream:'} // 0) == 29, '5.3 lbf:stream: unchanged at 29');
+    # 29 -> 30 at 1.0.33 for the _albumMatches spaced-slash guard, NOT for this fix.
+    ok(($KEYV{'lbf:stream:'} // 0) == 30, '5.3 lbf:stream: at 30 (bumped by the 1.0.33 matcher sync, not here)');
     ok(($KEYV{'lbf:follow:resolved:'} // 0) == 5, '5.4 lbf:follow:resolved: unchanged at 5');
     ok(($KEYV{'lbf:trending:resolved:'} // 0) == 8, '5.5 lbf:trending:resolved: unchanged at 8');
     ok(($KEYV{'lbf:trending:albums:'} // 0) == 7, '5.6 lbf:trending:albums: unchanged at 7');
