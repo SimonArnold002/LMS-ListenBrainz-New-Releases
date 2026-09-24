@@ -6829,7 +6829,14 @@ Detected in `_isVariousArtists()`:
 > control), `t_aliasmatch.pl` §1 (a credit PART or another name cannot route round it);
 > `t_playlistresolve.pl` 5.3 still pins 29. The four new rejections FAIL against the
 > committed Browse.pm, controls pass on both. All 38 suites exit 0.
-> **Review of the 29 revert (2026-09-24): no findings — ROUND CLOSED, pushed to dev.** Checked: no
+> **Review of the 29 revert (2026-09-24): no findings.** It covered the uncommitted revert ONLY — the
+> 1.0.32/1.0.33 commits were pushed to dev before their own review. **That review (3108cf3..f401d53,
+> 2026-09-24): no findings — ROUND CLOSED.** Checked: every `_albumMatches` caller (5 adapters +
+> `_albumMatchesAlt`) passes the raw album, and `$candTitle` is raw, so the slash guard can't be bypassed;
+> only the prefix tier is guarded and no other tier reaches "X / Y" -> "Y"; `_bioHardWrapped` uses
+> `_bioBlocks`' underline test on trimmed lines; `_maiNotFound` is prefix-anchored, a no-op when MAI's
+> strings aren't loaded, an all-not-found page renders no bio, and nothing caches it (`lbf:bio:` gone since
+> 0.9.186). t_matchersync 83, t_aliasmatch 64, t_bioreveal 157 pass. Checked: no
 > `.pm`/suite still expects 30; `_streamLayerTag` reads the version live so `lbf:trending:albums:`
 > follows it back; `_cacheStream` does not refresh expiry on read, so a stale two-fer match is
 > redone within `STREAM_FOUND_TTL` (7 days); `main` ships 29, so no released install ever held 30.
