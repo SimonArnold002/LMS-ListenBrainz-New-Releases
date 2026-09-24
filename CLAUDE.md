@@ -988,6 +988,7 @@ because line numbers rot on the next edit.
 | ONE cached rendition is NOT enough and Qobuz does not do that: LMS refetches the SOURCE for any size it does not hold (measured 1.78s vs 0.04s; Qobuz 0.117s vs 0.042s). `COVER_SPECS` stays at three; `front-1200` stays (bytes, not speed). Simon: leave the warm alone, 2026-09-23 | A3 | `Warming ONE rendition` |
 | Slow-artwork rework 1.0.16–1.0.31 (truthful warm via the proxy's own cache, `lbf:imgmiss:` holds + daily retry, provenance on `%coverRank`, saved last warm, home shelves = browse): every round CLOSED by Simon 2026-09-23, pushed to `dev`; cumulative review NO findings. Closes those defects only; the code is open to review. 1.0.31 NOT installed | C | `ALL REVIEW ROUNDS 1.0.16–1.0.31 CLOSED` |
 | Web-skin dividers: Default/Classic get `type=>'textarea'` with NO image (`_webSkin`/`_divType`/`_divImage`); Classic losing row covers is the ACCEPTED cost; Material untouched. 1.0.8: `_webify` pass (feedMode = web on the itemActions CLI route, text rows -> textarea, `_webBounce` for nextWindow) | A2 | `WEB-SKIN DIVIDERS ARE TEXTAREA` |
+| `lbf:stream:` NOT bumped for 1.0.33's spaced-slash guard in `_albumMatches` (fleet sync, DSC 0.51.7): a two-fer cached as a match keeps it until the entry ages out. Simon overruled the bump 2026-09-24: *"any failed matches can be redone"* | A2 | `DELIBERATELY NOT BUMPED (stays 29)` |
 
 **Two standing rules that kill most repeat findings:**
 
@@ -6818,12 +6819,20 @@ Detected in `_isVariousArtists()`:
 > resolving to the single, and a service two-fer standing in for it). Every LBF caller
 > (`_albumMatchesAlt`, five adapters) passes the RAW `$album` as `$albumRaw`, and `$candTitle`
 > is always the service's raw title, so the guard sees the slash. It only REJECTS more, so the
-> stale state is cached MATCHES: **`lbf:stream:` 29 → 30** (`lbf:trending:albums:` re-keys
-> through `_streamLayerTag`); `lbf:track:` untouched (`_trackMatches` has no prefix tier).
+> stale state is cached MATCHES. **`lbf:stream:` is DELIBERATELY NOT BUMPED (stays 29) —
+> Simon overruled it 2026-09-24:** *"we dont need a bump ... any failed matches can be redone."*
+> A two-fer already cached as a match keeps it until the entry ages out; a global re-resolve is
+> not worth that rare case. **Not a finding — do not re-report the missing bump.** `lbf:track:`
+> untouched (`_trackMatches` has no prefix tier). (d77ffea committed a 29 → 30 bump; the
+> rebuild reverted it - zip rebuilt at 1.0.33, NOT re-versioned, since 1.0.33 was never installed.)
 > Pinned: `t_matchersync.pl` §3c (DSC t_alias §9's cases + an unspaced "Third/Sister Lovers"
 > control), `t_aliasmatch.pl` §1 (a credit PART or another name cannot route round it);
-> `t_playlistresolve.pl` 5.3 re-pinned to 30. The four new rejections FAIL against the
+> `t_playlistresolve.pl` 5.3 still pins 29. The four new rejections FAIL against the
 > committed Browse.pm, controls pass on both. All 38 suites exit 0.
+> **Review of the 29 revert (2026-09-24): no findings — ROUND CLOSED, pushed to dev.** Checked: no
+> `.pm`/suite still expects 30; `_streamLayerTag` reads the version live so `lbf:trending:albums:`
+> follows it back; `_cacheStream` does not refresh expiry on read, so a stale two-fer match is
+> redone within `STREAM_FOUND_TTL` (7 days); `main` ships 29, so no released install ever held 30.
 >
 > The three rules that came across, each pinned by the field failure that motivated it:
 > 1. **Apostrophes ELIDE** rather than becoming a space (DSC 0.44.26) — spacing keyed

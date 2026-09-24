@@ -8051,9 +8051,9 @@ sub _streamKey {
     # to carry "<album> - <artist>" too, so :25: cached that. Now _stripArtistAffix'd.
     # :26→:27 (0.9.148): 0.9.147 applied that strip on ALL FOUR services, so :26: can hold a
     # Qobuz/Tidal/Deezer title truncated at a dash the service really does use. Bandcamp-only now.
-    # :29→:30 (1.0.33): _albumMatches no longer strips the artist prefix across a spaced " / "
-    # (fleet sync, DSC 0.51.7). The rule only REJECTS more, so the stale entries are cached
-    # MATCHES of a two-album set for its single album; those would otherwise play for 7 days.
+    # STAYS at :29: for 1.0.33's spaced-slash guard in _albumMatches (fleet sync, DSC 0.51.7) -
+    # DELIBERATE, Simon overruled the bump 2026-09-24: a match the new rule would reject is
+    # redone when its entry ages out, and a global re-resolve is not worth that rare case.
     my $key = Plugins::ListenBrainzFreshReleases::DB::kver("lbf:stream:") . $svcOrder . ':' . ($idPart // '');
     utf8::encode($key) if utf8::is_utf8($key);   # octet key — non-Latin fallback can't crash md5
     return $key;
