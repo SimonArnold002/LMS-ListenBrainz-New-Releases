@@ -139,6 +139,30 @@ ok('an unrelated title still does not match',
 ok('collapse does not fuse two genuinely different albums',
    !m_($STONES, 'Let It Bleed', $STONES, 'Letit Bleedx'));
 
+print "\n== 3c. SPACED SLASH: a two-album set is not an artist prefix (DSC 0.51.7)\n";
+# _norm erases " / ", so "The B‐52’s / Cosmic Thing" read as "the b 52s cosmic thing" and
+# the artist-prefix rule stripped "the b 52s" off it. Both directions are the field case:
+# an LB two-fer release resolving to the single album, and a service two-fer standing in
+# for the LB single album. The cases are DSC t_alias.pl §9's, run through LBF's copy.
+my $B52 = 'The B-52s';
+my $SET = "The B\x{2010}52\x{2019}s / Cosmic Thing";
+ok('the two-album release does NOT match the single album "Cosmic Thing"',
+   !m_($B52, $SET, $B52, 'Cosmic Thing'));
+ok('... nor does a two-album CANDIDATE match the single album',
+   !m_($B52, 'Cosmic Thing', $B52, "The B-52's / Cosmic Thing"));
+ok('control: "Cosmic Thing" still matches itself',
+   m_($B52, 'Cosmic Thing', $B52, 'Cosmic Thing'));
+ok('control: the two-fer still matches the SAME two-fer',
+   m_($B52, $SET, $B52, "The B-52's / Cosmic Thing"));
+ok('control: a real artist prefix still matches (Belle and Sebastian Write About Love)',
+   m_('Belle and Sebastian', 'Write About Love', 'Belle and Sebastian', 'Belle and Sebastian Write About Love'));
+ok('control: ... in the other direction too',
+   m_('Belle and Sebastian', 'Belle and Sebastian Write About Love', 'Belle and Sebastian', 'Write About Love'));
+ok('control: an UNSPACED slash is an alternate title, not refused (Third/Sister Lovers)',
+   m_('Big Star', 'Big Star Third/Sister Lovers', 'Big Star', 'Third/Sister Lovers'));
+# The LBF-only wrapper _albumMatchesAlt (joint-credit parts, other names) is checked
+# against this rule in t_aliasmatch.pl §1, which loads the real splitArtistCredits.
+
 print "\n== 4. LBF ONLY: the rules reach the TRACK path too (_trackMatches)\n";
 # THE POINT OF THIS SECTION. `_trackMatches` is LBF's alone — no other repo has it, so the
 # fleet check cannot say a word about it and PFR's copy of this suite never exercises it. It

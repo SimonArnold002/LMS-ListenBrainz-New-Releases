@@ -167,10 +167,19 @@ section '1. THE REGISTRY: set, observe, release';
 # control-flow property of two long async subs. There is no return value to
 # inspect for "a second fan-out was not started".
 # ---------------------------------------------------------------------------
+# A SUB THAT IS GONE MUST FAIL, NOT DIE (review of 1.0.31). Every use below is an
+# ASSERTION about a body's shape, not a lift — nothing here is eval'd and run except
+# the registry, which has its own die. Dying on a rename aborted the whole file at
+# exit 255 with NO FAIL line and a PASS as its last output, which reads like a pass;
+# this repo has been bitten by that class twice, and the assertions that would die are
+# the ones pinning that an exit closes its stage. Now it reports and carries on.
 sub sub_body {
     my ($name) = @_;
     my ($body) = $src =~ /\nsub \Q$name\E \{(.*?)\n\}\n/s;
-    die "t_buildingstate: could not find sub $name in Browse.pm\n" unless $body;
+    unless (defined $body && length $body) {
+        ok(0, "sub $name is GONE from Browse.pm — the assertions below could not run");
+        return '';
+    }
     return $body;
 }
 
@@ -192,8 +201,18 @@ section '2. _resolveTrending TAKES the flag, and RELEASES it on every exit';
        'and it releases the flag — so every exit that calls $finish releases it');
 
     # The guard's own exit must NOT be counted as an exit that started a build.
-    ok(scalar($b =~ /_isBuilding\(\$bkey\)\)\s*\{[\s\S]{0,300}?\$finish->\(\);\s*return;/),
+    ok(scalar($b =~ /_isBuilding\(\$bkey\)\)\s*\{[\s\S]{0,900}?\$finish->\(\);\s*return;/),
        'the already-building path still calls $finish, so a WARM caller advances its chain');
+
+    # ...AND CLOSES THE WARM'S STAGE (review of 1.0.22). A view's cold build (~50s) can
+    # still be running at 05:00, so the tick takes this exit; _warmTrending opened
+    # `trending_tracks` and only _resolveTrending closes it. The view's own close is
+    # transient, so without a close here the saved warm's row read `running` for 24h.
+    ok(scalar($b =~ /_isBuilding\(\$bkey\)\)\s*\{[\s\S]{0,400}?_stage\('end', 'trending_tracks',[^;]*\$transient\);[\s\S]{0,300}?\$finish->\(\);/),
+       '...and closes trending_tracks before it does, so a tick cannot leave the row running');
+    # The flag itself is still left alone: this caller does not own it.
+    ok(scalar($b =~ /_isBuilding\(\$bkey\)\)\s*\{(?:(?!_buildingStart|_buildingEnd)[\s\S]){0,900}?\$finish->\(\);/),
+       '...without taking or clearing the in-flight flag it does not own');
 }
 
 section '3. _buildAlbumsData RELEASES via a WRAPPER, not at each exit';
@@ -362,6 +381,20 @@ section '7. THE FIRST OPENER GETS THE ROW TOO — the case 0.9.180 shipped broke
     ok(scalar(@warmAlbums >= 2), 'the warm drives both album ranges');
     ok(scalar($wt !~ /_buildAlbumsData\([^;]*?_buildingRow/s),
        'and passes NO $onPending for either — the warm gets completions, not placeholders');
+
+    # ...AND THE ALBUM STAGES TELL undef FROM [] (review of 1.0.29). _buildAlbumsData
+    # answers undef when a build is already in flight, never []; `// []` recorded that
+    # as `done, 0 album(s)`, so warmstats reported a warm that did nothing as a warm
+    # that ran and found nobody's listens — the confusion the undef answer exists to
+    # remove, and the same carrier the trending_tracks close above was written for.
+    ok(scalar($wt !~ /_stage\('end', 'trending_(?:year|month)', 'done',[^;]*\/\/ \[\]/s),
+       'neither album stage collapses undef into an empty list');
+    for my $st (qw(year month)) {
+        ok(scalar($wt =~ /_stage\('end', 'trending_$st', 'skipped', 'a build is already in flight'[^;]*\$transient\)/),
+           "trending_$st records the in-flight build as SKIPPED, not done");
+        ok(scalar($wt =~ /_stage\('end', 'trending_$st', 'done', scalar\(\@\$albums\)/),
+           "...and still counts the albums when there really are some ($st)");
+    }
 }
 
 section '8. EVERY UNREADY VIEW, AND THE "CHECK AGAIN" ROW';

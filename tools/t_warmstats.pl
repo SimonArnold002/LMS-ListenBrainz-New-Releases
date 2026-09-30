@@ -117,14 +117,43 @@ my $bsrc = slurp($BROWSE);
 # them. The declarations are restated here (they are four `my` lines, not logic);
 # everything with behaviour in it is lifted verbatim.
 # ---------------------------------------------------------------------------
-my $harness = join('',
-    "package T::Warm;\n",
-    "use strict; use warnings; use Time::HiRes ();\n",
-    "my %WARM_STAGE; my \@WARM_ORDER; my \$WARM_TICK_AT; my \$WARM_TICK_N = 0;\n",
-    map { grab($psrc, $_) } qw(stageStart stageEnd stageReset warmStages),
-);
-eval $harness;
-die "harness failed to compile: $@" if $@;
+# THE STORE, stubbed: one hash shared by every harness package, because the point
+# of section 6 is that a SECOND PROCESS (a restart) reads what the first one saved.
+our %STORE; our @SETS;
+{
+    package Plugins::ListenBrainzFreshReleases::DB;
+    sub store { return bless {}, 'T::Store' }
+    sub kver  { return $_[0] . '1:' }
+}
+{
+    package T::Store;
+    sub set { my (undef, $k, $v, $ttl) = @_; push @main::SETS, [ $k, $ttl ]; $main::STORE{$k} = $v; 1 }
+    sub get { my (undef, $k) = @_; return $main::STORE{$k} }
+}
+$INC{'Plugins/ListenBrainzFreshReleases/DB.pm'} = __FILE__;
+
+my ($lastTtlLine) = $psrc =~ /^(use constant LAST_WARM_TTL\s*=>.*?;)$/m
+    or die "no LAST_WARM_TTL in Plugin.pm\n";
+# One harness per "process": each gets its own lexicals, as a restart does.
+sub harness {
+    my ($pkg) = @_;
+    my $h = join('',
+        "package $pkg;\n",
+        "use strict; use warnings; use Time::HiRes ();\n",
+        "my %WARM_STAGE; my \@WARM_ORDER; my \$WARM_TICK_AT; my \$WARM_TICK_N = 0;\n",
+        "my %LAST_STAGE; my \@LAST_ORDER; my \$LAST_SEAL = 0;\n",
+        "sub version { '9.9.9' }\n",
+        "$lastTtlLine\n",
+        # stageSeal only if the source has it, so the section-8 assertions can report
+        # its absence as a FAIL instead of the harness dying before they run.
+        map { grab($psrc, $_) }
+            (qw(stageStart stageEnd stageReset _stageRows warmStages _noteLast _saveLastWarm lastWarm),
+             grep { $psrc =~ /^sub \Q$_\E\b/m } qw(stageSeal)),
+    );
+    eval $h;
+    die "harness $pkg failed to compile: $@" if $@;
+}
+harness('T::Warm');
 
 # ---------------------------------------------------------------------------
 section('1. BEFORE ANY TICK — empty, but answering');
@@ -240,6 +269,24 @@ section('5. THE RECORDER IS ACTUALLY CALLED — a perfect unused instrument is d
     ok(scalar($shim =~ /eval \{/), '_stage is eval-guarded (a die inside an async callback is unrecoverable)');
     ok(scalar($shim !~ /\bdie\b/), '_stage cannot itself raise');
 
+    # THE SHIM PASSES THE TRANSIENT FLAG THROUGH (review of 1.0.19). Driven for real:
+    # t_coverwarm.pl stubs _stage, so a shim that dropped the 5th argument would let
+    # every browse overwrite the saved warm with every suite green — the anti-test
+    # run found exactly that gap.
+    {
+        my @got;
+        no warnings 'once';
+        local *Plugins::ListenBrainzFreshReleases::Plugin::stageStart = sub { push @got, [ 'start', @_ ] };
+        local *Plugins::ListenBrainzFreshReleases::Plugin::stageEnd   = sub { push @got, [ 'end',   @_ ] };
+        eval "package T::Shim; $shim 1;" or die "shim failed to compile: $@";
+        T::Shim::_stage('start', 'covers', undef, undef, 1);
+        T::Shim::_stage('end',   'covers', 'done', 'n', 1);
+        T::Shim::_stage('start', 'covers');
+        ok(scalar(@got) == 3 && $got[0][2] && $got[1][4],
+           '_stage passes the TRANSIENT flag through to stageStart and stageEnd');
+        ok(scalar(@got) == 3 && !$got[2][2], '...and a plain call stays non-transient');
+    }
+
     # Every stage the report is expected to carry must be marked somewhere.
     for my $stage (qw(all_feed foryou_feed muspy_feed covers
                       genres_foryou genres_all genres_lastfm_foryou genres_lastfm_all
@@ -291,7 +338,7 @@ section('5. THE RECORDER IS ACTUALLY CALLED — a perfect unused instrument is d
     # Each of the three concurrently-started follower builds needs its OWN name.
     # One shared name would overwrite, and the measurement that matters most here
     # is precisely whether those three overlap.
-    ok(scalar($bsrc =~ /_stage\('start', 'trending_month'\)/ && $bsrc =~ /_stage\('start', 'trending_year'\)/),
+    ok(scalar($bsrc =~ /_stage\('start', 'trending_month'[,)]/ && $bsrc =~ /_stage\('start', 'trending_year'[,)]/),
        'trending_month and trending_year are separate stages, not one shared name');
     # Same for the Last.fm rung, which runs once for For You and once for All.
     ok(scalar($bsrc =~ /genres_lastfm_foryou/ && $bsrc =~ /genres_lastfm_all/),
@@ -312,6 +359,248 @@ section('5. THE RECORDER IS ACTUALLY CALLED — a perfect unused instrument is d
     ok(scalar($cli =~ /setStatusDone/),             'the handler completes the request');
     ok(scalar($cli =~ /\bat\b/ && $cli =~ /\buntil\b/),
        'the CLI emits start AND end offsets, so the overlap survives to the reader');
+}
+
+# ---------------------------------------------------------------------------
+section('6. THE LAST SCHEDULED WARM SURVIVES A RESTART (1.0.18)');
+# Simon's server stops every service for a 06:30 backup, so the 05:xx warm's table
+# was gone by the time anyone read it (live 2026-09-22: ticks 0). The table is now
+# also saved to the store — but ONLY by a process that ran a tick, so the restart's
+# re-seed (which still marks `covers`) cannot overwrite the real warm.
+{
+    %STORE = (); @SETS = ();
+    harness('T::P1');                  # the process that runs the 05:xx warm
+    T::P1::stageStart('covers');       # a mark BEFORE any tick (a startup re-seed)
+    T::P1::stageEnd('covers', 'done', 're-seed');
+    ok(scalar(@SETS) == 0, 'a process that has run no tick saves nothing');
+
+    T::P1::stageReset();
+    T::P1::stageStart('all_feed');
+    my $saved = T::P1::lastWarm();
+    ok($saved && ($saved->{stages}[0]{outcome} // '') eq 'running',
+       'a stage START is saved, so a warm cut off mid-stage shows it still running');
+    T::P1::stageEnd('all_feed', 'done', '1776 releases');
+    T::P1::stageStart('covers');
+    T::P1::stageEnd('covers', 'done', '54 request(s)');
+    $saved = T::P1::lastWarm();
+    ok($saved && scalar(@{ $saved->{stages} }) == 2, 'every stage of the tick is saved');
+    ok($saved && $saved->{stages}[0]{note} eq '1776 releases' && $saved->{stages}[1]{outcome} eq 'done',
+       '...with its outcome and note');
+    ok($saved && $saved->{tick_at} > 0 && $saved->{version} eq '9.9.9',
+       '...and the tick time and the build that ran it');
+    my ($k, $ttl) = @{ $SETS[-1] || [] };
+    ok(($k // '') eq 'lbf:warmlast:1:tick', 'saved under the versioned lbf:warmlast: family');
+    ok(($ttl // 0) == T::P1::LAST_WARM_TTL() && T::P1::LAST_WARM_TTL() > 86400,
+       '...with a TTL longer than a day, so yesterday\'s warm is readable the next morning');
+
+    # THE RESTART: a new process, fresh lexicals, same store.
+    harness('T::P2');
+    my $n = scalar @SETS;
+    T::P2::stageStart('covers');
+    T::P2::stageEnd('covers', 'done', '0 request(s), 1908 already warm');
+    ok(scalar(@SETS) == $n, 'after a restart the re-seed marks do NOT overwrite the saved warm');
+    my $after = T::P2::lastWarm();
+    ok($after && scalar(@{ $after->{stages} }) == 2 && $after->{stages}[1]{note} eq '54 request(s)',
+       '...and the restarted process reads the 05:xx warm back intact');
+    ok(scalar(@{ T::P2::warmStages()->{stages} }) == 1,
+       '...while its OWN table stays its own (the re-seed row only, never merged)');
+
+    # The CLI has to report it, under names that cannot be read as the live table.
+    my $cli = grab($psrc, '_cliWarmStats');
+    ok(scalar($cli =~ /lastWarm\(\)/ && $cli =~ /last_stages_loop/ && $cli =~ /last_tick_at/),
+       'warmstats reports the saved warm under its own last_ names');
+    ok(scalar(grab($psrc, '_saveLastWarm') =~ /\beval\s*\{/),
+       '_saveLastWarm is eval-guarded (its callers are inside async callbacks)');
+}
+
+# ---------------------------------------------------------------------------
+section('7. A BROWSE AFTER THE TICK DOES NOT OVERWRITE THE SAVED WARM (review of 1.0.19)');
+# The 1.0.19 review: a browse that queues a cold cover opens a NEW `covers` stage,
+# and _saveLastWarm stored the whole live table — so a 06:10 browse replaced the
+# 05:xx warm's cover numbers (and on a server with no daily restart, every browse
+# did, all day). A browse-driven boundary is TRANSIENT: it shows in the live table
+# and never reaches the saved warm. Nor may a LATER tick boundary carry the browse's
+# row into the save with it.
+{
+    %STORE = (); @SETS = ();
+    harness('T::P3');
+    T::P3::stageReset();
+    T::P3::stageStart('covers');
+    T::P3::stageEnd('covers', 'done', '54 request(s) / 18 release(s)');
+    T::P3::stageStart('genres_lastfm_all');                     # still running
+    my $n = scalar @SETS;
+
+    # The browse: a transient covers stage.
+    T::P3::stageStart('covers', 1);
+    T::P3::stageEnd('covers', 'done', '3 request(s) / 1 release(s)', 1);
+    ok(scalar(@SETS) == $n, 'a TRANSIENT (browse) boundary writes nothing to the store');
+    my $live = { map { $_->{name} => $_ } @{ T::P3::warmStages()->{stages} } };
+    ok(scalar(($live->{covers}{note} // '') =~ /^3 request/),
+       '...while the LIVE table still shows the browse (unchanged behaviour)');
+
+    # A tick stage finishing AFTER the browse must not drag the browse's row in.
+    T::P3::stageEnd('genres_lastfm_all', 'done', '68 requested');
+    my $saved = { map { $_->{name} => $_ } @{ (T::P3::lastWarm() || {})->{stages} || [] } };
+    ok(scalar(($saved->{covers}{note} // '') =~ /^54 request/),
+       'the saved warm keeps the TICK\'s covers row after a later tick stage is saved');
+    ok(($saved->{genres_lastfm_all}{outcome} // '') eq 'done',
+       '...and still records the tick stage that finished after the browse');
+    ok(scalar(keys %$saved) == 2, '...and nothing else');
+
+    # A new tick starts a new saved table.
+    T::P3::stageReset();
+    T::P3::stageStart('all_feed');
+    my $fresh = T::P3::lastWarm();
+    ok($fresh && scalar(@{ $fresh->{stages} }) == 1 && $fresh->{stages}[0]{name} eq 'all_feed',
+       'a new tick starts a new saved table (yesterday\'s rows do not carry over)');
+}
+# ...and the tick must clear the cover memo, or a cover memoised by an evening
+# browse is skipped at 05:xx without asking the proxy (the second 1.0.19 finding).
+{
+    my $tick = grab($psrc, '_warmTick');
+    ok(scalar($tick =~ /stageReset\(\);.*?coverMemoForget/s),
+       '_warmTick clears the cover memo (Browse::coverMemoForget) after the reset');
+    # ...and forgets yesterday's HELD MISSES, or the daily retry the hold's comment
+    # promises never happens: the warm fires at the same instant each day and reaches a
+    # held path earlier in the tick than the fetch that recorded it, so a 24h hold is
+    # still standing and the retry lands on a browse walk instead (review of 1.0.23).
+    ok(scalar($tick =~ /stageReset\(\);.*?coverTickBegin/s),
+       '...and stamps the tick (Browse::coverTickBegin), so the warm retries yesterday\'s holds');
+}
+
+# ---------------------------------------------------------------------------
+section('8. A MANUAL REFRESH DOES NOT OVERWRITE THE SAVED WARM (reviews of 1.0.20 and 1.0.21)');
+# "Refresh playlist matches" runs warmCache(force => 1) OUTSIDE any tick
+# (docs/scheduled-overnight-warm.md §3.3: a refresh is not a warm). 1.0.21 SEALED the
+# save by time, and the review of 1.0.21 broke that: a refresh tapped WHILE the tick
+# is still running restarts a stage the tick has open, the seal marked the entry late,
+# and the tick's own end was then never saved — the row read `running` until the next
+# day. Tick stages that first started after the seal were dropped too. Time cannot say
+# whose boundary it is; the CALLER can. So a refresh's boundaries are TRANSIENT (like a
+# browse's), and the saved warm is its OWN table, moved only by non-transient boundaries
+# — it never copies the live entry a transient boundary may have replaced.
+{
+    %STORE = (); @SETS = ();
+    harness('T::P4');
+    T::P4::stageReset();                                       # 05:00, the tick
+    T::P4::stageStart('playlists');
+    T::P4::stageEnd('playlists', 'done', '4 playlist(s)');
+    T::P4::stageStart('genres_lastfm_all');                    # the tick, still running
+    T::P4::stageStart('trending_year');                        # the tick, still running
+    my $tickStart = { map { $_->{name} => $_ } @{ T::P4::lastWarm()->{stages} } }->{trending_year}{start};
+    select(undef, undef, undef, 0.03);
+    # 05:02: the refresh, while the tick is still running. Every boundary transient.
+    T::P4::stageStart('playlists', 1);
+    T::P4::stageEnd('playlists', 'done', '4 playlist(s) (forced)', 1);
+    T::P4::stageEnd('follow_feed', 'skipped', 'no token', 1);  # never started: refresh-only
+    T::P4::stageStart('trending_year', 1);                     # re-runs a stage the TICK has open
+    T::P4::stageEnd('trending_year', 'done', '9 album(s) (refresh)', 1);
+    # ...and the tick carries on.
+    T::P4::stageEnd('trending_year', 'done', '8 album(s)');    # the tick's own end
+    T::P4::stageStart('trending_tracks');                      # a tick stage that STARTS after the refresh
+    T::P4::stageEnd('trending_tracks', 'done', '50 tracks');
+    T::P4::stageEnd('genres_lastfm_all', 'done', '68 requested');
+    my $saved = { map { $_->{name} => $_ } @{ (T::P4::lastWarm() || {})->{stages} || [] } };
+    ok(($saved->{playlists}{note} // '') eq '4 playlist(s)',
+       'a stage the refresh re-runs keeps the TICK\'s row in the saved warm');
+    ok(!exists $saved->{follow_feed}, 'a stage only the refresh recorded is not saved');
+    ok(($saved->{trending_year}{outcome} // '') eq 'done' && ($saved->{trending_year}{note} // '') eq '8 album(s)',
+       'a tick stage the refresh RESTARTED mid-run still has the tick\'s END saved (review of 1.0.21)');
+    ok(abs(($saved->{trending_year}{start} // 0) - ($tickStart // -1)) < 1e-6,
+       '...with the TICK\'s start, not the refresh\'s');
+    ok(($saved->{trending_tracks}{note} // '') eq '50 tracks',
+       'a tick stage that first starts after the refresh is saved (review of 1.0.21)');
+    ok(($saved->{genres_lastfm_all}{outcome} // '') eq 'done',
+       'a tick stage running through the refresh has its END saved');
+    my $live = { map { $_->{name} => $_ } @{ T::P4::warmStages()->{stages} } };
+    ok(($live->{playlists}{note} // '') eq '4 playlist(s) (forced)',
+       '...while the LIVE table shows the refresh (unchanged behaviour)');
+
+    # A refresh in a process that has run no tick saves nothing (the tick guard).
+    harness('T::P5');
+    my $n = scalar @SETS;
+    T::P5::stageStart('playlists', 1);
+    T::P5::stageEnd('playlists', 'done', 'x', 1);
+    ok(scalar(@SETS) == $n, 'a refresh before any tick writes nothing');
+}
+
+# ---------------------------------------------------------------------------
+section('9. EVERY NON-TICK CALLER MARKS ITS STAGES TRANSIENT (reviews of 1.0.20 and 1.0.21)');
+# The recorder can only keep a boundary out of the save if the CALLER says whose it
+# is. Two callers close tick stages from outside a tick: the manual refresh
+# (warmCache(force => 1) and everything it reaches) and the What's Trending VIEW
+# (_resolveTrending with a callback). 1.0.21's trace followed only warmCache/warmFeeds
+# callers and missed the view, which closes `trending_tracks` directly. Source-level,
+# because there is no return value to inspect: every _stage call in these subs must
+# carry the transient argument.
+{
+    my %flag = (
+        warmCache        => qr/\$transient/,
+        _warmGenres      => qr/\$transient/,
+        _warmFollow      => qr/\$transient/,
+        _warmTrending    => qr/\$transient/,
+        _resolveTrending => qr/\$transient/,
+    );
+    for my $sub (sort keys %flag) {
+        my $body  = grab($bsrc, $sub);
+        my @calls = $body =~ /(_stage\([^;]*?\)\s*(?:for\s+qw\([^)]*\))?;)/gs;
+        my @bare  = grep { $_ !~ $flag{$sub} } @calls;
+        ok(scalar(@calls) && !@bare,
+           "$sub: every _stage call passes \$transient (" . scalar(@calls) . " call(s))"
+             . (@bare ? " — bare: " . join(' | ', map { (my $c = $_) =~ s/\s+/ /g; $c } @bare) : ''));
+    }
+    my $wc = grab($bsrc, 'warmCache');
+    ok(scalar($wc =~ /my \$transient\s*=\s*\$force/), 'warmCache: $transient is the refresh (force), never the tick');
+    ok(scalar($wc =~ /_warmGenres\(\$transient\)/), 'warmCache hands $transient to _warmGenres');
+    ok(scalar($wc =~ /_warmFollow\(\$client, \$force/ && $wc =~ /_warmTrending\(\$client, \$force/),
+       'warmCache hands $force to _warmFollow and _warmTrending');
+    ok(scalar(grab($bsrc, '_warmGenres') =~ /my \(\$transient\)\s*=\s*\@_/), '_warmGenres takes $transient');
+    ok(scalar(grab($bsrc, '_warmFollow') =~ /my \$transient\s*=\s*\$force/), '_warmFollow derives $transient from $force');
+    my $wt = grab($bsrc, '_warmTrending');
+    ok(scalar($wt =~ /my \$transient\s*=\s*\$force/), '_warmTrending derives $transient from $force');
+    ok(scalar($wt =~ /_warmTrendingCovers\([^)]*\$transient\)/), '_warmTrending hands $transient to its cover warm');
+    ok(scalar(grab($bsrc, '_warmTrendingCovers') =~ /_warmCovers\([^)]*\$transient\)/),
+       '_warmTrendingCovers passes it on to _warmCovers');
+    my $rt = grab($bsrc, '_resolveTrending');
+    ok(scalar($rt =~ /my \$transient\s*=\s*\(!\$warm \|\| \$force\)/),
+       '_resolveTrending: the VIEW (a callback) or a refresh is transient; only the tick is not (review of 1.0.21)');
+    my $tr = grab($bsrc, '_warmTrending');
+    ok(scalar($tr =~ /_resolveTrending\([^)]*\$force/), '_warmTrending hands $force to _resolveTrending');
+    ok(scalar($bsrc !~ /stageSeal/ && $psrc !~ /LAST_SEAL|stageSeal/),
+       'the time-based seal is gone (it lost a tick stage restarted by a refresh)');
+}
+
+# ---------------------------------------------------------------------------
+section('10. EVERY EXIT OF _resolveTrending CLOSES trending_tracks (review of 1.0.22)');
+# The mirror of section 9, and a REGRESSION THE 1.0.22 FIX COULD INTRODUCE. The warm
+# opens `trending_tracks` in _warmTrending and _resolveTrending closes it. Two exits
+# never did: "a build is already in flight" and "no username". While the VIEW's close
+# was non-transient that was invisible — the view eventually closed the row for the
+# warm. Now the view's close is transient, so a tick taking one of those exits leaves
+# the SAVED warm's row `running` for 24h: warmstats reports a warm that finished as cut
+# off mid-stage, the exact false signal the save exists to prevent.
+#
+# The rule, not the two cases: each $finish->() must have a stage end between it and
+# the previous exit. ($finish is the one thing every exit calls — it releases the
+# in-flight flag, which t_buildingstate.pl pins.)
+{
+    my $b = grab($bsrc, '_resolveTrending');
+    my @exits;
+    my $prev = 0;
+    while ($b =~ /\$finish->\(\)/g) {
+        my $at = $-[0];
+        push @exits, substr($b, $prev, $at - $prev);
+        $prev = pos($b);
+    }
+    ok(scalar(@exits) >= 4, 'found the exits of _resolveTrending (' . scalar(@exits) . ')');
+    my $n = 0;
+    for my $seg (@exits) {
+        $n++;
+        my ($tail) = $seg =~ /([^\n]*\n[^\n]*)$/;
+        $tail = ' ' . join(' ', split ' ', ($tail // ''));
+        ok(scalar($seg =~ /_stage\('end', 'trending_tracks',[^;]*\$transient\)/s),
+           "exit $n closes trending_tracks (with \$transient) before it finishes —$tail");
+    }
 }
 
 printf "\n%s\n%d passed, %d failed.\n", '=' x 74, $pass, $fail;

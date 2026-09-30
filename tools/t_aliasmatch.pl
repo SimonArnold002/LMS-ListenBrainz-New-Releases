@@ -164,6 +164,18 @@ section('1. _albumMatchesAlt — joint credits and other names, title always req
        !$AMA->($ohs, $pt, 'Osees', 'Carrion Crawler', 'Protean Threat', [ $N->('Osees') ]));
     ok('an empty artist on either side gets no extra leniency',
        !$AMA->('', $pt, 'Osees, Somebody', 'Other Title', 'Protean Threat', [ $N->('Osees') ]));
+
+    # The spaced-slash guard (fleet sync, DSC 0.51.7) sits on the TITLES, so a retry
+    # under a credit PART or another name must not route round it. The joint credit
+    # fails step 1 on the artist, so it is step 2's "The B-52s" part that is asked.
+    my $b52 = $N->('The B-52s');
+    my $set = "The B\x{2010}52\x{2019}s / Cosmic Thing"; utf8::upgrade($set);
+    ok('spaced slash: a credit PART does not let a two-fer claim the single album',
+       !$AMA->($b52, $N->($set), 'The B-52s, Fred Schneider', 'Cosmic Thing', $set, undef));
+    ok('...nor does another name',
+       !$AMA->($N->('B52s'), $N->($set), 'The B-52s', 'Cosmic Thing', $set, [ $b52 ]));
+    ok('CONTROL: the same credit part still matches the right album',
+       $AMA->($b52, $N->('Cosmic Thing'), 'The B-52s, Fred Schneider', 'Cosmic Thing', 'Cosmic Thing', undef));
 }
 
 # ===========================================================================

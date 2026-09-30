@@ -91,6 +91,13 @@ use constant WARM_SVC_MAX_WAIT => 300;       # give up waiting, warm anyway
 # not durable cached data. A stage table from before a restart would describe a
 # different run.
 #
+# ...WHICH IS WHY THE LAST SCHEDULED WARM IS ALSO SAVED, SEPARATELY (1.0.18). Simon's
+# server stops every service for a 06:30 backup, so the 05:xx warm's table was gone
+# by the time anyone read it (live 2026-09-22: `ticks 0`, only the re-seed's covers
+# row). _saveLastWarm copies the table to the store — labelled as the last TICK, never
+# merged into this process's table — and warmstats reports both. Only a process that
+# has run a tick saves, so a restart's re-seed can never overwrite the real warm.
+#
 # Every entry is eval-guarded at the call site's expense, never this module's: a
 # recorder that can die turns an instrument into an outage.
 # ---------------------------------------------------------------------------
@@ -98,15 +105,28 @@ my %WARM_STAGE;     # name => { start, end, outcome, note }
 my @WARM_ORDER;     # names in the order they STARTED — the overlap is the point
 my $WARM_TICK_AT;   # epoch the current tick began
 my $WARM_TICK_N = 0;
+# The SAVED warm's own rows (see _saveLastWarm). A table of its own, moved ONLY by
+# non-transient boundaries and never copied from the live entry: a transient boundary
+# (a browse, a manual refresh, the What's Trending view) may replace the live entry
+# of a stage the tick has open, and copying that entry would carry its start into
+# the save (review of 1.0.21).
+my %LAST_STAGE;
+my @LAST_ORDER;
 
 # Mark a stage as started. Re-starting a name that is already open (a stage that
 # runs once per feed, say) overwrites it rather than accumulating — the tick is
 # the unit of measurement, not the call.
+#
+# $transient: a boundary that is NOT the scheduled warm's — a browse (the page-focused
+# cover warm), a manual refresh (warmCache(force => 1)), the What's Trending view.
+# It updates the live table as always but never the saved warm — see _saveLastWarm.
 sub stageStart {
-    my ($name) = @_;
+    my ($name, $transient) = @_;
     return unless defined $name && length $name;
+    my $now = Time::HiRes::time();
     push @WARM_ORDER, $name unless exists $WARM_STAGE{$name};
-    $WARM_STAGE{$name} = { start => Time::HiRes::time(), end => 0, outcome => 'running', note => '' };
+    $WARM_STAGE{$name} = { start => $now, end => 0, outcome => 'running', note => '' };
+    _noteLast($name, $now) unless $transient;
     return;
 }
 
@@ -118,7 +138,7 @@ sub stageStart {
 # section switched off), and it is worth seeing in the report rather than being
 # silently absent.
 sub stageEnd {
-    my ($name, $outcome, $note) = @_;
+    my ($name, $outcome, $note, $transient) = @_;
     return unless defined $name && length $name;
     my $e = $WARM_STAGE{$name};
     unless ($e) {
@@ -128,6 +148,7 @@ sub stageEnd {
     $e->{end}     = Time::HiRes::time();
     $e->{outcome} = $outcome // 'done';
     $e->{note}    = $note    // '';
+    _noteLast($name, undef, $e->{end}, $e->{outcome}, $e->{note}) unless $transient;
     return;
 }
 
@@ -136,6 +157,8 @@ sub stageEnd {
 sub stageReset {
     %WARM_STAGE   = ();
     @WARM_ORDER   = ();
+    %LAST_STAGE   = ();
+    @LAST_ORDER   = ();
     $WARM_TICK_AT = Time::HiRes::time();
     $WARM_TICK_N++;
     return;
@@ -143,10 +166,13 @@ sub stageReset {
 
 # The recorded table, oldest-start first. Returns plain data so the CLI (and any
 # test) can read it without touching the lexicals.
-sub warmStages {
+# Rows for a table, oldest-start first — shared by the live report and the save, so
+# the two can never disagree on what a row holds.
+sub _stageRows {
+    my ($order, $stage) = @_;
     my @rows;
-    for my $name (@WARM_ORDER) {
-        my $e = $WARM_STAGE{$name} or next;
+    for my $name (@$order) {
+        my $e = $stage->{$name} or next;
         push @rows, {
             name    => $name,
             start   => $e->{start},
@@ -162,11 +188,75 @@ sub warmStages {
             note    => $e->{note},
         };
     }
+    return @rows;
+}
+
+sub warmStages {
+    my @rows = _stageRows(\@WARM_ORDER, \%WARM_STAGE);
     return {
         tick_at => $WARM_TICK_AT // 0,
         ticks   => $WARM_TICK_N,
         stages  => \@rows,
     };
+}
+
+# Copy this process's table to the store as "the last scheduled warm". Called on
+# every stage boundary, so a warm cut off mid-stage (the 06:30 backup) is saved with
+# that stage still `running` — which is itself the answer to "did it finish?".
+#
+# ONLY AFTER A TICK IN THIS PROCESS ($WARM_TICK_N). After a restart the re-seed and
+# browses still mark stages (covers), and those must not replace the real warm.
+#
+# Eval-guarded here, because the callers are inside async HTTP callbacks: an
+# instrument that can die turns into an outage.
+use constant LAST_WARM_TTL => 8 * 86400;
+#
+# THE SAVE IS ITS OWN TABLE (%LAST_STAGE), moved only by non-transient boundaries
+# (_noteLast), with the boundary's own values — the same start/end rules as the live
+# table, applied independently. Saving the live table let a browse after the tick
+# replace the warm's `covers` row (review of 1.0.19); copying the live ENTRY let a
+# refresh that restarted a stage the tick had open lend the saved row its start
+# (review of 1.0.21).
+#
+# ($name, $start) for a start; ($name, undef, $end, $outcome, $note) for an end.
+sub _noteLast {
+    my ($name, $start, $end, $outcome, $note) = @_;
+    push @LAST_ORDER, $name unless exists $LAST_STAGE{$name};
+    if (defined $start) {
+        $LAST_STAGE{$name} = { start => $start, end => 0, outcome => 'running', note => '' };
+    }
+    else {
+        my $e = $LAST_STAGE{$name} ||= { start => 0 };
+        @$e{qw(end outcome note)} = ($end, $outcome, $note);
+    }
+    _saveLastWarm();
+    return;
+}
+
+sub _saveLastWarm {
+    return unless $WARM_TICK_N;
+    eval {
+        require Plugins::ListenBrainzFreshReleases::DB;
+        Plugins::ListenBrainzFreshReleases::DB::store()->set(
+            Plugins::ListenBrainzFreshReleases::DB::kver('lbf:warmlast:') . 'tick',
+            { tick_at  => $WARM_TICK_AT // 0,
+              saved_at => Time::HiRes::time(),
+              version  => (eval { version() } // ''),
+              stages   => [ _stageRows(\@LAST_ORDER, \%LAST_STAGE) ] },
+            LAST_WARM_TTL);
+        1;
+    };
+    return;
+}
+
+# The last scheduled warm as saved, or undef. Read by ["lbf","warmstats"].
+sub lastWarm {
+    my $v = eval {
+        require Plugins::ListenBrainzFreshReleases::DB;
+        Plugins::ListenBrainzFreshReleases::DB::store()->get(
+            Plugins::ListenBrainzFreshReleases::DB::kver('lbf:warmlast:') . 'tick');
+    };
+    return ref $v eq 'HASH' ? $v : undef;
 }
 
 # ARE WE A DEV BUILD? 1 on `dev`, 0 on `main`. This is telemetry only: ordinary
@@ -478,6 +568,54 @@ sub initPlugin {
     Slim::Control::Request::addDispatch(
         ['lbf', 'warmstats'], [0, 1, 0, \&_cliWarmStats]);
 
+    # Cover truth report (DIAGNOSTIC, 1.0.16; proxy-only since 1.0.18) —
+    #     ["lbf","coverstats"]
+    # Of the covers the warm is responsible for, how many does the LMS image proxy
+    # actually hold? See Browse::coverStats. Flags [0,1,1]: no player, a query, and
+    # ASYNC — it reads thousands of rows, chunked across turns of the event loop.
+    Slim::Control::Request::addDispatch(
+        ['lbf', 'coverstats'], [0, 1, 1, \&_cliCoverStats]);
+
+    return;
+}
+
+sub _cliCoverStats {
+    my $request = shift;
+    $request->setStatusProcessing();
+    my $answered = 0;
+    # Guarded like _cliDiag: the request is already processing, so a die before the
+    # callback would leave the caller hanging with no answer.
+    my $ok = eval {
+        Plugins::ListenBrainzFreshReleases::Browse::coverStats(sub {
+            my ($r) = @_;
+            $request->addResult('plugin_version', version());
+            $request->addResult($_, $r->{$_} // '')
+                for qw(error reads read_ms_mean read_ms_max elapsed);
+            my $i = 0;
+            my $labels = $r->{labels} || {};
+            for my $label (sort keys %$labels) {
+                for my $spec (sort keys %{ $labels->{$label} }) {
+                    my $c = $labels->{$label}{$spec};
+                    $request->addResultLoop('specs_loop', $i, 'label', $label);
+                    $request->addResultLoop('specs_loop', $i, 'spec',  $spec);
+                    $request->addResultLoop('specs_loop', $i, $_, $c->{$_})
+                        for qw(paths proxy miss cold memo);
+                    $i++;
+                }
+            }
+            $request->addResult('count', $i);
+            my $j = 0;
+            $request->addResultLoop('cold_loop', $j++, 'path', $_) for @{ $r->{cold} || [] };
+            $answered = 1;
+            $request->setStatusDone();
+        });
+        1;
+    };
+    unless ($ok || $answered) {
+        $request->addResult('error', $@ || 'unknown error');
+        $request->addResult('count', 0);
+        $request->setStatusDone();
+    }
     return;
 }
 
@@ -523,6 +661,28 @@ sub _cliWarmStats {
         $i++;
     }
     $request->addResult('count', $i);
+
+    # THE LAST SCHEDULED WARM, from the store — survives the 06:30 backup restart.
+    # Same row shape and offsets as the live table, under its own `last_` names so the
+    # two can never be read as one run.
+    my $last = eval { lastWarm() };
+    my $l0 = $last ? ($last->{tick_at} || 0) : 0;
+    $request->addResult('last_tick_at',  int($l0));
+    $request->addResult('last_saved_at', $last ? int($last->{saved_at} || 0) : 0);
+    $request->addResult('last_version',  $last ? ($last->{version} // '') : '');
+    my $k = 0;
+    for my $s (@{ ($last && $last->{stages}) || [] }) {
+        $request->addResultLoop('last_stages_loop', $k, 'name',    $s->{name});
+        $request->addResultLoop('last_stages_loop', $k, 'outcome', $s->{outcome});
+        $request->addResultLoop('last_stages_loop', $k, 'at',
+            $s->{start} && $l0 ? sprintf('%.2f', $s->{start} - $l0) : '');
+        $request->addResultLoop('last_stages_loop', $k, 'until',
+            $s->{end}   && $l0 ? sprintf('%.2f', $s->{end}   - $l0) : '');
+        $request->addResultLoop('last_stages_loop', $k, 'elapsed', sprintf('%.2f', $s->{elapsed} // 0));
+        $request->addResultLoop('last_stages_loop', $k, 'note',    $s->{note} // '');
+        $k++;
+    }
+    $request->addResult('last_count', $k);
 
     $request->setStatusDone();
 }
@@ -1142,6 +1302,19 @@ sub _warmTick {
     # deferred tick has not begun, and resetting here would show an empty table
     # for however long the scan runs, which reads as "the warm did nothing".
     stageReset();
+
+    # The daily warm ASKS THE PROXY for every cover. Without this a cover memoised
+    # by an evening browse (COVER_WARM_MEMO, 12h) is still trusted at 05:xx, and one
+    # LMS dropped overnight loads cold on screen (review of 1.0.19).
+    eval { Plugins::ListenBrainzFreshReleases::Browse::coverMemoForget(); 1 };
+
+    # ...and RETRIES yesterday's failures. A 24h hold (COVER_MISS_TTL) is still standing
+    # when a warm that fires at the same instant each day reaches the path, so without
+    # this the retry landed on a browse walk instead — a cold CAA fetch and its ~0.5s
+    # freeze in front of the user (review of 1.0.23). It marks the instant rather than
+    # deleting the family: a hold this capped, interruptible pass never reaches must
+    # keep standing (review of 1.0.25).
+    eval { Plugins::ListenBrainzFreshReleases::Browse::coverTickBegin(); 1 };
 
     # THE FEED WARM RUNS AHEAD OF warmCache, AND THAT ORDER IS THE POINT.
     # `warmCache` returns early without a username (Browse.pm), so All Releases —

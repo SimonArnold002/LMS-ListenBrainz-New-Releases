@@ -4968,7 +4968,9 @@ sub _parseReleaseDetails {
 #     builder splices the spec before whatever extension it finds, so it follows
 #     this automatically — but every marker written under the old `.png` paths
 #     describes an entry nothing will request again, which is why
-#     `lbf:imgwarm:` is now a versioned family in DB::KEY_VERSIONS.
+#     `lbf:imgwarm:` became a versioned family in DB::KEY_VERSIONS. (Retired in
+#     1.0.18: the warm now asks the image proxy's own cache, keyed by the same
+#     path, so a changed path is simply a cold one.)
 # ---------------------------------------------------------------------------
 sub coverArtUrl {
     my ($class, $rel) = @_;

@@ -3,6 +3,22 @@
 All notable changes to **ListenBrainz Fresh Releases** are listed here.
 Versions follow `MAJOR.MINOR.PATCH`.
 
+## 1.0.33 — 2026-09-30
+
+Artwork loading reworked so the Monday week rollover and browsing no longer bog the server down, plus biography and matching fixes.
+
+### Improvements
+- **The weekly rollover no longer reloads every cover.** Opening or re-sorting a week used to re-check the artwork for every release in it, every time — on a Monday that was hundreds of releases re-queued several times a second, enough to slow the server and drop players. Covers that are already prepared are now remembered and skipped, so a new week fetches only its own artwork.
+- **Cover pre-loading checks the server's own image cache.** It used to trust its own notes, so a cover the server no longer held was never fetched again overnight and loaded slowly in front of you. The overnight pass now asks the image cache directly and re-fetches anything missing.
+- **A cover that can't be downloaded is set aside for a day** instead of being retried on every page you open, and the next overnight pass tries it again. A local interruption — a server restart or backup mid-pass — is never held against a cover.
+- **Home-page shelves count as browsing,** so their artwork is fetched at full speed while you're looking at them.
+- **The overnight preparation report survives a restart.** `["lbf","warmstats"]` keeps the last scheduled pass's stage table, so an early-morning restart no longer erases it, and a manual refresh or opening a view no longer overwrites it. A new `["lbf","coverstats"]` reports how much of the feed's artwork the server has cached.
+
+### Fixes
+- **Two-album sets titled with a " / " no longer match just one of the albums,** and a streaming service's two-album set can no longer stand in for a single album. Matches already cached are corrected as they expire.
+- **Biography fixes:** a short Wikipedia stub no longer shows "(Source: Wikipedia)" as a bold heading, and for an artist that Music & Artist Information doesn't know, its "not found" message is no longer shown as the biography.
+- **The preparation report no longer shows a skipped Trending Albums pass as "done, 0 albums."**
+
 ## 1.0.13 — 2026-09-18
 
 The 1.0 release: no API token needed, Spotify playback, genre labels and a genre filter, a simpler week-based release window, much faster artwork, a server-side Connection Check, and proper support for the Default and Classic web skins.

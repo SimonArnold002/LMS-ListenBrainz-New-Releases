@@ -82,12 +82,15 @@ sub _dbg { Plugins::ListenBrainzFreshReleases::Plugin::dbg(@_) }
 # eval and simply abandons the rest of the chain. An instrument must not be able
 # to break the thing it measures, and one that logged its own failure at every
 # call would be worse than the gap it leaves.
+#
+# A 5th argument marks the boundary TRANSIENT — caused by a browse, so it shows in
+# the live table but never overwrites the saved scheduled warm (Plugin::_saveLastWarm).
 sub _stage {
-    my ($what, $name, $outcome, $note) = @_;
+    my ($what, $name, $outcome, $note, $transient) = @_;
     eval {
         my $P = 'Plugins::ListenBrainzFreshReleases::Plugin';
-        if ($what eq 'start') { $P->can('stageStart')->($name) }
-        else                  { $P->can('stageEnd')->($name, $outcome, $note) }
+        if ($what eq 'start') { $P->can('stageStart')->($name, $transient) }
+        else                  { $P->can('stageEnd')->($name, $outcome, $note, $transient) }
         1;
     };
     return;
@@ -1059,6 +1062,16 @@ sub fetchForYou {
 sub homeForYou {
     my ($client, $cb, $args) = @_;
 
+    # A HOME SHELF IS A BROWSE (review of 1.0.30). Material re-requests all three
+    # shelves on every home-page load — verified 0.9.26, two loads produced two full
+    # re-fetches — so this is the LBF surface most often on screen, and it was the one
+    # place the brake never engaged: the cover pump stayed at the IDLE width (8
+    # releases, 24 local requests) while somebody sat on the home page, each cold one
+    # able to freeze the loop ~0.5s. The shelves take no focus warm of their own, and
+    # deliberately: a focus warm queues the WHOLE feed, which is what Step 2 of the
+    # rework exists to bound.
+    _noteBrowse();
+
     # Flat list of release cards — NO week-divider headers. The Material carousel
     # and its "show all" click-in are the SAME feed (Material exposes no way to
     # give the click-in a different command), so they must share one structure.
@@ -1098,6 +1111,8 @@ sub homeForYou {
 sub homePlaylists {
     my ($client, $cb, $args) = @_;
 
+    _noteBrowse();   # a home shelf is a browse — see homeForYou
+
     Plugins::ListenBrainzFreshReleases::API->getCreatedForPlaylists(
         onDone => sub {
             my $playlists = shift // [];
@@ -1122,6 +1137,8 @@ sub homePlaylists {
 # vs "show all"), keeping deep drill-in stable.
 sub homeAllReleases {
     my ($client, $cb, $args) = @_;
+
+    _noteBrowse();   # a home shelf is a browse — see homeForYou
 
     Plugins::ListenBrainzFreshReleases::API->getFreshReleaseWeeksAll(
         sort    => 'release_date',
@@ -1867,14 +1884,15 @@ sub _dayDivider {
 # forced warm always re-resolves.
 sub _warmFollow {
     my ($client, $force, $onDone) = @_;
+    my $transient = $force;   # a manual refresh (see warmCache)
     $onDone ||= sub {};
     unless (($prefs->get('token') // '') ne '') {
-        _stage('end', 'follow_feed', 'skipped', 'no token');
+        _stage('end', 'follow_feed', 'skipped', 'no token', $transient);
         $onDone->();
         return;
     }
 
-    _stage('start', 'follow_feed');
+    _stage('start', 'follow_feed', undef, undef, $transient);
     Plugins::ListenBrainzFreshReleases::API->getFollowFeed(
         # force => 1: bypass the working-cache READ so a warm always re-pulls the
         # feed and can discover newly-arrived recommendations.
@@ -1883,32 +1901,32 @@ sub _warmFollow {
             my $store  = _mergeFollow(shift // []);
             my $tracks = $store->{tracks} || [];
             unless (@$tracks) {
-                _stage('end', 'follow_feed', 'done', 'empty');
+                _stage('end', 'follow_feed', 'done', 'empty', $transient);
                 _dbg("warm: follow feed empty");
                 $onDone->();
             return;
             }
             unless ($client) {   # no player → resolve on first open instead
-                _stage('end', 'follow_feed', 'skipped', 'no player');
+                _stage('end', 'follow_feed', 'skipped', 'no player', $transient);
                 $onDone->();
             return;
             }
 
             my $c = $cache->get(_followResolvedKey());
             if (!$force && $c && ($c->{sig} // '') eq _followSig($tracks)) {
-                _stage('end', 'follow_feed', 'cache-hit', 'unchanged');
+                _stage('end', 'follow_feed', 'cache-hit', 'unchanged', $transient);
                 _dbg("warm: follow feed unchanged — skip");
                 $onDone->();
             return;
             }
             _resolveFollow($client, $store, undef, $force, undef, sub {
-                _stage('end', 'follow_feed', 'done', scalar(@$tracks) . ' track(s), processed');
+                _stage('end', 'follow_feed', 'done', scalar(@$tracks) . ' track(s), processed', $transient);
                 $onDone->();
             });
         },
         onError => sub {
             my $err = shift // '';
-            _stage('end', 'follow_feed', 'failed', $err);
+            _stage('end', 'follow_feed', 'failed', $err, $transient);
             $log->info("warm: follow feed fetch failed: $err");
             $onDone->();
         },
@@ -2199,6 +2217,11 @@ sub _resolveTrending {
     # WHO CALLED, read before the cold build detaches $callback: the warm passes none,
     # a view always does. It decides whether the resolve is paced while Spotify refuses.
     my $warm = !$callback;
+    # WHOSE STAGE BOUNDARY: only the tick's. The view (a callback) closes
+    # `trending_tracks` too — a cache hit or a cold build started from the page — and
+    # a manual refresh reaches here with $force; both are TRANSIENT, so neither can
+    # replace the saved scheduled warm's row (review of 1.0.21).
+    my $transient = (!$warm || $force) ? 1 : 0;
 
     # $onDone signals COMPLETION to the warm chain, which is a different thing from
     # $callback (which renders). It must fire at EVERY terminal point or the chain
@@ -2219,6 +2242,13 @@ sub _resolveTrending {
 
     my $user = $prefs->get('username') // '';
     unless (length $user) {
+        # CLOSE THE STAGE ON EVERY EXIT (review of 1.0.22). _warmTrending opens
+        # `trending_tracks` and this sub is the only thing that closes it, so an exit
+        # that just returns leaves the SAVED warm's row `running` for 24h — warmstats
+        # then reports a warm that finished as cut off. Unreachable from the tick today
+        # (_warmTrending's own username gate ends the three stages and never calls
+        # here), but it is the same shape as the in-flight exit below, which was live.
+        _stage('end', 'trending_tracks', 'skipped', 'no username', $transient);
         $callback->({ items => [{ name => cstring($client, 'PLUGIN_LBF_SETUP_REQUIRED'), type => 'text' }], cachetime => 0 }) if $callback;
         $finish->();
         return;
@@ -2227,7 +2257,7 @@ sub _resolveTrending {
     my $rkey = _trendingResolvedKey();
     if (!$force && (my $c = $cache->get($rkey))) {
         my $n = scalar(@{ $c->{items} || [] });
-        _stage('end', 'trending_tracks', 'cache-hit', "$n tracks");
+        _stage('end', 'trending_tracks', 'cache-hit', "$n tracks", $transient);
         _dbg("trending cache hit ($n tracks)");
         $callback->(_trendingResult($client, $c, $feat)) if $callback;
         $finish->();
@@ -2239,6 +2269,10 @@ sub _resolveTrending {
     # build is ~50s, far past any watchdog worth waiting behind, which is what the
     # measurement settled. The flag is left alone: this caller does not own it.
     if (_isBuilding($bkey)) {
+        # The stage closes here too: a VIEW's cold build (~50s) can still be running at
+        # 05:00, and the tick then takes this exit. Its own close is transient, so
+        # without this the tick's row never moved off `running` (review of 1.0.22).
+        _stage('end', 'trending_tracks', 'skipped', 'a build is already in flight', $transient);
         _dbg("trending: a build is already in flight — rendering the building row");
         $callback->(_buildingRow($client)) if $callback;
         $finish->();
@@ -2265,7 +2299,7 @@ sub _resolveTrending {
 
     my $empty = sub {
         my ($msg, $cacheEmpty) = @_;
-        _stage('end', 'trending_tracks', ($cacheEmpty ? 'done' : 'failed'), ($msg // 'empty'));
+        _stage('end', 'trending_tracks', ($cacheEmpty ? 'done' : 'failed'), ($msg // 'empty'), $transient);
         _dbg("trending: $msg") if $msg;
         # Cache a genuine "no data" outcome (nobody followed / all stale / no candidates)
         # SHORT, so it doesn't re-run the whole fan-out + aggregation on every browse but
@@ -2382,7 +2416,7 @@ sub _resolveTrending {
                                 or $log->warn("resolved trending cache set failed: $@");
                             _stage('end', 'trending_tracks', 'done',
                                    scalar(@$items) . " tracks, $owned owned excluded"
-                                   . ($inconclusive ? ", $inconclusive inconclusive" : ""));
+                                   . ($inconclusive ? ", $inconclusive inconclusive" : ""), $transient);
                             _dbg("resolved trending: " . scalar(@$items) . " tracks"
                                 . " ($owned owned excluded"
                                 . ($inconclusive ? ", $inconclusive inconclusive — short TTL" : "")
@@ -3186,10 +3220,10 @@ sub _trendingAlbumRow {
 # queued behind every mapped row in all three spec passes, which is a small rerun of
 # the ordering bug 0.9.189 exists to fix. Both go away with the second rel.
 sub _warmTrendingCovers {
-    my ($aggs, $label) = @_;
+    my ($aggs, $label, $transient) = @_;
     return unless ref $aggs eq 'ARRAY' && @$aggs;
     my @rels = map { _trendingAlbumRel($_) } grep { ref $_ eq 'HASH' } @$aggs;
-    _warmCovers(\@rels, $label);
+    _warmCovers(\@rels, $label, undef, $transient);
     return;
 }
 
@@ -3198,9 +3232,10 @@ sub _warmTrendingCovers {
 # the follow-feed warm in warmCache.
 sub _warmTrending {
     my ($client, $force, $onDone) = @_;
+    my $transient = $force;   # a manual refresh (see warmCache)
     $onDone ||= sub {};
     unless (($prefs->get('username') // '') ne '') {
-        _stage('end', $_, 'skipped', 'no username')
+        _stage('end', $_, 'skipped', 'no username', $transient)
             for qw(trending_tracks trending_month trending_year);
         $onDone->();
         return;
@@ -3225,11 +3260,25 @@ sub _warmTrending {
     # was supposed to make this cheap.
     #
     # Chained back-to-front so each step is defined before the one that calls it.
+    # UNDEF IS NOT AN EMPTY LIST HERE EITHER (review of 1.0.29). _buildAlbumsData
+    # answers undef — never [] — when a build is ALREADY IN FLIGHT, precisely so the
+    # two cannot be confused; a view's cold build can still be running at 05:00, and
+    # that is the same carrier the tracks stage's in-flight close was written for
+    # (review of 1.0.22). Collapsing it with `// []` recorded that as
+    # `done, 0 album(s)`: a warm that did nothing, reported in warmstats as a warm
+    # that ran and found People You Follow empty — the exact confusion the undef
+    # answer exists to remove. The chain still advances either way.
     my $albumsYear = sub {
-        _stage('start', 'trending_year');
+        _stage('start', 'trending_year', undef, undef, $transient);
         _buildAlbumsData($client, 'this_year', sub {
-            _stage('end', 'trending_year', 'done', scalar(@{ $_[0] // [] }) . ' album(s)');
-            _warmTrendingCovers($_[0], 'trending albums · this year');
+            my ($albums) = @_;
+            if (defined $albums) {
+                _stage('end', 'trending_year', 'done', scalar(@$albums) . ' album(s)', $transient);
+            }
+            else {
+                _stage('end', 'trending_year', 'skipped', 'a build is already in flight', $transient);
+            }
+            _warmTrendingCovers($albums, 'trending albums · this year', $transient);
             $onDone->();
         }, $force);
     };
@@ -3237,16 +3286,22 @@ sub _warmTrending {
     # The albums build needs the player too (its streaming gate resolves each album
     # via _findPlayable); with no player it builds ungated on a short TTL.
     my $albumsMonth = sub {
-        _stage('start', 'trending_month');
+        _stage('start', 'trending_month', undef, undef, $transient);
         _buildAlbumsData($client, 'this_month', sub {
-            _stage('end', 'trending_month', 'done', scalar(@{ $_[0] // [] }) . ' album(s)');
-            _warmTrendingCovers($_[0], 'trending albums · this month');
+            my ($albums) = @_;   # undef: already in flight — see $albumsYear above
+            if (defined $albums) {
+                _stage('end', 'trending_month', 'done', scalar(@$albums) . ' album(s)', $transient);
+            }
+            else {
+                _stage('end', 'trending_month', 'skipped', 'a build is already in flight', $transient);
+            }
+            _warmTrendingCovers($albums, 'trending albums · this month', $transient);
             $albumsYear->();
         }, $force);
     };
 
     if ($client) {
-        _stage('start', 'trending_tracks');
+        _stage('start', 'trending_tracks', undef, undef, $transient);
         # The 5th arg is the COMPLETION hook, distinct from the render callback
         # (4th is $feat, which the warm has no use for). It fires at every terminal
         # point in _resolveTrending, including the cache-hit and empty ones — a
@@ -3255,7 +3310,7 @@ sub _warmTrending {
         _resolveTrending($client, undef, $force, undef, $albumsMonth);
     }
     else {
-        _stage('end', 'trending_tracks', 'skipped', 'no player');
+        _stage('end', 'trending_tracks', 'skipped', 'no player', $transient);
         $albumsMonth->();
     }
 }
@@ -3998,8 +4053,9 @@ use constant COVER_SPECS => [qw(_150x150_f _300x300_f _600x600_f)];
 # arithmetic that justified a small cap has changed by ~4x. Measured against the
 # live server, cold covers through the proxy: 0.40/s serial, 1.62/s at
 # concurrency 8. A whole 2,157-release feed is 3 x 2,157 = 6,471 requests, which
-# went from ~4.5 hours to ~1.1 hours of background work — and the markers hold
-# for COVER_WARM_TTL (25 days), so this is a first-run cost, not a nightly one.
+# went from ~4.5 hours to ~1.1 hours of background work — and the proxy holds each
+# rendition for 30 days (the warm asks it, _coverProxyWarm), so this is a first-run
+# cost, not a nightly one.
 # Steady state is whatever is genuinely new.
 # WHAT IS WARMED IS WHAT WILL BE RENDERED (0.9.196). The warm used to be handed
 # the RAW feed while every render path applies _filterSection first, so blocked
@@ -4068,21 +4124,80 @@ use constant COVER_BROWSE_QUIET         => 20;   # seconds of quiet before "idle
 # only true while covers are cold. This is what makes it true the rest of the time.
 use constant COVER_SCAN_BUDGET          => 25;   # groups dequeued per turn
 
-# How long we remember that a path is warm. Deliberately UNDER the proxy's own 30d
-# (Slim::Web::ImageProxy::Cache is constructed with 86400*30), so our marker can
-# never outlive the entry it describes. Note this is the PLUGIN's store, whose
-# expires_at is always absolute — the LMS 30-day TTL cliff does not apply here.
-use constant COVER_WARM_TTL => 25 * 86400;
+# WHAT "WARM" MEANS (1.0.18): THE IMAGE PROXY HOLDS THE RENDITION. Asked of the
+# proxy's own cache (Slim::Web::ImageProxy::Cache, see _coverProxyWarm), never of a
+# copy of it.
+#
+# Until 1.0.17 the warm kept its own `lbf:imgwarm:` marker per path, 25 days, and
+# believed it. Measured live with ["lbf","coverstats"] (1.0.17): ~1% of markers
+# claimed a rendition the proxy did not hold, every sampled one a cover that exists
+# at CAA. A marker could lie three ways and nothing in the plugin could see any of
+# them: written on the proxy's 200 PLACEHOLDER (_artworkError answers a failed fetch
+# with 200 + radio.png), written on a cache HIT so it outlived the entry (DbCache::get
+# never extends an expiry), or left standing when LMS purged or cleared its cache. A
+# lying marker kept a cover cold in front of the user for up to 25 days. The proxy's
+# cache cannot lie about itself, and reading it costs 0.047ms (6,543 reads, live).
+#
+# The family is RETIRED, not deleted: `lbf:imgwarm:` stays in DB::KEY_VERSIONS at a
+# version nothing writes, so the startup retirePrefixes sweep reclaims every old row.
+
+# A cover that could not be fetched — a placeholder instead of an image, a timeout,
+# an error — is not asked for again until this has passed. Without it a genuinely
+# missing or failing cover would be re-fetched on EVERY walk, and each cold CAA fetch
+# freezes the event loop ~0.5s (the LMS Net::HTTP read path; see CLAUDE.md "Slow
+# artwork / server freezes"). One day, and the next daily warm retries it — but NOT
+# because this lapses. The warm fires at the same instant every day (WARM_HOUR + a
+# fixed per-install jitter), and a day-2 pass reaches a held path EARLIER in the tick
+# than the day-1 fetch that recorded the miss did (a hold costs two cheap reads; the
+# pass that recorded it was fetching at ~1.6/s). So a 24h hold is always still standing
+# when the next warm arrives, and the retry would land on the first browse walk after
+# it lapsed — a cold CAA fetch, and its ~0.5s freeze, in front of the user. So the tick
+# STAMPS ITS START (coverTickBegin, from Plugin::_warmTick) and a launch of a group THE
+# SCHEDULED WARM QUEUED retries a hold older than that stamp (review of 1.0.23, corrected
+# in 1.0.26 and again in 1.0.27 — 1.0.24 deleted the whole family here, which lost every
+# hold the capped, interruptible pass never reached, and 1.0.26 read "is this the warm?"
+# off %coverFocus, which a later browse clears).
+# This TTL is what ends a hold the warm never revisits, and the only thing that ends one
+# in a process that never ticks. The proxy is asked FIRST, so a cover that has since been
+# cached is never held back by this.
+use constant COVER_MISS_TTL => 86400;
+
+# How long THIS PROCESS trusts that the proxy held a path, so a re-walk of a warm
+# view queues nothing and reads nothing (1.0.15: every walk of a Show-all week
+# re-queued 322 releases and re-read 966 markers on each sort tap).
+#
+# The proxy's entries expire (30d, fixed at write) and are purged; the memo cannot see
+# that. So the scheduled warm does not rely on the memo lapsing: it FORGETS it
+# (coverMemoForget, from Plugin::_warmTick) and asks the proxy for every cover, so a
+# rendition that has gone is re-fetched overnight rather than on screen. (A 12h memo
+# alone did not guarantee that — one set by an evening browse is still fresh at
+# 05:xx; review of 1.0.19.) 12h bounds how long a browse trusts it between warms.
+use constant COVER_WARM_MEMO => 12 * 3600;
 
 # A queue element is a GROUP: every proxy path for ONE release, which after the
 # ladder collapse all resolve to the same source URL. They are launched together
 # so the image proxy can coalesce them into a single download (see _coverLaunch).
 my @coverQueue;      # [ [ [$path,$key], ... ], ... ] — one entry per release
-my %coverRank;       # path => default [section, arrival] priority
+# THE GROUP'S FIRST PATH => [section, arrival, queued-by-the-warm]. The first two
+# fields are the default priority _orderCoverQueue sorts on; the THIRD is provenance,
+# 1 when the scheduled warm queued the group and 0 when a browse or a manual refresh
+# did, and _coverLaunch reads it to decide whether it may retry a held miss (see
+# coverTickBegin). It is not ordering, and it is load-bearing: get it wrong and a
+# cold CAA fetch — with its ~0.5s freeze — happens in front of somebody.
+my %coverRank;
 my %coverFocus;      # path => rank in the most recently requested view
 my $coverSequence = 0;
 my %coverReveal;     # player/view => previous reveal count
 my %coverQueued;     # $path => 1 while queued, so two feeds can't queue it twice
+my %coverWarm;       # marker KEY => epoch until which this process trusts it (COVER_WARM_MEMO)
+# The instant this process's current scheduled warm began (Plugin::_warmTick via
+# coverTickBegin). Two rules read it: a launch of a group the scheduled warm queued
+# retries a hold older than it, and a covers stage opened before it is RE-OPENED when
+# the tick's own pass joins. 0 means no
+# tick has run in this process, so every hold stands (a restart must not turn a failing
+# cover into a fetch storm) and no stage is re-opened.
+my $coverTickAt = 0;
+my $coverWarmSwept = 0;
 my $coverRunning = 0;   # RELEASES currently in flight (0 .. _coverLimit())
 my $coverPumping = 0;   # re-entrancy guard on _coverTick's launch loop
 my $lastBrowseAt = 0;   # epoch of the last browse tap — see _noteBrowse
@@ -4094,15 +4209,26 @@ my $coverResumeArmed  = 0;   # ditto for the budget continuation — see _coverA
 # work actually happens and three rows would imply a parallelism that isn't there.
 #
 # THREE COUNTERS, NOT ONE, and the split is what makes the stage note falsifiable:
-# $coverFetched is requests actually ISSUED, $coverSkipped is requests the marker
-# check answered without touching the network, and $coverGroups is releases —
-# i.e. upstream downloads. The claim this stage exists to prove is
-# "$coverFetched ~ 3 x $coverGroups", and a single merged counter cannot show it.
+# $coverFetched is requests actually ISSUED, $coverSkipped is paths the proxy's own
+# cache already held (no network), and $coverGroups is releases — i.e. upstream
+# downloads. The claim this stage exists to prove is "$coverFetched ~ 3 x
+# $coverGroups", and a single merged counter cannot show it. Two more since 1.0.18:
+# $coverHeld is paths not asked for because they failed inside COVER_MISS_TTL, and
+# $coverFailed is issued requests that did NOT leave a rendition in the proxy
+# (placeholder, timeout, error) — the number the old markers could not see.
 my $coverStageOpen = 0;
 my $coverFetched   = 0;
 my $coverSkipped   = 0;
 my $coverGroups    = 0;
 my $coverPeak      = 0;
+my $coverHeld      = 0;
+my $coverFailed    = 0;
+# The open covers stage was opened by a BROWSE (a focus warm) and no whole-feed warm
+# has joined it: its boundaries are transient and never overwrite the saved warm.
+my $coverStageTransient = 0;
+# When the open covers stage was started, so the tick can tell its own stage from one it
+# inherited (see _warmCovers).
+my $coverStageOpenedAt = 0;
 
 # Current week first, then earlier weeks newest-first, then upcoming weeks.
 sub _coverWeekOrder {
@@ -4118,6 +4244,229 @@ sub _coverWeekOrder {
     push @out, sort { ($b->{release_date} // '') cmp ($a->{release_date} // '') }
                     @{ $buckets{$_} } for @weeks;
     return \@out;
+}
+
+# The key the IMAGE PROXY caches a path under, which is NOT the path proxiedImage
+# returns. Slim::Web::HTTP strips the leading slash and URL-DECODES the request path
+# (`$params->{path} = Slim::Utils::Misc::unescape($path)`) before getImage caches
+# under it (`cachekey => $path`): the key is `imageproxy/https://coverartarchive.org/…
+# /image_150x150_f.jpg`. Pinned live by coverstats 1.0.17 — every hit was under
+# this form and none under either escaped one. LMS's own decoder, so it cannot drift.
+# A regex, no store: safe inside the allocation-only builder.
+sub _coverProxyKey {
+    my ($path) = @_;
+    (my $k = $path) =~ s{^/}{};
+    return Slim::Utils::Misc::unescape($k);
+}
+
+# Does the image proxy hold this rendition? The ONE definition of "warm". A read
+# that dies answers no, so the cover is fetched rather than wrongly skipped.
+my $coverProxyCache;
+# THREE ANSWERS, NOT TWO (review of 1.0.24): 1 the proxy holds it, 0 it does not,
+# UNDEF the question could not be asked (no cache object, or the read died). The same
+# 0 used to mean both "not there" and "could not ask" — harmless where it only gates a
+# FETCH, but 1.0.18 made it drive a WRITE: a proxy cache that could not be read filed
+# every cover of the pass as a 24h miss, holding a whole feed on a fault that says
+# nothing about any cover. Callers that fetch treat undef as 0; the caller that RECORDS
+# must not.
+sub _coverProxyWarm {
+    my ($pkey) = @_;
+    $coverProxyCache ||= eval { require Slim::Web::ImageProxy; Slim::Web::ImageProxy::Cache->new() }
+        or return undef;
+    my $hit = eval { $coverProxyCache->get($pkey) };
+    return undef if $@;
+    return $hit ? 1 : 0;
+}
+
+# KEYED BY THE PROXY KEY (_coverProxyKey), the same string the proxy's own cache is
+# asked with. Reads NO store — a hash lookup is what makes it safe on the render
+# path, where _coverGroupsFor must stay allocation-only.
+sub _coverKnownWarm {
+    my ($key) = @_;
+    my $until = $coverWarm{$key} or return 0;
+    return 1 if $until > time();
+    delete $coverWarm{$key};
+    return 0;
+}
+
+# Recorded only on EVIDENCE: the proxy's own cache answered for the path, before a
+# fetch or after one. Never on a failure or a placeholder, so a cover that could not
+# be fetched is retried (after COVER_MISS_TTL). Swept at most hourly, so a long uptime cannot let
+# expired entries accumulate.
+sub _coverNoteWarm {
+    my ($key) = @_;
+    my $now = time();
+    $coverWarm{$key} = $now + COVER_WARM_MEMO;
+    return if $now - $coverWarmSwept < 3600;
+    $coverWarmSwept = $now;
+    delete @coverWarm{ grep { $coverWarm{$_} <= $now } keys %coverWarm };
+    return;
+}
+
+# Forget what this process has proven warm. Called by the scheduled warm tick
+# (Plugin::_warmTick) so the daily warm ASKS THE PROXY for every cover: a memo set by
+# an evening browse is otherwise still trusted at 05:xx (COVER_WARM_MEMO is 12h), and
+# a rendition LMS dropped overnight loads cold on screen. The cost is one proxy read
+# per path per day (0.047ms, live).
+sub coverMemoForget {
+    %coverWarm = ();
+    $coverWarmSwept = time();
+    return;
+}
+
+# THE DAILY WARM RETRIES WHAT IT REACHES, AND ONLY THAT (review of 1.0.25). 1.0.24
+# DELETED the whole held-miss family at the top of the tick, which retried a hold only
+# if the pass then walked that path — and the pass is capped (COVER_WARM_MAX) and
+# interruptible (the 06:30 backup cuts it). Every hold it never reached was wiped with
+# no retry, so the re-fetch landed on a browse walk: the cold CAA fetch and ~0.5s freeze
+# the hold exists to prevent, the opposite of what the fix intended.
+#
+# So nothing is deleted. The tick stamps an instant, and a launch of a group THE
+# SCHEDULED WARM QUEUED ignores a hold written BEFORE it (retrying that cover once, at
+# 05:xx where a freeze is unseen) while honouring one written during or after it (a cover
+# that failed again this morning is not re-fetched all day). A hold the pass never reaches
+# simply stands, and its own COVER_MISS_TTL still ends it.
+#
+# EVERY OTHER LAUNCH HONOURS A HOLD, and which pass queued a group is carried on the
+# group itself (%coverRank's third field) rather than inferred from %coverFocus (review
+# of 1.0.27). Focus alone was wrong in both directions: it is cleared and rebuilt by the
+# next focus warm, so a held cover queued by a browse of For You was re-fetched — cold,
+# on screen — as soon as the user opened All Releases, and a manual refresh's trending
+# covers were never marked at all. Focus is still read, as the second half of the rule:
+# a path on screen RIGHT NOW is never re-fetched even when the warm queued it.
+sub coverTickBegin {
+    # Time::HiRes, the same clock $coverStageOpenedAt uses: a whole-second stamp
+    # compares wrongly against a stage opened a fraction of a second earlier, and the
+    # stage re-open rule would never fire.
+    $coverTickAt = Time::HiRes::time();
+    return $coverTickAt;
+}
+
+# A fetch that left no rendition in the proxy. Held back for COVER_MISS_TTL, in the
+# plugin's store so the hold survives a restart (a restart must not turn a failing
+# cover into a fresh fetch — and a fresh freeze — on every startup walk).
+sub _coverNoteMiss {
+    my ($path) = @_;
+    $coverFailed++;
+    eval {
+        # THE VALUE IS THE INSTANT IT WAS HELD, not a bare 1: the daily retry compares it
+        # with the tick's start (coverTickBegin). An old row written as 1 compares as
+        # older than any tick, so it is retried once, which is the wanted behaviour.
+        $cache->set(Plugins::ListenBrainzFreshReleases::DB::kver('lbf:imgmiss:') . $path,
+                    Time::HiRes::time(), COVER_MISS_TTL);
+        1;
+    };
+    return;
+}
+
+# ---------------------------------------------------------------------------
+# ["lbf","coverstats"] — DIAGNOSTIC. Of the covers the warm is responsible for, how
+# many does the image proxy actually hold?
+#
+# Built in 1.0.16/1.0.17 to test the premise of the 1.0.18 rework: that the old
+# `lbf:imgwarm:` markers claimed renditions the proxy did not hold. It found ~1%
+# lying, and pinned the proxy's key form (decoded — see _coverProxyKey). Since the
+# warm now asks the proxy itself, the report is the warm's own truth: `proxy` of
+# `paths` after a daily warm should be all of them bar `miss` (held failures).
+# `paths` and `proxy` keep their 1.0.17 meaning, so a 1.0.17 reading and a 1.0.18
+# reading compare directly.
+#
+# CHANGES NOTHING THE WARM READS: it walks the last list each non-focus warm was
+# handed (a REFERENCE, no copy), builds paths the way _coverGroupsFor does but never
+# touches %coverQueued or %coverWarm, and writes no store.
+#
+# CHUNKED, because a synchronous run is thousands of reads in one turn of the event
+# loop — the hazard class this whole investigation is about.
+my %coverDiagSource;   # label => the last release arrayref a non-focus warm was handed
+# Releases checked per turn of the event loop.
+use constant COVER_DIAG_CHUNK => 25;
+
+sub coverStats {
+    my ($cb) = @_;
+    my $proxyCache = eval {
+        require Slim::Web::ImageProxy;
+        require Slim::Utils::Misc;
+        Slim::Web::ImageProxy::Cache->new();
+    };
+    unless ($proxyCache && Slim::Web::ImageProxy->can('proxiedImage')) {
+        $cb->({ error => 'image proxy cache unavailable: ' . ($@ || 'no proxiedImage') });
+        return;
+    }
+
+    my @work;   # [label, release]
+    for my $label (sort keys %coverDiagSource) {
+        my $rels = $coverDiagSource{$label};
+        next unless ref $rels eq 'ARRAY';
+        my $n = 0;
+        for my $rel (@$rels) {
+            last if ++$n > COVER_WARM_MAX;
+            push @work, [ $label, $rel ];
+        }
+    }
+
+    my %rep;         # label => spec => counters
+    my @cold;
+    my %seen;        # a release in two feeds is counted under both labels, once each
+    my ($reads, $readMs, $readMax) = (0, 0, 0);
+    my $t0 = Time::HiRes::time();
+
+    my $timed = sub {
+        my ($key) = @_;
+        my $s = Time::HiRes::time();
+        my $v = eval { $proxyCache->get($key) };
+        my $ms = (Time::HiRes::time() - $s) * 1000;
+        $reads++;
+        $readMs += $ms;
+        $readMax = $ms if $ms > $readMax;
+        return $v ? 1 : 0;
+    };
+
+    my $step;
+    $step = sub {
+        my $ok = eval {
+            my $budget = COVER_DIAG_CHUNK;
+            while (@work && $budget-- > 0) {
+                my ($label, $rel) = @{ shift @work };
+                my $url = Plugins::ListenBrainzFreshReleases::API->coverArtUrl($rel) or next;
+                my $base = Slim::Web::ImageProxy::proxiedImage($url) or next;
+                next if $seen{"$label\0$base"}++;
+                for my $spec (@{ +COVER_SPECS }) {
+                    (my $path = $base) =~ s/(\.\w+)$/$spec$1/ or next;
+                    my $c = $rep{$label}{$spec} ||= {
+                        paths => 0, proxy => 0, miss => 0, cold => 0, memo => 0 };
+                    $c->{paths}++;
+                    my $key = _coverProxyKey($path);
+                    my $proxy = $timed->($key);
+                    my $miss = eval { $cache->get(
+                        Plugins::ListenBrainzFreshReleases::DB::kver('lbf:imgmiss:') . $path) } ? 1 : 0;
+                    $c->{proxy}++ if $proxy;
+                    $c->{miss}++  if $miss && !$proxy;
+                    $c->{memo}++  if $coverWarm{$key} && $coverWarm{$key} > time();
+                    if (!$proxy && !$miss) {
+                        $c->{cold}++;
+                        push @cold, "$label $spec $path" if @cold < 10;
+                    }
+                }
+            }
+            1;
+        };
+        if (!$ok || !@work) {
+            undef $step;   # break the self-reference
+            $cb->({
+                error    => $ok ? '' : ($@ || 'unknown error'),
+                labels   => \%rep,
+                cold     => \@cold,
+                reads    => $reads,
+                read_ms_mean => $reads ? sprintf('%.3f', $readMs / $reads) : '0',
+                read_ms_max  => sprintf('%.3f', $readMax),
+                elapsed  => sprintf('%.2f', Time::HiRes::time() - $t0),
+            });
+            return;
+        }
+        Slim::Utils::Timers::setTimer(undef, Time::HiRes::time(), $step);
+    };
+    $step->();
+    return;
 }
 
 sub _orderCoverQueue {
@@ -4283,10 +4632,16 @@ sub _focusReleaseCovers {
 }
 
 sub _warmCovers {
-    my ($releases, $label, $focus) = @_;
+    my ($releases, $label, $focus, $transient) = @_;
+    # A browse's cover warm (focus) is always transient; a manual refresh's
+    # (_warmTrendingCovers) says so itself. Only the stage boundary reads this.
+    $transient = ($focus || $transient) ? 1 : 0;
 
     return unless $prefs->get('warm_covers') // 1;
     return unless ref $releases eq 'ARRAY' && @$releases;
+
+    # Diagnostic only (coverStats): remember what a whole-feed warm was handed.
+    $coverDiagSource{$label} = $releases unless $focus;
 
     $releases = _coverWeekOrder($releases) if !$focus && $label eq 'all releases';
     my ($groups, $seen) = _coverGroupsFor($releases, COVER_WARM_MAX, $focus || $label eq 'all releases') or return;
@@ -4300,6 +4655,9 @@ sub _warmCovers {
             my $base = Slim::Web::ImageProxy::proxiedImage($url) or next;
             for my $spec (@{ +COVER_SPECS }) {
                 (my $path = $base) =~ s/(\.\w+)$/$spec$1/ or next;
+                # A path known warm will never be queued, so ranking it only grows
+                # %coverFocus with entries no launch will ever clear.
+                next if _coverKnownWarm(_coverProxyKey($path));
                 $coverFocus{$path} = $rank++;
             }
         }
@@ -4308,19 +4666,50 @@ sub _warmCovers {
         my $path = $group->[0][0];
         # For You (including MuSpy) precedes All Releases when nobody is looking.
         my $section = $label =~ /for you|muspy/ ? 0 : $label =~ /all releases/ ? 1 : 2;
-        $coverRank{$path} = [$section, ++$coverSequence];
+        # THE THIRD FIELD IS PROVENANCE, NOT ORDER (review of 1.0.27): 1 when the
+        # SCHEDULED WARM queued this group, 0 when a browse or a manual refresh did.
+        # _coverLaunch reads it to decide whether it may retry a held miss, because
+        # that is a property of the PASS and there is nowhere else to keep it: the
+        # queue is shared, groups outlive the pass that queued them, and %coverFocus
+        # — which the first cut read instead — is CLEARED and rebuilt by the next
+        # focus warm, so view A's queued covers lost their browse marking the moment
+        # the user opened view B. The order fields are untouched (_orderCoverQueue
+        # reads [0] and [1] only), and a group with no entry reads as a browse's,
+        # which is the safe default: the hold stands.
+        $coverRank{$path} = [$section, ++$coverSequence, $transient ? 0 : 1];
     }
     push @coverQueue, @$groups;
     _orderCoverQueue();
     return unless @coverQueue;
 
+    # A tick's whole-feed warm joining a stage a browse or a refresh opened makes that
+    # drain the tick's.
+    $coverStageTransient = 0 if $coverStageOpen && !$transient;
+    # ...AND THE STAGE IS RE-OPENED, or the tick's own row has no start (review of
+    # 1.0.25). `stageReset` clears Plugin.pm's tables, not this flag, so a stage still
+    # open from before the tick (the startup re-seed's whole-feed pass, ~1.1h cold, or a
+    # browse's) left the tick with no `start` mark at all: the saved row landed via the
+    # end alone, printing `at ''` / `elapsed 0.00` and a note carrying the EARLIER pass's
+    # counts. Re-opening stamps this tick's window and zeroes the counters.
+    #
+    # ONLY FOR A STAGE OLDER THAN THIS TICK. The tick warms several labels (all
+    # releases, for you, muspy, trending) through this same sub, and re-opening on every
+    # one of those would restart the counters mid-tick and leave the note describing
+    # only the last label.
+    if ($coverStageOpen && !$transient && $coverTickAt > 0 && $coverStageOpenedAt < $coverTickAt) {
+        $coverStageOpen = 0;
+    }
     unless ($coverStageOpen) {
         $coverStageOpen = 1;
+        $coverStageOpenedAt  = Time::HiRes::time();
+        $coverStageTransient = $transient;
         $coverFetched   = 0;
         $coverSkipped   = 0;
         $coverGroups    = 0;
         $coverPeak      = 0;
-        _stage('start', 'covers');
+        $coverHeld      = 0;
+        $coverFailed    = 0;
+        _stage('start', 'covers', undef, undef, $coverStageTransient);
     }
     _dbg("warm: covers — $label queued " . scalar(@$groups) . " release(s) of $seen");
     _coverTick();
@@ -4377,13 +4766,12 @@ sub _coverGroupsFor {
         for my $spec (@{ +COVER_SPECS }) {
             (my $path = $base) =~ s/(\.\w+)$/$spec$1/ or next;
             next if $coverQueued{$path};
-            # THROUGH kver, so the family can be invalidated like every other.
-            # Written as a bare literal this marker outlived the thing it
-            # described: it is a claim about an entry in the LMS image proxy's
-            # cache, keyed by a path that changes whenever the row URL changes
-            # (the `.png` -> `.jpg` switch being exactly that), and there was no
-            # way to retire the stale ones short of the dev wipe.
-            my $key = Plugins::ListenBrainzFreshReleases::DB::kver('lbf:imgwarm:') . $path;
+            # The key the image proxy caches this path under (_coverProxyKey) —
+            # the truth _coverLaunch asks, and the memo's key.
+            my $key = _coverProxyKey($path);
+            # Already proven warm in this process: queue nothing, so the launcher
+            # reads nothing. An in-memory lookup, so this stays allocation-only.
+            next if _coverKnownWarm($key);
             $coverQueued{$path} = 1;
             push @grp, [ $path, $key ];
         }
@@ -4558,7 +4946,9 @@ sub _coverMaybeEnd {
     # distinguish a pass that did nothing from a pass that skipped everything.
     _stage('end', 'covers', 'done',
            "$coverFetched request(s) / $coverGroups release(s)"
-         . ", $coverSkipped already warm, peak $coverPeak in flight");
+         . ", $coverSkipped already warm, $coverFailed not cached"
+         . ", $coverHeld held (recent miss), peak $coverPeak in flight",
+           $coverStageTransient);
 }
 
 # Launch ONE release: every spec, in a single synchronous turn.
@@ -4576,22 +4966,46 @@ sub _coverLaunch {
     $coverRunning++;
     $coverPeak = $coverRunning if $coverRunning > $coverPeak;
 
-    # THE MARKER CHECK LIVES HERE, not in the queue builder, for two reasons that
+    # THE WARM CHECK LIVES HERE, not in the queue builder, for two reasons that
     # both matter. (1) The builder runs inside an async HTTP callback and, later,
-    # inside a browse callback; doing this there is thousands of synchronous
-    # SQLite reads in one turn of the event loop. Here it is one read per launch,
-    # naturally spread across the pump. (2) The page-aligned warm unshifts
+    # inside a browse callback; reading there is thousands of synchronous SQLite
+    # reads in one turn of the event loop. Here it is one read per path per
+    # launch, naturally spread across the pump. (2) The page-aligned warm unshifts
     # unchecked precisely because it cannot afford the read — so this is the only
     # thing standing between a re-rendered page and a re-fetch of covers that are
     # already warm.
+    #
+    # THE PROXY IS ASKED FIRST, THE MISS MEMO SECOND. A cover the proxy holds is
+    # warm whatever a past failure recorded; a cover it does not hold is fetched
+    # unless it failed inside COVER_MISS_TTL.
+    # WHOSE PASS QUEUED THIS GROUP, read ONCE and before the loop below deletes the
+    # rank entry it lives in. Only the scheduled warm may retry a held miss.
+    my $warmPass = $coverTickAt > 0
+                && (($coverRank{ $group->[0][0] } || [])->[2] ? 1 : 0);
+
     my @todo;
     for my $ent (@$group) {
         my ($path, $key) = @$ent;
-        if (eval { $cache->get($key) }) {
+        if (_coverProxyWarm($key)) {
+            _coverNoteWarm($key);
             delete $coverQueued{$path};
             delete $coverRank{$path};
             delete $coverFocus{$path};
             $coverSkipped++;
+            next;
+        }
+        # A HOLD IS HONOURED UNLESS THIS IS THE DAILY WARM RETRYING IT (see
+        # coverTickBegin), which takes all three of: a group the SCHEDULED WARM
+        # queued ($warmPass), a path not on screen right now (%coverFocus), and a
+        # hold recorded before this tick began. Anything else honours it, because a
+        # re-fetch anywhere else is a cold CAA fetch — and its ~0.5s freeze — while
+        # somebody is looking.
+        my $miss = eval { $cache->get(Plugins::ListenBrainzFreshReleases::DB::kver('lbf:imgmiss:') . $path) };
+        if ($miss && !($warmPass && !exists $coverFocus{$path} && $miss < $coverTickAt)) {
+            delete $coverQueued{$path};
+            delete $coverRank{$path};
+            delete $coverFocus{$path};
+            $coverHeld++;
             next;
         }
         push @todo, $ent;
@@ -4640,24 +5054,59 @@ sub _coverLaunch {
 
             Slim::Networking::SimpleAsyncHTTP->new(
                 sub {
-                    # Only the fact that the proxy answered matters — by the time this
-                    # returns the resized image is in its cache, and we throw our copy
-                    # away.
-                    eval { $cache->set($key, 1, COVER_WARM_TTL); 1 };
+                    # AN ANSWER IS NOT A COVER. The proxy answers a failed upstream
+                    # fetch with 200 and its placeholder (_artworkError), which is
+                    # exactly how the old markers came to lie. So the proxy's own
+                    # cache is asked: it stores the rendition BEFORE it responds
+                    # (_resizeFromFile), so a real image is already there by now.
+                    my $held = _coverProxyWarm($key);
+                    if ($held) {
+                        _coverNoteWarm($key);
+                    }
+                    elsif (defined $held) {
+                        _coverNoteMiss($path);
+                    }
+                    else {
+                        # The proxy cache could not be asked. The download may well have
+                        # worked; holding the cover for a day on OUR fault would keep it
+                        # cold on screen (review of 1.0.24). Counted, never held.
+                        $coverFailed++;
+                    }
                     $done->();
                 },
                 sub {
                     my (undef, $error) = @_;
+                    my $err = $error // '';
                     # A server behind HTTP auth refuses our own request, and retrying
                     # the rest of the queue would just log the same failure a few
                     # hundred times. Drop the whole pass; the next warm retries.
-                    if (($error // '') =~ /\b40[13]\b/) {
+                    if ($err =~ /\b40[13]\b/) {
                         $log->info("warm: covers — the server refused a local request ($error);"
                                  . " skipping the cover warm");
                         @coverQueue  = ();
                         %coverQueued = ();
                         %coverRank = ();
                         %coverFocus = ();
+                    }
+                    # A LOCAL FAILURE SAYS NOTHING ABOUT THE COVER, and a 401/403 is not
+                    # the only one (review of 1.0.24). The request is to 127.0.0.1: a
+                    # refused connection, a reset or a closed socket means OUR server went
+                    # away mid-pass — Simon's stops every service for the 06:30 backup, and
+                    # a dev restart does the same. Holding those covers for a day would
+                    # keep them cold on screen, which is the freeze this rework removes.
+                    # Counted, never held.
+                    #
+                    # A TIMEOUT IS STILL A MISS, deliberately (1.0.18, mutant
+                    # `timeout-no-miss`): an upstream CAA hang can expire our loopback
+                    # request too, and re-fetching a hanging cover on every walk is a
+                    # freeze per walk. Note an upstream FAILURE does not arrive here at
+                    # all — the proxy answers it 200 with its placeholder, which the
+                    # success path catches by asking the proxy's cache.
+                    elsif ($err =~ /connection refused|refused|reset by peer|connect(?:ion)? (?:failed|closed)|broken pipe|not connected|no route|unreachable/i) {
+                        $coverFailed++;
+                    }
+                    else {
+                        _coverNoteMiss($path);
                     }
                     $done->();
                 },
@@ -4673,18 +5122,23 @@ sub _coverLaunch {
 sub warmCache {
     my ($client, %opts) = @_;
     my $force = $opts{force} ? 1 : 0;   # force => 1: re-resolve even already-cached playlists (manual refresh)
+    # A MANUAL REFRESH IS NOT A WARM (docs/scheduled-overnight-warm.md §3.3): the tick
+    # calls warmCache() bare, only "Refresh playlist matches" passes force. Every stage
+    # this reaches is marked TRANSIENT on a refresh, so it shows in the live table and
+    # never in the saved scheduled warm (reviews of 1.0.20 and 1.0.21).
+    my $transient = $force;
 
     # ListenBrainz metadata stays early. Only Last.fm waits for core processing
     # and artwork, including Last.fm jobs submitted by a browse top-up.
     my $releaseLastfm = _holdLastfm();
-    _warmGenres();
+    _warmGenres($transient);
 
     unless (($prefs->get('username') // '') ne '') {
         # The genre stages are NOT listed here any more — `_warmGenres` has just
         # recorded them itself, correctly: For You skipped, All Releases running.
         # Re-marking them 'skipped' here would overwrite a live stage with a
         # wrong outcome, which is worse than the missing warm was.
-        _stage('end', $_, 'skipped', 'no username')
+        _stage('end', $_, 'skipped', 'no username', $transient)
             for qw(playlists follow_feed trending_tracks trending_month trending_year);
         $releaseLastfm->();
         return;
@@ -4696,7 +5150,7 @@ sub warmCache {
     $client ||= (Slim::Player::Client::clients())[0];
 
 
-    _stage('start', 'playlists');
+    _stage('start', 'playlists', undef, undef, $transient);
     Plugins::ListenBrainzFreshReleases::API->getCreatedForPlaylists(
         # force => 1: bypass the working-cache READ so the warm always re-pulls the
         # listing from ListenBrainz. Without this, a warm tick that ran while the
@@ -4714,7 +5168,7 @@ sub warmCache {
             my $next;
             $next = sub {
                 my $pl = shift @queue or do {
-                    _stage('end', 'playlists', 'done', "$nPl playlist(s)");
+                    _stage('end', 'playlists', 'done', "$nPl playlist(s)", $transient);
                     _dbg("warm: playlists done");
                     # Then warm the follow feed (a no-op without a token), then the
                     # People-You-Follow trending list + album aggregates. Chained
@@ -4733,7 +5187,7 @@ sub warmCache {
                         # follower block genuinely costs nothing — worth seeing in
                         # the report, since it is otherwise indistinguishable from
                         # a follower stage that hung and never recorded an end.
-                        _stage('end', $_, 'skipped', 'people_follow off')
+                        _stage('end', $_, 'skipped', 'people_follow off', $transient)
                             for qw(follow_feed trending_tracks trending_month trending_year);
                         $releaseLastfm->();
                     }
@@ -4823,8 +5277,8 @@ sub warmCache {
         # one of them is a follower problem.
         onError => sub {
             my $err = shift // '';
-            _stage('end', 'playlists', 'failed', $err);
-            _stage('end', $_, 'skipped', 'playlist listing failed')
+            _stage('end', 'playlists', 'failed', $err, $transient);
+            _stage('end', $_, 'skipped', 'playlist listing failed', $transient)
                 for qw(follow_feed trending_tracks trending_month trending_year);
             $log->info("warm: playlist list fetch failed: $err");
             $releaseLastfm->();
@@ -4846,7 +5300,11 @@ sub refreshPlaylists {
     my $msg = $client
         ? cstring($client, 'PLUGIN_LBF_REFRESH_STARTED')
         : cstring($client, 'PLUGIN_LBF_REFRESH_NO_PLAYER');
-    warmCache($client, force => 1) if $client;
+    if ($client) {
+        # Not a warm (§3.3): force => 1 also marks every stage it records transient,
+        # so none of them can replace the saved scheduled warm.
+        warmCache($client, force => 1);
+    }
 
     $callback->({ items => [{ name => $msg, type => 'text' }], cachetime => 0 });
 }
@@ -6013,13 +6471,30 @@ sub _proseBlock {
 #     admits a long unpunctuated run.
 # Plus a floor of BIO_WRAP_MIN_LINES, since two or three short lines prove nothing.
 #
-# A false positive costs one joined paragraph — never a broken render — which is
-# why the gates are stated as a preference for leaving 0.9.151's behaviour alone.
+# A FALSE POSITIVE IS NOT HARMLESS: it joins lines AND lets _bioLooksLikeHeading
+# promote any short unpunctuated line to a bold heading. (This comment used to say
+# "one joined paragraph — never a broken render"; the 2026-09-24 review of
+# Discography's copy showed otherwise.)
+#
+# SETEXT HEADINGS ARE STRUCTURE, NOT PROSE, so a setext underline and the title it
+# underlines are left out of the count. Counted, they are exactly the lines the
+# test reads as wrapping: short, unpunctuated. A one-paragraph Wikipedia stub from
+# MAI cleans to four lines — the sentence, "(Source: Wikipedia)", "More online
+# sources" and its dashes — which cleared the floor and the mid-sentence test, and
+# "(Source: Wikipedia)" rendered as a bold heading. The underline itself is still
+# consumed by _bioBlocks whatever this returns. Ported from Discography 0.51.20,
+# where it was measured over 44 live MAI answers (html and plain text): the stub
+# was the only output that changed, and every hard-wrapped plain-text bio was
+# still detected.
 use constant BIO_WRAP_MAX_COL   => 100;
 use constant BIO_WRAP_MIN_LINES => 4;
 sub _bioHardWrapped {
     my ($lines) = @_;
-    my @l = grep { length } @$lines;
+    my $rule = qr/^[-=_~*]{3,}$/;      # the same underline test as _bioBlocks
+    my @l = grep { length }
+            map  { ($lines->[$_] =~ $rule
+                    || ($_ < $#$lines && $lines->[$_ + 1] =~ $rule)) ? () : $lines->[$_] }
+            0 .. $#$lines;
     return 0 if @l < BIO_WRAP_MIN_LINES;
 
     my $mid = 0;
@@ -7217,6 +7692,36 @@ sub _maiEnabled {
     return $on ? 1 : 0;
 }
 
+# Is this MAI item its NOT-FOUND answer rather than a biography?
+#
+# READ IN MAI's SOURCE (michaelherger/MusicArtistInfo) and MEASURED LIVE
+# (2026-09-24): with nothing to offer, getBiography does NOT call back empty. It
+# hands over ONE item whose `name` is the localised PLUGIN_MUSICARTISTINFO_NOT_FOUND
+# ("I'm sorry, didn't find any relevant information."), and for a web client wraps
+# it as "<p>…</p>" plus the "More online sources" links (ArtistInfo::_getBioItems;
+# the Last.fm fallback every failed bio ends in, LFM.pm, builds the same text). An
+# unknown artist's `biography` over the CLI is exactly that sentence. Until this
+# check it rendered AS the artist's biography on the release page.
+#
+# The test is MAI's OWN: its CLI wrapper classifies an item as an error when the
+# text starts with that string (ArtistInfo::getBiographyCLI). We strip the markup
+# first, which MAI's check does not, so the web-wrapped form is caught too. The
+# item TYPE cannot tell them apart for a bio (both are `textarea`). cstring($client)
+# resolves the same language MAI rendered with — MAI builds the text with
+# cstring($client, …) in every place it does. Ported from Discography 0.51.20.
+sub _maiNotFound {
+    my ($client, $raw) = @_;
+    return 0 unless defined $raw && !ref $raw && length $raw;
+    my $nf = eval {
+        Slim::Utils::Strings::stringExists('PLUGIN_MUSICARTISTINFO_NOT_FOUND')
+            ? cstring($client, 'PLUGIN_MUSICARTISTINFO_NOT_FOUND') : '';
+    } // '';
+    return 0 unless length $nf;
+    (my $plain = $raw) =~ s/<[^>]+>//g;
+    $plain =~ s/^\s+//;
+    return index($plain, $nf) == 0 ? 1 : 0;
+}
+
 # Fetch an artist biography + photo for the detail page's Artist section, from the
 # MAI (Music Artist Info) plugin. Calls $cb->({ bio => $text|undef, image =>
 # $url|undef }). Fully guarded: any MAI failure degrades to "no bio / no photo"
@@ -7263,6 +7768,10 @@ sub _fetchArtistInfo {
                 for my $it (@$items) {
                     next unless ref $it eq 'HASH';
                     my $t = $it->{name};
+                    if (_maiNotFound($client, $t)) {
+                        $log->info("artist-info '$artist': MAI not-found answer");
+                        next;
+                    }
                     if (defined $t && length $t) {
                         $info{bio} = Plugins::ListenBrainzFreshReleases::API::_cleanBio($t);
                         last;
@@ -7542,6 +8051,9 @@ sub _streamKey {
     # to carry "<album> - <artist>" too, so :25: cached that. Now _stripArtistAffix'd.
     # :26→:27 (0.9.148): 0.9.147 applied that strip on ALL FOUR services, so :26: can hold a
     # Qobuz/Tidal/Deezer title truncated at a dash the service really does use. Bandcamp-only now.
+    # STAYS at :29: for 1.0.33's spaced-slash guard in _albumMatches (fleet sync, DSC 0.51.7) -
+    # DELIBERATE, Simon overruled the bump 2026-09-24: a match the new rule would reject is
+    # redone when its entry ages out, and a global re-resolve is not worth that rare case.
     my $key = Plugins::ListenBrainzFreshReleases::DB::kver("lbf:stream:") . $svcOrder . ':' . ($idPart // '');
     utf8::encode($key) if utf8::is_utf8($key);   # octet key — non-Latin fallback can't crash md5
     return $key;
@@ -9716,9 +10228,19 @@ sub _albumMatches {
     # "Write About Love". Strip a leading "<artist> " from both sides and
     # re-compare, gated on a >=3 char remainder; the artist check below still
     # applies. (Ported from the Discography plugin 0.9.1.)
+    #
+    # NOT across a spaced slash: "The B‐52’s / Cosmic Thing" is TWO titles, the
+    # first of which merely equals the artist name. _norm erases the slash, so
+    # without this the two-album set claimed "Cosmic Thing", and a service's
+    # two-fer would stand in for the single album. Only the side carrying the
+    # slash is refused; the other side still gets its own prefix stripped.
+    # $albumRaw/$candTitle are the RAW titles - the slash is gone after _norm.
+    # (Fleet matcher sync from the Discography plugin 0.51.7.)
     if (!$ok && length $artistNorm) {
-        my $ab = _stripArtistPrefix($albumNorm, $artistNorm);
-        my $tb = _stripArtistPrefix($t, $artistNorm);
+        my $ab = ($albumRaw  // '') =~ m{\s/\s} ? $albumNorm
+               : _stripArtistPrefix($albumNorm, $artistNorm);
+        my $tb = ($candTitle // '') =~ m{\s/\s} ? $t
+               : _stripArtistPrefix($t, $artistNorm);
         if (($ab ne $albumNorm || $tb ne $t) && length($ab) >= 3 && length($tb) >= 3) {
             $ok = 1 if $tb eq $ab || index($tb, "$ab ") == 0;
         }
@@ -10703,6 +11225,7 @@ sub _warmReport {
 }
 
 sub _warmGenres {
+    my ($transient) = @_;   # a manual refresh (see warmCache)
     my $user  = $prefs->get('username') // '';
     my $token = $prefs->get('token')    // '';
 
@@ -10720,7 +11243,7 @@ sub _warmGenres {
 
     # All Releases needs no account, so it's warmed for everyone.
     my $warmAll = sub {
-        _stage('start', 'genres_all');
+        _stage('start', 'genres_all', undef, undef, $transient);
         Plugins::ListenBrainzFreshReleases::API->getFreshReleasesAll(
             sort    => 'release_date',
             onDone  => sub {
@@ -10733,8 +11256,8 @@ sub _warmGenres {
                     # below it, because it is the paced one (one request per
                     # second) and folding the two together would hide which of
                     # them the ladder actually spends its time in.
-                    _stage('end', 'genres_all', 'done', scalar(keys %$meta) . ' release group(s)');
-                    _stage('start', 'genres_lastfm_all');
+                    _stage('end', 'genres_all', 'done', scalar(keys %$meta) . ' release group(s)', $transient);
+                    _stage('start', 'genres_lastfm_all', undef, undef, $transient);
                     _dbg("warm: genres — All Releases, " . scalar(keys %$meta) . " release group(s)");
                     _persistLbArtistTags($rels, $meta);
                     # Ladder order, strictly chained so the two never fan out
@@ -10744,7 +11267,7 @@ sub _warmGenres {
                     # other cannot prepare a feed — see LFM_WARM_ALL.
                     _warmLastfm($rels, $meta, sub {
                         my $stats = shift;
-                        _stage('end', 'genres_lastfm_all', 'done', _lastfmWarmNote($stats));
+                        _stage('end', 'genres_lastfm_all', 'done', _lastfmWarmNote($stats), $transient);
                         _warmReport($rels, $meta, 'All Releases');
                         $branchDone->();
                     }, LFM_WARM_ALL);
@@ -10752,7 +11275,7 @@ sub _warmGenres {
             },
             onError => sub {
                 my $err = shift // '';
-                _stage('end', 'genres_all', 'failed', $err);
+                _stage('end', 'genres_all', 'failed', $err, $transient);
                 _dbg("warm: genres — All Releases fetch failed: $err");
                 $branchDone->();
             },
@@ -10764,28 +11287,28 @@ sub _warmGenres {
     # tokenless user's For You genres were never warmed at all, and their rows
     # could only ever fill from a background top-up two minutes at a time.
     unless ($user) {
-        _stage('end', 'genres_foryou',         'skipped', 'no username');
-        _stage('end', 'genres_lastfm_foryou',  'skipped', 'no username');
+        _stage('end', 'genres_foryou',         'skipped', 'no username', $transient);
+        _stage('end', 'genres_lastfm_foryou',  'skipped', 'no username', $transient);
         $warmAll->();
         return;
     }
 
-    _stage('start', 'genres_foryou');
+    _stage('start', 'genres_foryou', undef, undef, $transient);
     Plugins::ListenBrainzFreshReleases::API->getFreshReleasesForUser(
         sort    => 'release_date',
         onDone  => sub {
             my $rels = _filterForYou(shift);
             _withGenres($rels, sub {
                 my $meta = shift // {};
-                _stage('end', 'genres_foryou', 'done', scalar(keys %$meta) . ' release group(s)');
-                _stage('start', 'genres_lastfm_foryou');
+                _stage('end', 'genres_foryou', 'done', scalar(keys %$meta) . ' release group(s)', $transient);
+                _stage('start', 'genres_lastfm_foryou', undef, undef, $transient);
                 _dbg("warm: genres — For You, " . scalar(keys %$meta) . " release group(s)");
                 _persistLbArtistTags($rels, $meta);
                 # Queue Last.fm independently; All Releases metadata must not
                 # wait for the optional, paced Last.fm tail.
                 _warmLastfm($rels, $meta, sub {
                     my $stats = shift;
-                    _stage('end', 'genres_lastfm_foryou', 'done', _lastfmWarmNote($stats));
+                    _stage('end', 'genres_lastfm_foryou', 'done', _lastfmWarmNote($stats), $transient);
                     _warmReport($rels, $meta, 'For You');
                     $branchDone->();
                 }, LFM_WARM_ALL);
@@ -10794,7 +11317,7 @@ sub _warmGenres {
         },
         onError => sub {
             my $err = shift // '';
-            _stage('end', 'genres_foryou', 'failed', $err);
+            _stage('end', 'genres_foryou', 'failed', $err, $transient);
             _dbg("warm: genres — For You fetch failed: $err");
             $branchDone->();
             $warmAll->();

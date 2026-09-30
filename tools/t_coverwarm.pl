@@ -103,6 +103,20 @@ sub slurp {
     local $/; my $s = <$fh>; close $fh; return $s;
 }
 
+# A SUB THAT IS GONE MUST FAIL, NOT DIE. grab() dies on a missing sub, and that is
+# right where the harness LIFTS a body — nothing below can run without it. It is wrong
+# in an ASSERTION about a named sub: a rename then aborts the whole file at exit 255
+# with NO FAIL line and a PASS as its last output, which reads like a pass, and the
+# assertion that dies is the very one that exists to catch an entry point nobody wired.
+# Verified 2026-09-23 by renaming homeForYou in a mutated copy: exit 255, 0 FAILs.
+sub body_of {
+    my ($src, $name) = @_;
+    my $b = eval { grab($src, $name) };
+    return $b if defined $b;
+    ok(0, "sub $name is GONE from the source — the assertion below could not run");
+    return '';
+}
+
 # Brace-matched verbatim extraction of a named sub.
 sub grab {
     my ($src, $name) = @_;
@@ -161,13 +175,35 @@ my ($kv_src) = $dsrc =~ /use constant KEY_VERSIONS => \{(.*?)^\};/ms
     or die "no KEY_VERSIONS in DB.pm\n";
 my %KEY_VERSIONS = $kv_src =~ /'([^']+)'\s*=>\s*(\d+)/g;
 die "KEY_VERSIONS parsed empty\n" unless keys %KEY_VERSIONS;
-die "'lbf:imgwarm:' is not a registered key family\n"
-    unless defined $KEY_VERSIONS{'lbf:imgwarm:'};
+die "'lbf:imgmiss:' is not a registered key family\n"
+    unless defined $KEY_VERSIONS{'lbf:imgmiss:'};
 {
     package Plugins::ListenBrainzFreshReleases::DB;
     sub kver { return $_[0] . $KEY_VERSIONS{ $_[0] } . ':' }
+    # The store's own prefix delete, standing in for DB::kvForgetPrefix: it must hit
+    # the SAME rows _coverNoteMiss wrote, so a wrong prefix in the plugin fails here.
+    sub kvForgetPrefix {
+        my ($prefix) = @_;
+        my $c = $T::cache or return 0;
+        my @hit = grep { index($_, $prefix) == 0 } keys %{ $c->{d} };
+        delete $c->{d}{$_} for @hit;
+        return scalar @hit;
+    }
 }
-my $IMGWARM = 'lbf:imgwarm:' . $KEY_VERSIONS{'lbf:imgwarm:'} . ':';
+my $IMGMISS = 'lbf:imgmiss:' . $KEY_VERSIONS{'lbf:imgmiss:'} . ':';
+
+# 1.0.18: "WARM" MEANS THE IMAGE PROXY HOLDS THE RENDITION. These helpers stand in for
+# the proxy's own cache (the Slim::Web::ImageProxy::Cache stub below).
+#
+# pkey is derived HERE, independently of Browse.pm's _coverProxyKey — strip the
+# leading slash, url-decode, as Slim::Web::HTTP does before getImage caches — so a
+# wrong helper in the plugin fails the suite instead of agreeing with itself.
+sub pkey { my ($p) = @_; (my $k = $p) =~ s{^/}{}; return Slim::Utils::Misc::unescape($k) }
+sub mark_warm { $Slim::Web::ImageProxy::Cache::D{ pkey($_[0]) } = { data_ref => \'img' }; return }
+# Reads of EITHER store the warm consults: the proxy's cache and the plugin's own
+# (the miss memo). "Reads per turn" is a claim about the event loop, and both count.
+sub reads { return scalar(@Slim::Web::ImageProxy::Cache::GETS) + ($T::cache->{gets} // 0) }
+sub reset_reads { @Slim::Web::ImageProxy::Cache::GETS = (); $T::cache->{gets} = 0; return }
 
 # ==========================================================================
 section('1. every spec resolves to ONE source url, so the proxy can coalesce');
@@ -349,9 +385,31 @@ section('2. a warmed path is byte-identical to what Material will request');
     }
 }
 $INC{'Slim/Web/ImageProxy.pm'} = __FILE__;
+# The image proxy's own cache, for coverStats (1.0.16). A singleton like LMS's.
+# Reads are COUNTED so a test can see which key form was asked for.
+{
+    package Slim::Web::ImageProxy::Cache;
+    our %D; our @GETS; our $DIES = 0; my $one;
+    sub new { $one ||= bless {}, shift }
+    # $DIES: the cache cannot be READ (a broken DbCache, a locked db). Distinct from
+    # "the key is not there", and since 1.0.18 that difference drives a WRITE.
+    sub get { my ($s, $k) = @_; push @GETS, $k; die "cache unavailable\n" if $DIES; return $D{$k} }
+}
+# Slim::Utils::Misc::unescape, TRANSCRIBED from LMS 9.1 (the web server decodes the
+# request path with it before the proxy caches under that path).
+{
+    package Slim::Utils::Misc;
+    sub unescape {
+        my ($in, $isParam) = @_;
+        $in =~ s/\+/ /g if $isParam;
+        $in =~ s/%([0-9A-Fa-f]{2})/chr(hex($1))/eg;
+        return $in;
+    }
+}
+$INC{'Slim/Utils/Misc.pm'} = __FILE__;
 
 our @HTTP_GETS;         # every url the runner asked for, in order
-our $HTTP_MODE = 'ok';  # 'ok' | '401'
+our $HTTP_MODE = 'ok';  # 'ok' | '401' | 'fail' | 'refused' | 'placeholder' | 'die'
 {
     package Slim::Networking::SimpleAsyncHTTP;
     # 'die' mode reproduces a launch that never gets off the ground, which is the
@@ -377,8 +435,19 @@ $INC{'Slim/Networking/SimpleAsyncHTTP.pm'} = __FILE__;
 sub http_settle {
     my $req = shift @HTTP_PENDING or return 0;
     my ($s) = @$req;
-    if ($HTTP_MODE eq '401') { $s->{err}->(undef, 'Failed to open socket: 401 Authorization Required') }
-    else                     { $s->{done}->(bless {}, 'T::Resp') }
+    if    ($HTTP_MODE eq '401')  { $s->{err}->(undef, 'Failed to open socket: 401 Authorization Required') }
+    elsif ($HTTP_MODE eq 'fail') { $s->{err}->(undef, 'Timed out waiting for data') }
+    # OUR OWN server went away mid-pass (the 06:30 backup stops every service; a dev
+    # restart does the same). A loopback transport failure, not the cover's fault.
+    elsif ($HTTP_MODE eq 'refused') { $s->{err}->(undef, 'Connect failed: Connection refused') }
+    # The proxy's 200 PLACEHOLDER: an answer, and nothing cached. How markers lied.
+    elsif ($HTTP_MODE eq 'placeholder') { $s->{done}->(bless {}, 'T::Resp') }
+    else {
+        # A real image: the proxy caches the rendition BEFORE it responds.
+        (my $p = $req->[1]) =~ s{^http://[^/]+}{};
+        main::mark_warm($p);
+        $s->{done}->(bless {}, 'T::Resp');
+    }
     return 1;
 }
 
@@ -404,9 +473,9 @@ my $LOG   = T::Log->new;
 # Constants are EVALLED FROM SOURCE, not restated: a hand-copied COVER_SPECS
 # would drift the moment the shipped list changed, and every path assertion
 # below would then be checking a spec nothing asks for.
-for my $c (qw(COVER_SPECS COVER_WARM_MAX COVER_WARM_TTL
+for my $c (qw(COVER_SPECS COVER_WARM_MAX COVER_MISS_TTL COVER_WARM_MEMO
               COVER_CONCURRENCY_IDLE COVER_CONCURRENCY_BROWSING COVER_BROWSE_QUIET
-              COVER_SCAN_BUDGET)) {
+              COVER_SCAN_BUDGET COVER_DIAG_CHUNK)) {
     my ($line) = $bsrc =~ /^(use constant \Q$c\E\s*=>.*?;)$/ms
         or die "no constant $c in Browse.pm\n";
     eval "package T; $line 1;" or die "eval $c: $@";
@@ -438,12 +507,17 @@ for my $c (qw(COVER_SPECS COVER_WARM_MAX COVER_WARM_TTL
 }
 
 for my $name (qw(_coverWeekOrder _weekStart _orderCoverQueue _focusReleaseCovers _renderSlots _weekGroups _buildWeekly _divType _divImage _divName _escHtml _warmCovers _coverGroupsFor _coverTick _coverMaybeEnd _coverLaunch
-                 _noteBrowse _coverLimit _coverArmRestart _coverArmResume)) {
+                 _coverKnownWarm _coverNoteWarm _noteBrowse _coverLimit _coverArmRestart _coverArmResume
+                 _coverProxyKey _coverProxyWarm _coverNoteMiss coverStats coverMemoForget coverTickBegin)) {
+    # A sub the source does not have is SKIPPED, not fatal: its own assertion then reports
+    # the absence as a FAIL (and an anti-test against an older Browse.pm still runs the
+    # whole suite) instead of the harness dying before any section is reached.
+    next unless $bsrc =~ /^sub \Q$name\E\b/m;
     my $body = grab($bsrc, $name);
     eval "package T; use Time::HiRes (); use Time::Local (); our (\$cache, \$prefs, \$log); "
-       . "our (\@coverQueue, \%coverQueued, \%_WEEK_START, \%coverRank, \%coverFocus, \%coverReveal, \$coverSequence, \$coverRunning, \$coverPumping, \$coverStageOpen, "
+       . "our (\@coverQueue, \%coverQueued, \%coverWarm, \$coverWarmSwept, \%_WEEK_START, \%coverRank, \%coverFocus, \%coverReveal, \$coverSequence, \$coverRunning, \$coverPumping, \$coverStageOpen, "
        . "\$coverFetched, \$coverSkipped, \$coverGroups, \$coverPeak, "
-       . "\$lastBrowseAt, \$coverRestartArmed, \$coverResumeArmed); $body 1;"
+       . "\$lastBrowseAt, \$coverRestartArmed, \$coverResumeArmed, \%coverDiagSource, \$coverHeld, \$coverFailed, \$coverProxyCache, \$coverStageTransient, \$coverTickAt, \$coverStageOpenedAt); $body 1;"
         or die "eval $name: $@";
 }
 
@@ -452,6 +526,7 @@ sub reset_world {
     no warnings 'once';
     @T::coverQueue  = ();
     %T::coverQueued = ();
+    %T::coverWarm = (); $T::coverWarmSwept = 0;
     %T::coverRank = (); %T::coverFocus = (); %T::coverReveal = (); $T::coverSequence = 0;
     $T::coverRunning = 0;
     $T::coverPumping = 0;
@@ -459,7 +534,15 @@ sub reset_world {
     $T::coverSkipped = 0;
     $T::coverGroups  = 0;
     $T::coverPeak    = 0;
+    $T::coverHeld    = 0;
+    $T::coverFailed  = 0;
+    $T::coverStageTransient = 0;
     $T::coverStageOpen = 0;
+    $T::coverStageOpenedAt = 0;
+    # No tick has run in the harness process unless a test says so: every hold stands.
+    $T::coverTickAt = 0;
+    %Slim::Web::ImageProxy::Cache::D = (); @Slim::Web::ImageProxy::Cache::GETS = ();
+    %T::coverDiagSource = ();
     $T::lastBrowseAt = 0;          # nobody browsing: every section below runs at the IDLE width
     $T::coverRestartArmed = 0;
     $T::coverResumeArmed  = 0;
@@ -594,8 +677,8 @@ ok(!scalar(grep { /_1024x1024_f|_2048x2048_f/ } @paths),
     T::_warmCovers([ map { rel() } 1 .. 20 ], 'test');
     my @q = map { @$_ } @T::coverQueue;
     ok(scalar(@q) > 0, 'a pass larger than the idle width leaves entries queued');
-    ok(scalar(@q) == scalar(grep { $_->[1] eq $IMGWARM . $_->[0] } @q),
-       'every queued marker key is its own path, so it cannot mark a different one warm');
+    ok(scalar(@q) == scalar(grep { $_->[1] eq pkey($_->[0]) } @q),
+       'every queued key is its OWN path\'s proxy key, so it cannot vouch for a different one');
     reset_world();
 }
 
@@ -626,9 +709,9 @@ ok(scalar($HTTP_GETS[0] =~ /mbid-0002/),
 
 reset_world(); $n = 0;
 my $r = rel();
-$CACHE->set($IMGWARM . $EXPECT . '_300x300_f' . $EXT, 1, 100);
+mark_warm($EXPECT . '_300x300_f' . $EXT);
 T::_warmCovers([ $r ], 'test');
-ok(warmed_count() == 2, 'a spec already marked warm is not queued again');
+ok(warmed_count() == 2, 'a spec the image proxy already holds is not fetched again');
 ok(!scalar(grep { /_300x300_f/ } warmed_paths()), '...and it is the right one that was skipped');
 
 reset_world(); $n = 0;
@@ -695,12 +778,12 @@ ok(scalar(@HTTP_GETS) == $queued, 'every queued request is eventually made, and 
 ok($T::coverRunning == 0, 'the in-flight counter returns to zero — no leak');
 ok(scalar(@T::coverQueue) == 0, 'the queue drains completely');
 
-# The marker, from the first completed request.
-ok(scalar(@{ $CACHE->{sets} }) == $queued, 'every completed request writes its warm marker');
-my ($mk, $mttl) = @{ $CACHE->{sets}[0] };
-ok(scalar($mk =~ /^\Q$IMGWARM\E/), "the marker is keyed under the versioned family ($IMGWARM)");
-ok($mttl && $mttl < 30 * 86400,
-   'the marker expires INSIDE the proxy\'s own 30-day life, so it cannot outlive the image');
+# 1.0.18: NO MARKER. The proxy's cache is the record; a completed request that left
+# a rendition there is remembered in-process only.
+ok(!scalar(grep { $_->[0] =~ /^lbf:imgwarm:/ } @{ $CACHE->{sets} }),
+   'no warm marker is written to the store any more');
+is_count(scalar(keys %T::coverWarm), $queued,
+   'every completed request the proxy cached is noted warm in-process');
 
 # THE RE-ENTRANCY GUARD, which only a launch FAILURE can exercise. When the
 # request cannot be constructed at all, `$done` runs INLINE — so without the
@@ -762,10 +845,10 @@ ok(scalar(@HTTP_GETS) == T::COVER_CONCURRENCY_IDLE() * 3,
 {
     reset_world(); $n = 0;
     my @feed = map { rel() } 1 .. 30;
-    $CACHE->{gets} = 0;
+    reset_reads();
     my ($groups, $seen) = T::_coverGroupsFor(\@feed, T::COVER_WARM_MAX());
-    is_count($CACHE->{gets}, 0,
-             'the queue builder reads the store ZERO times — it is allocation only');
+    is_count(reads(), 0,
+             'the queue builder reads NEITHER store (proxy cache, plugin store) — allocation only');
     is_count(scalar(@$groups), 30, '...and still returns one group per release');
     reset_world();
 }
@@ -778,7 +861,7 @@ ok(scalar(@HTTP_GETS) == T::COVER_CONCURRENCY_IDLE() * 3,
     my $base = Slim::Web::ImageProxy::proxiedImage($src);
     for my $spec (@{ +T::COVER_SPECS() }) {
         (my $path = $base) =~ s/(\.\w+)$/$spec$1/;
-        $CACHE->set($IMGWARM . $path, 1, 100);
+        mark_warm($path);
     }
     T::_warmCovers([ $r ], 'test');
     is_count(scalar(@HTTP_GETS), 0,
@@ -798,7 +881,7 @@ ok(scalar(@HTTP_GETS) == T::COVER_CONCURRENCY_IDLE() * 3,
     my $base = Slim::Web::ImageProxy::proxiedImage($src);
     my ($first) = @{ +T::COVER_SPECS() };
     (my $warm = $base) =~ s/(\.\w+)$/$first$1/;
-    $CACHE->set($IMGWARM . $warm, 1, 100);
+    mark_warm($warm);
 
     T::_warmCovers([ $r ], 'test');
     is_count(scalar(@HTTP_GETS), scalar(@{ +T::COVER_SPECS() }) - 1,
@@ -938,16 +1021,21 @@ section('4b. the browsing brake — one compromise number becomes two');
 # return value to inspect and the defect is an entry point that was never wired —
 # exactly how the People You Follow section came to warm no artwork at all.
 {
+    # The three Material HOME SHELVES are entry points too, and were missed until the
+    # 1.0.30 carrier audit: HomeExtraBase runs the same XMLBrowser `items` query as the
+    # browse menu, Material re-requests all three on every home-page load (verified
+    # 0.9.26), and until then none of them marked a browse — so the cover pump ran at
+    # the IDLE width on the one surface a user sits on most.
     my @entries = qw(topLevel fetchForYou fetchAll fetchPlaylists resolvePlaylist
                      resolveFollowFeed resolveTrending resolveTrendingAlbums
-                     _releaseDetail);
-    my @missing = grep { grab($bsrc, $_) !~ /_noteBrowse\(\)/ } @entries;
+                     _releaseDetail homeForYou homePlaylists homeAllReleases);
+    my @missing = grep { body_of($bsrc, $_) !~ /_noteBrowse\(\)/ } @entries;
     ok(!@missing, 'every browse entry point calls _noteBrowse (' . scalar(@entries)
                   . ' checked)' . (@missing ? ' — missing: ' . join(', ', @missing) : ''));
     # The All Releases week drill is a coderef, not a sub, so it needs naming
     # separately — and it is the level a user is most often sitting on while the
     # warm runs.
-    ok(scalar(grab($bsrc, '_buildAllWeekItems') =~ /_noteBrowse\(\)/),
+    ok(scalar(body_of($bsrc, '_buildAllWeekItems') =~ /_noteBrowse\(\)/),
        '...including the All Releases week drill, which is a coderef not a sub');
 }
 
@@ -980,15 +1068,15 @@ section('4d. the pump yields — store reads per TURN, not per pass');
         my $base = Slim::Web::ImageProxy::proxiedImage($src);
         for my $spec (@{ +T::COVER_SPECS() }) {
             (my $path = $base) =~ s/(\.\w+)$/$spec$1/;
-            $CACHE->set($IMGWARM . $path, 1, 100);
+            mark_warm($path);
         }
     }
     my ($groups) = T::_coverGroupsFor(\@feed, T::COVER_WARM_MAX());
     push @T::coverQueue, @$groups;
 
-    $CACHE->{gets} = 0;
+    reset_reads();
     T::_coverTick();
-    my $first = $CACHE->{gets};
+    my $first = reads();
     ok($first <= T::COVER_SCAN_BUDGET() * scalar(@{ +T::COVER_SPECS() }),
        "one turn reads at most the budget's worth ($first, cap "
        . (T::COVER_SCAN_BUDGET() * scalar(@{ +T::COVER_SPECS() })) . ')');
@@ -1000,10 +1088,10 @@ section('4d. the pump yields — store reads per TURN, not per pass');
     # stall the queue for ever, which is worse than the stall being fixed.
     my ($turns, $worst) = (1, $first);
     while (@T::coverQueue && $turns < 200) {
-        $CACHE->{gets} = 0;
+        reset_reads();
         Slim::Utils::Timers::fire_all();
         $turns++;
-        $worst = $CACHE->{gets} if $CACHE->{gets} > $worst;
+        $worst = reads() if reads() > $worst;
     }
     ok(!scalar(@T::coverQueue), 'the queue still drains completely, over several turns');
     ok($turns > 1, "...and it took more than one ($turns)");
@@ -1024,16 +1112,16 @@ section('4d. the pump yields — store reads per TURN, not per pass');
         my $base = Slim::Web::ImageProxy::proxiedImage($src);
         for my $spec (@{ +T::COVER_SPECS() }) {
             (my $path = $base) =~ s/(\.\w+)$/$spec$1/;
-            $CACHE->set($IMGWARM . $path, 1, 100);
+            mark_warm($path);
         }
     }
     my ($groups) = T::_coverGroupsFor(\@feed, T::COVER_WARM_MAX());
     push @T::coverQueue, @$groups;
     $T::lastBrowseAt = time();                    # somebody is browsing: brake ON
-    $CACHE->{gets} = 0;
+    reset_reads();
     T::_coverTick();
-    ok($CACHE->{gets} <= T::COVER_SCAN_BUDGET() * scalar(@{ +T::COVER_SPECS() }),
-       'the budget bounds the turn with the brake ON too (' . $CACHE->{gets} . ')');
+    ok(reads() <= T::COVER_SCAN_BUDGET() * scalar(@{ +T::COVER_SPECS() }),
+       'the budget bounds the turn with the brake ON too (' . reads() . ')');
     reset_world();
 }
 {
@@ -1046,7 +1134,7 @@ section('4d. the pump yields — store reads per TURN, not per pass');
         my $base = Slim::Web::ImageProxy::proxiedImage($src);
         for my $spec (@{ +T::COVER_SPECS() }) {
             (my $path = $base) =~ s/(\.\w+)$/$spec$1/;
-            $CACHE->set($IMGWARM . $path, 1, 100);
+            mark_warm($path);
         }
     }
     my ($groups) = T::_coverGroupsFor(\@feed, T::COVER_WARM_MAX());
@@ -1088,7 +1176,7 @@ section('4c. the warm warms only what will be rendered');
 # is new information about BOTH — re-point the counter, or it measures the place
 # the work left.)
 {
-    my $warm = grab($bsrc, 'warmFeeds');
+    my $warm = body_of($bsrc, 'warmFeeds');
     $warm =~ s/^\s*#.*$//mg;                      # comments cannot satisfy this
     my @calls = $warm =~ /_fanOutFeed\(([^,]+),/g;
     is_count(scalar(@calls), 4, 'warmFeeds has four feed fan-out call sites');
@@ -1359,5 +1447,654 @@ reset_world();
 }
 
 # ==========================================================================
+
+# ==========================================================================
+section('4f. a re-walk of a warm view queues nothing and reads nothing');
+# ==========================================================================
+# THE REPORT (live, 2026-09-21): every walk of a Show-all All Releases week logged
+# "covers - all releases queued 322 release(s) of 322" — five times in six seconds
+# while the user changed the sort — and each one re-read all 966 markers. Nothing
+# was downloaded (the stage note said "966 already warm"); asking again WAS the
+# waste. %coverWarm remembers, per process, what a marker read or a completed
+# download has already proven.
+#
+# COUNTED AT BOTH PLACES THE WORK CAN LIVE, per the 0.9.196 lesson: the builder
+# (queue length) AND the pump (store reads during the drain). A fix that stopped
+# queueing but moved the reads elsewhere would pass a queue-only assertion.
+{
+    reset_world(); $n = 0;
+    local $T::coverPumping = 0;
+    my @rows = map { rel() } 1 .. 30;
+    my $flat = sub { T::_renderSlots(5, [{ rels => $_[0] }]) };
+    my $specs = scalar @{ +T::COVER_SPECS() };
+    for my $r (@rows) {
+        my $base = Slim::Web::ImageProxy::proxiedImage(
+            Plugins::ListenBrainzFreshReleases::API->coverArtUrl($r));
+        for my $spec (@{ +T::COVER_SPECS() }) {
+            (my $path = $base) =~ s/(\.\w+)$/$spec$1/;
+            mark_warm($path);
+        }
+    }
+    my $drain = sub {
+        my $g = 0;
+        T::_coverTick();
+        while ((@T::coverQueue || @HTTP_PENDING || @Slim::Utils::Timers::PENDING) && ++$g < 500) {
+            http_settle() while @HTTP_PENDING;
+            Slim::Utils::Timers::fire_all();
+        }
+    };
+
+    # First walk: the proxy MUST be asked — it is the only way to learn they are warm.
+    reset_reads();
+    T::_focusReleaseCovers(undef, 'arweek:test', $flat->(\@rows), {});
+    $drain->();
+    is_count(reads(), 30 * $specs, 'first walk of a warm week asks the proxy once per path');
+    is_count(scalar(@HTTP_GETS), 0, '...and downloads nothing');
+
+    # Second walk — the sort tap. Nothing to queue, nothing to read.
+    reset_reads();
+    T::_focusReleaseCovers(undef, 'arweek:test', $flat->(\@rows), {});
+    is_count(scalar(@T::coverQueue), 0, 'a re-walk of the same warm week queues NOTHING');
+    $drain->();
+    is_count(reads(), 0, '...and reads ZERO times, builder and pump together');
+    is_count(scalar(@HTTP_GETS), 0, '...and downloads nothing');
+    is_count(scalar(keys %T::coverFocus), 0, '...and leaves no focus entries behind for warm paths');
+
+    # CONTROL: a genuinely cold release arriving in the same week is still warmed.
+    my $cold = rel();
+    reset_reads();
+    T::_focusReleaseCovers(undef, 'arweek:test', $flat->([ @rows, $cold ]), {});
+    # Asserted on requests IN FLIGHT, not queue length: a cold group launches in the
+    # same turn it is queued, so the queue is already empty when this runs.
+    is_count(scalar(@HTTP_PENDING), $specs, 'CONTROL: a cold release in the re-walk is still launched');
+    $drain->();
+    is_count(scalar(@HTTP_GETS), $specs, '...and fetched, every spec');
+    # Per path: the proxy (miss), the miss memo (none), then the proxy again after
+    # the download to confirm a rendition landed — 3 reads, all its own.
+    is_count(reads(), 3 * $specs, '...reading only its own paths (proxy, miss memo, proxy again to confirm)');
+
+    # ...and a completed download is itself proof: the next walk skips it too.
+    @HTTP_GETS = ();
+    reset_reads();
+    T::_focusReleaseCovers(undef, 'arweek:test', $flat->([ @rows, $cold ]), {});
+    is_count(scalar(@T::coverQueue), 0, 'a cover this process just downloaded is not re-queued');
+    $drain->();
+    is_count(reads() + scalar(@HTTP_GETS), 0, '...no read, no request');
+    reset_world();
+}
+{
+    # A FAILED download is NOT evidence of warmth — and since 1.0.18 it is not
+    # re-fetched on the very next walk either: it is HELD for COVER_MISS_TTL, because
+    # each cold CAA fetch freezes the event loop, and a failing cover re-asked on every
+    # walk is a freeze per walk. It is retried once the hold lapses.
+    reset_world(); $n = 0;
+    my $r = rel();
+    my $specs = scalar @{ +T::COVER_SPECS() };
+    $HTTP_MODE = 'fail';
+    T::_warmCovers([ $r ], 'all releases', 1);
+    http_settle() while @HTTP_PENDING;
+    Slim::Utils::Timers::fire_all();
+    is_count(scalar(keys %T::coverWarm), 0, 'a failed download records nothing as warm');
+    is_count(scalar(grep { $_->[0] =~ /^\Q$IMGMISS\E/ } @{ $CACHE->{sets} }), $specs,
+             '...and records a MISS for every spec');
+    # `|| []`: an assertion must not be able to take the harness down with it.
+    my ($mk, $mttl) = @{ $CACHE->{sets}[0] || [] };
+    is_count($mttl // 0, T::COVER_MISS_TTL(), '...held for COVER_MISS_TTL');
+    $HTTP_MODE = 'ok'; @HTTP_GETS = ();
+    T::_warmCovers([ $r ], 'all releases', 1);
+    is_count(scalar(@HTTP_GETS), 0, '...so the next walk does NOT fetch it again (no freeze per walk)');
+    is_count($T::coverHeld, $specs, '...and counts it as held');
+    # THE HOLD DOES NOT LAPSE IN TIME FOR THE NEXT WARM (review of 1.0.23). The warm
+    # fires at the same instant daily and reaches a held path earlier in the tick than
+    # the fetch that recorded it, so a 24h TTL is always still standing — the retry
+    # would land on a browse walk, which is the freeze this whole rework is about.
+    #
+    # 1.0.24 DELETED the family at the top of the tick; the review of 1.0.25 killed that:
+    # the pass is capped (COVER_WARM_MAX) and interruptible (the 06:30 backup), so every
+    # hold it never reached was wiped with no retry at all. The tick now STAMPS AN
+    # INSTANT and a warm launch retries only a hold older than it.
+    ok(T->can('coverTickBegin'), 'Browse has coverTickBegin, for the tick to call');
+    @HTTP_GETS = ();
+    T::_warmCovers([ $r ], 'all releases', 1);
+    is_count(scalar(@HTTP_GETS), 0, 'CONTROL: before the tick the hold still stands');
+    select(undef, undef, undef, 0.02);
+    T::coverTickBegin() if T->can('coverTickBegin');
+    T::_warmCovers([ $r ], 'all releases');   # the tick's own pass: NOT a focus
+    is_count(scalar(@HTTP_GETS), $specs, '...and the tick RETRIES a hold written before it');
+    is_count(scalar(grep { /^\Q$IMGMISS\E/ } keys %{ $CACHE->{d} }), $specs,
+             '...without deleting anything: a hold the pass never reaches must stand');
+    http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+
+    # A HOLD WRITTEN DURING THE TICK IS HONOURED for the rest of the day — a cover that
+    # failed again this morning must not be re-fetched on every walk.
+    reset_world(); $n = 0;
+    my $rd = rel();
+    T::coverTickBegin() if T->can('coverTickBegin');
+    $HTTP_MODE = 'fail';
+    T::_warmCovers([ $rd ], 'all releases');
+    http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    $HTTP_MODE = 'ok'; @HTTP_GETS = ();
+    T::_warmCovers([ $rd ], 'all releases');
+    is_count(scalar(@HTTP_GETS), 0, 'a hold written DURING the tick is still honoured');
+
+    # A BROWSE (a focus path) honours a hold whatever its age: on screen is exactly
+    # where a re-fetch must not happen.
+    reset_world(); $n = 0;
+    my $rb = rel();
+    $HTTP_MODE = 'fail';
+    T::_warmCovers([ $rb ], 'all releases', 1);
+    http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    select(undef, undef, undef, 0.02);
+    T::coverTickBegin() if T->can('coverTickBegin');
+    $HTTP_MODE = 'ok'; @HTTP_GETS = ();
+    T::_warmCovers([ $rb ], 'all releases', 1);   # focus: a browse
+    is_count(scalar(@HTTP_GETS), 0, 'a BROWSE honours a hold older than the tick (no freeze on screen)');
+    is_count($T::coverHeld, $specs, '...and counts it held');
+
+    # ...AND IT STILL HONOURS IT ONCE THE USER HAS MOVED ON (review of 1.0.27). The
+    # first cut read "is this the daily warm?" off %coverFocus, which _warmCovers
+    # CLEARS and rebuilds on every focus warm — so a held cover queued by a browse of
+    # All Releases lost its marking the moment the user opened For You, and the pump
+    # then re-fetched it cold, on screen, which is the freeze the hold exists to
+    # prevent. Which pass queued a group is now carried on the group (%coverRank's
+    # third field) instead.
+    reset_world(); $n = 0;
+    my $hb = rel();                                        # oldest, so it queues LAST
+    my $hm = $hb->{caa_release_mbid};
+    $HTTP_MODE = 'fail';
+    T::_warmCovers([ $hb ], 'all releases', 1);            # yesterday's browse fails
+    http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    select(undef, undef, undef, 0.02);
+    T::coverTickBegin() if T->can('coverTickBegin');       # 05:00 arrives
+    $HTTP_MODE = 'ok'; @HTTP_GETS = ();
+    $T::lastBrowseAt = time();                             # browsing: two releases wide
+    T::_warmCovers([ (map { rel() } 1 .. 6), $hb ], 'all releases', 1);   # view A
+    is_count(scalar(grep { index($_, $hm) >= 0 } keys %T::coverFocus), $specs,
+             'the held cover is queued by view A, and focused');
+    T::_warmCovers([ map { rel() } 1 .. 3 ], 'for you', 1);               # view B
+    is_count(scalar(grep { index($_, $hm) >= 0 } keys %T::coverFocus), 0,
+             '...and view B clears that focus while it is still queued');
+    $T::lastBrowseAt = 0;
+    my $gb = 0;
+    while ((@HTTP_PENDING || @T::coverQueue || @Slim::Utils::Timers::PENDING) && ++$gb < 500) {
+        http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    }
+    is_count(scalar(grep { index($_, $hm) >= 0 } @HTTP_GETS), 0,
+             '...yet the hold still stands: a browse-queued cover is never the warm retrying');
+
+    # A MANUAL REFRESH IS NOT THE WARM EITHER, and it has no focus of its own to be
+    # read as one — the same rule, the other carrier.
+    reset_world(); $n = 0;
+    my $hr = rel();
+    $HTTP_MODE = 'fail';
+    T::_warmCovers([ $hr ], 'trending albums', undef, 1);
+    http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    select(undef, undef, undef, 0.02);
+    T::coverTickBegin() if T->can('coverTickBegin');
+    $HTTP_MODE = 'ok'; @HTTP_GETS = ();
+    T::_warmCovers([ $hr ], 'trending albums', undef, 1);
+    is_count(scalar(@HTTP_GETS), 0, 'a manual REFRESH honours a hold older than the tick');
+    is_count($T::coverHeld, $specs, '...and counts it held');
+
+    # CONTROL: narrowing the rule must not cost the tick its retry. The tick queues the
+    # group, a browse then clears the focus map, and the hold is STILL retried.
+    reset_world(); $n = 0;
+    my $ht = rel();                                        # oldest, so it queues last
+    my $tm = $ht->{caa_release_mbid};
+    $HTTP_MODE = 'fail';
+    T::_warmCovers([ $ht ], 'all releases', 1);
+    http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    select(undef, undef, undef, 0.02);
+    T::coverTickBegin() if T->can('coverTickBegin');
+    $HTTP_MODE = 'ok'; @HTTP_GETS = ();
+    $T::lastBrowseAt = time();
+    T::_warmCovers([ $ht, map { rel() } 1 .. 6 ], 'for you');            # the TICK's pass
+    T::_warmCovers([ map { rel() } 1 .. 2 ], 'all releases', 1);         # a browse clears focus
+    $T::lastBrowseAt = 0;
+    my $gt = 0;
+    while ((@HTTP_PENDING || @T::coverQueue || @Slim::Utils::Timers::PENDING) && ++$gt < 500) {
+        http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    }
+    is_count(scalar(grep { index($_, $tm) >= 0 } @HTTP_GETS), $specs,
+             'CONTROL: a hold the TICK queued is still retried after a browse clears the focus');
+
+    # ...unless the user is LOOKING at it. The second half of the rule: the tick queued
+    # the group at 05:00, somebody opened that view at 05:05, and the retry would be a
+    # cold CAA fetch on screen. A browse marks already-queued paths into %coverFocus
+    # exactly so this can be seen here.
+    reset_world(); $n = 0;
+    my $hw = rel();
+    my $wm = $hw->{caa_release_mbid};
+    $HTTP_MODE = 'fail';
+    T::_warmCovers([ $hw ], 'all releases', 1);
+    http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    select(undef, undef, undef, 0.02);
+    T::coverTickBegin() if T->can('coverTickBegin');
+    $HTTP_MODE = 'ok'; @HTTP_GETS = ();
+    $T::lastBrowseAt = time();
+    T::_warmCovers([ $hw, map { rel() } 1 .. 6 ], 'for you');       # the tick queues it
+    T::_warmCovers([ $hw ], 'for you', 1);                          # the user opens that view
+    is_count(scalar(grep { index($_, $wm) >= 0 } keys %T::coverFocus), $specs,
+             'a browse focuses a path the TICK already queued');
+    $T::lastBrowseAt = 0;
+    my $gw = 0;
+    while ((@HTTP_PENDING || @T::coverQueue || @Slim::Utils::Timers::PENDING) && ++$gw < 500) {
+        http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    }
+    is_count(scalar(grep { index($_, $wm) >= 0 } @HTTP_GETS), 0,
+             '...and the tick does NOT retry its hold while that page is on screen');
+
+    # WHICH PASS QUEUED THE GROUP IS READ ONCE, BEFORE THE LOOP. It lives in the rank
+    # entry of the group's FIRST path, and that entry is deleted the moment that path
+    # is skipped — so reading it per path would lose the tick's retry for every spec
+    # behind a spec the proxy already holds.
+    reset_world(); $n = 0;
+    my $hx = rel();                                        # mbid-0001: $EXPECT names it
+    $HTTP_MODE = 'fail';
+    T::_warmCovers([ $hx ], 'all releases', 1);            # a browse records the holds
+    http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    select(undef, undef, undef, 0.02);
+    T::coverTickBegin() if T->can('coverTickBegin');
+    $HTTP_MODE = 'ok'; @HTTP_GETS = ();
+    mark_warm($EXPECT . T::COVER_SPECS()->[0] . $EXT);     # the proxy now holds spec one
+    T::_warmCovers([ $hx ], 'all releases');               # the tick's pass
+    http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    is_count(scalar(@HTTP_GETS), $specs - 1,
+             'the tick retries the specs BEHIND one the proxy already holds');
+
+    # The hold lapses (the store's TTL): the next walk retries.
+    reset_world(); $n = 0;
+    my $rl = rel();
+    $HTTP_MODE = 'fail';
+    T::_warmCovers([ $rl ], 'all releases', 1);
+    http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    $HTTP_MODE = 'ok'; @HTTP_GETS = ();
+    delete $CACHE->{d}{$_} for grep { /^\Q$IMGMISS\E/ } keys %{ $CACHE->{d} };
+    T::_warmCovers([ $rl ], 'all releases', 1);
+    is_count(scalar(@HTTP_GETS), $specs, '...and once the hold lapses it is fetched again');
+    reset_world();
+}
+{
+    # A LOCAL TRANSPORT FAILURE IS NOT THE COVER'S FAULT (review of 1.0.24). The 401/403
+    # refusal was already exempt; a refused connection is the same class — our own
+    # server went away mid-pass (the 06:30 backup, a restart). Holding those covers for
+    # a day would keep them cold on screen, which is the freeze this rework removes.
+    reset_world(); $n = 0;
+    my $r = rel();
+    my $specs = scalar @{ +T::COVER_SPECS() };
+    $HTTP_MODE = 'refused';
+    T::_warmCovers([ $r ], 'all releases', 1);
+    http_settle() while @HTTP_PENDING;
+    Slim::Utils::Timers::fire_all();
+    is_count(scalar(grep { $_->[0] =~ /^\Q$IMGMISS\E/ } @{ $CACHE->{sets} }), 0,
+             'a refused local connection records NO miss');
+    is_count($T::coverFailed, $specs, '...but is counted as a failure (the note stays honest)');
+    $HTTP_MODE = 'ok'; @HTTP_GETS = ();
+    T::_warmCovers([ $r ], 'all releases', 1);
+    is_count(scalar(@HTTP_GETS), $specs, '...so the very next walk fetches it (never held)');
+    http_settle() while @HTTP_PENDING;
+
+    # CONTROL, and the ledger's pinned rule (1.0.18, mutant `timeout-no-miss`): a
+    # TIMEOUT is still a miss. An upstream hang can expire our loopback request too, and
+    # re-fetching a hanging cover on every walk is a freeze per walk.
+    reset_world(); $n = 0;
+    my $r2 = rel();
+    $HTTP_MODE = 'fail';
+    T::_warmCovers([ $r2 ], 'all releases', 1);
+    http_settle() while @HTTP_PENDING;
+    Slim::Utils::Timers::fire_all();
+    is_count(scalar(grep { $_->[0] =~ /^\Q$IMGMISS\E/ } @{ $CACHE->{sets} }), $specs,
+             'CONTROL: a TIMEOUT is still held as a miss');
+    reset_world();
+}
+{
+    # THE PROXY CACHE CANNOT BE READ (review of 1.0.24). _coverProxyWarm answered 0 for
+    # both "not there" and "could not ask"; since 1.0.18 that 0 drives a WRITE, so a
+    # broken cache filed every cover of the pass as a 24h miss — a whole feed held on a
+    # fault that says nothing about any cover.
+    reset_world(); $n = 0;
+    my $r = rel();
+    my $specs = scalar @{ +T::COVER_SPECS() };
+    local $Slim::Web::ImageProxy::Cache::DIES = 1;
+    T::_warmCovers([ $r ], 'all releases', 1);
+    is_count(scalar(@HTTP_GETS), $specs, 'a cache that cannot be read still fetches (undef gates like 0)');
+    http_settle() while @HTTP_PENDING;
+    Slim::Utils::Timers::fire_all();
+    is_count(scalar(grep { $_->[0] =~ /^\Q$IMGMISS\E/ } @{ $CACHE->{sets} }), 0,
+             '...and records NO miss, so it cannot hold a whole feed on our own fault');
+    is_count(scalar(keys %T::coverWarm), 0, '...nor claims the cover warm on an answer it could not verify');
+    reset_world();
+}
+{
+    # THE MEMO EXPIRES, and a key-family bump misses it exactly as it misses the store.
+    reset_world(); $n = 0;
+    my $r = rel();
+    T::_warmCovers([ $r ], 'all releases', 1);
+    http_settle() while @HTTP_PENDING;
+    my $specs = scalar @{ +T::COVER_SPECS() };
+    is_count(scalar(keys %T::coverWarm), $specs, 'a completed download remembers every spec');
+
+    $T::coverWarm{$_} = time() - 1 for keys %T::coverWarm;
+    @HTTP_GETS = (); reset_reads();
+    T::_warmCovers([ $r ], 'all releases', 1);
+    is_count(reads(), $specs, 'an EXPIRED memo is not trusted: the proxy is asked again');
+    is_count(scalar(@HTTP_GETS), 0, '...and, the proxy holding them, nothing is fetched');
+
+    # THE LIE THE OLD MARKERS COULD NOT SEE: LMS purged (or cleared) the proxy's
+    # cache. Once the memo lapses, the warm finds the rendition gone and re-fetches —
+    # overnight, not on screen.
+    %Slim::Web::ImageProxy::Cache::D = ();
+    $T::coverWarm{$_} = time() - 1 for keys %T::coverWarm;
+    @HTTP_GETS = ();
+    T::_warmCovers([ $r ], 'all releases', 1);
+    is_count(scalar(@HTTP_GETS), $specs, 'a rendition the proxy has DROPPED is re-fetched once the memo lapses');
+    reset_world();
+}
+{
+    # BOUNDED: the hourly sweep drops expired entries instead of growing for ever.
+    reset_world();
+    $T::coverWarm{"stale$_"} = time() - 10 for 1 .. 50;
+    $T::coverWarmSwept = 0;
+    T::_coverNoteWarm('fresh');
+    is_count(scalar(keys %T::coverWarm), 1, 'the sweep drops expired entries, keeping the fresh one');
+    # UNDER A DAY, so the daily warm always finds the memo lapsed and re-asks the
+    # proxy — a purged rendition is re-fetched overnight, not on screen.
+    ok(T::COVER_WARM_MEMO() < 86400,
+       'COVER_WARM_MEMO is under a day, so every daily warm re-asks the proxy (' . T::COVER_WARM_MEMO() . 's)');
+    reset_world();
+}
+
+# ==========================================================================
+section('4g. coverstats: a DIAGNOSTIC that reads, and changes nothing');
+# ==========================================================================
+# Of the covers the warm is responsible for, how many does the image proxy hold?
+# It must COUNT correctly — `cold` is neither held by the proxy nor held back as a
+# recent miss — and it must leave the warm exactly as it found it: a diagnostic that
+# queued, memoised or wrote would change the very state it reports on.
+{
+    reset_world();
+    my @feed = map { rel() } 1 .. 4;
+    T::_warmCovers(\@feed, 'all releases');
+    ok(($T::coverDiagSource{'all releases'} // 0) == \@feed,
+       'a whole-feed warm records the list it was handed (by reference, no copy)');
+    my $focusList = [ rel() ];
+    T::_warmCovers($focusList, 'all releases', 1);
+    ok(($T::coverDiagSource{'all releases'} // 0) == \@feed,
+       '...and a focus warm does NOT replace it (a page is not the feed)');
+
+    # r1 and r4: in the proxy; r2: a recent miss; r3: cold.
+    my @specs = @{ T::COVER_SPECS() };
+    my @base = map { Slim::Web::ImageProxy::proxiedImage(
+                         Plugins::ListenBrainzFreshReleases::API->coverArtUrl($_)) } @feed;
+    my @paths = map { my $b = $_; [ map { (my $p = $b) =~ s/(\.\w+)$/$_$1/; $p } @specs ] } @base;
+    %Slim::Web::ImageProxy::Cache::D = ();
+    mark_warm($_) for @{ $paths[0] }, @{ $paths[3] };
+    $CACHE->{d}{ $IMGMISS . $_ } = 1 for @{ $paths[1] };
+
+    my %queued = %T::coverQueued; my %memo = %T::coverWarm;
+    my $qlen = scalar @T::coverQueue; my $gets = scalar @HTTP_GETS;
+    my $sets = scalar @{ $CACHE->{sets} };
+
+    my $res;
+    T::coverStats(sub { $res = shift });
+    my $turns = 0;
+    $turns++ while !$res && Slim::Utils::Timers::fire_all() && $turns < 50;
+    ok($res && !$res->{error}, 'coverStats answers without error');
+    my %sum;
+    for my $spec (keys %{ $res->{labels}{'all releases'} || {} }) {
+        my $c = $res->{labels}{'all releases'}{$spec};
+        $sum{$_} += $c->{$_} for keys %$c;
+    }
+    is_count($sum{paths}, 4 * @specs, 'every spec of every release is checked');
+    is_count($sum{proxy}, 2 * @specs, 'renditions the proxy holds are counted');
+    ok(scalar(grep { m{^imageproxy/https://coverartarchive\.org/} } @Slim::Web::ImageProxy::Cache::GETS),
+       '...asked under the DECODED, slash-less key (what LMS stores)');
+    is_count($sum{miss}, scalar @specs, 'a held recent miss is counted as a miss, not cold');
+    is_count($sum{cold}, scalar @specs, 'neither held nor a miss is COLD');
+    is_count(scalar @{ $res->{cold} }, scalar @specs, '...and listed as an example');
+
+    ok(join(',', sort keys %T::coverQueued) eq join(',', sort keys %queued),
+       'coverStats queued nothing (%coverQueued unchanged)');
+    ok(join(',', map { "$_=$T::coverWarm{$_}" } sort keys %T::coverWarm)
+       eq join(',', map { "$_=$memo{$_}" } sort keys %memo),
+       '...memoised nothing (%coverWarm unchanged)');
+    is_count(scalar @T::coverQueue, $qlen, '...left the cover queue as it was');
+    is_count(scalar @HTTP_GETS, $gets, '...fetched nothing');
+    is_count(scalar @{ $CACHE->{sets} }, $sets, '...and wrote no store row');
+
+    # CHUNKED: a feed bigger than one chunk must not be answered in a single turn.
+    reset_world();
+    my @big = map { rel() } 1 .. (T::COVER_DIAG_CHUNK() * 2 + 1);
+    $T::coverDiagSource{'big'} = \@big;
+    my $done;
+    T::coverStats(sub { $done = shift });
+    ok(!$done, 'a feed larger than COVER_DIAG_CHUNK is not answered in one turn');
+    my $t = 0;
+    $t++ while !$done && Slim::Utils::Timers::fire_all() && $t < 50;
+    ok($done && $t >= 2, "...it yields between chunks and then answers ($t extra turns)");
+    delete $T::coverDiagSource{'big'};
+    reset_world();
+}
+
+# ==========================================================================
+section('4h. the warm tells the truth (1.0.18): the proxy decides, not a marker');
+# ==========================================================================
+# ["lbf","coverstats"] 1.0.17, live: ~1% of `lbf:imgwarm:` markers claimed renditions
+# the proxy did not hold — every sampled one a cover that exists at CAA. The ways a
+# marker lied are each pinned here against the new rule.
+{
+    # LIE 1: THE PLACEHOLDER. The proxy answers a failed upstream fetch with 200 and
+    # radio.png; the old success callback wrote a 25-day marker on it.
+    reset_world(); $n = 0;
+    my $r = rel();
+    my $specs = scalar @{ +T::COVER_SPECS() };
+    $HTTP_MODE = 'placeholder';
+    T::_warmCovers([ $r ], 'all releases');
+    http_settle() while @HTTP_PENDING;
+    is_count(scalar(keys %T::coverWarm), 0, 'a 200 PLACEHOLDER is not recorded as warm');
+    is_count(scalar(grep { $_->[0] =~ /^\Q$IMGMISS\E/ } @{ $CACHE->{sets} }), $specs,
+             '...it is recorded as a MISS');
+    is_count($T::coverFailed, $specs, '...and counted as not cached, for the stage note');
+    ok(!scalar(grep { $_->[0] =~ /^lbf:imgwarm:/ } @{ $CACHE->{sets} }),
+       '...and no warm marker is written (the family is retired)');
+    reset_world();
+}
+{
+    # LIE 2: THE HIT THAT OUTLIVED ITS ENTRY. The proxy is asked first, every launch,
+    # so a rendition present now is warm and one absent now is not — no stored claim
+    # to outlive anything.
+    reset_world(); $n = 0;
+    my $r = rel();
+    my $specs = scalar @{ +T::COVER_SPECS() };
+    my $base = Slim::Web::ImageProxy::proxiedImage(
+        Plugins::ListenBrainzFreshReleases::API->coverArtUrl($r));
+    my @p = map { (my $x = $base) =~ s/(\.\w+)$/$_$1/; $x } @{ +T::COVER_SPECS() };
+    mark_warm($_) for @p;
+    # ...even with a stale miss recorded against it: the proxy wins.
+    $CACHE->{d}{ $IMGMISS . $_ } = 1 for @p;
+    T::_warmCovers([ $r ], 'all releases');
+    is_count(scalar(@HTTP_GETS), 0, 'a rendition the proxy holds is not fetched');
+    is_count($T::coverSkipped, $specs, '...it is counted as already warm');
+    is_count($T::coverHeld, 0, '...and a stale miss against it does not override the proxy');
+    reset_world();
+}
+{
+    # A LOCAL REFUSAL IS NOT A MISS: 401/403 from our own server says nothing about
+    # the cover, and marking the pass's covers missed would hold them for a day.
+    reset_world(); $n = 0;
+    $HTTP_MODE = '401';
+    T::_warmCovers([ rel() ], 'all releases');
+    http_settle() while @HTTP_PENDING;
+    ok(!scalar(grep { $_->[0] =~ /^\Q$IMGMISS\E/ } @{ $CACHE->{sets} }),
+       'a 401 from our own server records NO miss');
+    reset_world();
+}
+{
+    # THE STAGE NOTE says what happened, so a live warmstats can show failures.
+    reset_world(); $n = 0;
+    my @stage;
+    no warnings 'redefine';
+    local *T::_stage = sub { push @stage, [ @_ ] };
+    $HTTP_MODE = 'placeholder';
+    T::_warmCovers([ rel(), rel() ], 'all releases');
+    http_settle() while @HTTP_PENDING;
+    Slim::Utils::Timers::fire_all();
+    my ($end) = grep { $_->[0] eq 'end' } @stage;
+    ok($end && $end->[3] =~ /\b6 not cached\b/ && $end->[3] =~ /\b0 held\b/,
+       'the covers stage note reports failures and holds (' . ($end ? $end->[3] : 'no end') . ')');
+    reset_world();
+}
+{
+    # THE KEY, derived independently here (pkey) and in the plugin (_coverProxyKey):
+    # slash stripped, url DECODED — the form coverstats 1.0.17 pinned live.
+    my $p = '/imageproxy/https%3A%2F%2Fcoverartarchive.org%2Frelease%2Fx%2Ffront-250.jpg/image_150x150_f.jpg';
+    my $want = 'imageproxy/https://coverartarchive.org/release/x/front-250.jpg/image_150x150_f.jpg';
+    ok(T::_coverProxyKey($p) eq $want && pkey($p) eq $want,
+       'the proxy key is slash-less and url-DECODED (plugin and suite agree)');
+}
+
+# ==========================================================================
+section('4i. review of 1.0.19: the browse stage is transient; the tick asks the proxy');
+# ==========================================================================
+{
+    # FINDING 1, Browse side: a covers stage a BROWSE opens is marked transient, so
+    # it never overwrites the saved scheduled warm. One the warm opens is not.
+    reset_world(); $n = 0;
+    my @stage;
+    no warnings 'redefine';
+    local *T::_stage = sub { push @stage, [ @_ ] };
+    T::_warmCovers([ rel() ], 'all releases', 1);                # a browse (focus)
+    my ($s1) = grep { $_->[0] eq 'start' } @stage;
+    ok($s1 && $s1->[4], 'a covers stage opened by a BROWSE is started transient');
+    http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    my ($e1) = grep { $_->[0] eq 'end' } @stage;
+    ok($e1 && $e1->[4], '...and ended transient');
+
+    reset_world(); $n = 0; @stage = ();
+    T::_warmCovers([ rel() ], 'all releases');                   # the warm (no focus)
+    my ($s2) = grep { $_->[0] eq 'start' } @stage;
+    ok($s2 && !$s2->[4], 'a covers stage opened by the WARM is not transient');
+    http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    my ($e2) = grep { $_->[0] eq 'end' } @stage;
+    ok($e2 && !$e2->[4], '...and its end is saved');
+
+    # The warm JOINING a stage a browse opened makes that drain the warm's: its end
+    # must be saved, or the 05:xx cover work vanishes whenever someone was browsing.
+    reset_world(); $n = 0; @stage = ();
+    $T::lastBrowseAt = time();                                   # brake on: the browse group waits
+    T::_warmCovers([ map { rel() } 1 .. 5 ], 'all releases', 1);
+    T::_warmCovers([ map { rel() } 1 .. 3 ], 'all releases');
+    $T::lastBrowseAt = 0;
+    my $g = 0;
+    while ((@HTTP_PENDING || @T::coverQueue || @Slim::Utils::Timers::PENDING) && ++$g < 200) {
+        http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    }
+    my @ends = grep { $_->[0] eq 'end' } @stage;
+    ok(scalar(@ends) == 1 && !$ends[0][4], 'a warm that joins a browse-opened stage makes its end SAVED');
+
+    # THE TICK RE-OPENS A STAGE IT INHERITED (review of 1.0.25). stageReset clears
+    # Plugin.pm's tables, not $coverStageOpen, so a covers stage still open from before
+    # the tick — the startup re-seed's whole-feed pass (~1.1h cold), or a browse's — left
+    # the tick's saved row with NO start at all: it landed via the end alone, printing
+    # `at ''` / `elapsed 0.00` and a note carrying the earlier pass's counts.
+    reset_world(); $n = 0; @stage = ();
+    $T::lastBrowseAt = time();                                  # hold the queue open
+    T::_warmCovers([ map { rel() } 1 .. 5 ], 'all releases');    # the re-seed: NOT the tick
+    is_count(scalar(grep { $_->[0] eq 'start' } @stage), 1, 'the pre-tick pass opens the stage once');
+    select(undef, undef, undef, 0.02);
+    T::coverTickBegin() if T->can('coverTickBegin');            # 05:00 arrives
+    T::_warmCovers([ map { rel() } 1 .. 3 ], 'for you');         # the tick joins
+    my @starts = grep { $_->[0] eq 'start' } @stage;
+    is_count(scalar(@starts), 2, '...and the TICK re-opens it, so its own row has a start');
+    ok(scalar(@starts) == 2 && !$starts[1][4], '...non-transient, so that start is SAVED');
+    # ...but the tick's OWN second label must not restart it again, or the note would
+    # describe only the last feed warmed.
+    T::_warmCovers([ map { rel() } 1 .. 2 ], 'muspy');
+    is_count(scalar(grep { $_->[0] eq 'start' } @stage), 2,
+             '...while the tick\'s next label joins its own stage without restarting it');
+    $T::lastBrowseAt = 0;
+    $g = 0;
+    while ((@HTTP_PENDING || @T::coverQueue || @Slim::Utils::Timers::PENDING) && ++$g < 400) {
+        http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    }
+    is_count(scalar(grep { $_->[0] eq 'end' } @stage), 1, '...and the stage still ends exactly once');
+    reset_world();
+
+    # A MANUAL REFRESH (review of 1.0.21): its trending cover warm is not a browse (no
+    # focus, so no ranking change) but it is not the tick either — the stage it opens
+    # is transient, and the tick joining it makes that drain the tick's again.
+    reset_world(); $n = 0; @stage = ();
+    T::_warmCovers([ rel() ], 'trending albums · this year', undef, 1);   # the refresh
+    my ($s3) = grep { $_->[0] eq 'start' } @stage;
+    ok($s3 && $s3->[4], 'a covers stage opened by a REFRESH is started transient');
+    is_count(scalar(keys %T::coverFocus), 0, '...without the browse ranking (a refresh is not a focus)');
+    http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    my ($e3) = grep { $_->[0] eq 'end' } @stage;
+    ok($e3 && $e3->[4], '...and ended transient');
+
+    reset_world(); $n = 0; @stage = ();
+    $T::lastBrowseAt = time();
+    T::_warmCovers([ map { rel() } 1 .. 5 ], 'trending albums · this year', undef, 1);
+    T::_warmCovers([ map { rel() } 1 .. 3 ], 'all releases');           # the tick joins
+    $T::lastBrowseAt = 0;
+    $g = 0;
+    while ((@HTTP_PENDING || @T::coverQueue || @Slim::Utils::Timers::PENDING) && ++$g < 200) {
+        http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    }
+    @ends = grep { $_->[0] eq 'end' } @stage;
+    ok(scalar(@ends) == 1 && !$ends[0][4], 'the tick joining a refresh-opened stage makes its end SAVED');
+
+    # A refresh warms BOTH trending cover lists (year, then month): the second joining
+    # the first's stage is still the refresh, so the stage stays transient.
+    reset_world(); $n = 0; @stage = ();
+    $T::lastBrowseAt = time();
+    T::_warmCovers([ map { rel() } 1 .. 5 ], 'trending albums · this year',  undef, 1);
+    T::_warmCovers([ map { rel() } 1 .. 3 ], 'trending albums · this month', undef, 1);
+    $T::lastBrowseAt = 0;
+    $g = 0;
+    while ((@HTTP_PENDING || @T::coverQueue || @Slim::Utils::Timers::PENDING) && ++$g < 200) {
+        http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    }
+    @ends = grep { $_->[0] eq 'end' } @stage;
+    ok(scalar(@ends) == 1 && $ends[0][4], 'a refresh\'s second cover list joining its first keeps the stage TRANSIENT');
+
+    # ...and the refresh joining the TICK's stage does not make it transient.
+    reset_world(); $n = 0; @stage = ();
+    $T::lastBrowseAt = time();
+    T::_warmCovers([ map { rel() } 1 .. 3 ], 'all releases');           # the tick
+    T::_warmCovers([ map { rel() } 1 .. 5 ], 'trending albums · this year', undef, 1);
+    $T::lastBrowseAt = 0;
+    $g = 0;
+    while ((@HTTP_PENDING || @T::coverQueue || @Slim::Utils::Timers::PENDING) && ++$g < 200) {
+        http_settle() while @HTTP_PENDING; Slim::Utils::Timers::fire_all();
+    }
+    @ends = grep { $_->[0] eq 'end' } @stage;
+    ok(scalar(@ends) == 1 && !$ends[0][4], 'a refresh joining the TICK\'s stage leaves its end SAVED');
+    reset_world();
+}
+{
+    # FINDING 2: the memo survives from an evening browse into the 05:xx warm, which
+    # then skips a cover the proxy has since dropped — it loads cold on screen.
+    reset_world(); $n = 0;
+    my $r = rel();
+    my $specs = scalar @{ +T::COVER_SPECS() };
+    T::_warmCovers([ $r ], 'all releases', 1);                   # the evening browse
+    http_settle() while @HTTP_PENDING;
+    is_count(scalar(keys %T::coverWarm), $specs, 'an evening browse memoises the cover');
+    %Slim::Web::ImageProxy::Cache::D = ();                       # LMS drops it overnight
+    @HTTP_GETS = ();
+    T::_warmCovers([ $r ], 'all releases');                      # a warm WITHOUT the forget
+    is_count(scalar(@HTTP_GETS), 0, 'CONTROL: with the memo still fresh the warm skips it (the bug)');
+    http_settle() while @HTTP_PENDING;
+    ok(T->can('coverMemoForget'), 'Browse has coverMemoForget, for the tick to call');
+    @HTTP_GETS = ();
+    reset_reads();
+    T::coverMemoForget() if T->can('coverMemoForget');
+    is_count(scalar(keys %T::coverWarm), 0, '...which empties the memo');
+    T::_warmCovers([ $r ], 'all releases');
+    is_count(scalar(@HTTP_GETS), $specs, '...so the warm asks the proxy, finds it gone, and re-fetches it');
+    reset_world();
+}
+
 print "\n" . ('=' x 74) . "\n$pass passed, $fail failed.\n";
 exit($fail ? 1 : 0);
