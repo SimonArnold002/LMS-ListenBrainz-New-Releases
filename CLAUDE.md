@@ -6749,6 +6749,10 @@ on top). The Playlists section is gated on `username` being set. See
 ### Image Proxy Caching
 - Registered via `Slim::Web::ImageProxy->registerHandler` matching `coverartarchive\.org`
 - Only active when LMS server pref `useLocalImageproxy` is enabled
+- **Discography (0.56.27) registers an IDENTICAL handler under the SAME pattern and gate** (`Covers::proxyHandler`,
+  copied from this one). LMS keeps one handler per pattern (`Tie::RegexpHash::add` replaces an equal key), so with
+  both plugins installed whichever loads LAST serves every coverartarchive.org url, LBF's included. **Change this
+  handler and Discography's together**, or the load order decides which rewrite runs.
 - LMS caches CAA images locally, avoids repeated external fetches
 
 ### API

@@ -33,7 +33,7 @@ import json, sys, urllib.request, urllib.error, urllib.parse
 from collections import defaultdict
 
 BASE = "https://api.listenbrainz.org"
-UA = "LBF-debug/1.0 ( simon.arnold@unionvfx.com )"
+UA = "LBF-debug/1.0 ( https://github.com/SimonArnold002/LMS-ListenBrainz-New-Releases )"
 PER_FOLLOWER_CAP = 100   # equal cap per follower so a mega-listener can't dominate
 METADATA_CHUNK = 50
 
